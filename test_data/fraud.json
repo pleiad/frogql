@@ -1,0 +1,128 @@
+{
+  "nodes": [
+    {
+      "id": "a1",
+      "labels": [
+        "Account"
+      ],
+      "props": {
+        "owner": "Aretha",
+        "isBlocked": false
+      }
+    },
+    {
+      "id": "a2",
+      "labels": [
+        "Account"
+      ],
+      "props": {
+        "owner": "Scott",
+        "isBlocked": false
+      }
+    },
+    {
+      "id": "p1",
+      "labels": [
+        "Account"
+      ],
+      "props": {
+        "owner": "Jay",
+        "isBlocked": false
+      }
+    },
+    {
+      "id": "p2",
+      "labels": [
+        "Account"
+      ],
+      "props": {
+        "owner": "Mike",
+        "isBlocked": true
+      }
+    },
+    {
+      "id": "d1",
+      "labels": [
+        "Dummy",
+        "Person"
+      ],
+      "props": {
+        "owner": "Fred",
+        "isBlocked": false,
+        "isDummy": true
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "t1",
+      "labels": [
+        "Transfer"
+      ],
+      "props": {
+        "amount": 2500000
+      },
+      "endpoints": [
+        "p1",
+        "p2"
+      ],
+      "directionality": "->"
+    },
+    {
+      "id": "t2",
+      "labels": [
+        "Transfer"
+      ],
+      "props": {
+        "amount": 3000000
+      },
+      "endpoints": [
+        "p2",
+        "a2"
+      ],
+      "directionality": "->"
+    },
+    {
+      "id": "t3",
+      "labels": [
+        "Transfer"
+      ],
+      "props": {
+        "amount": 3500000
+      },
+      "endpoints": [
+        "a2",
+        "a1"
+      ],
+      "directionality": "->"
+    },
+    {
+      "id": "t4",
+      "labels": [
+        "Transfer"
+      ],
+      "props": {
+        "amount": 2000000
+      },
+      "endpoints": [
+        "a1",
+        "p1"
+      ],
+      "directionality": "->"
+    },
+    {
+      "id": "t5",
+      "labels": [
+        "Foo"
+      ],
+      "props": {
+        "amount": 2000000
+      },
+      "endpoints": [
+        "a1",
+        "d1"
+      ],
+      "directionality": "->"
+    }
+  ]
+}

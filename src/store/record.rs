@@ -1,0 +1,236 @@
+/// Binary encoding for node and edge records stored in page cells.
+///
+/// Node cell format:
+/// ```text
+/// [user_id_str_id: u32 LE]      — string table ID of the user-facing ID ("a1", "n1")
+/// [label_count: u16 LE]
+/// [label_str_ids: u32 LE × label_count]
+/// [prop_count: u16 LE]
+/// [properties...]
+///   each: [name_str_id: u32 LE][value_type: u8][value_data: variable]
+///     value_type 0 = Int:  [i64 LE, 8 bytes]
+///     value_type 1 = Str:  [str_id: u32 LE]
+///     value_type 2 = Bool: [u8: 0 or 1]
+/// ```
+///
+/// Edge cell format = Node cell format + :
+/// ```text
+/// [src_internal_id: u32 LE]    — internal sequential ID of source node
+/// [tgt_internal_id: u32 LE]    — internal sequential ID of target node
+/// [directionality: u8]         — 0 = directed (->), 1 = undirected (~~)
+/// ```
+
+pub const VALUE_TYPE_INT: u8 = 0;
+pub const VALUE_TYPE_STR: u8 = 1;
+pub const VALUE_TYPE_BOOL: u8 = 2;
+
+pub const DIR_DIRECTED: u8 = 0;
+pub const DIR_UNDIRECTED: u8 = 1;
+
+/// Encode a node record into bytes.
+pub fn encode_node(
+    user_id_str_id: u32,
+    label_str_ids: &[u32],
+    props: &[(u32, PropValue)], // (name_str_id, value)
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    buf.extend_from_slice(&user_id_str_id.to_le_bytes());
+
+    buf.extend_from_slice(&(label_str_ids.len() as u16).to_le_bytes());
+    for &lid in label_str_ids {
+        buf.extend_from_slice(&lid.to_le_bytes());
+    }
+
+    buf.extend_from_slice(&(props.len() as u16).to_le_bytes());
+    for (name_sid, val) in props {
+        buf.extend_from_slice(&name_sid.to_le_bytes());
+        encode_prop_value(&mut buf, val);
+    }
+
+    buf
+}
+
+/// Encode an edge record into bytes (node record + endpoint info).
+pub fn encode_edge(
+    user_id_str_id: u32,
+    label_str_ids: &[u32],
+    props: &[(u32, PropValue)],
+    src_internal_id: u32,
+    tgt_internal_id: u32,
+    directed: bool,
+) -> Vec<u8> {
+    let mut buf = encode_node(user_id_str_id, label_str_ids, props);
+    buf.extend_from_slice(&src_internal_id.to_le_bytes());
+    buf.extend_from_slice(&tgt_internal_id.to_le_bytes());
+    buf.push(if directed { DIR_DIRECTED } else { DIR_UNDIRECTED });
+    buf
+}
+
+/// A property value in its encoded form.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropValue {
+    Int(i64),
+    Str(u32), // string table ID
+    Bool(bool),
+}
+
+fn encode_prop_value(buf: &mut Vec<u8>, val: &PropValue) {
+    match val {
+        PropValue::Int(n) => {
+            buf.push(VALUE_TYPE_INT);
+            buf.extend_from_slice(&n.to_le_bytes());
+        }
+        PropValue::Str(sid) => {
+            buf.push(VALUE_TYPE_STR);
+            buf.extend_from_slice(&sid.to_le_bytes());
+        }
+        PropValue::Bool(b) => {
+            buf.push(VALUE_TYPE_BOOL);
+            buf.push(if *b { 1 } else { 0 });
+        }
+    }
+}
+
+/// Decoded node record.
+#[derive(Debug)]
+pub struct DecodedNode {
+    pub user_id_str_id: u32,
+    pub label_str_ids: Vec<u32>,
+    pub props: Vec<(u32, PropValue)>, // (name_str_id, value)
+}
+
+/// Decoded edge record.
+#[derive(Debug)]
+pub struct DecodedEdge {
+    pub node: DecodedNode, // shared fields
+    pub src_internal_id: u32,
+    pub tgt_internal_id: u32,
+    pub directed: bool,
+}
+
+/// Decode a node record from bytes. Returns (decoded_node, bytes_consumed).
+pub fn decode_node(data: &[u8]) -> (DecodedNode, usize) {
+    let mut pos = 0;
+
+    let user_id_str_id = read_u32(data, &mut pos);
+    let label_count = read_u16(data, &mut pos) as usize;
+    let mut label_str_ids = Vec::with_capacity(label_count);
+    for _ in 0..label_count {
+        label_str_ids.push(read_u32(data, &mut pos));
+    }
+
+    let prop_count = read_u16(data, &mut pos) as usize;
+    let mut props = Vec::with_capacity(prop_count);
+    for _ in 0..prop_count {
+        let name_sid = read_u32(data, &mut pos);
+        let val = decode_prop_value(data, &mut pos);
+        props.push((name_sid, val));
+    }
+
+    (
+        DecodedNode {
+            user_id_str_id,
+            label_str_ids,
+            props,
+        },
+        pos,
+    )
+}
+
+/// Decode an edge record from bytes.
+pub fn decode_edge(data: &[u8]) -> DecodedEdge {
+    let (node, mut pos) = decode_node(data);
+    let src_internal_id = read_u32(data, &mut pos);
+    let tgt_internal_id = read_u32(data, &mut pos);
+    let directed = data[pos] == DIR_DIRECTED;
+
+    DecodedEdge {
+        node,
+        src_internal_id,
+        tgt_internal_id,
+        directed,
+    }
+}
+
+fn decode_prop_value(data: &[u8], pos: &mut usize) -> PropValue {
+    let vtype = data[*pos];
+    *pos += 1;
+    match vtype {
+        VALUE_TYPE_INT => {
+            let n = i64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            *pos += 8;
+            PropValue::Int(n)
+        }
+        VALUE_TYPE_STR => {
+            let sid = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+            *pos += 4;
+            PropValue::Str(sid)
+        }
+        VALUE_TYPE_BOOL => {
+            let b = data[*pos] != 0;
+            *pos += 1;
+            PropValue::Bool(b)
+        }
+        _ => panic!("unknown property value type: {vtype}"),
+    }
+}
+
+fn read_u32(data: &[u8], pos: &mut usize) -> u32 {
+    let v = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+    *pos += 4;
+    v
+}
+
+fn read_u16(data: &[u8], pos: &mut usize) -> u16 {
+    let v = u16::from_le_bytes(data[*pos..*pos + 2].try_into().unwrap());
+    *pos += 2;
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_node_roundtrip() {
+        let props = vec![
+            (10, PropValue::Str(20)),
+            (11, PropValue::Bool(true)),
+            (12, PropValue::Int(42)),
+        ];
+        let encoded = encode_node(5, &[1, 2, 3], &props);
+        let (decoded, len) = decode_node(&encoded);
+
+        assert_eq!(len, encoded.len());
+        assert_eq!(decoded.user_id_str_id, 5);
+        assert_eq!(decoded.label_str_ids, vec![1, 2, 3]);
+        assert_eq!(decoded.props.len(), 3);
+        assert_eq!(decoded.props[0], (10, PropValue::Str(20)));
+        assert_eq!(decoded.props[1], (11, PropValue::Bool(true)));
+        assert_eq!(decoded.props[2], (12, PropValue::Int(42)));
+    }
+
+    #[test]
+    fn test_edge_roundtrip() {
+        let props = vec![(7, PropValue::Int(2500000))];
+        let encoded = encode_edge(99, &[4], &props, 0, 1, true);
+        let decoded = decode_edge(&encoded);
+
+        assert_eq!(decoded.node.user_id_str_id, 99);
+        assert_eq!(decoded.node.label_str_ids, vec![4]);
+        assert_eq!(decoded.node.props, vec![(7, PropValue::Int(2500000))]);
+        assert_eq!(decoded.src_internal_id, 0);
+        assert_eq!(decoded.tgt_internal_id, 1);
+        assert!(decoded.directed);
+    }
+
+    #[test]
+    fn test_undirected_edge() {
+        let encoded = encode_edge(1, &[2], &[], 5, 6, false);
+        let decoded = decode_edge(&encoded);
+        assert!(!decoded.directed);
+        assert_eq!(decoded.src_internal_id, 5);
+        assert_eq!(decoded.tgt_internal_id, 6);
+    }
+}

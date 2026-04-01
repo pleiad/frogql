@@ -1,0 +1,78 @@
+{
+  "nodes": [
+    {
+      "id": "n1",
+      "labels": [
+        "Person",
+        "Teacher"
+      ],
+      "props": {
+        "name": "Alice",
+        "status": "active"
+      }
+    },
+    {
+      "id": "n2",
+      "labels": [
+        "Person",
+        "Student"
+      ],
+      "props": {
+        "name": "Bob",
+        "status": 1
+      }
+    },
+    {
+      "id": "n3",
+      "labels": [
+        "Comment"
+      ],
+      "props": {
+        "content": "I love PLs and DBs!",
+        "status": true
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "labels": [
+        "Knows"
+      ],
+      "props": {
+        "since": 2020
+      },
+      "endpoints": [
+        "n1",
+        "n2"
+      ],
+      "directionality": "~~"
+    },
+    {
+      "id": "e2",
+      "labels": [
+        "Likes"
+      ],
+      "props": {
+      },
+      "endpoints": [
+        "n1",
+        "n3"
+      ],
+      "directionality": "->"
+    },
+    {
+      "id": "e3",
+      "labels": [
+        "Author"
+      ],
+      "props": {
+      },
+      "endpoints": [
+        "n3",
+        "n2"
+      ],
+      "directionality": "->"
+    }
+  ]
+}
