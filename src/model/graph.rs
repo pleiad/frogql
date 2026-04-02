@@ -183,6 +183,79 @@ impl Graph {
         })
     }
 
+    /// Build a Graph from pre-parsed components (used by store::io::load_graph).
+    /// Computes indexes automatically.
+    pub fn from_raw(
+        nodes: Vec<String>,
+        edges_d: Vec<String>,
+        edges_u: Vec<String>,
+        labels: HashMap<String, LabelType>,
+        props: HashMap<String, Props>,
+        endpoints: HashMap<String, (String, String)>,
+        src: HashMap<String, String>,
+        tgt: HashMap<String, String>,
+    ) -> Self {
+        // Build indexes
+        let mut label_to_nodes: HashMap<String, Vec<String>> = HashMap::new();
+        let mut label_to_edges_d: HashMap<String, Vec<String>> = HashMap::new();
+        let mut label_to_edges_u: HashMap<String, Vec<String>> = HashMap::new();
+        let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
+        let mut incoming: HashMap<String, Vec<String>> = HashMap::new();
+        let mut undirected_adj: HashMap<String, Vec<String>> = HashMap::new();
+
+        for id in &nodes {
+            for l in Self::label_strings(&labels[id]) {
+                label_to_nodes.entry(l).or_default().push(id.clone());
+            }
+        }
+        for id in &edges_d {
+            for l in Self::label_strings(&labels[id]) {
+                label_to_edges_d.entry(l).or_default().push(id.clone());
+            }
+            outgoing.entry(src[id].clone()).or_default().push(id.clone());
+            incoming.entry(tgt[id].clone()).or_default().push(id.clone());
+        }
+        for id in &edges_u {
+            for l in Self::label_strings(&labels[id]) {
+                label_to_edges_u.entry(l).or_default().push(id.clone());
+            }
+            let (ep0, ep1) = &endpoints[id];
+            undirected_adj.entry(ep0.clone()).or_default().push(id.clone());
+            undirected_adj.entry(ep1.clone()).or_default().push(id.clone());
+        }
+
+        Graph {
+            nodes, edges_d, edges_u, labels, props, endpoints, src, tgt,
+            label_to_nodes, label_to_edges_d, label_to_edges_u,
+            outgoing, incoming, undirected_adj,
+        }
+    }
+
+    /// Save this graph to a .gql database file.
+    pub fn save(&self, path: &Path) -> Result<(), GraphError> {
+        crate::store::io::save_graph(self, path)
+            .map_err(|e| GraphError::Io(e.to_string()))
+    }
+
+    /// Open a graph from a .gql database file (loads everything into memory).
+    pub fn open(path: &Path) -> Result<Self, GraphError> {
+        crate::store::io::load_graph(path)
+            .map_err(|e| GraphError::Io(e.to_string()))
+    }
+
+    /// Extract label strings from a LabelType (for index building).
+    fn label_strings(lt: &LabelType) -> Vec<String> {
+        match lt {
+            LabelType::Label(s) => vec![s.clone()],
+            LabelType::And(a, b) => {
+                let mut v = Self::label_strings(a);
+                v.extend(Self::label_strings(b));
+                v
+            }
+            _ => vec![],
+        }
+    }
+
     fn parse_props(obj: &serde_json::Value) -> Result<Props, GraphError> {
         let map = match obj.as_object() {
             Some(m) => m,

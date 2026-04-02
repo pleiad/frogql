@@ -23,7 +23,7 @@ const PAGE_HEADER: usize = 8;
 /// but since strings are variable-length we store a flat vector in memory.
 pub struct StringTable {
     /// String → ID mapping for deduplication.
-    str_to_id: HashMap<String, u32>,
+    pub str_to_id: HashMap<String, u32>,
     /// ID → String for resolution.
     id_to_str: Vec<String>,
     /// Pages used by the string table (page numbers in the database file).

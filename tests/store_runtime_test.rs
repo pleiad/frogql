@@ -1,11 +1,11 @@
-//! End-to-end tests: import JSON → .gql file → reopen → parse queries → run against GraphStore.
-//! These must produce identical results to the in-memory Graph tests.
+//! End-to-end tests: save to .gql file → reopen → compile queries → run.
+//! These must produce identical results to the in-memory JSON-loaded Graph tests.
 
 use std::path::{Path, PathBuf};
 
 use gqlrust::compile;
+use gqlrust::model::graph::Graph;
 use gqlrust::runtime::engine::Runtime;
-use gqlrust::store::graph_store::GraphStore;
 
 fn temp_path(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("gqlrust_test");
@@ -24,30 +24,18 @@ fn query_hash(q: &str) -> u64 {
     h.finish()
 }
 
+/// Load JSON → save to .gql → run query on the saved Graph
 fn fraud_store_run(query: &str) -> usize {
     let db_path = temp_path(&format!("fraud_rt_{}.gql", query_hash(query)));
     cleanup(&db_path);
 
     let json_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-    let store = GraphStore::from_json_file(&db_path, &json_path).unwrap();
-    let r = Runtime::new(&store);
-    let pattern = compile(query).unwrap();
-    let result = r.run(&pattern).rows.len();
+    let graph = Graph::from_file(&json_path).unwrap();
+    graph.save(&db_path).unwrap();
 
-    cleanup(&db_path);
-    result
-}
-
-fn fraud_store_reopen_run(query: &str) -> usize {
-    let db_path = temp_path(&format!("fraud_reopen_{}.gql", query_hash(query)));
-    cleanup(&db_path);
-
-    let json_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-    // Import
-    { let _store = GraphStore::from_json_file(&db_path, &json_path).unwrap(); }
-    // Reopen from disk
-    let store = GraphStore::open(&db_path).unwrap();
-    let r = Runtime::new(&store);
+    // Reopen from .gql
+    let graph = Graph::open(&db_path).unwrap();
+    let r = Runtime::new(&graph);
     let pattern = compile(query).unwrap();
     let result = r.run(&pattern).rows.len();
 
@@ -60,8 +48,11 @@ fn social_store_run(query: &str) -> usize {
     cleanup(&db_path);
 
     let json_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data/social-network.json");
-    let store = GraphStore::from_json_file(&db_path, &json_path).unwrap();
-    let r = Runtime::new(&store);
+    let graph = Graph::from_file(&json_path).unwrap();
+    graph.save(&db_path).unwrap();
+
+    let graph = Graph::open(&db_path).unwrap();
+    let r = Runtime::new(&graph);
     let pattern = compile(query).unwrap();
     let result = r.run(&pattern).rows.len();
 
@@ -69,7 +60,7 @@ fn social_store_run(query: &str) -> usize {
     result
 }
 
-// ===== Tests against freshly imported GraphStore =====
+// ===== Tests against save → reopen cycle =====
 
 #[test] fn test_node_empty() { assert_eq!(fraud_store_run("()"), 5); }
 #[test] fn test_node_capturing() { assert_eq!(fraud_store_run("(x)"), 5); }
@@ -102,15 +93,5 @@ fn social_store_run(query: &str) -> usize {
 #[test] fn test_unop_not() { assert_eq!(fraud_store_run("(x WHERE not x.isBlocked)"), 4); }
 #[test] fn test_unop_neg() { assert_eq!(fraud_store_run("-[x WHERE -x.amount < 0]->"), 5); }
 #[test] fn test_social_where() { assert_eq!(social_store_run("(x: {status: bool})"), 1); }
-
-// ===== Tests against reopened GraphStore (persistence validation) =====
-
-#[test] fn test_reopen_node_empty() { assert_eq!(fraud_store_reopen_run("()"), 5); }
-#[test] fn test_reopen_edge_empty() { assert_eq!(fraud_store_reopen_run("-[]->"), 5); }
-#[test] fn test_reopen_filter_label() { assert_eq!(fraud_store_reopen_run("(x: Account)"), 4); }
-#[test] fn test_reopen_concat() { assert_eq!(fraud_store_reopen_run("()-[]->"), 5); }
-#[test] fn test_reopen_filter() { assert_eq!(fraud_store_reopen_run("(y WHERE y.isBlocked=true)"), 1); }
-#[test] fn test_reopen_digest_p4() {
-    assert_eq!(fraud_store_reopen_run("(x) -[z:Transfer WHERE z.amount>1000000]-> (y WHERE y.isBlocked=true)"), 1);
-}
-#[test] fn test_reopen_repetition() { assert_eq!(fraud_store_reopen_run("-->{1,2}"), 23); }
+#[test] fn test_social_undirected() { assert_eq!(social_store_run("~[:Knows]~"), 2); }
+#[test] fn test_multi_label() { assert_eq!(fraud_store_run("(x: Dummy & Person)"), 1); }

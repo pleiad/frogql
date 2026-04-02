@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::model::graph::Props;
 use crate::model::graph_access::GraphAccess;
 use crate::model::value::{Path, PathValue, Value};
@@ -221,7 +223,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
         // Fallback: cross-product for complex right-side patterns
         let ir2 = self.run_path_pattern(p2);
-        Self::cross_product(&ir1, &ir2)
+        Self::hash_join(&ir1, &ir2)
     }
 
     /// Adjacency-driven concat: left results → outgoing/incoming edges → target nodes.
@@ -376,12 +378,24 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         )
     }
 
-    /// Fallback cross-product (used for complex right-side patterns).
-    fn cross_product(ir1: &IntermediateResult, ir2: &IntermediateResult) -> IntermediateResult {
+    /// Hash-join on the concatenation key (last node of ir1 = first node of ir2).
+    /// O(n + m) expected instead of O(n × m) cross-product.
+    fn hash_join(ir1: &IntermediateResult, ir2: &IntermediateResult) -> IntermediateResult {
+        // Build hash map: first_node_id → Vec<index into ir2.rows>
+        let mut ir2_by_first: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, r2) in ir2.rows.iter().enumerate() {
+            if let Some(first) = r2.path.first_node_id() {
+                ir2_by_first.entry(first).or_default().push(i);
+            }
+        }
+
         let mut rows = Vec::new();
         for r1 in &ir1.rows {
-            for r2 in &ir2.rows {
-                if r1.path.can_concat(&r2.path) && r1.assignment.can_unify(&r2.assignment) {
+            let Some(last) = r1.path.last_node_id() else { continue };
+            let Some(matches) = ir2_by_first.get(last) else { continue };
+            for &idx in matches {
+                let r2 = &ir2.rows[idx];
+                if r1.assignment.can_unify(&r2.assignment) {
                     rows.push(ResultRow::new(
                         r1.path.concat(&r2.path),
                         r1.assignment.unify(&r2.assignment),
@@ -411,14 +425,22 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             return grouped;
         }
 
+        // Build hash map once: first_node_id → indices in grouped.rows
+        let mut grouped_by_first: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, r) in grouped.rows.iter().enumerate() {
+            if let Some(first) = r.path.first_node_id() {
+                grouped_by_first.entry(first).or_default().push(i);
+            }
+        }
+
         let mut res = grouped.clone();
         for _ in 1..n {
             let mut new_rows = Vec::new();
             for r in &res.rows {
-                for r2 in &grouped.rows {
-                    if r.path.can_concat(&r2.path) {
-                        new_rows.push(r.concat_group(r2));
-                    }
+                let Some(last) = r.path.last_node_id() else { continue };
+                let Some(matches) = grouped_by_first.get(last) else { continue };
+                for &idx in matches {
+                    new_rows.push(r.concat_group(&grouped.rows[idx]));
                 }
             }
             res = IntermediateResult::new(new_rows);

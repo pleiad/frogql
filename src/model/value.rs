@@ -71,6 +71,14 @@ impl fmt::Display for PathValue {
 pub struct Path(pub Vec<PathValue>);
 
 impl Path {
+    /// Get the ID of the first node in the path (paths always start with a node).
+    pub fn first_node_id(&self) -> Option<&str> {
+        self.0.first().and_then(|pv| match pv {
+            PathValue::Node(id) => Some(id.as_str()),
+            _ => None,
+        })
+    }
+
     /// Get the ID of the last node in the path (paths always end with a node).
     pub fn last_node_id(&self) -> Option<&str> {
         self.0.last().and_then(|pv| match pv {

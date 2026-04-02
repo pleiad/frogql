@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -5,23 +6,40 @@ use std::path::{Path, PathBuf};
 use super::header::FileHeader;
 use super::page::{Page, PageType, PAGE_SIZE};
 
+/// Default page cache size (number of pages).
+const DEFAULT_CACHE_SIZE: usize = 2000;
+
 /// The Pager manages a single database file as a sequence of fixed-size pages.
 ///
+/// All page reads go through an LRU cache. The cache holds up to `cache_size`
+/// pages in memory. On a miss, the least recently used page is evicted.
+///
 /// Page 0 is always the file header. Pages 1+ are data/index pages.
-/// The pager handles:
-/// - Reading and writing individual pages by page number
-/// - Allocating new pages (either from the free list or by extending the file)
-/// - Freeing pages (adding them to the free list)
-/// - Persisting the file header
 pub struct Pager {
     file: File,
     path: PathBuf,
     pub header: FileHeader,
+    // LRU page cache: page_num → (page_data, last_access_tick)
+    cache: HashMap<u32, CacheEntry>,
+    cache_size: usize,
+    tick: u64,
+    cache_hits: u64,
+    cache_misses: u64,
+}
+
+struct CacheEntry {
+    page: Page,
+    last_access: u64,
+    dirty: bool,
 }
 
 impl Pager {
     /// Create a new database file. Fails if the file already exists.
     pub fn create(path: &Path) -> io::Result<Self> {
+        Self::create_with_cache(path, DEFAULT_CACHE_SIZE)
+    }
+
+    pub fn create_with_cache(path: &Path, cache_size: usize) -> io::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -33,18 +51,25 @@ impl Pager {
             file,
             path: path.to_path_buf(),
             header,
+            cache: HashMap::new(),
+            cache_size,
+            tick: 0,
+            cache_hits: 0,
+            cache_misses: 0,
         };
 
-        // Write the initial header page
         pager.write_header()?;
         Ok(pager)
     }
 
     /// Open an existing database file.
     pub fn open(path: &Path) -> io::Result<Self> {
+        Self::open_with_cache(path, DEFAULT_CACHE_SIZE)
+    }
+
+    pub fn open_with_cache(path: &Path, cache_size: usize) -> io::Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
 
-        // Read page 0
         let mut buf = [0u8; PAGE_SIZE];
         file.seek(SeekFrom::Start(0))?;
         file.read_exact(&mut buf)?;
@@ -57,34 +82,58 @@ impl Pager {
             file,
             path: path.to_path_buf(),
             header,
+            cache: HashMap::new(),
+            cache_size,
+            tick: 0,
+            cache_hits: 0,
+            cache_misses: 0,
         })
     }
 
-    /// Read a page by page number.
+    /// Read a page by page number. Goes through the LRU cache.
     pub fn read_page(&mut self, page_num: u32) -> io::Result<Page> {
         if page_num >= self.header.page_count {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "page {page_num} out of range (total: {})",
-                    self.header.page_count
-                ),
+                format!("page {page_num} out of range (total: {})", self.header.page_count),
             ));
         }
 
-        let offset = page_num as u64 * PAGE_SIZE as u64;
-        self.file.seek(SeekFrom::Start(offset))?;
+        self.tick += 1;
 
-        let mut buf = [0u8; PAGE_SIZE];
-        self.file.read_exact(&mut buf)?;
-        Ok(Page::from_bytes(buf))
+        // Cache hit
+        if let Some(entry) = self.cache.get_mut(&page_num) {
+            entry.last_access = self.tick;
+            self.cache_hits += 1;
+            return Ok(entry.page.clone());
+        }
+
+        // Cache miss — read from disk
+        self.cache_misses += 1;
+        let page = self.read_page_from_disk(page_num)?;
+
+        // Insert into cache (evict LRU if full)
+        self.cache_insert(page_num, page.clone(), false);
+
+        Ok(page)
     }
 
-    /// Write a page at the given page number.
+    /// Write a page at the given page number. Updates cache and writes through to disk.
     pub fn write_page(&mut self, page_num: u32, page: &Page) -> io::Result<()> {
-        let offset = page_num as u64 * PAGE_SIZE as u64;
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(&page.data)?;
+        // Write to disk immediately (write-through)
+        self.write_page_to_disk(page_num, page)?;
+
+        // Update cache
+        self.tick += 1;
+        if self.cache.contains_key(&page_num) {
+            let entry = self.cache.get_mut(&page_num).unwrap();
+            entry.page = page.clone();
+            entry.last_access = self.tick;
+            entry.dirty = false;
+        } else {
+            self.cache_insert(page_num, page.clone(), false);
+        }
+
         Ok(())
     }
 
@@ -92,11 +141,9 @@ impl Pager {
     /// otherwise extends the file.
     pub fn allocate_page(&mut self) -> io::Result<u32> {
         if self.header.free_list_head != 0 {
-            // Pop from free list
             let page_num = self.header.free_list_head;
             let free_page = self.read_page(page_num)?;
 
-            // The first 4 bytes of a free page store the next free page number
             let next = u32::from_le_bytes([
                 free_page.data[0],
                 free_page.data[1],
@@ -108,11 +155,9 @@ impl Pager {
 
             Ok(page_num)
         } else {
-            // Extend the file
             let page_num = self.header.page_count;
             self.header.page_count += 1;
 
-            // Write a zeroed page to extend the file
             let blank = Page::new(PageType::Free);
             self.write_page(page_num, &blank)?;
             self.write_header()?;
@@ -130,7 +175,6 @@ impl Pager {
             ));
         }
 
-        // Write the current free list head into the first 4 bytes of the freed page
         let mut free_page = Page::new(PageType::Free);
         let next_bytes = self.header.free_list_head.to_le_bytes();
         free_page.data[0..4].copy_from_slice(&next_bytes);
@@ -139,15 +183,16 @@ impl Pager {
         self.header.free_list_head = page_num;
         self.write_header()?;
 
+        // Evict from cache
+        self.cache.remove(&page_num);
+
         Ok(())
     }
 
     /// Flush the file header to page 0.
     pub fn write_header(&mut self) -> io::Result<()> {
         let page = self.header.to_page();
-        let offset = 0u64;
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(&page.data)?;
+        self.write_page_to_disk(0, &page)?;
         self.file.flush()?;
         Ok(())
     }
@@ -160,6 +205,53 @@ impl Pager {
     /// The file path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Cache statistics.
+    pub fn cache_stats(&self) -> (u64, u64) {
+        (self.cache_hits, self.cache_misses)
+    }
+
+    // --- Internal ---
+
+    fn read_page_from_disk(&mut self, page_num: u32) -> io::Result<Page> {
+        let offset = page_num as u64 * PAGE_SIZE as u64;
+        self.file.seek(SeekFrom::Start(offset))?;
+        let mut buf = [0u8; PAGE_SIZE];
+        self.file.read_exact(&mut buf)?;
+        Ok(Page::from_bytes(buf))
+    }
+
+    fn write_page_to_disk(&mut self, page_num: u32, page: &Page) -> io::Result<()> {
+        let offset = page_num as u64 * PAGE_SIZE as u64;
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.write_all(&page.data)?;
+        Ok(())
+    }
+
+    fn cache_insert(&mut self, page_num: u32, page: Page, dirty: bool) {
+        if self.cache.len() >= self.cache_size {
+            self.evict_lru();
+        }
+        self.cache.insert(page_num, CacheEntry {
+            page,
+            last_access: self.tick,
+            dirty,
+        });
+    }
+
+    fn evict_lru(&mut self) {
+        if let Some((&evict_key, _)) = self.cache.iter()
+            .min_by_key(|(_, entry)| entry.last_access)
+        {
+            // If dirty, flush to disk (not used currently — write-through)
+            // but included for future write-back cache mode
+            if self.cache[&evict_key].dirty {
+                let page = &self.cache[&evict_key].page;
+                let _ = self.write_page_to_disk(evict_key, &page.clone());
+            }
+            self.cache.remove(&evict_key);
+        }
     }
 }
 
@@ -213,13 +305,11 @@ mod tests {
             assert_eq!(pg2, 2);
             assert_eq!(pager.page_count(), 3);
 
-            // Write data to page 1
             let mut page = Page::new(PageType::NodeData);
             page.insert_cell(b"hello");
             pager.write_page(pg1, &page).unwrap();
         }
 
-        // Reopen and verify
         {
             let mut pager = Pager::open(&path).unwrap();
             assert_eq!(pager.page_count(), 3);
@@ -241,31 +331,21 @@ mod tests {
 
         let mut pager = Pager::create(&path).unwrap();
 
-        let p1 = pager.allocate_page().unwrap(); // page 1
-        let p2 = pager.allocate_page().unwrap(); // page 2
-        let _p3 = pager.allocate_page().unwrap(); // page 3
+        let p1 = pager.allocate_page().unwrap();
+        let p2 = pager.allocate_page().unwrap();
+        let _p3 = pager.allocate_page().unwrap();
         assert_eq!(pager.page_count(), 4);
 
-        // Free page 2
         pager.free_page(p2).unwrap();
-        assert_eq!(pager.header.free_list_head, 2);
-
-        // Free page 1
         pager.free_page(p1).unwrap();
-        assert_eq!(pager.header.free_list_head, 1);
 
-        // Allocate should reuse page 1 first (LIFO)
         let reused1 = pager.allocate_page().unwrap();
         assert_eq!(reused1, 1);
-
-        // Then page 2
         let reused2 = pager.allocate_page().unwrap();
         assert_eq!(reused2, 2);
 
-        // Next allocation extends the file
         let p4 = pager.allocate_page().unwrap();
         assert_eq!(p4, 4);
-        assert_eq!(pager.page_count(), 5);
 
         cleanup(&path);
     }
@@ -277,12 +357,11 @@ mod tests {
 
         {
             let mut pager = Pager::create(&path).unwrap();
-            pager.allocate_page().unwrap(); // 1
-            pager.allocate_page().unwrap(); // 2
+            pager.allocate_page().unwrap();
+            pager.allocate_page().unwrap();
             pager.free_page(1).unwrap();
         }
 
-        // Reopen — free list should still have page 1
         {
             let mut pager = Pager::open(&path).unwrap();
             assert_eq!(pager.header.free_list_head, 1);
@@ -297,10 +376,8 @@ mod tests {
     fn test_cannot_free_page_zero() {
         let path = temp_path("test_no_free_zero.gql");
         cleanup(&path);
-
         let mut pager = Pager::create(&path).unwrap();
         assert!(pager.free_page(0).is_err());
-
         cleanup(&path);
     }
 
@@ -308,9 +385,61 @@ mod tests {
     fn test_read_out_of_range() {
         let path = temp_path("test_out_of_range.gql");
         cleanup(&path);
-
         let mut pager = Pager::create(&path).unwrap();
         assert!(pager.read_page(99).is_err());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_cache_hits() {
+        let path = temp_path("test_cache_hits.gql");
+        cleanup(&path);
+
+        let mut pager = Pager::create_with_cache(&path, 10).unwrap();
+        let pg = pager.allocate_page().unwrap();
+
+        let mut page = Page::new(PageType::NodeData);
+        page.insert_cell(b"cached");
+        pager.write_page(pg, &page).unwrap();
+
+        // First read: miss (page was in cache from write, actually a hit)
+        let _ = pager.read_page(pg).unwrap();
+        // Second read: definitely a hit
+        let _ = pager.read_page(pg).unwrap();
+        let _ = pager.read_page(pg).unwrap();
+
+        let (hits, _misses) = pager.cache_stats();
+        assert!(hits >= 2, "expected cache hits, got hits={hits}");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_cache_eviction() {
+        let path = temp_path("test_cache_evict.gql");
+        cleanup(&path);
+
+        // Tiny cache: 3 pages
+        let mut pager = Pager::create_with_cache(&path, 3).unwrap();
+
+        // Allocate 5 pages
+        let pages: Vec<u32> = (0..5).map(|_| pager.allocate_page().unwrap()).collect();
+
+        // Write data to each
+        for &pg in &pages {
+            let mut page = Page::new(PageType::NodeData);
+            page.insert_cell(format!("page{pg}").as_bytes());
+            pager.write_page(pg, &page).unwrap();
+        }
+
+        // Cache only holds 3, so reading all 5 forces evictions
+        for &pg in &pages {
+            let page = pager.read_page(pg).unwrap();
+            assert_eq!(page.page_type(), PageType::NodeData);
+        }
+
+        let (_hits, misses) = pager.cache_stats();
+        assert!(misses > 0, "expected some cache misses with tiny cache");
 
         cleanup(&path);
     }

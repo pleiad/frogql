@@ -37,8 +37,11 @@ pub struct FileHeader {
     pub string_table_root: u32,
     pub node_data_first: u32,
     pub edge_data_first: u32,
-    pub label_index_root: u32,
+    pub label_index_root: u32,   // node labels
     pub adjacency_root: u32,
+    pub edge_label_index_root: u32,
+    pub node_id_index_root: u32,
+    pub edge_id_index_root: u32,
 }
 
 impl FileHeader {
@@ -47,7 +50,7 @@ impl FileHeader {
         FileHeader {
             format_version: FORMAT_VERSION,
             page_size: PAGE_SIZE as u32,
-            page_count: 1, // just the header page
+            page_count: 1,
             free_list_head: 0,
             node_count: 0,
             edge_count: 0,
@@ -56,6 +59,9 @@ impl FileHeader {
             edge_data_first: 0,
             label_index_root: 0,
             adjacency_root: 0,
+            edge_label_index_root: 0,
+            node_id_index_root: 0,
+            edge_id_index_root: 0,
         }
     }
 
@@ -76,6 +82,9 @@ impl FileHeader {
         d[36..40].copy_from_slice(&self.edge_data_first.to_le_bytes());
         d[40..44].copy_from_slice(&self.label_index_root.to_le_bytes());
         d[44..48].copy_from_slice(&self.adjacency_root.to_le_bytes());
+        d[48..52].copy_from_slice(&self.edge_label_index_root.to_le_bytes());
+        d[52..56].copy_from_slice(&self.node_id_index_root.to_le_bytes());
+        d[56..60].copy_from_slice(&self.edge_id_index_root.to_le_bytes());
 
         page
     }
@@ -100,6 +109,9 @@ impl FileHeader {
             edge_data_first: u32::from_le_bytes([d[36], d[37], d[38], d[39]]),
             label_index_root: u32::from_le_bytes([d[40], d[41], d[42], d[43]]),
             adjacency_root: u32::from_le_bytes([d[44], d[45], d[46], d[47]]),
+            edge_label_index_root: u32::from_le_bytes([d[48], d[49], d[50], d[51]]),
+            node_id_index_root: u32::from_le_bytes([d[52], d[53], d[54], d[55]]),
+            edge_id_index_root: u32::from_le_bytes([d[56], d[57], d[58], d[59]]),
         })
     }
 }

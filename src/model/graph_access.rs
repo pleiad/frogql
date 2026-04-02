@@ -3,7 +3,8 @@ use crate::model::value::PathValue;
 use crate::typing::label_type::LabelType;
 
 /// Trait abstracting graph data access.
-/// Both in-memory `Graph` (JSON) and file-backed `GraphStore` implement this.
+/// `Graph` implements this for in-memory access. `LazyGraphStore` (future) will
+/// implement it for on-demand page-cache-backed access to large graphs.
 pub trait GraphAccess {
     /// All node IDs.
     fn nodes(&self) -> Vec<String>;
