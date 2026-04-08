@@ -67,33 +67,26 @@ impl Assignment {
         }
     }
 
-    /// Fill missing variables with empty List.
+    /// Fill missing variables with Nothing (used for repetition grouping).
     pub fn fill_empty_list(&mut self, dom: &HashSet<String>) {
         for x in dom {
             if !self.m.contains_key(x) {
-                self.m.insert(x.clone(), PathValue::List(vec![]));
+                self.m.insert(x.clone(), PathValue::Nothing);
             }
         }
     }
 
-    /// Wrap all values in singleton lists (for repetition grouping).
+    /// Wrap all values for grouping (identity for now — grouping uses paths).
     pub fn to_group(&mut self) {
-        for val in self.m.values_mut() {
-            *val = PathValue::List(vec![val.clone()]);
-        }
+        // No-op: grouping is tracked via paths, not assignment values.
     }
 
-    /// Concatenate grouped assignments (both must have List values).
+    /// Concatenate grouped assignments: merge, preferring self's values.
     pub fn concat_group(&self, other: &Assignment) -> Assignment {
-        let mut result = Assignment::new();
-        for (k, v) in &self.m {
-            match (v, other.m.get(k)) {
-                (PathValue::List(a), Some(PathValue::List(b))) => {
-                    let mut combined = a.clone();
-                    combined.extend_from_slice(b);
-                    result.m.insert(k.clone(), PathValue::List(combined));
-                }
-                _ => panic!("concat_group requires List values"),
+        let mut result = self.clone();
+        for (k, v) in &other.m {
+            if !result.m.contains_key(k) {
+                result.m.insert(k.clone(), *v);
             }
         }
         result

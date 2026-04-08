@@ -495,3 +495,74 @@ fn test_unop_filter_pattern() {
         )
     );
 }
+
+// ==================== Comma-join (Q1, Q2) tests ====================
+
+#[test]
+fn test_join_simple() {
+    // Two node patterns joined by comma
+    assert_eq!(
+        parse("(x), (y)").unwrap(),
+        PathPattern::Join(
+            Box::new(PathPattern::Node(Some(var_star("x")))),
+            Box::new(PathPattern::Node(Some(var_star("y")))),
+        )
+    );
+}
+
+#[test]
+fn test_join_paths() {
+    // Two path patterns joined by comma
+    let result = parse("(x) -[]-> (), (y) -[]-> ()").unwrap();
+    match &result {
+        PathPattern::Join(left, right) => {
+            assert!(matches!(left.as_ref(), PathPattern::Concat(_, _)));
+            assert!(matches!(right.as_ref(), PathPattern::Concat(_, _)));
+        }
+        _ => panic!("expected Join, got {result:?}"),
+    }
+}
+
+#[test]
+fn test_join_three_way() {
+    // Three patterns: left-associative
+    let result = parse("(x), (y), (z)").unwrap();
+    match &result {
+        PathPattern::Join(left, right) => {
+            // The inner left should itself be a Join
+            assert!(matches!(left.as_ref(), PathPattern::Join(_, _)));
+            assert!(matches!(right.as_ref(), PathPattern::Node(_)));
+        }
+        _ => panic!("expected Join, got {result:?}"),
+    }
+}
+
+#[test]
+fn test_join_with_labels() {
+    // (x: Car) -[]-> (y), (:Person) -[]-> (y)
+    let result = parse("(x: Car) -[]-> (y), (:Person) -[]-> (y)").unwrap();
+    assert!(matches!(result, PathPattern::Join(_, _)));
+}
+
+#[test]
+fn test_join_lower_precedence_than_union() {
+    // (x) | (y), (z)  should parse as  ((x) | (y)), (z)
+    let result = parse("(x) | (y), (z)").unwrap();
+    match &result {
+        PathPattern::Join(left, right) => {
+            assert!(matches!(left.as_ref(), PathPattern::Union(_, _)));
+            assert!(matches!(right.as_ref(), PathPattern::Node(_)));
+        }
+        _ => panic!("expected Join, got {result:?}"),
+    }
+}
+
+#[test]
+fn test_join_shared_var() {
+    // (x) -[]-> (), (:Car) -[]-> (x) -[]-> ()
+    let result = parse("(x) -[]-> (), (:Car) -[]-> (x) -[]-> ()").unwrap();
+    assert!(matches!(result, PathPattern::Join(_, _)));
+    // Both sides should have "x" in their free variables
+    let fv = result.freevars();
+    assert!(fv.contains("x"));
+}

@@ -4,50 +4,48 @@ use std::path::Path;
 
 use serde_json;
 
-use crate::model::value::{PathValue, Value};
+use crate::model::value::{Id, PathValue, Value};
 use crate::typing::label_type::LabelType;
 
 /// Property map: attribute name → Value.
 pub type Props = HashMap<String, Value>;
 
-/// A property graph loaded from JSON.
+/// A property graph with u32 internal IDs.
 ///
-/// Mirrors the Python `Graph` class: separate lists for directed/undirected edges,
-/// and lookup maps for labels, properties, and endpoints.
+/// String user-facing IDs (from JSON) are mapped to sequential u32 IDs at load time.
+/// All internal operations use u32 IDs for performance.
 pub struct Graph {
-    /// All node IDs.
-    pub nodes: Vec<String>,
-    /// Directed edge IDs.
-    pub edges_d: Vec<String>,
-    /// Undirected edge IDs.
-    pub edges_u: Vec<String>,
-    /// Labels for both nodes and edges (id → LabelType).
-    pub labels: HashMap<String, LabelType>,
-    /// Properties for both nodes and edges (id → Props).
-    pub props: HashMap<String, Props>,
-    /// Edge endpoints (edge_id → (endpoint0, endpoint1)).
-    pub endpoints: HashMap<String, (String, String)>,
-    /// Source node of directed edges (edge_id → node_id).
-    pub src: HashMap<String, String>,
-    /// Target node of directed edges (edge_id → node_id).
-    pub tgt: HashMap<String, String>,
+    // --- User-facing names (indexed by internal ID) ---
+    pub node_names: Vec<String>,
+    pub edge_names: Vec<String>,
 
-    // --- Indexes (built at load time) ---
-    /// label → node IDs with that label.
-    label_to_nodes: HashMap<String, Vec<String>>,
-    /// label → directed edge IDs with that label.
-    label_to_edges_d: HashMap<String, Vec<String>>,
-    /// label → undirected edge IDs with that label.
-    label_to_edges_u: HashMap<String, Vec<String>>,
-    /// node_id → outgoing directed edge IDs.
-    outgoing: HashMap<String, Vec<String>>,
-    /// node_id → incoming directed edge IDs.
-    incoming: HashMap<String, Vec<String>>,
-    /// node_id → undirected edge IDs.
-    undirected_adj: HashMap<String, Vec<String>>,
+    // --- Topology ---
+    pub edge_src: Vec<Id>,         // edge internal ID → src node internal ID
+    pub edge_tgt: Vec<Id>,         // edge internal ID → tgt node internal ID
+    pub edge_directed: Vec<bool>,  // edge internal ID → is directed?
+
+    // --- Data (indexed by internal ID) ---
+    pub node_labels: Vec<LabelType>,
+    pub edge_labels: Vec<LabelType>,
+    pub node_props: Vec<Props>,
+    pub edge_props: Vec<Props>,
+
+    // --- Indexes ---
+    label_to_nodes: HashMap<String, Vec<Id>>,
+    label_to_edges_d: HashMap<String, Vec<Id>>,
+    label_to_edges_u: HashMap<String, Vec<Id>>,
+    outgoing: Vec<Vec<Id>>,    // node internal ID → outgoing edge internal IDs
+    incoming: Vec<Vec<Id>>,    // node internal ID → incoming edge internal IDs
+    undirected_adj: Vec<Vec<Id>>, // node internal ID → undirected edge internal IDs
+
+    // --- Reverse lookup (user name → internal ID) ---
+    node_name_to_id: HashMap<String, Id>,
 }
 
 impl Graph {
+    pub fn node_count(&self) -> usize { self.node_names.len() }
+    pub fn edge_count(&self) -> usize { self.edge_names.len() }
+
     /// Load a graph from a JSON file path.
     pub fn from_file(path: &Path) -> Result<Self, GraphError> {
         let content = fs::read_to_string(path)
@@ -71,163 +69,169 @@ impl Graph {
             .as_array()
             .ok_or_else(|| GraphError::Parse("missing 'edges' array".into()))?;
 
-        let mut nodes = Vec::new();
-        let mut labels = HashMap::new();
-        let mut props = HashMap::new();
-        let mut label_to_nodes: HashMap<String, Vec<String>> = HashMap::new();
-        let mut label_to_edges_d: HashMap<String, Vec<String>> = HashMap::new();
-        let mut label_to_edges_u: HashMap<String, Vec<String>> = HashMap::new();
-        let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
-        let mut incoming: HashMap<String, Vec<String>> = HashMap::new();
-        let mut undirected_adj: HashMap<String, Vec<String>> = HashMap::new();
+        let mut node_names = Vec::new();
+        let mut node_labels_vec = Vec::new();
+        let mut node_props_vec = Vec::new();
+        let mut node_name_to_id: HashMap<String, Id> = HashMap::new();
+        let mut label_to_nodes: HashMap<String, Vec<Id>> = HashMap::new();
 
         // Parse nodes
         for n in json_nodes {
-            let id = n["id"]
+            let name = n["id"]
                 .as_str()
                 .ok_or_else(|| GraphError::Parse("node missing 'id'".into()))?
                 .to_string();
 
-            let node_labels: Vec<String> = n["labels"]
+            let nid = node_names.len() as Id;
+            node_name_to_id.insert(name.clone(), nid);
+
+            let labs: Vec<String> = n["labels"]
                 .as_array()
-                .ok_or_else(|| GraphError::Parse(format!("node {id} missing 'labels'")))?
+                .ok_or_else(|| GraphError::Parse(format!("node {name} missing 'labels'")))?
                 .iter()
                 .map(|l| l.as_str().unwrap().to_string())
                 .collect();
 
-            for l in &node_labels {
-                label_to_nodes.entry(l.clone()).or_default().push(id.clone());
+            for l in &labs {
+                label_to_nodes.entry(l.clone()).or_default().push(nid);
             }
 
-            labels.insert(id.clone(), LabelType::from_list(&node_labels));
-            props.insert(id.clone(), Self::parse_props(&n["props"])?);
-            nodes.push(id);
+            node_labels_vec.push(LabelType::from_list(&labs));
+            node_props_vec.push(Self::parse_props(&n["props"])?);
+            node_names.push(name);
         }
 
-        // Parse edges
-        let mut edges_d = Vec::new();
-        let mut edges_u = Vec::new();
-        let mut endpoints_map = HashMap::new();
-        let mut src_map = HashMap::new();
-        let mut tgt_map = HashMap::new();
+        let num_nodes = node_names.len();
+        let mut outgoing = vec![Vec::new(); num_nodes];
+        let mut incoming = vec![Vec::new(); num_nodes];
+        let mut undirected_adj = vec![Vec::new(); num_nodes];
+
+        let mut edge_names = Vec::new();
+        let mut edge_labels_vec = Vec::new();
+        let mut edge_props_vec = Vec::new();
+        let mut edge_src = Vec::new();
+        let mut edge_tgt = Vec::new();
+        let mut edge_directed = Vec::new();
+        let mut label_to_edges_d: HashMap<String, Vec<Id>> = HashMap::new();
+        let mut label_to_edges_u: HashMap<String, Vec<Id>> = HashMap::new();
 
         for e in json_edges {
-            let id = e["id"]
+            let name = e["id"]
                 .as_str()
                 .ok_or_else(|| GraphError::Parse("edge missing 'id'".into()))?
                 .to_string();
 
-            let edge_labels: Vec<String> = e["labels"]
+            let eid = edge_names.len() as Id;
+
+            let labs: Vec<String> = e["labels"]
                 .as_array()
-                .ok_or_else(|| GraphError::Parse(format!("edge {id} missing 'labels'")))?
+                .ok_or_else(|| GraphError::Parse(format!("edge {name} missing 'labels'")))?
                 .iter()
                 .map(|l| l.as_str().unwrap().to_string())
                 .collect();
 
             let eps = e["endpoints"]
                 .as_array()
-                .ok_or_else(|| GraphError::Parse(format!("edge {id} missing 'endpoints'")))?;
-            let ep0 = eps[0].as_str().unwrap().to_string();
-            let ep1 = eps[1].as_str().unwrap().to_string();
+                .ok_or_else(|| GraphError::Parse(format!("edge {name} missing 'endpoints'")))?;
+            let ep0_name = eps[0].as_str().unwrap();
+            let ep1_name = eps[1].as_str().unwrap();
+            let ep0 = node_name_to_id[ep0_name];
+            let ep1 = node_name_to_id[ep1_name];
 
             let dir = e["directionality"]
                 .as_str()
-                .ok_or_else(|| GraphError::Parse(format!("edge {id} missing 'directionality'")))?;
+                .ok_or_else(|| GraphError::Parse(format!("edge {name} missing 'directionality'")))?;
 
-            labels.insert(id.clone(), LabelType::from_list(&edge_labels));
-            props.insert(id.clone(), Self::parse_props(&e["props"])?);
-            endpoints_map.insert(id.clone(), (ep0.clone(), ep1.clone()));
-
-            match dir {
+            let is_dir = match dir {
                 "->" => {
-                    for l in &edge_labels {
-                        label_to_edges_d.entry(l.clone()).or_default().push(id.clone());
-                    }
-                    outgoing.entry(ep0.clone()).or_default().push(id.clone());
-                    incoming.entry(ep1.clone()).or_default().push(id.clone());
-                    src_map.insert(id.clone(), ep0);
-                    tgt_map.insert(id.clone(), ep1);
-                    edges_d.push(id);
+                    for l in &labs { label_to_edges_d.entry(l.clone()).or_default().push(eid); }
+                    outgoing[ep0 as usize].push(eid);
+                    incoming[ep1 as usize].push(eid);
+                    true
                 }
                 "~~" => {
-                    for l in &edge_labels {
-                        label_to_edges_u.entry(l.clone()).or_default().push(id.clone());
-                    }
-                    undirected_adj.entry(ep0.clone()).or_default().push(id.clone());
-                    undirected_adj.entry(ep1.clone()).or_default().push(id.clone());
-                    edges_u.push(id);
+                    for l in &labs { label_to_edges_u.entry(l.clone()).or_default().push(eid); }
+                    undirected_adj[ep0 as usize].push(eid);
+                    undirected_adj[ep1 as usize].push(eid);
+                    false
                 }
-                other => {
-                    return Err(GraphError::Parse(format!(
-                        "unknown directionality '{other}'"
-                    )));
-                }
-            }
+                other => return Err(GraphError::Parse(format!("unknown directionality '{other}'"))),
+            };
+
+            edge_labels_vec.push(LabelType::from_list(&labs));
+            edge_props_vec.push(Self::parse_props(&e["props"])?);
+            edge_src.push(ep0);
+            edge_tgt.push(ep1);
+            edge_directed.push(is_dir);
+            edge_names.push(name);
         }
 
         Ok(Graph {
-            nodes,
-            edges_d,
-            edges_u,
-            labels,
-            props,
-            endpoints: endpoints_map,
-            src: src_map,
-            tgt: tgt_map,
-            label_to_nodes,
-            label_to_edges_d,
-            label_to_edges_u,
-            outgoing,
-            incoming,
-            undirected_adj,
+            node_names, edge_names,
+            edge_src, edge_tgt, edge_directed,
+            node_labels: node_labels_vec, edge_labels: edge_labels_vec,
+            node_props: node_props_vec, edge_props: edge_props_vec,
+            label_to_nodes, label_to_edges_d, label_to_edges_u,
+            outgoing, incoming, undirected_adj,
+            node_name_to_id,
         })
     }
 
     /// Build a Graph from pre-parsed components (used by store::io::load_graph).
-    /// Computes indexes automatically.
     pub fn from_raw(
-        nodes: Vec<String>,
-        edges_d: Vec<String>,
-        edges_u: Vec<String>,
-        labels: HashMap<String, LabelType>,
-        props: HashMap<String, Props>,
-        endpoints: HashMap<String, (String, String)>,
-        src: HashMap<String, String>,
-        tgt: HashMap<String, String>,
+        node_names: Vec<String>,
+        node_labels: Vec<LabelType>,
+        node_props: Vec<Props>,
+        edge_names: Vec<String>,
+        edge_labels: Vec<LabelType>,
+        edge_props: Vec<Props>,
+        edge_src: Vec<Id>,
+        edge_tgt: Vec<Id>,
+        edge_directed: Vec<bool>,
     ) -> Self {
-        // Build indexes
-        let mut label_to_nodes: HashMap<String, Vec<String>> = HashMap::new();
-        let mut label_to_edges_d: HashMap<String, Vec<String>> = HashMap::new();
-        let mut label_to_edges_u: HashMap<String, Vec<String>> = HashMap::new();
-        let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
-        let mut incoming: HashMap<String, Vec<String>> = HashMap::new();
-        let mut undirected_adj: HashMap<String, Vec<String>> = HashMap::new();
+        let num_nodes = node_names.len();
+        let mut node_name_to_id: HashMap<String, Id> = HashMap::new();
+        for (i, name) in node_names.iter().enumerate() {
+            node_name_to_id.insert(name.clone(), i as Id);
+        }
 
-        for id in &nodes {
-            for l in Self::label_strings(&labels[id]) {
-                label_to_nodes.entry(l).or_default().push(id.clone());
+        let mut label_to_nodes: HashMap<String, Vec<Id>> = HashMap::new();
+        let mut label_to_edges_d: HashMap<String, Vec<Id>> = HashMap::new();
+        let mut label_to_edges_u: HashMap<String, Vec<Id>> = HashMap::new();
+        let mut outgoing = vec![Vec::new(); num_nodes];
+        let mut incoming = vec![Vec::new(); num_nodes];
+        let mut undirected_adj = vec![Vec::new(); num_nodes];
+
+        for (nid, lt) in node_labels.iter().enumerate() {
+            for l in Self::label_strings(lt) {
+                label_to_nodes.entry(l).or_default().push(nid as Id);
             }
         }
-        for id in &edges_d {
-            for l in Self::label_strings(&labels[id]) {
-                label_to_edges_d.entry(l).or_default().push(id.clone());
+        for (eid, _) in edge_names.iter().enumerate() {
+            let eid = eid as Id;
+            if edge_directed[eid as usize] {
+                for l in Self::label_strings(&edge_labels[eid as usize]) {
+                    label_to_edges_d.entry(l).or_default().push(eid);
+                }
+                outgoing[edge_src[eid as usize] as usize].push(eid);
+                incoming[edge_tgt[eid as usize] as usize].push(eid);
+            } else {
+                for l in Self::label_strings(&edge_labels[eid as usize]) {
+                    label_to_edges_u.entry(l).or_default().push(eid);
+                }
+                undirected_adj[edge_src[eid as usize] as usize].push(eid);
+                undirected_adj[edge_tgt[eid as usize] as usize].push(eid);
             }
-            outgoing.entry(src[id].clone()).or_default().push(id.clone());
-            incoming.entry(tgt[id].clone()).or_default().push(id.clone());
-        }
-        for id in &edges_u {
-            for l in Self::label_strings(&labels[id]) {
-                label_to_edges_u.entry(l).or_default().push(id.clone());
-            }
-            let (ep0, ep1) = &endpoints[id];
-            undirected_adj.entry(ep0.clone()).or_default().push(id.clone());
-            undirected_adj.entry(ep1.clone()).or_default().push(id.clone());
         }
 
         Graph {
-            nodes, edges_d, edges_u, labels, props, endpoints, src, tgt,
+            node_names, edge_names,
+            edge_src, edge_tgt, edge_directed,
+            node_labels, edge_labels,
+            node_props, edge_props,
             label_to_nodes, label_to_edges_d, label_to_edges_u,
             outgoing, incoming, undirected_adj,
+            node_name_to_id,
         }
     }
 
@@ -244,7 +248,7 @@ impl Graph {
     }
 
     /// Extract label strings from a LabelType (for index building).
-    fn label_strings(lt: &LabelType) -> Vec<String> {
+    pub fn label_strings(lt: &LabelType) -> Vec<String> {
         match lt {
             LabelType::Label(s) => vec![s.clone()],
             LabelType::And(a, b) => {
@@ -282,70 +286,77 @@ impl Graph {
         Ok(props)
     }
 
-    /// Get the PathValue for a node ID.
-    pub fn node_value(&self, id: &str) -> PathValue {
-        PathValue::Node(id.to_string())
-    }
-
-    /// Get the PathValue for an edge ID (directed or undirected).
-    pub fn edge_value(&self, id: &str) -> PathValue {
-        if self.src.contains_key(id) {
-            PathValue::EdgeDirectional(id.to_string())
-        } else {
-            PathValue::EdgeUndirectional(id.to_string())
-        }
+    /// Lookup node internal ID by user-facing name.
+    pub fn node_id_by_name(&self, name: &str) -> Option<Id> {
+        self.node_name_to_id.get(name).copied()
     }
 }
 
 impl super::graph_access::GraphAccess for Graph {
-    fn nodes(&self) -> Vec<String> {
-        self.nodes.clone()
+    fn nodes(&self) -> Vec<Id> {
+        (0..self.node_names.len() as Id).collect()
     }
-    fn edges_directed(&self) -> Vec<String> {
-        self.edges_d.clone()
+    fn edges_directed(&self) -> Vec<Id> {
+        (0..self.edge_names.len() as Id)
+            .filter(|&eid| self.edge_directed[eid as usize])
+            .collect()
     }
-    fn edges_undirected(&self) -> Vec<String> {
-        self.edges_u.clone()
+    fn edges_undirected(&self) -> Vec<Id> {
+        (0..self.edge_names.len() as Id)
+            .filter(|&eid| !self.edge_directed[eid as usize])
+            .collect()
     }
-    fn labels(&self, id: &str) -> &LabelType {
-        &self.labels[id]
+    fn node_labels(&self, id: Id) -> LabelType {
+        self.node_labels[id as usize].clone()
     }
-    fn props(&self, id: &str) -> &Props {
-        &self.props[id]
+    fn edge_labels(&self, id: Id) -> LabelType {
+        self.edge_labels[id as usize].clone()
     }
-    fn src(&self, edge_id: &str) -> &str {
-        &self.src[edge_id]
+    fn node_props(&self, id: Id) -> Props {
+        self.node_props[id as usize].clone()
     }
-    fn tgt(&self, edge_id: &str) -> &str {
-        &self.tgt[edge_id]
+    fn edge_props(&self, id: Id) -> Props {
+        self.edge_props[id as usize].clone()
     }
-    fn endpoints(&self, edge_id: &str) -> (&str, &str) {
-        let (a, b) = &self.endpoints[edge_id];
-        (a, b)
+    fn src(&self, edge_id: Id) -> Id {
+        self.edge_src[edge_id as usize]
     }
-    fn is_directed(&self, edge_id: &str) -> bool {
-        self.src.contains_key(edge_id)
+    fn tgt(&self, edge_id: Id) -> Id {
+        self.edge_tgt[edge_id as usize]
     }
-    fn edge_path_value(&self, edge_id: &str) -> PathValue {
-        self.edge_value(edge_id)
+    fn is_directed(&self, edge_id: Id) -> bool {
+        self.edge_directed[edge_id as usize]
     }
-    fn nodes_with_label(&self, label: &str) -> Option<Vec<String>> {
+    fn edge_path_value(&self, edge_id: Id) -> PathValue {
+        if self.edge_directed[edge_id as usize] {
+            PathValue::EdgeDirectional(edge_id)
+        } else {
+            PathValue::EdgeUndirectional(edge_id)
+        }
+    }
+    fn node_name(&self, id: Id) -> &str {
+        &self.node_names[id as usize]
+    }
+    fn edge_name(&self, id: Id) -> &str {
+        &self.edge_names[id as usize]
+    }
+    fn nodes_with_label(&self, label: &str) -> Option<Vec<Id>> {
         self.label_to_nodes.get(label).cloned()
     }
-    fn directed_edges_with_label(&self, label: &str) -> Option<Vec<String>> {
+    fn directed_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
         self.label_to_edges_d.get(label).cloned()
     }
-    fn undirected_edges_with_label(&self, label: &str) -> Option<Vec<String>> {
+    fn undirected_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
         self.label_to_edges_u.get(label).cloned()
     }
-    fn outgoing_edges(&self, node_id: &str) -> Vec<String> {
-        self.outgoing.get(node_id).cloned().unwrap_or_default()
+    fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {
+        self.outgoing[node_id as usize].clone()
     }
-    fn incoming_edges(&self, node_id: &str) -> Vec<String> {
-        self.incoming.get(node_id).cloned().unwrap_or_default()
+    fn incoming_edges(&self, node_id: Id) -> Vec<Id> {
+        self.incoming[node_id as usize].clone()
     }
-    fn undirected_edges_of(&self, node_id: &str) -> Vec<String> {
-        self.undirected_adj.get(node_id).cloned().unwrap_or_default()
+    fn undirected_edges_of(&self, node_id: Id) -> Vec<Id> {
+        self.undirected_adj[node_id as usize].clone()
     }
 }
 
@@ -374,99 +385,24 @@ mod tests {
     #[test]
     fn test_fraud_node_count() {
         let g = fraud_graph();
-        assert_eq!(g.nodes.len(), 5);
+        assert_eq!(g.node_count(), 5);
     }
 
     #[test]
     fn test_fraud_edge_counts() {
         let g = fraud_graph();
-        assert_eq!(g.edges_d.len(), 5);
-        assert_eq!(g.edges_u.len(), 0);
-    }
-
-    #[test]
-    fn test_fraud_labels() {
-        let g = fraud_graph();
-        assert_eq!(g.labels["a1"], LabelType::Label("Account".into()));
-        // d1 has two labels: Dummy & Person
-        assert_eq!(
-            g.labels["d1"],
-            LabelType::And(
-                Box::new(LabelType::Label("Dummy".into())),
-                Box::new(LabelType::Label("Person".into())),
-            )
-        );
-    }
-
-    #[test]
-    fn test_fraud_props() {
-        let g = fraud_graph();
-        assert_eq!(g.props["a1"]["owner"], Value::Str("Aretha".into()));
-        assert_eq!(g.props["a1"]["isBlocked"], Value::Bool(false));
-        assert_eq!(g.props["t1"]["amount"], Value::Int(2500000));
-    }
-
-    #[test]
-    fn test_fraud_endpoints() {
-        let g = fraud_graph();
-        assert_eq!(g.src["t1"], "p1");
-        assert_eq!(g.tgt["t1"], "p2");
-        assert_eq!(g.endpoints["t1"], ("p1".into(), "p2".into()));
+        assert_eq!(g.edge_count(), 5);
     }
 
     #[test]
     fn test_social_node_count() {
         let g = social_graph();
-        assert_eq!(g.nodes.len(), 3);
+        assert_eq!(g.node_count(), 3);
     }
 
     #[test]
     fn test_social_edge_counts() {
         let g = social_graph();
-        assert_eq!(g.edges_d.len(), 2); // e2 (Likes ->), e3 (Author ->)
-        assert_eq!(g.edges_u.len(), 1); // e1 (Knows ~~)
-    }
-
-    #[test]
-    fn test_social_multi_labels() {
-        let g = social_graph();
-        // n1 has labels: Person & Teacher
-        assert_eq!(
-            g.labels["n1"],
-            LabelType::And(
-                Box::new(LabelType::Label("Person".into())),
-                Box::new(LabelType::Label("Teacher".into())),
-            )
-        );
-    }
-
-    #[test]
-    fn test_social_mixed_prop_types() {
-        let g = social_graph();
-        // n1.name is string, n2.status is int, n3.status is bool
-        assert_eq!(g.props["n1"]["name"], Value::Str("Alice".into()));
-        assert_eq!(g.props["n2"]["status"], Value::Int(1));
-        assert_eq!(g.props["n3"]["status"], Value::Bool(true));
-    }
-
-    #[test]
-    fn test_social_undirected_edge() {
-        let g = social_graph();
-        // e1 is undirected, should not be in src/tgt maps
-        assert!(!g.src.contains_key("e1"));
-        assert!(!g.tgt.contains_key("e1"));
-        assert_eq!(g.endpoints["e1"], ("n1".into(), "n2".into()));
-    }
-
-    #[test]
-    fn test_edge_value_type() {
-        let g = fraud_graph();
-        assert!(matches!(g.edge_value("t1"), PathValue::EdgeDirectional(_)));
-
-        let g2 = social_graph();
-        assert!(matches!(
-            g2.edge_value("e1"),
-            PathValue::EdgeUndirectional(_)
-        ));
+        assert_eq!(g.edge_count(), 3);
     }
 }

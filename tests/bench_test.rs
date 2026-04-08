@@ -291,17 +291,16 @@ fn bench_compare<G1: GraphAccess, G2: GraphAccess>(
 }
 
 fn print_graph_stats(graph: &Graph) {
-    println!(
-        "  Nodes: {}, Directed: {}, Undirected: {}",
-        graph.nodes.len(),
-        graph.edges_d.len(),
-        graph.edges_u.len()
-    );
+    let nc = graph.node_count();
+    let ec = graph.edge_count();
+    let dc = graph.edge_directed.iter().filter(|&&d| d).count();
+    let uc = ec - dc;
+    println!("  Nodes: {}, Directed: {}, Undirected: {}", nc, dc, uc);
 
-    let multi_label = graph.nodes.iter()
-        .filter(|id| !matches!(graph.labels[*id], gqlrust::typing::label_type::LabelType::Label(_)))
+    let multi_label = graph.node_labels.iter()
+        .filter(|lt| !matches!(lt, gqlrust::typing::label_type::LabelType::Label(_)))
         .count();
-    println!("  Multi-label nodes: {} ({:.1}%)", multi_label, 100.0 * multi_label as f64 / graph.nodes.len() as f64);
+    println!("  Multi-label nodes: {} ({:.1}%)", multi_label, 100.0 * multi_label as f64 / nc as f64);
 }
 
 fn temp_path(name: &str) -> PathBuf {

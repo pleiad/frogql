@@ -81,6 +81,20 @@ impl LabelType {
             _ => None,
         }
     }
+
+    /// Collect all positive leaf labels that MUST be present (from And and bare Labels).
+    /// Does not include labels under Or or Neg (those can't narrow the search).
+    pub fn required_labels(&self) -> Vec<&str> {
+        match self {
+            LabelType::Label(s) => vec![s.as_str()],
+            LabelType::And(a, b) => {
+                let mut v = a.required_labels();
+                v.extend(b.required_labels());
+                v
+            }
+            _ => vec![],
+        }
+    }
 }
 
 impl fmt::Display for LabelType {

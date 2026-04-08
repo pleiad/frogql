@@ -78,6 +78,9 @@ fn rewrite(p: PathPattern) -> PathPattern {
             ub,
         },
         PathPattern::Questioned(p) => PathPattern::Questioned(Box::new(rewrite(*p))),
+        PathPattern::Join(p1, p2) => {
+            PathPattern::Join(Box::new(rewrite(*p1)), Box::new(rewrite(*p2)))
+        }
         // Leaf patterns — no rewriting needed
         other => other,
     }
@@ -178,6 +181,10 @@ fn merge_constraints(
         PathPattern::Questioned(inner) => {
             PathPattern::Questioned(Box::new(merge_constraints(*inner, constraints)))
         }
+        PathPattern::Join(p1, p2) => PathPattern::Join(
+            Box::new(merge_constraints(*p1, constraints)),
+            Box::new(merge_constraints(*p2, constraints)),
+        ),
     }
 }
 

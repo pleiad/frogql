@@ -18,24 +18,26 @@ impl fmt::Display for Value {
     }
 }
 
+/// Internal ID type for nodes and edges.
+pub type Id = u32;
+
 /// A runtime value that can appear in a path or assignment.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PathValue {
-    Node(String),
-    EdgeDirectional(String),
-    EdgeUndirectional(String),
+    Node(Id),
+    EdgeDirectional(Id),
+    EdgeUndirectional(Id),
     Nothing,
-    List(Vec<PathValue>),
 }
 
 impl PathValue {
-    /// Returns the id string for Node/Edge variants, None for Nothing/List.
-    pub fn id(&self) -> Option<&str> {
+    /// Returns the internal id for Node/Edge variants, None for Nothing.
+    pub fn id(&self) -> Option<Id> {
         match self {
             PathValue::Node(id)
             | PathValue::EdgeDirectional(id)
-            | PathValue::EdgeUndirectional(id) => Some(id),
-            PathValue::Nothing | PathValue::List(_) => None,
+            | PathValue::EdgeUndirectional(id) => Some(*id),
+            PathValue::Nothing => None,
         }
     }
 
@@ -54,14 +56,10 @@ impl PathValue {
 impl fmt::Display for PathValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PathValue::Node(id) => write!(f, "{id}"),
-            PathValue::EdgeDirectional(id) => write!(f, "{id}"),
-            PathValue::EdgeUndirectional(id) => write!(f, "{id}"),
+            PathValue::Node(id) => write!(f, "n{id}"),
+            PathValue::EdgeDirectional(id) => write!(f, "e{id}"),
+            PathValue::EdgeUndirectional(id) => write!(f, "u{id}"),
             PathValue::Nothing => write!(f, "Nothing"),
-            PathValue::List(l) => {
-                let items: Vec<String> = l.iter().map(|x| x.to_string()).collect();
-                write!(f, "[{}]", items.join(", "))
-            }
         }
     }
 }
@@ -72,17 +70,17 @@ pub struct Path(pub Vec<PathValue>);
 
 impl Path {
     /// Get the ID of the first node in the path (paths always start with a node).
-    pub fn first_node_id(&self) -> Option<&str> {
+    pub fn first_node_id(&self) -> Option<Id> {
         self.0.first().and_then(|pv| match pv {
-            PathValue::Node(id) => Some(id.as_str()),
+            PathValue::Node(id) => Some(*id),
             _ => None,
         })
     }
 
     /// Get the ID of the last node in the path (paths always end with a node).
-    pub fn last_node_id(&self) -> Option<&str> {
+    pub fn last_node_id(&self) -> Option<Id> {
         self.0.last().and_then(|pv| match pv {
-            PathValue::Node(id) => Some(id.as_str()),
+            PathValue::Node(id) => Some(*id),
             _ => None,
         })
     }
@@ -103,6 +101,14 @@ impl Path {
         result.extend_from_slice(&other.0[1..]);
         Path(result)
     }
+
+    /// Cross-product of two paths: concatenation of both path elements.
+    /// Used for Join (Q1, Q2) semantics where paths are independent.
+    pub fn cross(&self, other: &Path) -> Path {
+        let mut result = self.0.clone();
+        result.extend_from_slice(&other.0);
+        Path(result)
+    }
 }
 
 impl fmt::Display for Path {
@@ -118,21 +124,9 @@ mod tests {
 
     #[test]
     fn test_path_can_concat() {
-        let p1 = Path(vec![
-            PathValue::Node("n1".into()),
-            PathValue::EdgeDirectional("e1".into()),
-            PathValue::Node("n2".into()),
-        ]);
-        let p2 = Path(vec![
-            PathValue::Node("n2".into()),
-            PathValue::EdgeDirectional("e2".into()),
-            PathValue::Node("n3".into()),
-        ]);
-        let p3 = Path(vec![
-            PathValue::Node("n3".into()),
-            PathValue::EdgeDirectional("e3".into()),
-            PathValue::Node("n4".into()),
-        ]);
+        let p1 = Path(vec![PathValue::Node(1), PathValue::EdgeDirectional(10), PathValue::Node(2)]);
+        let p2 = Path(vec![PathValue::Node(2), PathValue::EdgeDirectional(20), PathValue::Node(3)]);
+        let p3 = Path(vec![PathValue::Node(3), PathValue::EdgeDirectional(30), PathValue::Node(4)]);
 
         assert!(p1.can_concat(&p2));
         assert!(!p1.can_concat(&p3));
@@ -140,34 +134,18 @@ mod tests {
 
     #[test]
     fn test_path_concat() {
-        let p1 = Path(vec![
-            PathValue::Node("n1".into()),
-            PathValue::EdgeDirectional("e1".into()),
-            PathValue::Node("n2".into()),
-        ]);
-        let p2 = Path(vec![
-            PathValue::Node("n2".into()),
-            PathValue::EdgeDirectional("e2".into()),
-            PathValue::Node("n3".into()),
-        ]);
+        let p1 = Path(vec![PathValue::Node(1), PathValue::EdgeDirectional(10), PathValue::Node(2)]);
+        let p2 = Path(vec![PathValue::Node(2), PathValue::EdgeDirectional(20), PathValue::Node(3)]);
         let expected = Path(vec![
-            PathValue::Node("n1".into()),
-            PathValue::EdgeDirectional("e1".into()),
-            PathValue::Node("n2".into()),
-            PathValue::EdgeDirectional("e2".into()),
-            PathValue::Node("n3".into()),
+            PathValue::Node(1), PathValue::EdgeDirectional(10), PathValue::Node(2),
+            PathValue::EdgeDirectional(20), PathValue::Node(3),
         ]);
         assert_eq!(p1.concat(&p2), expected);
     }
 
     #[test]
     fn test_pathvalue_display() {
-        assert_eq!(PathValue::Node("n1".into()).to_string(), "n1");
+        assert_eq!(PathValue::Node(1).to_string(), "n1");
         assert_eq!(PathValue::Nothing.to_string(), "Nothing");
-        let list = PathValue::List(vec![
-            PathValue::Node("n1".into()),
-            PathValue::Node("n2".into()),
-        ]);
-        assert_eq!(list.to_string(), "[n1, n2]");
     }
 }

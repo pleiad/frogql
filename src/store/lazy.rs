@@ -14,7 +14,7 @@ use std::path::Path;
 
 use crate::model::graph::Props;
 use crate::model::graph_access::GraphAccess;
-use crate::model::value::{PathValue, Value};
+use crate::model::value::{Id, PathValue, Value};
 use crate::pager::page::{Page, PageType, PAGE_SIZE};
 use crate::pager::pager::Pager;
 use crate::typing::label_type::LabelType;
@@ -33,11 +33,9 @@ pub struct LazyGraphStore {
     pager: RefCell<Pager>,
     strings: StringTable,
 
-    // Compact in-memory indexes (IDs only, no record data)
-    node_ids: Vec<String>,        // internal_id → user_id
-    edge_ids: Vec<String>,        // internal_id → user_id
-    node_id_map: HashMap<String, u32>,  // user_id → internal_id
-    edge_id_map: HashMap<String, u32>,
+    // Counts
+    node_count: u32,
+    edge_count: u32,
 
     // Record locations on disk (for lazy loading)
     node_locs: Vec<RecordLoc>,     // internal_id → disk location
@@ -73,10 +71,8 @@ impl LazyGraphStore {
         let mut store = LazyGraphStore {
             pager: RefCell::new(pager),
             strings,
-            node_ids: Vec::new(),
-            edge_ids: Vec::new(),
-            node_id_map: HashMap::new(),
-            edge_id_map: HashMap::new(),
+            node_count: 0,
+            edge_count: 0,
             node_locs: Vec::new(),
             edge_locs: Vec::new(),
             edge_src: Vec::new(),
@@ -114,23 +110,15 @@ impl LazyGraphStore {
             let (offset, end) = cell_bounds(page, i);
             let (decoded, _) = record::decode_node(&page.data[offset..end]);
 
-            let internal_id = self.node_ids.len() as u32;
-            let user_id = self.strings.resolve(decoded.user_id_str_id).unwrap().to_string();
+            let internal_id = self.node_count;
+            self.node_count += 1;
 
-            // Resolve label strings for index
-            let labels: Vec<String> = decoded.label_str_ids.iter()
-                .map(|&sid| self.strings.resolve(sid).unwrap().to_string())
-                .collect();
-
-            for l in &labels {
-                self.label_to_nodes.entry(l.clone()).or_default().push(internal_id);
+            for &sid in &decoded.label_str_ids {
+                let label = self.strings.resolve(sid).unwrap().to_string();
+                self.label_to_nodes.entry(label).or_default().push(internal_id);
             }
 
-            self.node_ids.push(user_id.clone());
-            self.node_id_map.insert(user_id, internal_id);
             self.node_locs.push(RecordLoc { page_num, cell_index: i });
-
-            // NOTE: we do NOT store labels/props in memory — those are read on demand
         }
     }
 
@@ -139,15 +127,12 @@ impl LazyGraphStore {
             let (offset, end) = cell_bounds(page, i);
             let decoded = record::decode_edge(&page.data[offset..end]);
 
-            let internal_id = self.edge_ids.len() as u32;
-            let user_id = self.strings.resolve(decoded.node.user_id_str_id).unwrap().to_string();
+            let internal_id = self.edge_count;
+            self.edge_count += 1;
 
-            let labels: Vec<String> = decoded.node.label_str_ids.iter()
-                .map(|&sid| self.strings.resolve(sid).unwrap().to_string())
-                .collect();
-
-            for l in &labels {
-                self.label_to_edges.entry(l.clone()).or_default().push(internal_id);
+            for &sid in &decoded.node.label_str_ids {
+                let label = self.strings.resolve(sid).unwrap().to_string();
+                self.label_to_edges.entry(label).or_default().push(internal_id);
             }
 
             let src = decoded.src_internal_id;
@@ -161,8 +146,6 @@ impl LazyGraphStore {
                 self.undirected_adj.entry(tgt).or_default().push(internal_id);
             }
 
-            self.edge_ids.push(user_id.clone());
-            self.edge_id_map.insert(user_id, internal_id);
             self.edge_locs.push(RecordLoc { page_num, cell_index: i });
             self.edge_src.push(src);
             self.edge_tgt.push(tgt);
@@ -191,7 +174,11 @@ impl LazyGraphStore {
         let labels: Vec<String> = label_str_ids.iter()
             .map(|&sid| self.strings.resolve(sid).unwrap().to_string())
             .collect();
-        LabelType::from_list(&labels)
+        if labels.is_empty() {
+            LabelType::Star
+        } else {
+            LabelType::from_list(&labels)
+        }
     }
 
     fn decode_props_from_record(&self, encoded: &[(u32, PropValue)]) -> Props {
@@ -208,6 +195,9 @@ impl LazyGraphStore {
         props
     }
 
+    pub fn node_count(&self) -> u32 { self.node_count }
+    pub fn edge_count(&self) -> u32 { self.edge_count }
+
     /// Cache statistics from the underlying pager.
     pub fn cache_stats(&self) -> (u64, u64) {
         self.pager.borrow().cache_stats()
@@ -215,135 +205,107 @@ impl LazyGraphStore {
 }
 
 impl GraphAccess for LazyGraphStore {
-    fn nodes(&self) -> Vec<String> {
-        self.node_ids.clone()
+    fn nodes(&self) -> Vec<Id> {
+        (0..self.node_count).collect()
     }
 
-    fn edges_directed(&self) -> Vec<String> {
-        self.edge_ids.iter().enumerate()
-            .filter(|(i, _)| self.edge_directed[*i])
-            .map(|(_, id)| id.clone())
+    fn edges_directed(&self) -> Vec<Id> {
+        (0..self.edge_count)
+            .filter(|&i| self.edge_directed[i as usize])
             .collect()
     }
 
-    fn edges_undirected(&self) -> Vec<String> {
-        self.edge_ids.iter().enumerate()
-            .filter(|(i, _)| !self.edge_directed[*i])
-            .map(|(_, id)| id.clone())
+    fn edges_undirected(&self) -> Vec<Id> {
+        (0..self.edge_count)
+            .filter(|&i| !self.edge_directed[i as usize])
             .collect()
     }
 
-    fn labels(&self, id: &str) -> &LabelType {
-        // Read record lazily via page cache, return leaked ref.
-        // Leaked memory is bounded by number of distinct elements accessed per query.
-        if let Some(&iid) = self.node_id_map.get(id) {
-            let decoded = self.read_node_record(iid);
-            let lt = self.decode_labels_from_record(&decoded.label_str_ids);
-            Box::leak(Box::new(lt))
-        } else if let Some(&iid) = self.edge_id_map.get(id) {
-            let decoded = self.read_edge_record(iid);
-            let lt = self.decode_labels_from_record(&decoded.node.label_str_ids);
-            Box::leak(Box::new(lt))
+    fn node_labels(&self, id: Id) -> LabelType {
+        let decoded = self.read_node_record(id);
+        self.decode_labels_from_record(&decoded.label_str_ids)
+    }
+
+    fn edge_labels(&self, id: Id) -> LabelType {
+        let decoded = self.read_edge_record(id);
+        self.decode_labels_from_record(&decoded.node.label_str_ids)
+    }
+
+    fn node_props(&self, id: Id) -> Props {
+        let decoded = self.read_node_record(id);
+        self.decode_props_from_record(&decoded.props)
+    }
+
+    fn edge_props(&self, id: Id) -> Props {
+        let decoded = self.read_edge_record(id);
+        self.decode_props_from_record(&decoded.node.props)
+    }
+
+    fn src(&self, edge_id: Id) -> Id {
+        self.edge_src[edge_id as usize]
+    }
+
+    fn tgt(&self, edge_id: Id) -> Id {
+        self.edge_tgt[edge_id as usize]
+    }
+
+    fn is_directed(&self, edge_id: Id) -> bool {
+        self.edge_directed[edge_id as usize]
+    }
+
+    fn edge_path_value(&self, edge_id: Id) -> PathValue {
+        if self.edge_directed[edge_id as usize] {
+            PathValue::EdgeDirectional(edge_id)
         } else {
-            panic!("unknown element id: {id}")
+            PathValue::EdgeUndirectional(edge_id)
         }
     }
 
-    fn props(&self, id: &str) -> &Props {
-        if let Some(&iid) = self.node_id_map.get(id) {
-            let decoded = self.read_node_record(iid);
-            let props = self.decode_props_from_record(&decoded.props);
-            Box::leak(Box::new(props))
-        } else if let Some(&iid) = self.edge_id_map.get(id) {
-            let decoded = self.read_edge_record(iid);
-            let props = self.decode_props_from_record(&decoded.node.props);
-            Box::leak(Box::new(props))
-        } else {
-            panic!("unknown element id: {id}")
-        }
+    fn node_name(&self, id: Id) -> &str {
+        let decoded = self.read_node_record(id);
+        let s = self.strings.resolve(decoded.user_id_str_id).unwrap();
+        // Leak the string to return &str — only called for display, not hot path
+        Box::leak(Box::new(s.to_string()))
     }
 
-    fn src(&self, edge_id: &str) -> &str {
-        let iid = self.edge_id_map[edge_id] as usize;
-        let src_iid = self.edge_src[iid] as usize;
-        &self.node_ids[src_iid]
+    fn edge_name(&self, id: Id) -> &str {
+        let decoded = self.read_edge_record(id);
+        let s = self.strings.resolve(decoded.node.user_id_str_id).unwrap();
+        Box::leak(Box::new(s.to_string()))
     }
 
-    fn tgt(&self, edge_id: &str) -> &str {
-        let iid = self.edge_id_map[edge_id] as usize;
-        let tgt_iid = self.edge_tgt[iid] as usize;
-        &self.node_ids[tgt_iid]
+    fn nodes_with_label(&self, label: &str) -> Option<Vec<Id>> {
+        self.label_to_nodes.get(label).cloned()
     }
 
-    fn endpoints(&self, edge_id: &str) -> (&str, &str) {
-        (self.src(edge_id), self.tgt(edge_id))
-    }
-
-    fn is_directed(&self, edge_id: &str) -> bool {
-        let iid = self.edge_id_map[edge_id] as usize;
-        self.edge_directed[iid]
-    }
-
-    fn edge_path_value(&self, edge_id: &str) -> PathValue {
-        if self.is_directed(edge_id) {
-            PathValue::EdgeDirectional(edge_id.to_string())
-        } else {
-            PathValue::EdgeUndirectional(edge_id.to_string())
-        }
-    }
-
-    fn nodes_with_label(&self, label: &str) -> Option<Vec<String>> {
-        self.label_to_nodes.get(label).map(|ids| {
-            ids.iter().map(|&iid| self.node_ids[iid as usize].clone()).collect()
-        })
-    }
-
-    fn directed_edges_with_label(&self, label: &str) -> Option<Vec<String>> {
+    fn directed_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
         self.label_to_edges.get(label).map(|ids| {
             ids.iter()
                 .filter(|&&iid| self.edge_directed[iid as usize])
-                .map(|&iid| self.edge_ids[iid as usize].clone())
+                .copied()
                 .collect()
         })
     }
 
-    fn undirected_edges_with_label(&self, label: &str) -> Option<Vec<String>> {
+    fn undirected_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
         self.label_to_edges.get(label).map(|ids| {
             ids.iter()
                 .filter(|&&iid| !self.edge_directed[iid as usize])
-                .map(|&iid| self.edge_ids[iid as usize].clone())
+                .copied()
                 .collect()
         })
     }
 
-    fn outgoing_edges(&self, node_id: &str) -> Vec<String> {
-        if let Some(&niid) = self.node_id_map.get(node_id) {
-            self.outgoing.get(&niid).map(|eids| {
-                eids.iter().map(|&eiid| self.edge_ids[eiid as usize].clone()).collect()
-            }).unwrap_or_default()
-        } else {
-            vec![]
-        }
+    fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {
+        self.outgoing.get(&node_id).cloned().unwrap_or_default()
     }
 
-    fn incoming_edges(&self, node_id: &str) -> Vec<String> {
-        if let Some(&niid) = self.node_id_map.get(node_id) {
-            self.incoming.get(&niid).map(|eids| {
-                eids.iter().map(|&eiid| self.edge_ids[eiid as usize].clone()).collect()
-            }).unwrap_or_default()
-        } else {
-            vec![]
-        }
+    fn incoming_edges(&self, node_id: Id) -> Vec<Id> {
+        self.incoming.get(&node_id).cloned().unwrap_or_default()
     }
 
-    fn undirected_edges_of(&self, node_id: &str) -> Vec<String> {
-        if let Some(&niid) = self.node_id_map.get(node_id) {
-            self.undirected_adj.get(&niid).map(|eids| {
-                eids.iter().map(|&eiid| self.edge_ids[eiid as usize].clone()).collect()
-            }).unwrap_or_default()
-        } else {
-            vec![]
-        }
+    fn undirected_edges_of(&self, node_id: Id) -> Vec<Id> {
+        self.undirected_adj.get(&node_id).cloned().unwrap_or_default()
     }
 }
 

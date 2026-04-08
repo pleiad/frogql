@@ -12,9 +12,6 @@
 //! Each node's adjacency data: (edge_internal_id: u32, other_node_id: u32, kind: u8)
 //!   kind: 0=outgoing, 1=incoming, 2=undirected
 //!
-//! ## ID Index
-//! Sorted array of (user_id_string_id: u32, internal_id: u32) for binary search lookup.
-//! Separate pages for nodes and edges.
 
 use std::io;
 
@@ -114,24 +111,6 @@ pub fn read_triple_chain(pager: &mut Pager, first_page: u32) -> io::Result<Vec<(
         current = next;
     }
     Ok(result)
-}
-
-/// Write an ID index: sorted (string_id, internal_id) pairs for binary search.
-pub fn write_id_index(
-    pager: &mut Pager,
-    entries: &[(u32, u32)], // (user_id_string_id, internal_id), sorted by string_id
-) -> io::Result<u32> {
-    write_pair_list(pager, entries)
-}
-
-/// Binary search the ID index for a string_id. Returns the internal_id if found.
-pub fn search_id_index(pager: &mut Pager, root_page: u32, target_sid: u32) -> io::Result<Option<u32>> {
-    // Load all pairs (could be optimized to search page-by-page)
-    let pairs = read_pair_list(pager, root_page)?;
-    match pairs.binary_search_by_key(&target_sid, |(sid, _)| *sid) {
-        Ok(idx) => Ok(Some(pairs[idx].1)),
-        Err(_) => Ok(None),
-    }
 }
 
 // ============================================================================

@@ -21,6 +21,10 @@ pub enum PathPattern {
         ub: Option<usize>,
     },
     Questioned(Box<PathPattern>),
+    /// Join of two queries: Q1, Q2
+    /// Semantics: cross-product of paths, keeping only rows where assignments unify.
+    /// Result paths are paired (p1 × p2), assignment is mu1 ∪ mu2.
+    Join(Box<PathPattern>, Box<PathPattern>),
 }
 
 impl PathPattern {
@@ -40,7 +44,7 @@ impl PathPattern {
                     .into_iter()
                     .collect()
             }
-            PathPattern::Concat(p1, p2) | PathPattern::Union(p1, p2) => {
+            PathPattern::Concat(p1, p2) | PathPattern::Union(p1, p2) | PathPattern::Join(p1, p2) => {
                 let mut s = p1.freevars();
                 s.extend(p2.freevars());
                 s
@@ -87,6 +91,7 @@ impl fmt::Display for PathPattern {
                 write!(f, "({pattern}){{{lb},}}")
             }
             PathPattern::Questioned(p) => write!(f, "({p})?"),
+            PathPattern::Join(p1, p2) => write!(f, "{p1}, {p2}"),
         }
     }
 }

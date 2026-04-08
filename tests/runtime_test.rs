@@ -498,3 +498,77 @@ fn test_unop_neg() {
     );
     assert_eq!(r.run(&p).rows.len(), 5);
 }
+
+// ==================== Comma-join (Q1, Q2) tests ====================
+
+/// Test: (x) -[]-> (), (:Car) -[]-> (x) -[]-> ()
+/// From the user's example. On fraud graph, (:Car) matches nothing, so result is empty.
+#[test]
+fn test_join_no_match() {
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let p = gqlrust::compile("(x) -[]-> (), (:Car) -[]-> (x) -[]-> ()").unwrap();
+    assert_eq!(r.run(&p).rows.len(), 0);
+}
+
+/// Test basic join without shared variables: cross-product.
+/// (x: Dummy), (y: Account) — should produce 1 × 4 = 4 results (1 Dummy, 4 Accounts).
+/// Wait: d1 has labels Dummy & Person. All nodes have Account except d1.
+/// Actually: a1, a2, p1, p2 are Account (4 nodes). d1 is Dummy & Person.
+/// So (:Dummy) = {d1}, (:Account) = {a1, a2, p1, p2} → 1 * 4 = 4.
+#[test]
+fn test_join_cross_product() {
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let p = gqlrust::compile("(:Dummy), (:Account)").unwrap();
+    assert_eq!(r.run(&p).rows.len(), 4);
+}
+
+/// Test join with shared variable: unification filters results.
+/// (x) -[]-> (y), (y) -[]-> (x) means: find pairs where x→y AND y→x
+/// In the fraud graph: t4: a1→p1, t1: p1→p2 (no), t3: a2→a1, t4: a1→p1
+/// Cycle edges: p1→p2→a2→a1→p1. So x→y AND y→x pairs:
+/// (a1,p1) via t4 and (p1,a1) — but p1→a1 doesn't exist. p1→p2 only.
+/// Actually let me trace: edges are t1(p1→p2), t2(p2→a2), t3(a2→a1), t4(a1→p1), t5(a1→d1).
+/// x→y AND y→x: need (x,y) and (y,x) both as edges.
+/// (a1,p1) via t4 and (p1,a1)? No edge p1→a1.
+/// None of these form a mutual pair. So result should be 0.
+#[test]
+fn test_join_shared_var_no_mutual() {
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let p = gqlrust::compile("(x) -[]-> (y), (y) -[]-> (x)").unwrap();
+    assert_eq!(r.run(&p).rows.len(), 0);
+}
+
+/// Test join with shared variable that unifies.
+/// (x) -[:Transfer]-> (y), (x) -[:Transfer]-> (z)
+/// This is a star pattern: x has two outgoing Transfer edges.
+/// In fraud graph: a1 has t4(→p1) and t5(→d1, but Foo label). a2 has t3(→a1).
+/// t5 has label Foo, not Transfer. So only nodes with 1 outgoing Transfer:
+/// p1(→p2), p2(→a2), a2(→a1), a1(→p1). Each has exactly 1 Transfer edge.
+/// So no node has 2 outgoing Transfer edges.
+/// But (x) -[:Transfer]-> (y), (x) -[:Transfer]-> (z) allows y==z.
+/// So each x with 1 outgoing Transfer yields 1 result (y=z=same target).
+/// That's 4 results (p1,p2,a2,a1 each have 1 Transfer out).
+#[test]
+fn test_join_star_pattern() {
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let p = gqlrust::compile("(x) -[:Transfer]-> (y), (x) -[:Transfer]-> (z)").unwrap();
+    assert_eq!(r.run(&p).rows.len(), 4);
+}
+
+/// Test join on the full "all edges" pattern.
+/// (x) -[]-> (y), (x) -[]-> (z) — star with any label.
+/// a1 has 2 outgoing edges (t4→p1, t5→d1), so it produces 2×2=4 combos.
+/// p1, p2, a2 each have 1 outgoing, so 1×1=1 each.
+/// d1 has 0 outgoing.
+/// Total: 4 + 1 + 1 + 1 = 7.
+#[test]
+fn test_join_star_any_label() {
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let p = gqlrust::compile("(x) -[]-> (y), (x) -[]-> (z)").unwrap();
+    assert_eq!(r.run(&p).rows.len(), 7);
+}

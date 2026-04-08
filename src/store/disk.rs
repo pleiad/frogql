@@ -15,7 +15,7 @@ use std::path::Path;
 
 use crate::model::graph::Props;
 use crate::model::graph_access::GraphAccess;
-use crate::model::value::{PathValue, Value};
+use crate::model::value::{Id, PathValue, Value};
 use crate::pager::page::PageType;
 use crate::pager::pager::Pager;
 use crate::typing::label_type::LabelType;
@@ -52,11 +52,9 @@ pub struct DiskGraphStore {
     edge_tgt: Vec<u32>,
     edge_directed: Vec<bool>,
 
-    // Reverse maps for user_id ↔ internal_id (loaded from ID index on demand)
-    node_id_cache: RefCell<HashMap<String, u32>>,
-    edge_id_cache: RefCell<HashMap<String, u32>>,
-    node_user_ids: Vec<String>,
-    edge_user_ids: Vec<String>,
+    // Counts
+    node_count: u32,
+    edge_count: u32,
 }
 
 impl DiskGraphStore {
@@ -83,19 +81,12 @@ impl DiskGraphStore {
         let mut edge_src = Vec::with_capacity(edge_count as usize);
         let mut edge_tgt = Vec::with_capacity(edge_count as usize);
         let mut edge_directed = Vec::with_capacity(edge_count as usize);
-        let mut node_user_ids = Vec::with_capacity(node_count as usize);
-        let mut edge_user_ids = Vec::with_capacity(edge_count as usize);
-
         let page_count = pager.header.page_count;
         for pg in 1..page_count {
             let page = pager.read_page(pg)?;
             match page.page_type() {
                 PageType::NodeData => {
                     for i in 0..page.cell_count() {
-                        let (offset, end) = cell_bounds(&page, i);
-                        let (decoded, _) = record::decode_node(&page.data[offset..end]);
-                        let uid = strings.resolve(decoded.user_id_str_id).unwrap().to_string();
-                        node_user_ids.push(uid);
                         node_locs.push((pg, i));
                     }
                 }
@@ -103,8 +94,6 @@ impl DiskGraphStore {
                     for i in 0..page.cell_count() {
                         let (offset, end) = cell_bounds(&page, i);
                         let decoded = record::decode_edge(&page.data[offset..end]);
-                        let uid = strings.resolve(decoded.node.user_id_str_id).unwrap().to_string();
-                        edge_user_ids.push(uid);
                         edge_locs.push((pg, i));
                         edge_src.push(decoded.src_internal_id);
                         edge_tgt.push(decoded.tgt_internal_id);
@@ -113,16 +102,6 @@ impl DiskGraphStore {
                 }
                 _ => {}
             }
-        }
-
-        // Build ID caches
-        let mut node_id_cache = HashMap::new();
-        for (i, uid) in node_user_ids.iter().enumerate() {
-            node_id_cache.insert(uid.clone(), i as u32);
-        }
-        let mut edge_id_cache = HashMap::new();
-        for (i, uid) in edge_user_ids.iter().enumerate() {
-            edge_id_cache.insert(uid.clone(), i as u32);
         }
 
         Ok(DiskGraphStore {
@@ -139,10 +118,8 @@ impl DiskGraphStore {
             edge_src,
             edge_tgt,
             edge_directed,
-            node_id_cache: RefCell::new(node_id_cache),
-            edge_id_cache: RefCell::new(edge_id_cache),
-            node_user_ids,
-            edge_user_ids,
+            node_count,
+            edge_count,
         })
     }
 
@@ -194,7 +171,7 @@ impl DiskGraphStore {
         let labels: Vec<String> = label_str_ids.iter()
             .map(|&sid| self.strings.resolve(sid).unwrap().to_string())
             .collect();
-        LabelType::from_list(&labels)
+        if labels.is_empty() { LabelType::Star } else { LabelType::from_list(&labels) }
     }
 
     fn decode_props(&self, encoded: &[(u32, PropValue)]) -> Props {
@@ -244,130 +221,108 @@ impl DiskGraphStore {
 }
 
 impl GraphAccess for DiskGraphStore {
-    fn nodes(&self) -> Vec<String> {
-        self.node_user_ids.clone()
+    fn nodes(&self) -> Vec<Id> {
+        (0..self.node_count).collect()
     }
 
-    fn edges_directed(&self) -> Vec<String> {
-        self.edge_user_ids.iter().enumerate()
-            .filter(|(i, _)| self.edge_directed[*i])
-            .map(|(_, id)| id.clone())
+    fn edges_directed(&self) -> Vec<Id> {
+        (0..self.edge_count)
+            .filter(|&i| self.edge_directed[i as usize])
             .collect()
     }
 
-    fn edges_undirected(&self) -> Vec<String> {
-        self.edge_user_ids.iter().enumerate()
-            .filter(|(i, _)| !self.edge_directed[*i])
-            .map(|(_, id)| id.clone())
+    fn edges_undirected(&self) -> Vec<Id> {
+        (0..self.edge_count)
+            .filter(|&i| !self.edge_directed[i as usize])
             .collect()
     }
 
-    fn labels(&self, id: &str) -> &LabelType {
-        if let Some(&iid) = self.node_id_cache.borrow().get(id) {
-            let decoded = self.read_node_record(iid);
-            Box::leak(Box::new(self.decode_labels(&decoded.label_str_ids)))
-        } else if let Some(&iid) = self.edge_id_cache.borrow().get(id) {
-            let decoded = self.read_edge_record(iid);
-            Box::leak(Box::new(self.decode_labels(&decoded.node.label_str_ids)))
+    fn node_labels(&self, id: Id) -> LabelType {
+        let decoded = self.read_node_record(id);
+        self.decode_labels(&decoded.label_str_ids)
+    }
+
+    fn edge_labels(&self, id: Id) -> LabelType {
+        let decoded = self.read_edge_record(id);
+        self.decode_labels(&decoded.node.label_str_ids)
+    }
+
+    fn node_props(&self, id: Id) -> Props {
+        let decoded = self.read_node_record(id);
+        self.decode_props(&decoded.props)
+    }
+
+    fn edge_props(&self, id: Id) -> Props {
+        let decoded = self.read_edge_record(id);
+        self.decode_props(&decoded.node.props)
+    }
+
+    fn src(&self, edge_id: Id) -> Id {
+        self.edge_src[edge_id as usize]
+    }
+
+    fn tgt(&self, edge_id: Id) -> Id {
+        self.edge_tgt[edge_id as usize]
+    }
+
+    fn is_directed(&self, edge_id: Id) -> bool {
+        self.edge_directed[edge_id as usize]
+    }
+
+    fn edge_path_value(&self, edge_id: Id) -> PathValue {
+        if self.edge_directed[edge_id as usize] {
+            PathValue::EdgeDirectional(edge_id)
         } else {
-            panic!("unknown element: {id}")
+            PathValue::EdgeUndirectional(edge_id)
         }
     }
 
-    fn props(&self, id: &str) -> &Props {
-        if let Some(&iid) = self.node_id_cache.borrow().get(id) {
-            let decoded = self.read_node_record(iid);
-            Box::leak(Box::new(self.decode_props(&decoded.props)))
-        } else if let Some(&iid) = self.edge_id_cache.borrow().get(id) {
-            let decoded = self.read_edge_record(iid);
-            Box::leak(Box::new(self.decode_props(&decoded.node.props)))
-        } else {
-            panic!("unknown element: {id}")
-        }
+    fn node_name(&self, id: Id) -> &str {
+        let decoded = self.read_node_record(id);
+        let s = self.strings.resolve(decoded.user_id_str_id).unwrap();
+        Box::leak(Box::new(s.to_string()))
     }
 
-    fn src(&self, edge_id: &str) -> &str {
-        let iid = self.edge_id_cache.borrow()[edge_id] as usize;
-        &self.node_user_ids[self.edge_src[iid] as usize]
+    fn edge_name(&self, id: Id) -> &str {
+        let decoded = self.read_edge_record(id);
+        let s = self.strings.resolve(decoded.node.user_id_str_id).unwrap();
+        Box::leak(Box::new(s.to_string()))
     }
 
-    fn tgt(&self, edge_id: &str) -> &str {
-        let iid = self.edge_id_cache.borrow()[edge_id] as usize;
-        &self.node_user_ids[self.edge_tgt[iid] as usize]
-    }
-
-    fn endpoints(&self, edge_id: &str) -> (&str, &str) {
-        (self.src(edge_id), self.tgt(edge_id))
-    }
-
-    fn is_directed(&self, edge_id: &str) -> bool {
-        let iid = self.edge_id_cache.borrow()[edge_id] as usize;
-        self.edge_directed[iid]
-    }
-
-    fn edge_path_value(&self, edge_id: &str) -> PathValue {
-        if self.is_directed(edge_id) {
-            PathValue::EdgeDirectional(edge_id.to_string())
-        } else {
-            PathValue::EdgeUndirectional(edge_id.to_string())
-        }
-    }
-
-    fn nodes_with_label(&self, label: &str) -> Option<Vec<String>> {
+    fn nodes_with_label(&self, label: &str) -> Option<Vec<Id>> {
         self.ensure_node_label_dir();
         let dir = self.node_label_dir.borrow();
-        let ids = self.label_index_lookup(label, dir.as_ref().unwrap())?;
-        Some(ids.iter().map(|&iid| self.node_user_ids[iid as usize].clone()).collect())
+        self.label_index_lookup(label, dir.as_ref().unwrap())
     }
 
-    fn directed_edges_with_label(&self, label: &str) -> Option<Vec<String>> {
+    fn directed_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
         self.ensure_edge_label_dir();
         let dir = self.edge_label_dir.borrow();
         let ids = self.label_index_lookup(label, dir.as_ref().unwrap())?;
-        Some(ids.iter()
-            .filter(|&&iid| self.edge_directed[iid as usize])
-            .map(|&iid| self.edge_user_ids[iid as usize].clone())
+        Some(ids.into_iter()
+            .filter(|&iid| self.edge_directed[iid as usize])
             .collect())
     }
 
-    fn undirected_edges_with_label(&self, label: &str) -> Option<Vec<String>> {
+    fn undirected_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
         self.ensure_edge_label_dir();
         let dir = self.edge_label_dir.borrow();
         let ids = self.label_index_lookup(label, dir.as_ref().unwrap())?;
-        Some(ids.iter()
-            .filter(|&&iid| !self.edge_directed[iid as usize])
-            .map(|&iid| self.edge_user_ids[iid as usize].clone())
+        Some(ids.into_iter()
+            .filter(|&iid| !self.edge_directed[iid as usize])
             .collect())
     }
 
-    fn outgoing_edges(&self, node_id: &str) -> Vec<String> {
-        if let Some(&niid) = self.node_id_cache.borrow().get(node_id) {
-            self.get_adj_entries(niid, ADJ_OUTGOING).iter()
-                .map(|&eiid| self.edge_user_ids[eiid as usize].clone())
-                .collect()
-        } else {
-            vec![]
-        }
+    fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {
+        self.get_adj_entries(node_id, ADJ_OUTGOING)
     }
 
-    fn incoming_edges(&self, node_id: &str) -> Vec<String> {
-        if let Some(&niid) = self.node_id_cache.borrow().get(node_id) {
-            self.get_adj_entries(niid, ADJ_INCOMING).iter()
-                .map(|&eiid| self.edge_user_ids[eiid as usize].clone())
-                .collect()
-        } else {
-            vec![]
-        }
+    fn incoming_edges(&self, node_id: Id) -> Vec<Id> {
+        self.get_adj_entries(node_id, ADJ_INCOMING)
     }
 
-    fn undirected_edges_of(&self, node_id: &str) -> Vec<String> {
-        if let Some(&niid) = self.node_id_cache.borrow().get(node_id) {
-            self.get_adj_entries(niid, ADJ_UNDIRECTED).iter()
-                .map(|&eiid| self.edge_user_ids[eiid as usize].clone())
-                .collect()
-        } else {
-            vec![]
-        }
+    fn undirected_edges_of(&self, node_id: Id) -> Vec<Id> {
+        self.get_adj_entries(node_id, ADJ_UNDIRECTED)
     }
 }
 

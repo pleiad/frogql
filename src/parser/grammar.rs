@@ -13,7 +13,7 @@ use super::lexer::{Lexer, Token};
 pub fn parse(input: &str) -> Result<PathPattern, String> {
     let tokens = Lexer::tokenize(input)?;
     let mut p = Parser { tokens, pos: 0 };
-    let result = p.path_pattern()?;
+    let result = p.query()?;
     if !p.at_eof() {
         return Err(format!("unexpected token {:?} at position {}", p.peek(), p.pos));
     }
@@ -60,6 +60,18 @@ impl Parser {
         } else {
             false
         }
+    }
+
+    // ===== Queries =====
+
+    // query = path_pattern ("," path_pattern)*
+    fn query(&mut self) -> Result<PathPattern, String> {
+        let mut left = self.path_pattern()?;
+        while self.eat(&Token::Comma) {
+            let right = self.path_pattern()?;
+            left = PathPattern::Join(Box::new(left), Box::new(right));
+        }
+        Ok(left)
     }
 
     // ===== Path patterns =====
