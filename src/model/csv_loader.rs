@@ -30,7 +30,8 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
     for file_config in files {
         let columns = file_config["columns"].as_object()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing 'columns'"))?;
-        let is_edge = columns.contains_key("SRC_ID") && columns.contains_key("DST_ID");
+        let is_edge = columns.keys().any(|k| k.eq_ignore_ascii_case("SRC_ID"))
+            && columns.keys().any(|k| k.eq_ignore_ascii_case("DST_ID"));
         if is_edge {
             edge_files.push(file_config);
         } else {
@@ -49,14 +50,15 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
         let label = infer_node_label(csv_name);
         let csv_path = dir.join(csv_name);
         let columns = file_config["columns"].as_object().unwrap();
+        let id_col = find_id_column(columns, &label);
         let prop_cols: Vec<(&str, &str)> = columns.iter()
-            .filter(|(k, _)| k.as_str() != "vid")
+            .filter(|(k, _)| k.as_str() != id_col)
             .map(|(k, v)| (k.as_str(), v.as_str().unwrap_or("STRING")))
             .collect();
 
         let rows = read_csv(&csv_path)?;
         for row in &rows {
-            let vid = row.get("vid").cloned().unwrap_or_default();
+            let vid = get_ci(row, &id_col).unwrap_or_default();
             if vid.is_empty() { continue; }
 
             if let Some(&existing_id) = node_name_to_id.get(&vid) {
@@ -87,22 +89,34 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
     let mut edge_tgt = Vec::new();
     let mut edge_directed = Vec::new();
 
+    // Collect node type names (labels) for stripping from edge filenames
+    let node_type_names: Vec<String> = node_files.iter()
+        .map(|fc| infer_node_label(fc["path"].as_str().unwrap()))
+        .collect();
+
     for file_config in &edge_files {
         let csv_name = file_config["path"].as_str().unwrap();
-        let label = infer_edge_label(csv_name);
+        // Use the config's label field if available (strip node types from it),
+        // otherwise infer from filename
+        let raw_label = file_config["label"].as_str()
+            .unwrap_or(Path::new(csv_name).file_stem().unwrap().to_str().unwrap());
+        let label = strip_node_types(raw_label, &node_type_names);
         let csv_path = dir.join(csv_name);
         let columns = file_config["columns"].as_object().unwrap();
         let prop_cols: Vec<(&str, &str)> = columns.iter()
-            .filter(|(k, _)| !matches!(k.as_str(), "SRC_ID" | "DST_ID" | "vid"))
+            .filter(|(k, _)| {
+                let kl = k.to_lowercase();
+                kl != "src_id" && kl != "dst_id" && kl != "vid"
+            })
             .map(|(k, v)| (k.as_str(), v.as_str().unwrap_or("STRING")))
             .collect();
 
         let rows = read_csv(&csv_path)?;
         for row in &rows {
-            let src_name = row.get("SRC_ID").cloned().unwrap_or_default();
-            let dst_name = row.get("DST_ID").cloned().unwrap_or_default();
-            let eid_name = row.get("vid").cloned()
-                .unwrap_or_else(|| format!("e_{}_{}", src_name, dst_name));
+            let src_name = get_ci(row, "SRC_ID").unwrap_or_default();
+            let dst_name = get_ci(row, "DST_ID").unwrap_or_default();
+            let eid_name = get_ci(row, "vid")
+                .unwrap_or_else(|| format!("e{}", edge_names.len()));
 
             let src_id = match node_name_to_id.get(&src_name) {
                 Some(&id) => id,
@@ -130,38 +144,70 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
     ))
 }
 
+/// Case-insensitive HashMap lookup.
+fn get_ci(row: &HashMap<String, String>, key: &str) -> Option<String> {
+    for (k, v) in row {
+        if k.eq_ignore_ascii_case(key) {
+            return Some(v.clone());
+        }
+    }
+    None
+}
+
+/// Find the ID column in a node file. Tries: "vid", "<label>_id" (case-insensitive), first "_id" column, first column.
+fn find_id_column(columns: &serde_json::Map<String, serde_json::Value>, label: &str) -> String {
+    if columns.contains_key("vid") { return "vid".to_string(); }
+    // Try "<label>_id" case-insensitive
+    let label_lower = label.to_lowercase();
+    for k in columns.keys() {
+        if k.to_lowercase() == format!("{}_id", label_lower) {
+            return k.clone();
+        }
+    }
+    // Try any column ending in "_id" (not SRC/DST)
+    for k in columns.keys() {
+        if k.ends_with("_id") && k != "SRC_ID" && k != "DST_ID" {
+            return k.clone();
+        }
+    }
+    // Fallback: first column
+    columns.keys().next().cloned().unwrap_or_else(|| "vid".to_string())
+}
+
 fn infer_node_label(filename: &str) -> String {
     Path::new(filename).file_stem().unwrap().to_string_lossy().to_string()
 }
 
-fn infer_edge_label(filename: &str) -> String {
-    let name = Path::new(filename).file_stem().unwrap().to_string_lossy();
-    // Pattern: PersonACTED_INMovie → ACTED_IN
-    // Find the uppercase+underscore segment between two CamelCase words
-    let chars: Vec<char> = name.chars().collect();
-    let mut start = 0;
-    // Skip first CamelCase word (starts uppercase, then lowercase)
-    for i in 1..chars.len() {
-        if chars[i].is_uppercase() || chars[i] == '_' {
-            start = i;
+/// Strip known node type names from a label string.
+/// E.g., "PersonACTED_INMovie" with types [Person, Movie] → "ACTED_IN"
+/// E.g., "TRANSACTIONINITIATED_BYACCOUNT" with types [TRANSACTION, ACCOUNT] → "INITIATED_BY"
+fn strip_node_types(raw: &str, node_types: &[String]) -> String {
+    let mut name = raw.to_string();
+    // Strip ONE node type from start and ONE from end (longest match first).
+    let mut sorted_types: Vec<&String> = node_types.iter().collect();
+    sorted_types.sort_by(|a, b| b.len().cmp(&a.len()));
+    // Strip prefix (one pass only)
+    for t in &sorted_types {
+        if name.starts_with(t.as_str()) {
+            name = name[t.len()..].trim_start_matches('_').to_string();
             break;
         }
     }
-    // Find where the trailing CamelCase word starts
-    let mut end = chars.len();
-    for i in (start + 1..chars.len()).rev() {
-        if chars[i].is_lowercase() && i > 0 && chars[i - 1].is_uppercase() {
-            end = i - 1;
+    // Strip suffix (one pass only)
+    for t in &sorted_types {
+        if name.ends_with(t.as_str()) {
+            name = name[..name.len() - t.len()].trim_end_matches('_').to_string();
             break;
         }
     }
-    name[start..end].to_string()
+    if name.is_empty() { raw.to_string() } else { name }
 }
 
 fn extract_props(row: &HashMap<String, String>, prop_cols: &[(&str, &str)]) -> Props {
     let mut props = HashMap::new();
     for &(col_name, col_type) in prop_cols {
-        if let Some(val) = row.get(col_name) {
+        if let Some(val) = get_ci(row, col_name) {
+            let val = &val;
             if val.is_empty() { continue; }
             let converted = match col_type {
                 "INT64" => val.parse::<i64>().ok().map(Value::Int),
