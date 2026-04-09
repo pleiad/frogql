@@ -22,12 +22,13 @@ impl fmt::Display for Value {
 pub type Id = u32;
 
 /// A runtime value that can appear in a path or assignment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathValue {
     Node(Id),
     EdgeDirectional(Id),
     EdgeUndirectional(Id),
     Nothing,
+    List(Vec<PathValue>),
 }
 
 impl PathValue {
@@ -37,7 +38,7 @@ impl PathValue {
             PathValue::Node(id)
             | PathValue::EdgeDirectional(id)
             | PathValue::EdgeUndirectional(id) => Some(*id),
-            PathValue::Nothing => None,
+            PathValue::Nothing | PathValue::List(_) => None,
         }
     }
 
@@ -60,6 +61,10 @@ impl fmt::Display for PathValue {
             PathValue::EdgeDirectional(id) => write!(f, "e{id}"),
             PathValue::EdgeUndirectional(id) => write!(f, "u{id}"),
             PathValue::Nothing => write!(f, "Nothing"),
+            PathValue::List(l) => {
+                let items: Vec<String> = l.iter().map(|x| x.to_string()).collect();
+                write!(f, "[{}]", items.join(", "))
+            }
         }
     }
 }

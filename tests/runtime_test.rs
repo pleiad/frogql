@@ -612,6 +612,74 @@ fn test_query_no_return() {
     }
 }
 
+// ==================== Repetition grouping tests ====================
+
+#[test]
+fn test_repetition_groups_as_list() {
+    // -[x]->{1,2} should bind x to a List of edges
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let p = gqlrust::compile("-[x]->{1,2}").unwrap();
+    let result = r.run(&p);
+    assert!(!result.rows.is_empty());
+    for row in &result.rows {
+        let x = row.assignment.get("x").expect("x should be bound");
+        assert!(matches!(x, gqlrust::model::value::PathValue::List(_)),
+            "x should be a List, got {:?}", x);
+    }
+}
+
+#[test]
+fn test_repetition_list_length() {
+    // -[x]->{2,2} should bind x to a List of exactly 2 edges
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let p = gqlrust::compile("-[x]->{2,2}").unwrap();
+    let result = r.run(&p);
+    assert!(!result.rows.is_empty());
+    for row in &result.rows {
+        match row.assignment.get("x").unwrap() {
+            gqlrust::model::value::PathValue::List(l) => assert_eq!(l.len(), 2),
+            other => panic!("expected List of len 2, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn test_repetition_nested_list() {
+    // (-[x]->{1,2}){1,2} should bind x to a List of Lists
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let p = gqlrust::compile("(-[x]->{1,2}){1,2}").unwrap();
+    let result = r.run(&p);
+    assert!(!result.rows.is_empty());
+    for row in &result.rows {
+        match row.assignment.get("x").unwrap() {
+            gqlrust::model::value::PathValue::List(outer) => {
+                for item in outer {
+                    assert!(matches!(item, gqlrust::model::value::PathValue::List(_)),
+                        "inner items should be Lists, got {:?}", item);
+                }
+            }
+            other => panic!("expected List of Lists, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn test_repetition_zero_gives_empty_list() {
+    // -[x]->{0,1} with 0 repetitions should give x = []
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let p = gqlrust::compile("-[x]->{0,1}").unwrap();
+    let result = r.run(&p);
+    // Some rows should have x = [] (the 0-repetition case)
+    let empty_list_rows: Vec<_> = result.rows.iter()
+        .filter(|row| matches!(row.assignment.get("x"), Some(gqlrust::model::value::PathValue::List(l)) if l.is_empty()))
+        .collect();
+    assert!(!empty_list_rows.is_empty(), "should have rows with x = []");
+}
+
 /// Test join on the full "all edges" pattern.
 /// (x) -[]-> (y), (x) -[]-> (z) — star with any label.
 /// a1 has 2 outgoing edges (t4→p1, t5→d1), so it produces 2×2=4 combos.

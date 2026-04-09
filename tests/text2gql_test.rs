@@ -40,6 +40,49 @@ fn row_count(g: &Graph, q: &str) -> usize {
     run_query(g, q).row_count()
 }
 
+// ==================== CSV loader tests ====================
+
+#[test]
+fn test_csv_loader_node_types() {
+    let g = movies_graph();
+    let rt = Runtime::new(&g);
+    // Verify votes is Int, not String
+    let q = gqlrust::compile_query("MATCH (m: Movie) WHERE m.votes > 0 RETURN m.votes").unwrap();
+    let result = rt.run_query(&q, 1);
+    match result {
+        QueryResult::Projected(rows) => {
+            assert!(!rows.is_empty());
+            assert!(matches!(rows[0][0], Value::Int(_)), "votes should be Int, got {:?}", rows[0][0]);
+        }
+        _ => panic!("expected Projected"),
+    }
+}
+
+#[test]
+fn test_csv_loader_string_props() {
+    let g = movies_graph();
+    let rt = Runtime::new(&g);
+    let q = gqlrust::compile_query("MATCH (p: Person) WHERE p.name = 'Keanu Reeves' RETURN p.born").unwrap();
+    let result = rt.run_query(&q, 0);
+    match result {
+        QueryResult::Projected(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0], Value::Int(1964));
+        }
+        _ => panic!("expected Projected"),
+    }
+}
+
+#[test]
+fn test_csv_loader_edge_labels() {
+    let g = movies_graph();
+    // Verify edge labels are correctly parsed from filenames
+    use gqlrust::model::graph_access::GraphAccess;
+    let acted_in = g.directed_edges_with_label("ACTED_IN");
+    assert!(acted_in.is_some());
+    assert_eq!(acted_in.unwrap().len(), 172);
+}
+
 // ==================== Graph structure tests ====================
 
 #[test]

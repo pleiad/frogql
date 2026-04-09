@@ -142,7 +142,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             .map(|&id| {
                 let pv = PathValue::Node(id);
                 ResultRow::new(
-                    Path(vec![pv]),
+                    Path(vec![pv.clone()]),
                     Assignment::from_optional(var, pv),
                 )
             })
@@ -192,7 +192,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                             )
                         };
                         ResultRow::new(
-                            Path(vec![first, edge_pv, last]),
+                            Path(vec![first, edge_pv.clone(), last]),
                             Assignment::from_optional(var, edge_pv),
                         )
                     })
@@ -209,11 +209,11 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     let ep0 = self.graph.src(eid);
                     let ep1 = self.graph.tgt(eid);
                     rows.push(ResultRow::new(
-                        Path(vec![PathValue::Node(ep0), edge_pv, PathValue::Node(ep1)]),
-                        Assignment::from_optional(var, edge_pv),
+                        Path(vec![PathValue::Node(ep0), edge_pv.clone(), PathValue::Node(ep1)]),
+                        Assignment::from_optional(var, edge_pv.clone()),
                     ));
                     rows.push(ResultRow::new(
-                        Path(vec![PathValue::Node(ep1), edge_pv, PathValue::Node(ep0)]),
+                        Path(vec![PathValue::Node(ep1), edge_pv.clone(), PathValue::Node(ep0)]),
                         Assignment::from_optional(var, edge_pv),
                     ));
                 }
@@ -366,7 +366,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 } else {
                     self.graph.src(eid)
                 };
-                let edge_mu = Assignment::from_optional(var, edge_pv);
+                let edge_mu = Assignment::from_optional(var, edge_pv.clone());
                 if !r1.assignment.can_unify(&edge_mu) {
                     continue;
                 }
@@ -402,7 +402,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 let ep1 = self.graph.tgt(eid);
                 let other_node = if ep0 == last_node { ep1 } else { ep0 };
 
-                let edge_mu = Assignment::from_optional(var, edge_pv);
+                let edge_mu = Assignment::from_optional(var, edge_pv.clone());
                 if !r1.assignment.can_unify(&edge_mu) {
                     continue;
                 }
