@@ -559,6 +559,59 @@ fn test_join_star_pattern() {
     assert_eq!(r.run(&p).rows.len(), 4);
 }
 
+// ==================== MATCH/WHERE/RETURN runtime tests ====================
+
+#[test]
+fn test_query_match_where_return() {
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let q = gqlrust::compile_query(
+        "MATCH (x: Account) -[:Transfer]-> (y) WHERE x.owner = 'Jay' RETURN y.owner"
+    ).unwrap();
+    let result = r.run_query(&q, 0);
+    // Jay (p1) has one Transfer out: t1 → p2 (Mike)
+    assert_eq!(result.row_count(), 1);
+    match result {
+        gqlrust::runtime::result::QueryResult::Projected(rows) => {
+            assert_eq!(rows[0][0], Value::Str("Mike".into()));
+        }
+        _ => panic!("expected Projected"),
+    }
+}
+
+#[test]
+fn test_query_return_distinct() {
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    // All outgoing Transfer targets — some nodes might appear multiple times
+    let q = gqlrust::compile_query(
+        "MATCH (x) -[:Transfer]-> (y) RETURN DISTINCT y.owner"
+    ).unwrap();
+    let result = r.run_query(&q, 0);
+    match result {
+        gqlrust::runtime::result::QueryResult::Projected(rows) => {
+            // Transfers: p1→p2(Mike), p2→a2(Scott), a2→a1(Aretha), a1→p1(Jay)
+            // Distinct owners: Mike, Scott, Aretha, Jay = 4
+            assert_eq!(rows.len(), 4);
+        }
+        _ => panic!("expected Projected"),
+    }
+}
+
+#[test]
+fn test_query_no_return() {
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let q = gqlrust::compile_query("MATCH (x: Account)").unwrap();
+    let result = r.run_query(&q, 0);
+    match result {
+        gqlrust::runtime::result::QueryResult::Raw(ir) => {
+            assert_eq!(ir.rows.len(), 4); // 4 Account nodes
+        }
+        _ => panic!("expected Raw"),
+    }
+}
+
 /// Test join on the full "all edges" pattern.
 /// (x) -[]-> (y), (x) -[]-> (z) — star with any label.
 /// a1 has 2 outgoing edges (t4→p1, t5→d1), so it produces 2×2=4 combos.

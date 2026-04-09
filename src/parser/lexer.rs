@@ -18,6 +18,9 @@ pub enum Token {
     Int,
     Bool,
     Str,
+    Match,
+    Return,
+    Distinct,
 
     // Symbols
     LParen,    // (
@@ -291,9 +294,12 @@ impl Lexer {
                         "where" | "WHERE" => Token::Where,
                         "and" | "AND" => Token::And,
                         "or" | "OR" => Token::Or,
-                        "not" => Token::Not,
-                        "is" => Token::Is,
-                        "as" => Token::As,
+                        "not" | "NOT" => Token::Not,
+                        "is" | "IS" => Token::Is,
+                        "as" | "AS" => Token::As,
+                        "MATCH" | "match" => Token::Match,
+                        "RETURN" | "return" => Token::Return,
+                        "DISTINCT" | "distinct" => Token::Distinct,
                         "int" => Token::Int,
                         "bool" => Token::Bool,
                         "str" => Token::Str,

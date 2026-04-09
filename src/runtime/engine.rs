@@ -6,13 +6,14 @@ use crate::model::value::{Id, Path, PathValue, Value};
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
+use crate::syntax::query::Query;
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
 use crate::typing::property_type::PropertyType;
 use crate::typing::simple_type::SimpleType;
 
 use super::assignment::Assignment;
-use super::result::{ExprResult, IntermediateResult, ResultRow};
+use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
 
 /// Runtime engine for evaluating GQL path patterns on a graph.
 /// Generic over `GraphAccess` — works with both in-memory Graph and file-backed GraphStore.
@@ -36,6 +37,36 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// Run with a result limit (0 = unlimited). Stops early once limit is reached.
     pub fn run_with_limit(&self, pattern: &PathPattern, limit: usize) -> IntermediateResult {
         self.run_path_pattern(pattern, limit)
+    }
+
+    /// Run a full Query (MATCH ... WHERE ... RETURN).
+    /// Returns projected rows as Vec<Vec<Value>> if RETURN is specified,
+    /// or the raw IntermediateResult if no RETURN clause.
+    pub fn run_query(&self, query: &Query, limit: usize) -> QueryResult {
+        let ir = self.run_path_pattern(&query.pattern, limit);
+
+        match &query.returns {
+            None => QueryResult::Raw(ir),
+            Some(return_items) => {
+                let mut projected: Vec<Vec<Value>> = Vec::new();
+                for row in &ir.rows {
+                    let vals: Vec<Value> = return_items.iter().map(|item| {
+                        match self.run_expr(&row.assignment, &item.expr) {
+                            ExprResult::Success(v) => v,
+                            ExprResult::Failure(_) => Value::Str("NULL".into()),
+                        }
+                    }).collect();
+                    if query.distinct {
+                        if !projected.contains(&vals) {
+                            projected.push(vals);
+                        }
+                    } else {
+                        projected.push(vals);
+                    }
+                }
+                QueryResult::Projected(projected)
+            }
+        }
     }
 
     fn limit_reached(&self, rows: &[ResultRow], limit: usize) -> bool {

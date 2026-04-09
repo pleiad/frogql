@@ -66,6 +66,24 @@ impl IntermediateResult {
     }
 }
 
+/// Result of a full Query execution.
+#[derive(Debug)]
+pub enum QueryResult {
+    /// No RETURN clause — raw pattern match results.
+    Raw(IntermediateResult),
+    /// RETURN clause — projected rows of evaluated expressions.
+    Projected(Vec<Vec<Value>>),
+}
+
+impl QueryResult {
+    pub fn row_count(&self) -> usize {
+        match self {
+            QueryResult::Raw(ir) => ir.rows.len(),
+            QueryResult::Projected(rows) => rows.len(),
+        }
+    }
+}
+
 /// Result of expression evaluation.
 #[derive(Debug)]
 pub enum ExprResult {

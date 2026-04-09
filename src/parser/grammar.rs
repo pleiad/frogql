@@ -2,6 +2,7 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
+use crate::syntax::query::{Query, ReturnItem};
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
 use crate::typing::property_type::PropertyType;
@@ -9,11 +10,17 @@ use crate::typing::simple_type::SimpleType;
 
 use super::lexer::{Lexer, Token};
 
-/// Parse a GQL query string into a PathPattern.
+/// Parse a GQL path pattern string into a PathPattern (backwards compatible).
 pub fn parse(input: &str) -> Result<PathPattern, String> {
+    let q = parse_query(input)?;
+    Ok(q.pattern)
+}
+
+/// Parse a full GQL query: optional MATCH, path pattern, optional WHERE, optional RETURN.
+pub fn parse_query(input: &str) -> Result<Query, String> {
     let tokens = Lexer::tokenize(input)?;
     let mut p = Parser { tokens, pos: 0 };
-    let result = p.query()?;
+    let result = p.full_query()?;
     if !p.at_eof() {
         return Err(format!("unexpected token {:?} at position {}", p.peek(), p.pos));
     }
@@ -62,7 +69,103 @@ impl Parser {
         }
     }
 
-    // ===== Queries =====
+    // ===== Full query (MATCH ... WHERE ... RETURN) =====
+
+    // full_query = ("MATCH")? query ("WHERE" expr)? ("RETURN" ("DISTINCT")? return_list)?
+    fn full_query(&mut self) -> Result<Query, String> {
+        // Optional MATCH keyword
+        self.eat(&Token::Match);
+
+        // Parse the pattern (path_pattern with comma-joins)
+        let mut pattern = self.query()?;
+
+        // Optional WHERE clause (wraps pattern in Filter)
+        if self.eat(&Token::Where) {
+            let expr = self.expr()?;
+            pattern = PathPattern::Filter(Box::new(pattern), expr);
+        }
+
+        // Optional RETURN clause
+        if self.eat(&Token::Return) {
+            let distinct = self.eat(&Token::Distinct);
+            let returns = self.return_list()?;
+            Ok(Query { pattern, returns: Some(returns), distinct })
+        } else {
+            Ok(Query::pattern_only(pattern))
+        }
+    }
+
+    // return_list = return_item ("," return_item)*
+    fn return_list(&mut self) -> Result<Vec<ReturnItem>, String> {
+        let mut items = vec![self.return_item()?];
+        while self.eat(&Token::Comma) {
+            items.push(self.return_item()?);
+        }
+        Ok(items)
+    }
+
+    // return_item = expr ("AS" NAME)?
+    // Tricky: AS is also a type-cast operator in expressions (x.val as int).
+    // We disambiguate: if AS is followed by a Name (not a type keyword), it's an alias.
+    fn return_item(&mut self) -> Result<ReturnItem, String> {
+        let expr = self.return_expr()?;
+        // Check for "AS <name>" alias
+        if self.check(&Token::As) {
+            let saved = self.pos;
+            self.advance(); // consume AS
+            if let Token::Name(n) = self.peek().clone() {
+                self.advance();
+                return Ok(ReturnItem { expr, alias: Some(n) });
+            }
+            // Not a name after AS — backtrack, it wasn't an alias
+            self.pos = saved;
+        }
+        Ok(ReturnItem { expr, alias: None })
+    }
+
+    // Like expr but excludes AS from comparison operators (reserved for alias).
+    fn return_expr(&mut self) -> Result<Expr, String> {
+        self.return_logical_op()
+    }
+
+    fn return_logical_op(&mut self) -> Result<Expr, String> {
+        let mut left = self.return_comparison()?;
+        loop {
+            let op = match self.peek() {
+                Token::And => BinOp::And,
+                Token::Or => BinOp::Or,
+                _ => break,
+            };
+            self.advance();
+            let right = self.return_comparison()?;
+            left = Expr::Binop { op, left: Box::new(left), right: Box::new(right) };
+        }
+        Ok(left)
+    }
+
+    // Like comparison() but without AS (so it's available for alias).
+    fn return_comparison(&mut self) -> Result<Expr, String> {
+        let mut left = self.term()?;
+        loop {
+            let op = match self.peek() {
+                Token::Lt => BinOp::Lt,
+                Token::Gt => BinOp::Gt,
+                Token::Le => BinOp::Le,
+                Token::Ge => BinOp::Ge,
+                Token::Eq => BinOp::Eq,
+                Token::Ne => BinOp::Ne,
+                Token::Is => BinOp::Is,
+                // No Token::As here — reserved for alias
+                _ => break,
+            };
+            self.advance();
+            let right = self.term()?;
+            left = Expr::Binop { op, left: Box::new(left), right: Box::new(right) };
+        }
+        Ok(left)
+    }
+
+    // ===== Queries (comma-join level) =====
 
     // query = path_pattern ("," path_pattern)*
     fn query(&mut self) -> Result<PathPattern, String> {

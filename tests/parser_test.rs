@@ -566,3 +566,49 @@ fn test_join_shared_var() {
     let fv = result.freevars();
     assert!(fv.contains("x"));
 }
+
+// ==================== MATCH/WHERE/RETURN tests ====================
+
+#[test]
+fn test_match_simple() {
+    let q = gqlrust::compile_query("MATCH (x)").unwrap();
+    assert!(matches!(q.pattern, PathPattern::Node(_)));
+    assert!(q.returns.is_none());
+}
+
+#[test]
+fn test_match_where_return() {
+    let q = gqlrust::compile_query(
+        "MATCH (x) -[:Transfer]-> (y) WHERE x.amount > 100 RETURN x.name, y.name"
+    ).unwrap();
+    assert!(matches!(q.pattern, PathPattern::Filter(_, _)));
+    assert_eq!(q.returns.as_ref().unwrap().len(), 2);
+    assert!(!q.distinct);
+}
+
+#[test]
+fn test_match_return_distinct() {
+    let q = gqlrust::compile_query(
+        "MATCH (x) -[]-> (y) RETURN DISTINCT x.name"
+    ).unwrap();
+    assert!(q.distinct);
+    assert_eq!(q.returns.as_ref().unwrap().len(), 1);
+}
+
+#[test]
+fn test_match_return_alias() {
+    let q = gqlrust::compile_query(
+        "MATCH (m: Movie) RETURN m.title AS title, m.votes AS votes"
+    ).unwrap();
+    let returns = q.returns.as_ref().unwrap();
+    assert_eq!(returns.len(), 2);
+    assert_eq!(returns[0].alias.as_deref(), Some("title"));
+    assert_eq!(returns[1].alias.as_deref(), Some("votes"));
+}
+
+#[test]
+fn test_no_match_keyword_still_works() {
+    let q = gqlrust::compile_query("(x) -[]-> (y)").unwrap();
+    assert!(matches!(q.pattern, PathPattern::Concat(_, _)));
+    assert!(q.returns.is_none());
+}
