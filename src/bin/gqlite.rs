@@ -14,8 +14,9 @@ use rustyline::DefaultEditor;
 use gqlrust::model::csv_loader;
 use gqlrust::model::graph::Graph;
 use gqlrust::model::graph_access::GraphAccess;
+use gqlrust::model::value::PathValue;
 use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
+use gqlrust::runtime::result::{IntermediateResult, QueryResult};
 use gqlrust::store::lazy::LazyGraphStore;
 
 fn main() {
@@ -96,12 +97,7 @@ fn main() {
                 eprintln!("{} rows ({:.3}s)", rows.len(), elapsed.as_secs_f64());
             }
             QueryResult::Raw(ir) => {
-                for row in ir.rows.iter().take(20) {
-                    println!("{}", row);
-                }
-                if ir.rows.len() > 20 {
-                    println!("... ({} more rows)", ir.rows.len() - 20);
-                }
+                print_raw_table(&store, &ir, 20);
                 eprintln!("{} rows ({:.3}s)", ir.rows.len(), elapsed.as_secs_f64());
             }
         }
@@ -142,28 +138,286 @@ fn import(db_path: &Path, mode: &str, source: &str) {
     eprintln!("Saved ({:.1} MB)", size as f64 / 1_048_576.0);
 }
 
-fn print_schema(store: &LazyGraphStore) {
-    let mut label_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for nid in 0..store.node_count() {
-        let lt = store.node_labels(nid);
-        for l in Graph::label_strings(&lt) {
-            *label_counts.entry(l).or_default() += 1;
-        }
-    }
-    println!("Node labels:");
-    for (label, count) in &label_counts {
-        println!("  :{label} ({count} nodes)");
+/// Print raw results as a table with columns [path, var1, var2, ...].
+/// Resolves internal IDs to user-facing names.
+fn print_raw_table(store: &LazyGraphStore, ir: &IntermediateResult, max_rows: usize) {
+    if ir.rows.is_empty() {
+        return;
     }
 
-    let mut edge_label_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for eid in 0..store.edge_count() {
-        let lt = store.edge_labels(eid);
-        for l in Graph::label_strings(&lt) {
-            *edge_label_counts.entry(l).or_default() += 1;
+    // Collect variable names (sorted, consistent across rows)
+    let mut var_names: Vec<String> = {
+        let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for row in &ir.rows {
+            for k in row.assignment.m.keys() {
+                names.insert(k.clone());
+            }
+        }
+        names.into_iter().collect()
+    };
+
+    // Build headers
+    let mut headers = vec!["path".to_string()];
+    headers.extend(var_names.iter().cloned());
+
+    // Build cell values for each row
+    let display_rows: Vec<Vec<String>> = ir.rows.iter().take(max_rows).map(|row| {
+        let mut cells = Vec::new();
+
+        // Path column: raw IDs (n0 e200 n1332)
+        let path_str = format!("{}", row.path);
+        cells.push(path_str);
+
+        // Variable columns: labels + properties
+        for var in &var_names {
+            let val = row.assignment.m.get(var)
+                .map(|pv| format_pathvalue_rich(store, pv))
+                .unwrap_or_else(|| "-".to_string());
+            cells.push(val);
+        }
+
+        cells
+    }).collect();
+
+    // Compute column widths
+    let num_cols = headers.len();
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    for row in &display_rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < num_cols {
+                widths[i] = widths[i].max(cell.len());
+            }
         }
     }
-    println!("Edge labels:");
-    for (label, count) in &edge_label_counts {
-        println!("  :{label} ({count} edges)");
+
+    // Print header
+    let header_line: Vec<String> = headers.iter().enumerate()
+        .map(|(i, h)| format!("{:width$}", h, width = widths[i]))
+        .collect();
+    println!("{}", header_line.join(" | "));
+
+    // Print separator
+    let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+    println!("{}", sep.join("-+-"));
+
+    // Print rows
+    for row in &display_rows {
+        let line: Vec<String> = row.iter().enumerate()
+            .map(|(i, cell)| format!("{:width$}", cell, width = widths.get(i).copied().unwrap_or(0)))
+            .collect();
+        println!("{}", line.join(" | "));
     }
+
+    if ir.rows.len() > max_rows {
+        println!("... ({} more rows)", ir.rows.len() - max_rows);
+    }
+}
+
+/// Format a PathValue with labels and properties (for variable columns).
+fn format_pathvalue_rich(store: &LazyGraphStore, pv: &PathValue) -> String {
+    match pv {
+        PathValue::Node(id) => {
+            let labels = store.node_labels(*id);
+            let label_strs = labels.required_labels();
+            let props = store.node_props(*id);
+            let label_part = if label_strs.is_empty() {
+                format!("n{id}")
+            } else {
+                label_strs.join("&")
+            };
+            if props.is_empty() {
+                label_part
+            } else {
+                let prop_parts: Vec<String> = props.iter()
+                    .map(|(k, v)| format!("{k}: {v}"))
+                    .collect();
+                format!("{label_part} {{{}}}", prop_parts.join(", "))
+            }
+        }
+        PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => {
+            let labels = store.edge_labels(*id);
+            let label_strs = labels.required_labels();
+            let props = store.edge_props(*id);
+            let label_part = if label_strs.is_empty() {
+                format!("e{id}")
+            } else {
+                label_strs.join("&")
+            };
+            if props.is_empty() {
+                label_part
+            } else {
+                let prop_parts: Vec<String> = props.iter()
+                    .map(|(k, v)| format!("{k}: {v}"))
+                    .collect();
+                format!("{label_part} {{{}}}", prop_parts.join(", "))
+            }
+        }
+        PathValue::Nothing => "-".to_string(),
+        PathValue::List(items) => {
+            let parts: Vec<String> = items.iter().map(|v| format_pathvalue_rich(store, v)).collect();
+            format!("[{}]", parts.join(", "))
+        }
+    }
+}
+
+/// A node type: label combination + property name→type map.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct NodeType {
+    labels: Vec<String>,               // sorted
+    props: std::collections::BTreeMap<String, &'static str>, // prop_name → "str"|"int"|"bool"
+}
+
+/// An edge type: label + props + src/tgt node types + directed?
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct EdgeType {
+    labels: Vec<String>,
+    props: std::collections::BTreeMap<String, &'static str>,
+    src: NodeType,
+    tgt: NodeType,
+    directed: bool,
+}
+
+impl NodeType {
+    fn from_graph_element(store: &LazyGraphStore, id: u32, is_node: bool) -> Self {
+        let lt = if is_node { store.node_labels(id) } else { store.edge_labels(id) };
+        let mut labels = Graph::label_strings(&lt);
+        labels.sort();
+
+        let raw_props = if is_node { store.node_props(id) } else { store.edge_props(id) };
+        let mut props = std::collections::BTreeMap::new();
+        for (k, v) in &raw_props {
+            let t = match v {
+                gqlrust::model::value::Value::Int(_) => "int",
+                gqlrust::model::value::Value::Str(_) => "str",
+                gqlrust::model::value::Value::Bool(_) => "bool",
+            };
+            props.insert(k.clone(), t);
+        }
+
+        NodeType { labels, props }
+    }
+
+    fn format(&self) -> String {
+        let label_part = if self.labels.is_empty() {
+            String::new()
+        } else {
+            format!(":{}", self.labels.join("&"))
+        };
+
+        if self.props.is_empty() {
+            format!("({label_part})")
+        } else {
+            let prop_parts: Vec<String> = self.props.iter()
+                .map(|(k, t)| format!("{k}: {t}"))
+                .collect();
+            format!("({label_part} {{{}}})", prop_parts.join(", "))
+        }
+    }
+}
+
+fn print_schema(store: &LazyGraphStore) {
+    use std::collections::{HashMap, BTreeSet};
+
+    // 1. Infer node types: group by (labels, prop_types)
+    let mut node_type_counts: HashMap<NodeType, usize> = HashMap::new();
+    let mut node_id_to_type: Vec<NodeType> = Vec::with_capacity(store.node_count() as usize);
+
+    for nid in 0..store.node_count() {
+        let nt = NodeType::from_graph_element(store, nid, true);
+        *node_type_counts.entry(nt.clone()).or_default() += 1;
+        node_id_to_type.push(nt);
+    }
+
+    // 2. Infer edge types: group by (labels, props, src_type, tgt_type, directed)
+    let mut edge_type_counts: HashMap<EdgeType, usize> = HashMap::new();
+
+    for eid in 0..store.edge_count() {
+        let src_id = store.src(eid);
+        let tgt_id = store.tgt(eid);
+        let directed = store.is_directed(eid);
+
+        let lt = store.edge_labels(eid);
+        let mut labels = Graph::label_strings(&lt);
+        labels.sort();
+
+        let raw_props = store.edge_props(eid);
+        let mut props = std::collections::BTreeMap::new();
+        for (k, v) in &raw_props {
+            let t = match v {
+                gqlrust::model::value::Value::Int(_) => "int",
+                gqlrust::model::value::Value::Str(_) => "str",
+                gqlrust::model::value::Value::Bool(_) => "bool",
+            };
+            props.insert(k.clone(), t);
+        }
+
+        let et = EdgeType {
+            labels,
+            props,
+            src: node_id_to_type[src_id as usize].clone(),
+            tgt: node_id_to_type[tgt_id as usize].clone(),
+            directed,
+        };
+        *edge_type_counts.entry(et).or_default() += 1;
+    }
+
+    // 3. Collect node types that appear as edge endpoints
+    let mut endpoint_types: BTreeSet<NodeType> = BTreeSet::new();
+    for et in edge_type_counts.keys() {
+        endpoint_types.insert(et.src.clone());
+        endpoint_types.insert(et.tgt.clone());
+    }
+
+    // 4. Print node types NOT already visible as edge endpoints
+    let mut standalone_nodes: Vec<(&NodeType, &usize)> = node_type_counts.iter()
+        .filter(|(nt, _)| !endpoint_types.contains(nt))
+        .collect();
+    standalone_nodes.sort_by_key(|(nt, _)| (*nt).clone());
+
+    if !standalone_nodes.is_empty() {
+        println!("Node types:");
+        for (nt, count) in &standalone_nodes {
+            println!("  {} ({} nodes)", nt.format(), count);
+        }
+    }
+
+    // 5. Print edge types
+    if !edge_type_counts.is_empty() {
+        if !standalone_nodes.is_empty() {
+            println!();
+        }
+        println!("Edge types:");
+        let mut edge_types: Vec<(&EdgeType, &usize)> = edge_type_counts.iter().collect();
+        edge_types.sort_by_key(|(et, _)| (*et).clone());
+
+        for (et, count) in &edge_types {
+            let edge_label = if et.labels.is_empty() {
+                String::new()
+            } else {
+                format!(":{}", et.labels.join("&"))
+            };
+            let edge_props = if et.props.is_empty() {
+                String::new()
+            } else {
+                let parts: Vec<String> = et.props.iter()
+                    .map(|(k, t)| format!("{k}: {t}"))
+                    .collect();
+                format!(" {{{}}}", parts.join(", "))
+            };
+
+            let arrow = if et.directed {
+                format!("-[{edge_label}{edge_props}]->")
+            } else {
+                format!("~[{edge_label}{edge_props}]~")
+            };
+
+            println!("  {} {} {} ({} edges)", et.src.format(), arrow, et.tgt.format(), count);
+        }
+    }
+
+    // 6. Print summary
+    println!();
+    println!("{} node types, {} edge types ({} nodes, {} edges)",
+        node_type_counts.len(), edge_type_counts.len(),
+        store.node_count(), store.edge_count());
 }
