@@ -377,225 +377,293 @@ the `GraphAccess` trait. The backend decides whether that's an array
 lookup, a hash map lookup, or a disk read.
 
 
-## 6. TripleIndex (in-memory, query-time)
+## 6. TripleIndex (in-memory, built at query time)
 
-El `TripleIndex` es una estructura in-memory construida en tiempo de query
-para alimentar el algoritmo Leapfrog Triejoin (LTJ). No se persiste a disco:
-se construye a partir de cualquier backend `GraphAccess`.
+When the query engine encounters a multi-way join or a long chain of
+directed edges, it builds a temporary in-memory structure called the
+TripleIndex to feed the Leapfrog Triejoin (LTJ) algorithm. This index
+is not saved to disk — it's rebuilt each time from whatever backend
+(`Graph`, `LazyGraphStore`, etc.) is in use.
 
-### 6.1 Qué es
+For a full explanation of LTJ and why it matters, see
+`docs/JOIN_STRATEGY_NOTES.md`.
 
-Cada arista dirigida del grafo se modela como un triple `(src, label_id, tgt)`,
-similar a RDF. Los labels se mapean a IDs numéricos con un diccionario local.
-El triple se almacena en 6 copias, cada una ordenada lexicográficamente por
-una permutación distinta de las 3 componentes:
+### 6.1 What it stores
 
-```
-Orderings para el grafo de ejemplo (5 aristas dirigidas):
-
-SPO (src, label, tgt):     SOP (src, tgt, label):
-  (0, Transfer, 2)           (0, 2, Transfer)
-  (0, Foo,      4)           (0, 4, Foo)
-  (1, Transfer, 0)           (1, 0, Transfer)
-  (2, Transfer, 3)           (2, 3, Transfer)
-  (3, Transfer, 1)           (3, 1, Transfer)
-
-POS (label, tgt, src):     PSO (label, src, tgt):
-  (Foo,      4, 0)           (Foo,      0, 4)
-  (Transfer, 0, 1)           (Transfer, 0, 2)
-  (Transfer, 1, 3)           (Transfer, 1, 0)
-  (Transfer, 2, 0)           (Transfer, 2, 3)
-  (Transfer, 3, 2)           (Transfer, 3, 1)
-
-OSP (tgt, src, label):     OPS (tgt, label, src):
-  (0, 1, Transfer)           (0, Transfer, 1)
-  (1, 3, Transfer)           (1, Transfer, 3)
-  (2, 0, Transfer)           (2, Transfer, 0)
-  (3, 2, Transfer)           (3, Transfer, 2)
-  (4, 0, Foo)                (4, Foo,      0)
-```
-
-Cada entrada es `(u32, u32, u32, u32)`: las 3 componentes en el orden
-del ordering + el edge_id original (para reconstruir los resultados).
-
-### 6.2 Por qué 6 orderings
-
-LTJ necesita buscar eficientemente por cualquier prefijo de un triple.
-Si ya sabemos que `src=0` y `label=Transfer`, necesitamos encontrar
-rápidamente todos los `tgt` posibles. El ordering SPO resuelve esto:
-buscamos el rango donde `(0, Transfer, ?)` y leemos los targets.
-
-Pero si sabemos `tgt=3` y queremos buscar `src`, necesitamos un
-ordering que tenga `tgt` antes que `src`: OSP o OPS. Con 6 orderings,
-cualquier combinación de 0, 1 o 2 componentes fijas tiene un ordering
-donde las fijas están al principio y la variable buscada al final.
+Each directed edge becomes a triple `(source, label, target)`. For our
+fraud graph:
 
 ```
-Variables fijadas → Ordering usado → Variable al depth correcto
-────────────────────────────────────────────────────────────────
-(nada fijo, buscar S) → SPO   → S está en depth 0
-(S fijo, buscar P)    → SPO   → P está en depth 1
-(S fijo, buscar O)    → SOP   → O está en depth 1
-(S y P fijos, buscar O) → SPO → O está en depth 2
-(P fijo, buscar S)    → PSO   → S está en depth 1
-(O fijo, buscar S)    → OSP   → S está en depth 1
-...etc.
+Edge t1: p1 ──Transfer──► p2  →  triple (2, Transfer, 3)
+Edge t2: p2 ──Transfer──► a2  →  triple (3, Transfer, 1)
+Edge t3: a2 ──Transfer──► a1  →  triple (1, Transfer, 0)
+Edge t4: a1 ──Transfer──► p1  →  triple (0, Transfer, 2)
+Edge t5: a1 ──Foo──► d1       →  triple (0, Foo, 4)
 ```
 
-### 6.3 Cómo se construye
+(Using internal IDs: a1=0, a2=1, p1=2, p2=3, d1=4)
 
-`TripleIndex::from_graph(graph)` itera `edges_directed()`, extrae los
-labels de cada arista, asigna IDs numéricos a los labels, y construye
-los 6 arrays sorted. Complejidad: O(E log E) por el sort.
+These 5 triples are stored in **6 different sorted copies**. Each copy
+sorts the same data by a different permutation of the three components.
 
-```rust
-// Simplificado:
-for eid in graph.edges_directed() {
-    let src = graph.src(eid);
-    let tgt = graph.tgt(eid);
-    for label in graph.edge_labels(eid).required_labels() {
-        let lid = label_to_id[label];
-        raw_triples.push((src, lid, tgt, eid));
-    }
-}
-// Luego: 6 copias reordenadas y sorted
-```
+### 6.2 Why 6 copies?
 
-### 6.4 Operaciones sobre el índice
+Imagine looking up a phone number. If the phone book is sorted by last
+name, finding "Smith" is fast (binary search). But if you only know the
+phone number and want the name, the book is useless — you need a reverse
+directory.
 
-```
-leap(slice, begin, end, depth, key) → Option<(value, pos)>
-  Binary search en slice[begin..end] para el primer valor ≥ key
-  en la componente `depth`. O(log n).
+Same idea here. The SPO ordering (sorted by source, then label, then
+target) is perfect for the question "who does node 0 send Transfer edges
+to?" — just binary search for the prefix (0, Transfer, ?). But it can't
+answer "who sends edges TO node 3?" efficiently. For that question, we
+need OSP ordering (sorted by target first).
 
-range_for_key(slice, begin, end, depth, key) → (lo, hi)
-  Rango exacto de entries cuya componente `depth` == key.
-  Dos binary searches. O(log n).
-
-all_values(slice, begin, end, depth) → Vec<u32>
-  Todos los valores distintos en la componente `depth`.
-  Scan lineal sobre el rango. O(n).
-```
-
-### 6.5 Relación con los backends de almacenamiento
-
-El TripleIndex funciona con cualquier backend. Lee datos a través del
-trait `GraphAccess`, así que la fuente puede ser JSON en RAM, .gql
-con page cache, o cualquier implementación futura:
+With 6 orderings, **every possible question** can be answered with a
+binary search:
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│ Query: (a)->(b), (b)->(c), (c)->(a)                     │
-│                                                          │
-│ engine.rs detecta Join → intenta LTJ                     │
-│   ↓                                                      │
-│ TripleIndex::from_graph(graph)                           │
-│   ├── graph.edges_directed()  ← funciona con cualquier   │
-│   ├── graph.src(eid)            backend GraphAccess       │
-│   ├── graph.tgt(eid)                                     │
-│   └── graph.edge_labels(eid)                             │
-│   ↓                                                      │
-│ 6 arrays sorted (in-memory, efímeros)                    │
-│   ↓                                                      │
-│ LTJ: iteradores + leapfrog seek                          │
-│   ↓                                                      │
-│ Resultados → IntermediateResult                          │
-└──────────────────────────────────────────────────────────┘
+"Who does node 0 connect to?"       → SPO:  search (0, ?, ?)
+"Who connects TO node 3?"           → OSP:  search (3, ?, ?)
+"Which edges have label Transfer?"  → POS:  search (Transfer, ?, ?)
+"Does node 0 connect to node 4?"    → SOP:  search (0, 4, ?)
+"Who sends Transfer edges to node 0?" → POS: search (Transfer, 0, ?)
+```
+
+Here are two of the six orderings for our fraud graph:
+
+```
+SPO (sorted by source, label, target):
+  (0, Foo,      4)    ← a1 ──Foo──► d1
+  (0, Transfer, 2)    ← a1 ──Transfer──► p1
+  (1, Transfer, 0)    ← a2 ──Transfer──► a1
+  (2, Transfer, 3)    ← p1 ──Transfer──► p2
+  (3, Transfer, 1)    ← p2 ──Transfer──► a2
+
+OSP (sorted by target, source, label):
+  (0, 1, Transfer)    ← a2 ──Transfer──► a1   (target a1 first)
+  (1, 3, Transfer)    ← p2 ──Transfer──► a2   (target a2 first)
+  (2, 0, Transfer)    ← a1 ──Transfer──► p1   (target p1 first)
+  (3, 2, Transfer)    ← p1 ──Transfer──► p2   (target p2 first)
+  (4, 0, Foo)         ← a1 ──Foo──► d1        (target d1 first)
+```
+
+### 6.3 How it's built
+
+The construction is straightforward: read all directed edges from the
+graph (via `GraphAccess`), create one triple per edge per label, then
+sort 6 copies.
+
+```
+Graph (any backend)
+  │
+  │  edges_directed() → [0, 1, 2, 3, 4]
+  │  For each edge: src(), tgt(), edge_labels()
+  │
+  ▼
+Raw triples: [(0,"Transfer",2), (0,"Foo",4), (1,"Transfer",0), ...]
+  │
+  │  Assign numeric label IDs: Transfer=0, Foo=1
+  │
+  ▼
+Numeric triples: [(0,0,2,edge0), (0,1,4,edge4), (1,0,0,edge2), ...]
+  │               src lbl tgt eid
+  │
+  │  Copy 6 times, reorder each copy, sort
+  │
+  ▼
+SPO: sorted by (src, label, tgt)
+SOP: sorted by (src, tgt, label)
+POS: sorted by (label, tgt, src)
+PSO: sorted by (label, src, tgt)
+OSP: sorted by (tgt, src, label)
+OPS: sorted by (tgt, label, src)
+```
+
+Each entry is 4 × u32 = 16 bytes. For 100K edges, each ordering is
+~1.6 MB; all 6 together are ~10 MB. Construction time is dominated by
+sorting: O(E log E).
+
+### 6.4 How queries use it
+
+The LTJ algorithm navigates these orderings using three operations:
+
+**leap(start, end, depth, key)** — binary search for the first value
+≥ key at a given column within a range. This is the workhorse:
+
+```
+SPO ordering:
+  (0, Foo,      4)    index 0
+  (0, Transfer, 2)    index 1
+  (1, Transfer, 0)    index 2
+  (2, Transfer, 3)    index 3
+  (3, Transfer, 1)    index 4
+
+leap(0, 5, depth=0, key=2)
+  → binary search column 0 (src) for value ≥ 2
+  → finds index 3: (2, Transfer, 3)
+  → returns value=2
+```
+
+**range_for_key** — finds the exact range of rows where a column equals
+a given value (two binary searches):
+
+```
+range_for_key(0, 5, depth=0, key=0)
+  → rows where src=0: indices [0, 1]
+  → returns range (0, 2)
+```
+
+**all_values** — lists all distinct values in a column within a range
+(linear scan):
+
+```
+all_values(0, 5, depth=0)
+  → distinct sources: [0, 1, 2, 3]
 ```
 
 
 ## 7. Query-Time Data Flow
 
-### Example 1: `(x: Account) -[:Transfer]-> (y)` (concat, single edge)
+This section traces how different query shapes flow through the system,
+from pattern to results.
 
-Una travesía con label. Para un solo edge, el runtime usa adjacency-driven
-concat (no LTJ, porque un solo triple no se beneficia).
+### Example 1: `(x: Account) -[:Transfer]-> (y)` — simple traversal
 
-```
-1. SCAN: engine calls graph.nodes_with_label("Account")
-         Uses label index → returns [0, 1, 2, 3]
-         ├── In-Memory: HashMap lookup (in RAM)
-         ├── Lazy: HashMap lookup (index in RAM)
-         └── Disk: read label index page from disk/cache
-
-2. EXPAND: for each Account node, follow outgoing edges
-           engine calls graph.outgoing_edges(node_id) → Vec<u32>
-           ├── In-Memory: array index → outgoing[node_id]
-           ├── Lazy: HashMap lookup → outgoing[node_id]  (index in RAM)
-           └── Disk: read adjacency page from disk/cache
-
-3. FILTER EDGE: check edge has label "Transfer"
-                engine calls graph.edge_labels(edge_id)
-                ├── In-Memory: array index → edge_labels[id]
-                ├── Lazy: read edge record page → decode
-                └── Disk: read edge record page → decode
-
-4. RESOLVE TARGET: get target node
-                   engine calls graph.tgt(edge_id) → u32
-                   All three: array index → edge_tgt[id]  (always in RAM)
-
-5. RESULT: PathValue::Node(target_id), bind to variable y
-           All u32 — no string allocation
-```
-
-### Example 2: `(a)->(b)->(c)->(d)` (cadena larga, LTJ)
-
-Una cadena de 3 aristas. El runtime usa LTJ porque la cadena se descompone
-en 3 triples con variables compartidas.
+A single edge with labels. The runtime uses adjacency-driven concat
+(not LTJ), since a single edge doesn't need multi-way join.
 
 ```
-1. DECOMPOSE: flatten Concat tree → [Node(a), Edge, Node(b), Edge, Node(c), Edge, Node(d)]
-              Extract triples: (a,_p0,b), (b,_p1,c), (c,_p2,d)
+1. SCAN: find nodes with label "Account"
+         graph.nodes_with_label("Account") → [0, 1, 2, 3]
+         This uses the label index:
+         ├── In-Memory backend: HashMap lookup (instant)
+         ├── Lazy backend: HashMap lookup (index is in RAM)
+         └── Disk backend: read label index page from disk
 
-2. BUILD INDEX: TripleIndex::from_graph → 6 sorted arrays
+2. EXPAND: for each Account node, get outgoing edges
+         graph.outgoing_edges(0) → [3, 4]   (a1's outgoing edges)
+         graph.outgoing_edges(1) → []        (a2 has no outgoing... wait)
 
-3. VEO: order variables by connectivity.
-        a,b,c,d are non-lonely (shared between triples, except a and d).
-        _p0,_p1,_p2 are lonely (each in one triple).
-        Order chosen: b, c, a, d, _p0, _p1, _p2 (example)
+3. FILTER: keep only edges with label "Transfer"
+         graph.edge_labels(3) → Transfer ✓
+         graph.edge_labels(4) → Foo ✗  (skip this edge)
 
-4. SEARCH (recursive):
-   para cada b (leap en SPO para triples 1 y 2):
-     para cada c en out(b) (triples 2 y 3):
-       para cada a en in(b) (triple 1):
-         para cada d en out(c) (triple 3):
-           // _p0, _p1, _p2 son lonely: seek_all directo
-           emit (a, b, c, d)
+4. TARGET: get where the edge leads
+         graph.tgt(3) → 2 (node p1)
 
-   Nunca materializa todos los pares (a,b) antes de ver c.
-
-5. RESULT: convert tuples → IntermediateResult con Assignment y Path
+5. RESULT: x=0 (a1), y=2 (p1), path = [Node(0), Edge(3), Node(2)]
 ```
 
-### Example 3: `(a)->(b), (b)->(c), (c)->(a)` (triangle, LTJ)
+### Example 2: `(a)->(b)->(c)->(d)` — long chain via LTJ
+
+A chain of 3 edges. Without LTJ, this requires materializing all 2-hop
+paths before considering 3-hop paths, which can be slow on dense graphs.
+With LTJ, it's evaluated incrementally.
 
 ```
-1. DECOMPOSE: Join(Join((a)->(b), (b)->(c)), (c)->(a))
-              Triples: (a,_p0,b), (b,_p1,c), (c,_p2,a)
+1. FLATTEN the Concat tree:
+     [Node(a), EdgeRight, Node(b), EdgeRight, Node(c), EdgeRight, Node(d)]
 
-2. SEARCH:
-   para cada a (triples 1 y 3):
-     para cada b en out(a) ∩ ... (triples 1 y 2):
-       para cada c en out(b) ∩ in(a) (triples 2 y 3):
-         emit (a, b, c)
+2. EXTRACT triples (one per edge):
+     Triple 1: (a, _p0, b)    _p0 = any label, fresh variable
+     Triple 2: (b, _p1, c)    _p1 = any label
+     Triple 3: (c, _p2, d)    _p2 = any label
 
-   La intersección de out(b) ∩ in(a) se hace con leapfrog seek:
-   se busca alternadamente en los iteradores de triples 2 y 3
-   hasta que ambos coinciden en el mismo valor de c.
+3. BUILD TripleIndex: 6 sorted arrays from all graph edges
+
+4. CHOOSE variable order (VEO):
+     Variables b and c appear in 2 triples each (non-lonely) → bind first
+     Variables a and d appear in 1 triple each → bind after
+     Variables _p0, _p1, _p2 appear in 1 triple each → bind last
+     Order: [b, c, a, d, _p0, _p1, _p2]
+
+5. SEARCH:
+     for each b:                           ← leap across triples 1,2
+       for each c in out(b):              ← leap across triples 2,3
+         for each a such that a→b:        ← leap in triple 1 alone
+           for each d in out(c):          ← leap in triple 3 alone
+             _p0, _p1, _p2 are lonely → seek_all (get all matching labels)
+             emit (a, b, c, d)
+
+   No intermediate table. Each step only considers values that satisfy
+   all constraints so far.
+
+6. CONVERT: each result tuple {a=5, b=12, c=7, d=20} becomes:
+     Assignment: {a→Node(5), b→Node(12), c→Node(7), d→Node(20)}
+     Path: [Node(5), Edge(?), Node(12), Edge(?), Node(7), Edge(?), Node(20)]
+     (Edge IDs are looked up in the graph's adjacency lists)
 ```
 
-### Example 4: `(x: Person)(y: Student)` (concat sin edge)
+### Example 3: `(a)->(b), (b)->(c), (c)->(a)` — triangle via LTJ
 
-Two node patterns concatenated. No edge, no LTJ.
+The classic multi-way join. Three patterns share variables pairwise.
 
 ```
-1. SCAN: engine calls nodes_with_label("Person") → [0, 4, ...]
+1. DECOMPOSE the Join tree:
+     Join(Join((a)->(b), (b)->(c)), (c)->(a))
+     → Triple 1: (a, _p0, b)
+       Triple 2: (b, _p1, c)
+       Triple 3: (c, _p2, a)
 
-2. CONCAT WITH NODE: for each Person node, check if it also
-         matches "Student" (via filter_node). The result
-         has path [node4] with bindings {x → 4, y → 4}.
+2. SEARCH with leapfrog intersection:
+     for each a:
+       Triples 1 and 3 both mention a (as source and target respectively).
+       The iterator for triple 1 uses SPO (a is source).
+       The iterator for triple 3 uses OSP (a is target).
+       Leapfrog finds the first a that exists in both orderings.
 
-   No adjacency expansion happens. This is just a filter.
+       for each b in out(a):
+         Now a is fixed. Triple 1 narrows to "edges from a".
+         Triple 2 needs b as source.
+         Leapfrog intersects: b must be a target of a AND a source of
+         some edge. On dense graphs, this skips many non-matching b values.
+
+         for each c in out(b) ∩ in(a):
+           This is where the magic happens. Triple 2 says c must be
+           reachable from b. Triple 3 says c must reach a. Instead of
+           finding ALL neighbors of b and then checking which ones reach a,
+           LTJ intersects both lists simultaneously.
+
+           If out(b) = [3, 7, 12, 25] and in(a) = [5, 12, 18, 25, 40]:
+           → intersection = [12, 25] (found in O(log n) per step, not O(n))
+           → only 2 candidates for c, not 4
+
+           emit (a, b, c) for each valid c
+```
+
+### Example 4: `(x: Person)(y: Student)` — node concat, no edge
+
+Two node patterns without an edge between them. This is just a filter:
+"find nodes that are both Person and Student". No LTJ, no adjacency.
+
+```
+1. SCAN: nodes_with_label("Person") → [0, 4, ...]
+
+2. For each Person node, check if it also has label "Student"
+   via filter_node(). If yes, bind x and y to the same node.
+
+   No edge expansion, no join, no LTJ.
+```
+
+### Summary: how the runtime chooses a strategy
+
+```
+                    ┌──────────────────────────────┐
+                    │     Incoming pattern          │
+                    └──────────────┬───────────────┘
+                                   │
+                    ┌──────────────▼───────────────┐
+                    │  Is it a Join or Concat of    │
+                    │  directed edges only?          │
+                    └──────┬──────────────┬─────────┘
+                       yes │              │ no
+                    ┌──────▼──────┐  ┌────▼─────────────────┐
+                    │ Decompose   │  │ Use existing runtime: │
+                    │ into triples│  │ adjacency-driven concat│
+                    │ Build index │  │ or pairwise hash-join  │
+                    │ Run LTJ     │  │ or node scan           │
+                    └─────────────┘  └────────────────────────┘
 ```
 
 ### Key insight
