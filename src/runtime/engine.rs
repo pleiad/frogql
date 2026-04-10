@@ -13,6 +13,8 @@ use crate::typing::property_type::PropertyType;
 use crate::typing::simple_type::SimpleType;
 
 use super::assignment::Assignment;
+use super::ltj::triple_index::TripleIndex;
+use super::ltj::pattern_extract;
 use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
 
 /// Runtime engine for evaluating GQL path patterns on a graph.
@@ -244,6 +246,14 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     // --- Join: Q1, Q2 — cross-product with assignment unification ---
 
     fn run_join(&self, q1: &PathPattern, q2: &PathPattern, limit: usize) -> IntermediateResult {
+        // Try LTJ for multi-way joins
+        let join_pattern = PathPattern::Join(Box::new(q1.clone()), Box::new(q2.clone()));
+        let index = TripleIndex::from_graph(self.graph);
+        if let Some(result) = pattern_extract::try_ltj(self.graph, &join_pattern, &index, limit) {
+            return result;
+        }
+
+        // Fallback to pairwise hash-join
         let ir1 = self.run_path_pattern(q1, 0);
         let ir2 = self.run_path_pattern(q2, 0);
 
@@ -299,6 +309,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     // --- Optimized concatenation: uses adjacency when right side is edge/node ---
 
     fn run_concat_pattern(&self, p1: &PathPattern, p2: &PathPattern, limit: usize) -> IntermediateResult {
+        // Try LTJ for chains of directed edges
+        let concat_pattern = PathPattern::Concat(Box::new(p1.clone()), Box::new(p2.clone()));
+        let index = TripleIndex::from_graph(self.graph);
+        if let Some(result) = pattern_extract::try_ltj(self.graph, &concat_pattern, &index, limit) {
+            return result;
+        }
+
         let ir1 = self.run_path_pattern(p1, 0);
 
         // Optimization: if p2 is a simple edge or node pattern, use adjacency-driven execution

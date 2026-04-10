@@ -88,32 +88,40 @@ This means LTJ's trie-based approach doesn't directly apply to property constrai
 2. **Keep property graph model** and improve the join strategy separately from property filtering
 3. **Hybrid**: use LTJ for the join/intersection part, with property predicates as post-filters during variable binding
 
-## Possible Improvements (ordered by effort)
+## Implementation: LTJ (done)
 
-### 1. Propagate limit to sub-queries in joins (easy)
-Currently `run_join` passes `limit=0` to sub-queries. For queries with shared variables, we could estimate how many rows we need from each side. Won't help with the fundamental blowup but would help when limit is small.
+Leapfrog Triejoin is now implemented in `src/runtime/ltj/`. See `CLAUDE.md` for full documentation.
 
-### 2. Join reordering (medium)
-Currently left-to-right. Reorder joins so that the most selective joins happen first. E.g., for 4-clique, do triangle first then extend. This is what CLTJ calls "adaptive VEO" (Variable Elimination Order).
+The approach taken was hybrid: model edges as (src, label, tgt) triples stored in 6 sorted orderings (like CLTJ), but use sorted `Vec<(u32,u32,u32,u32)>` with binary search instead of compact tries with LOUDS. Node label and property constraints are handled as filters evaluated during the LTJ search, placed at the VEO level where all required variables are bound.
 
-### 3. Semijoin reduction (medium)  
-Before joining, reduce each side by checking which values of shared variables actually appear in the other side. This avoids producing rows that will be filtered out.
+### Results (soc-LiveJournal1-100k, limit=1000)
 
-### 4. Index-nested-loop join for edge patterns (medium)
-Instead of materializing `(a)-[]->(b)` as all edges, iterate over edges lazily and probe the index for the next pattern. This is closer to LTJ's behavior.
+| Shape | Hash-join (before) | LTJ (after) | Speedup |
+|-------|-------------------|-------------|---------|
+| 1-tree | 0.28s | 0.039s | 7x |
+| 2-comb | 0.40s | 0.039s | 10x |
+| 3-clique | 0.57s | 0.041s | 14x |
+| 3-cycle | 0.57s | 0.041s | 14x |
+| 4-cycle | 4.15s | 0.041s | 101x |
+| 3-path | 6.33s | 0.040s | 158x |
+| 2-tree | 101.8s | 0.039s | 2610x |
+| 4-path | 159.8s | 0.039s | 4097x |
+| 3-4-lollipop | 23.1s | 0.040s | 577x |
+| 4-clique | hung | 0.043s | ∞ |
 
-### 5. Implement LTJ over adjacency lists (hard)
-Build sorted adjacency lists, implement `leap()` (exponential search), and a generic multi-way join that binds variables one at a time with leapfrog intersection. Would need sorted adjacency lists (currently HashMap-based).
+## Remaining Improvements
 
-### 6. Full trie index (hard)
-Build proper tries for (src, label, tgt) in all orderings, implement full LTJ. Would also need to decide how to handle property constraints.
+### 1. Adaptive VEO (medium)
+Current VEO is static. An adaptive VEO re-estimates cardinalities at each step during the search, choosing the variable with the smallest candidate set. The CLTJ paper shows this reduces average query times by an order of magnitude.
 
-## Decision to Make
+### 2. Cache TripleIndex (easy)
+Currently rebuilt per query. Should be cached on Runtime via `RefCell<Option<TripleIndex>>` and reused across queries on the same graph.
 
-The core question: **RDF triples vs. property graph model?**
+### 3. Unroll repetitions into LTJ (medium)
+`{1,m}` with fixed bounds could be unrolled into m separate LTJ executions, each with k copies of the sub-pattern's triples. Results are unioned, and variables are collected into `PathValue::List`.
 
-- If we go RDF: reuse CLTJ's approach directly, compare apples-to-apples with the paper
-- If we stay property graph: need a custom join strategy that handles labels/properties natively
-- Hybrid is possible but complex
+### 4. Handle undirected/left edges (medium)
+Model undirected edges as two directed triples `(a,L,b)` + `(b,L,a)`, or add separate index.
 
-For the benchmark comparison with CLTJ, option 1 (RDF) makes the most sense since we're comparing on the same datasets and queries. For the broader GQL project, option 3 (hybrid) is more interesting but much more work.
+### 5. Compact trie representation (hard)
+Replace sorted Vec with LOUDS bitvectors for space efficiency on billion-triple graphs. Only matters for very large datasets.
