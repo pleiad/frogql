@@ -265,6 +265,64 @@ fn format_pathvalue_rich(store: &LazyGraphStore, pv: &PathValue) -> String {
     }
 }
 
+// --- ANSI color helpers ---
+
+const C_RESET: &str = "\x1b[0m";
+const C_BOLD: &str = "\x1b[1m";
+const C_DIM: &str = "\x1b[2m";
+const C_CYAN: &str = "\x1b[36m";
+const C_GREEN: &str = "\x1b[32m";
+const C_YELLOW: &str = "\x1b[33m";
+const C_MAGENTA: &str = "\x1b[35m";
+
+fn color_label(labels: &[String]) -> String {
+    if labels.is_empty() {
+        String::new()
+    } else {
+        format!("{C_BOLD}{C_CYAN}:{}{C_RESET}", labels.join("&"))
+    }
+}
+
+fn color_props(props: &std::collections::BTreeMap<String, &str>) -> String {
+    if props.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = props.iter()
+        .map(|(k, t)| format!("{k}: {C_GREEN}{t}{C_RESET}"))
+        .collect();
+    format!(" {{{}}}", parts.join(", "))
+}
+
+fn color_props_with_star(props: &std::collections::BTreeMap<String, &str>, has_opt: bool) -> String {
+    if props.is_empty() && !has_opt {
+        return String::new();
+    }
+    let mut parts: Vec<String> = props.iter()
+        .map(|(k, t)| format!("{k}: {C_GREEN}{t}{C_RESET}"))
+        .collect();
+    if has_opt {
+        parts.push(format!("{C_MAGENTA}*{C_RESET}"));
+    }
+    format!(" {{{}}}", parts.join(", "))
+}
+
+fn color_node(labels: &[String], props_str: &str) -> String {
+    format!("({}{props_str})", color_label(labels))
+}
+
+fn color_arrow(labels: &[String], props_str: &str, directed: bool) -> String {
+    let label_str = color_label(labels);
+    if directed {
+        format!("{C_YELLOW}-[{C_RESET}{label_str}{props_str}{C_YELLOW}]->{C_RESET}")
+    } else {
+        format!("{C_YELLOW}~[{C_RESET}{label_str}{props_str}{C_YELLOW}]~{C_RESET}")
+    }
+}
+
+fn color_count(count: usize, kind: &str) -> String {
+    format!("{C_DIM}({count} {kind}){C_RESET}")
+}
+
 /// A node type: label combination + property name→type map.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct NodeType {
@@ -380,9 +438,10 @@ fn print_schema(store: &LazyGraphStore) {
     standalone_nodes.sort_by_key(|(nt, _)| (*nt).clone());
 
     if !standalone_nodes.is_empty() {
-        println!("Node types:");
+        println!("{C_BOLD}Node types:{C_RESET}");
         for (nt, count) in &standalone_nodes {
-            println!("  {} ({} nodes)", nt.format(), count);
+            let node_str = color_node(&nt.labels, &color_props(&nt.props));
+            println!("  {node_str} {}", color_count(**count, "nodes"));
         }
     }
 
@@ -391,38 +450,21 @@ fn print_schema(store: &LazyGraphStore) {
         if !standalone_nodes.is_empty() {
             println!();
         }
-        println!("Edge types:");
+        println!("{C_BOLD}Edge types:{C_RESET}");
         let mut edge_types: Vec<(&EdgeType, &usize)> = edge_type_counts.iter().collect();
         edge_types.sort_by_key(|(et, _)| (*et).clone());
 
         for (et, count) in &edge_types {
-            let edge_label = if et.labels.is_empty() {
-                String::new()
-            } else {
-                format!(":{}", et.labels.join("&"))
-            };
-            let edge_props = if et.props.is_empty() {
-                String::new()
-            } else {
-                let parts: Vec<String> = et.props.iter()
-                    .map(|(k, t)| format!("{k}: {t}"))
-                    .collect();
-                format!(" {{{}}}", parts.join(", "))
-            };
-
-            let arrow = if et.directed {
-                format!("-[{edge_label}{edge_props}]->")
-            } else {
-                format!("~[{edge_label}{edge_props}]~")
-            };
-
-            println!("  {} {} {} ({} edges)", et.src.format(), arrow, et.tgt.format(), count);
+            let src = color_node(&et.src.labels, &color_props(&et.src.props));
+            let tgt = color_node(&et.tgt.labels, &color_props(&et.tgt.props));
+            let arrow = color_arrow(&et.labels, &color_props(&et.props), et.directed);
+            println!("  {src} {arrow} {tgt} {}", color_count(**count, "edges"));
         }
     }
 
     // 6. Print summary
     println!();
-    println!("{} node types, {} edge types ({} nodes, {} edges)",
+    println!("{C_DIM}{} node types, {} edge types ({} nodes, {} edges){C_RESET}",
         node_type_counts.len(), edge_type_counts.len(),
         store.node_count(), store.edge_count());
 }
@@ -552,18 +594,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
     // --- Format helpers ---
 
     let format_simple_node = |labels: &[String], common: &BTreeMap<String, &str>, has_opt: bool| -> String {
-        let label_part = if labels.is_empty() {
-            String::new()
-        } else {
-            format!(":{}", labels.join("&"))
-        };
-        if common.is_empty() && !has_opt {
-            format!("({label_part})")
-        } else {
-            let mut parts: Vec<String> = common.iter().map(|(k, t)| format!("{k}: {t}")).collect();
-            if has_opt { parts.push("*".to_string()); }
-            format!("({label_part} {{{}}})", parts.join(", "))
-        }
+        color_node(labels, &color_props_with_star(common, has_opt))
     };
 
     // --- Collect endpoint label combos that appear in edges ---
@@ -583,17 +614,17 @@ fn print_schema_simple(store: &LazyGraphStore) {
     standalone.sort_by_key(|(labels, _)| (*labels).clone());
 
     if !standalone.is_empty() {
-        println!("Node types:");
+        println!("{C_BOLD}Node types:{C_RESET}");
         for (labels, (common, count)) in &standalone {
             let has_opt = node_has_optional.get(*labels).copied().unwrap_or(false);
-            println!("  {} ({} nodes)", format_simple_node(labels, common.as_ref().unwrap(), has_opt), count);
+            println!("  {} {}", format_simple_node(labels, common.as_ref().unwrap(), has_opt), color_count(*count, "nodes"));
         }
     }
 
     // Edge types
     if !edge_groups.is_empty() {
         if !standalone.is_empty() { println!(); }
-        println!("Edge types:");
+        println!("{C_BOLD}Edge types:{C_RESET}");
 
         let mut edges: Vec<_> = edge_groups.iter().collect();
         edges.sort_by_key(|(k, _)| (*k).clone());
@@ -609,32 +640,16 @@ fn print_schema_simple(store: &LazyGraphStore) {
 
             let edge_common = common.as_ref().unwrap();
             let e_has_opt = edge_has_optional.get(key).copied().unwrap_or(false);
-            let edge_label = if key.edge_labels.is_empty() {
-                String::new()
-            } else {
-                format!(":{}", key.edge_labels.join("&"))
-            };
-            let edge_props = if edge_common.is_empty() && !e_has_opt {
-                String::new()
-            } else {
-                let mut parts: Vec<String> = edge_common.iter().map(|(k, t)| format!("{k}: {t}")).collect();
-                if e_has_opt { parts.push("*".to_string()); }
-                format!(" {{{}}}", parts.join(", "))
-            };
-            let arrow = if key.directed {
-                format!("-[{edge_label}{edge_props}]->")
-            } else {
-                format!("~[{edge_label}{edge_props}]~")
-            };
+            let arrow = color_arrow(&key.edge_labels, &color_props_with_star(edge_common, e_has_opt), key.directed);
 
-            println!("  {} {} {} ({} edges)", src_str, arrow, tgt_str, count);
+            println!("  {src_str} {arrow} {tgt_str} {}", color_count(*count, "edges"));
         }
     }
 
     let node_type_count = node_groups.len();
     let edge_type_count = edge_groups.len();
     println!();
-    println!("{} node types, {} edge types ({} nodes, {} edges)",
+    println!("{C_DIM}{} node types, {} edge types ({} nodes, {} edges){C_RESET}",
         node_type_count, edge_type_count,
         store.node_count(), store.edge_count());
 }
