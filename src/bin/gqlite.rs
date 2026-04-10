@@ -72,6 +72,11 @@ fn main() {
             continue;
         }
 
+        if line == "schema simple" {
+            print_schema_simple(&store);
+            continue;
+        }
+
         let query = match gqlrust::compile_query(line) {
             Ok(q) => q,
             Err(e) => { eprintln!("Parse error: {e}"); continue; }
@@ -419,5 +424,217 @@ fn print_schema(store: &LazyGraphStore) {
     println!();
     println!("{} node types, {} edge types ({} nodes, {} edges)",
         node_type_counts.len(), edge_type_counts.len(),
+        store.node_count(), store.edge_count());
+}
+
+/// Simplified schema: group by labels, intersect properties across all instances.
+/// Properties common to all instances of a label combo are shown; optional ones become `*`.
+fn print_schema_simple(store: &LazyGraphStore) {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+    // --- Node types: group by labels, intersect props ---
+
+    // For each label combo: collect (intersection of prop names with consistent types, total count)
+    let mut node_groups: HashMap<Vec<String>, (Option<BTreeMap<String, &'static str>>, usize)> = HashMap::new();
+    let mut node_label_to_simple: HashMap<Vec<String>, Vec<String>> = HashMap::new(); // for display
+
+    for nid in 0..store.node_count() {
+        let mut labels = Graph::label_strings(&store.node_labels(nid));
+        labels.sort();
+
+        let raw_props = store.node_props(nid);
+        let mut prop_types: BTreeMap<String, &'static str> = BTreeMap::new();
+        for (k, v) in &raw_props {
+            let t = match v {
+                gqlrust::model::value::Value::Int(_) => "int",
+                gqlrust::model::value::Value::Str(_) => "str",
+                gqlrust::model::value::Value::Bool(_) => "bool",
+            };
+            prop_types.insert(k.clone(), t);
+        }
+
+        let entry = node_groups.entry(labels.clone()).or_insert((None, 0));
+        entry.1 += 1;
+        match &mut entry.0 {
+            None => entry.0 = Some(prop_types),
+            Some(common) => {
+                // Intersect: keep only props present in both with same type
+                let keys: Vec<String> = common.keys().cloned().collect();
+                for k in keys {
+                    match prop_types.get(&k) {
+                        Some(t) if *t == common[&k] => {} // same type, keep
+                        _ => { common.remove(&k); }       // missing or different type, drop
+                    }
+                }
+            }
+        }
+    }
+
+    // Check if there are optional props (i.e., the full schema had more than the intersection)
+    // We track this by checking if any node had props beyond the common set
+    let mut node_has_optional: HashMap<Vec<String>, bool> = HashMap::new();
+    for nid in 0..store.node_count() {
+        let mut labels = Graph::label_strings(&store.node_labels(nid));
+        labels.sort();
+        let raw_props = store.node_props(nid);
+        let common = node_groups[&labels].0.as_ref().unwrap();
+        if raw_props.len() > common.len() {
+            node_has_optional.insert(labels, true);
+        }
+    }
+
+    // --- Edge types: group by (edge_labels, src_labels, tgt_labels, directed), intersect props ---
+
+    #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    struct SimpleEdgeKey {
+        edge_labels: Vec<String>,
+        src_labels: Vec<String>,
+        tgt_labels: Vec<String>,
+        directed: bool,
+    }
+
+    let mut edge_groups: HashMap<SimpleEdgeKey, (Option<BTreeMap<String, &'static str>>, usize)> = HashMap::new();
+    let mut edge_has_optional: HashMap<SimpleEdgeKey, bool> = HashMap::new();
+
+    for eid in 0..store.edge_count() {
+        let mut edge_labels = Graph::label_strings(&store.edge_labels(eid));
+        edge_labels.sort();
+        let mut src_labels = Graph::label_strings(&store.node_labels(store.src(eid)));
+        src_labels.sort();
+        let mut tgt_labels = Graph::label_strings(&store.node_labels(store.tgt(eid)));
+        tgt_labels.sort();
+        let directed = store.is_directed(eid);
+
+        let raw_props = store.edge_props(eid);
+        let mut prop_types: BTreeMap<String, &'static str> = BTreeMap::new();
+        for (k, v) in &raw_props {
+            let t = match v {
+                gqlrust::model::value::Value::Int(_) => "int",
+                gqlrust::model::value::Value::Str(_) => "str",
+                gqlrust::model::value::Value::Bool(_) => "bool",
+            };
+            prop_types.insert(k.clone(), t);
+        }
+
+        let key = SimpleEdgeKey { edge_labels, src_labels, tgt_labels, directed };
+        let entry = edge_groups.entry(key.clone()).or_insert((None, 0));
+        entry.1 += 1;
+        match &mut entry.0 {
+            None => entry.0 = Some(prop_types),
+            Some(common) => {
+                let keys: Vec<String> = common.keys().cloned().collect();
+                for k in keys {
+                    match prop_types.get(&k) {
+                        Some(t) if *t == common[&k] => {}
+                        _ => { common.remove(&k); }
+                    }
+                }
+            }
+        }
+    }
+
+    for eid in 0..store.edge_count() {
+        let mut edge_labels = Graph::label_strings(&store.edge_labels(eid));
+        edge_labels.sort();
+        let mut src_labels = Graph::label_strings(&store.node_labels(store.src(eid)));
+        src_labels.sort();
+        let mut tgt_labels = Graph::label_strings(&store.node_labels(store.tgt(eid)));
+        tgt_labels.sort();
+        let directed = store.is_directed(eid);
+        let key = SimpleEdgeKey { edge_labels, src_labels, tgt_labels, directed };
+        let raw_props = store.edge_props(eid);
+        let common = edge_groups[&key].0.as_ref().unwrap();
+        if raw_props.len() > common.len() {
+            edge_has_optional.insert(key, true);
+        }
+    }
+
+    // --- Format helpers ---
+
+    let format_simple_node = |labels: &[String], common: &BTreeMap<String, &str>, has_opt: bool| -> String {
+        let label_part = if labels.is_empty() {
+            String::new()
+        } else {
+            format!(":{}", labels.join("&"))
+        };
+        if common.is_empty() && !has_opt {
+            format!("({label_part})")
+        } else {
+            let mut parts: Vec<String> = common.iter().map(|(k, t)| format!("{k}: {t}")).collect();
+            if has_opt { parts.push("*".to_string()); }
+            format!("({label_part} {{{}}})", parts.join(", "))
+        }
+    };
+
+    // --- Collect endpoint label combos that appear in edges ---
+
+    let mut endpoint_label_combos: BTreeSet<Vec<String>> = BTreeSet::new();
+    for key in edge_groups.keys() {
+        endpoint_label_combos.insert(key.src_labels.clone());
+        endpoint_label_combos.insert(key.tgt_labels.clone());
+    }
+
+    // --- Print ---
+
+    // Standalone node types (not in any edge)
+    let mut standalone: Vec<_> = node_groups.iter()
+        .filter(|(labels, _)| !endpoint_label_combos.contains(*labels))
+        .collect();
+    standalone.sort_by_key(|(labels, _)| (*labels).clone());
+
+    if !standalone.is_empty() {
+        println!("Node types:");
+        for (labels, (common, count)) in &standalone {
+            let has_opt = node_has_optional.get(*labels).copied().unwrap_or(false);
+            println!("  {} ({} nodes)", format_simple_node(labels, common.as_ref().unwrap(), has_opt), count);
+        }
+    }
+
+    // Edge types
+    if !edge_groups.is_empty() {
+        if !standalone.is_empty() { println!(); }
+        println!("Edge types:");
+
+        let mut edges: Vec<_> = edge_groups.iter().collect();
+        edges.sort_by_key(|(k, _)| (*k).clone());
+
+        for (key, (common, count)) in &edges {
+            let src_common = node_groups.get(&key.src_labels).and_then(|(c, _)| c.as_ref()).cloned().unwrap_or_default();
+            let src_opt = node_has_optional.get(&key.src_labels).copied().unwrap_or(false);
+            let tgt_common = node_groups.get(&key.tgt_labels).and_then(|(c, _)| c.as_ref()).cloned().unwrap_or_default();
+            let tgt_opt = node_has_optional.get(&key.tgt_labels).copied().unwrap_or(false);
+
+            let src_str = format_simple_node(&key.src_labels, &src_common, src_opt);
+            let tgt_str = format_simple_node(&key.tgt_labels, &tgt_common, tgt_opt);
+
+            let edge_common = common.as_ref().unwrap();
+            let e_has_opt = edge_has_optional.get(key).copied().unwrap_or(false);
+            let edge_label = if key.edge_labels.is_empty() {
+                String::new()
+            } else {
+                format!(":{}", key.edge_labels.join("&"))
+            };
+            let edge_props = if edge_common.is_empty() && !e_has_opt {
+                String::new()
+            } else {
+                let mut parts: Vec<String> = edge_common.iter().map(|(k, t)| format!("{k}: {t}")).collect();
+                if e_has_opt { parts.push("*".to_string()); }
+                format!(" {{{}}}", parts.join(", "))
+            };
+            let arrow = if key.directed {
+                format!("-[{edge_label}{edge_props}]->")
+            } else {
+                format!("~[{edge_label}{edge_props}]~")
+            };
+
+            println!("  {} {} {} ({} edges)", src_str, arrow, tgt_str, count);
+        }
+    }
+
+    let node_type_count = node_groups.len();
+    let edge_type_count = edge_groups.len();
+    println!();
+    println!("{} node types, {} edge types ({} nodes, {} edges)",
+        node_type_count, edge_type_count,
         store.node_count(), store.edge_count());
 }
