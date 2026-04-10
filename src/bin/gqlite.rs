@@ -92,12 +92,41 @@ fn main() {
                     let headers: Vec<String> = returns.iter().map(|r| {
                         r.alias.clone().unwrap_or_else(|| format!("{}", r.expr))
                     }).collect();
-                    println!("{}", headers.join(" | "));
-                    println!("{}", headers.iter().map(|h| "-".repeat(h.len())).collect::<Vec<_>>().join("-+-"));
-                }
-                for row in &rows {
-                    let vals: Vec<String> = row.iter().map(|v| format!("{v}")).collect();
-                    println!("{}", vals.join(" | "));
+
+                    // Format all cell values
+                    let str_rows: Vec<Vec<String>> = rows.iter()
+                        .map(|row| row.iter().map(|v| format!("{v}")).collect())
+                        .collect();
+
+                    // Compute column widths from headers and data
+                    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+                    for row in &str_rows {
+                        for (i, cell) in row.iter().enumerate() {
+                            if i < widths.len() {
+                                widths[i] = widths[i].max(cell.len());
+                            }
+                        }
+                    }
+
+                    // Print header
+                    let header_line: String = headers.iter().enumerate()
+                        .map(|(i, h)| format!("{:width$}", h, width = widths[i]))
+                        .collect::<Vec<_>>().join(" | ");
+                    println!("{header_line}");
+
+                    // Print separator
+                    let sep: String = widths.iter()
+                        .map(|w| "-".repeat(*w))
+                        .collect::<Vec<_>>().join("-+-");
+                    println!("{sep}");
+
+                    // Print rows
+                    for row in &str_rows {
+                        let line: String = row.iter().enumerate()
+                            .map(|(i, cell)| format!("{:width$}", cell, width = widths.get(i).copied().unwrap_or(0)))
+                            .collect::<Vec<_>>().join(" | ");
+                        println!("{line}");
+                    }
                 }
                 eprintln!("{} rows ({:.3}s)", rows.len(), elapsed.as_secs_f64());
             }
