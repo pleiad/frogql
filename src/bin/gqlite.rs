@@ -67,13 +67,13 @@ fn main() {
 
         if line == "quit" || line == "exit" { break; }
 
-        if line == "schema" {
-            print_schema(&store);
-            continue;
-        }
-
-        if line == "schema simple" {
-            print_schema_simple(&store);
+        if line.starts_with("schema") {
+            let arg = line["schema".len()..].trim();
+            match arg {
+                "" => print_schema(&store),
+                "simple" => print_schema_simple(&store),
+                _ => eprintln!("Unknown schema command. Use 'schema' or 'schema simple'."),
+            }
             continue;
         }
 
