@@ -1,0 +1,1847 @@
+[
+  {
+    "question": "Retrieve the average confidence score of Assertions that are supported by other Assertions and tagged with the Tag named 'Important'.",
+    "gql": "MATCH (a1:Assertion)-[:Supports]->(a2:Assertion), (a1)-[:TaggedWith]->(:Tag {name: 'Important'}) RETURN AVG(a1.confidence_score) AS avg_confidence",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of Assertions sourced from articles published after January 1, 2025.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.publication_date > date('2025-01-01') RETURN avg(a.confidence_score) AS average_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the average confidence score of Assertion nodes that are supported by other Assertion nodes with a support strength greater than 0.5 and are sourced from Source nodes published after 2020.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion)-[sf:SourcedFrom]->(src:Source) WHERE s.support_strength > 0.5 AND src.publication_date > date('2020-12-31') RETURN AVG(a2.confidence_score) AS average_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Count the number of distinct Source nodes that are connected to Assertion nodes through the SourcedFrom relationship, where the Assertion nodes contradict other Assertion nodes with a contradiction severity less than 0.3.",
+    "gql": "MATCH (src:Source)<-[:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity < 0.3 RETURN COUNT(DISTINCT src) AS distinct_source_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find pairs of Concept nodes that are related through a common Assertion node where one supports the other with a strength greater than 0.8. Return the names of these concept pairs along with the support strength.",
+    "gql": "MATCH (c1:Concept)<-[:RelatesTo]-(a1:Assertion)-[s:Supports]->(a2:Assertion)-[:RelatesTo]->(c2:Concept) WHERE s.support_strength > 0.8 RETURN c1.name, c2.name, s.support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the average confidence score of assertions that support other assertions within the 'Data Science' domain.",
+    "gql": "MATCH (a1:Assertion)-[:Supports]->(a2:Assertion)-[:ClassifiedUnder]->(d:Domain {name: 'Data Science'}) RETURN AVG(a1.confidence_score) AS average_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify all pairs of Assertion nodes where one supports the other with a support strength greater than 0.7. Return the statements of both assertions and the support strength.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion) WHERE s.support_strength > 0.7 RETURN a1.statement, a2.statement, s.support_strength",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average confidence score of Assertion nodes that are supported by other Assertion nodes with a support strength greater than 0.5.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion) WHERE s.support_strength > 0.5 RETURN AVG(a1.confidence_score) AS average_confidence",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count how many distinct Experts have endorsed Concepts that are part of the 'Data Science' domain.",
+    "gql": "MATCH (:Domain {name: 'Data Science'})<-[:ClassifiedUnder]-(c:Concept)<-[:EndorsedBy]-(e:Expert) RETURN COUNT(DISTINCT e) AS expert_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions that contradict other assertions with a severity greater than 0.7.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.7 RETURN AVG(a1.confidence_score) AS average_confidence",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average confidence score of assertions that were sourced from articles published after January 1, 2025, and are related to concepts in the 'Healthcare' domain.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source {source_type: 'Article'})-[:ClassifiedUnder]->(d:Domain {name: 'Healthcare'}) WHERE s.publication_date > date('2025-01-01') RETURN AVG(a.confidence_score) AS average_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all Assertions that contradict other Assertions with a severity greater than 0.7, returning the statements of both Assertions and the contradiction severity.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.7 RETURN a1.statement AS Statement1, a2.statement AS Statement2, c.contradiction_severity AS Severity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve all Source nodes that have been used to source Assertions which contradict other Assertions, including the contradiction severity and the titles of the sources.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) RETURN s.title AS source_title, c.contradiction_severity AS severity LIMIT 10",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the average confidence score of assertions that contradict other assertions and are sourced from articles published after January 1, 2025.",
+    "gql": "MATCH (a1:Assertion)-[:Contradicts]->(a2:Assertion), (a1)-[:SourcedFrom]->(s:Source) WHERE s.publication_date > date('2025-01-01') RETURN AVG(a1.confidence_score) AS average_confidence",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify Sources that are linked to Assertions which contradict other Assertions, and list the Source titles along with the contradiction severity.",
+    "gql": "MATCH (src:Source)<-[:SourcedFrom]-(ast1:Assertion)-[c:Contradicts]->(ast2:Assertion) RETURN src.title AS source_title, c.contradiction_severity AS severity ORDER BY severity DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all Sources that are linked to Assertions with a validity start date in 2024 and group them by source type, counting how many assertions each type supports.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE a.validity_start >= date('2024-01-01') AND a.validity_start < date('2025-01-01') RETURN s.source_type, COUNT(a) AS assertion_count ORDER BY assertion_count DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the average confidence score of Assertions that contradict other Assertions with a contradiction severity greater than 0.5. Group the results by the evidence type of the contradicting assertions.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.5 RETURN a2.evidence_type, AVG(a1.confidence_score) AS avg_confidence",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of Assertions that are sourced from articles published after January 1, 2025, and tagged with 'Machine Learning'.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source)-[:TaggedWith]->(t:Tag {name: 'Machine Learning'}) WHERE s.publication_date > date('2025-01-01') RETURN AVG(a.confidence_score) AS average_confidence",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all assertions that contradict other assertions with a severity greater than 0.7, including the statements of both contradicting assertions.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.7 RETURN a1.statement AS assertion1_statement, a2.statement AS assertion2_statement",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve all Assertion nodes that contradict other Assertions with a severity greater than 0.7, including the statement of both the original and contradicting Assertion, and order them by contradiction severity.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.7 RETURN a1.statement AS original_statement, a2.statement AS contradicting_statement, c.contradiction_severity ORDER BY c.contradiction_severity DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the average confidence score of Assertions that have been endorsed by Experts with the specialization 'Data Science' and are sourced from Sources published after 2020.",
+    "gql": "MATCH (a:Assertion)-[:EndorsedBy]->(e:Expert {specialization: 'Data Science'}), (a)-[:SourcedFrom]->(s:Source) WHERE s.publication_date > date('2020-12-31') RETURN avg(a.confidence_score) AS average_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all assertions that support other assertions with a support strength higher than 0.8 and are contradicted with a severity less than 0.5, showing the assertion statements.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion), (a1)-[c:Contradicts]->(a3:Assertion) WHERE s.support_strength > 0.8 AND c.contradiction_severity < 0.5 RETURN a1.statement",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify Sources that have been cited by more than three Assertions, displaying the source title and the number of citations.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) RETURN s, COUNT(a) AS citation_count NEXT RETURN s.title AS SourceTitle, citation_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the top 5 Domain nodes with the highest number of associated Assertion nodes that have a confidence score greater than 0.7, and return their names along with the count of such assertions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a:Assertion) WHERE a.confidence_score > 0.7 RETURN d.name AS domain_name, COUNT(a) AS high_confidence_assertions_count ORDER BY high_confidence_assertions_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total number of Projects that apply Concepts tagged with 'Blockchain' and sourced from publications authored by 'John Doe'.",
+    "gql": "MATCH (p:`Project`)<-[:AppliedIn]-(c:Concept)-[:TaggedWith]->(t:Tag{name:'Blockchain'}) RETURN COUNT(p) AS total_projects",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify all Assertions with a confidence score higher than 0.9 that are supported by at least two other Assertions, and return their statements along with the count of supporting Assertions.",
+    "gql": "MATCH (a:Assertion)<-[s:Supports]-(:Assertion) WHERE a.confidence_score > 0.9 RETURN a, COUNT(s) AS support_count NEXT RETURN a.statement AS assertion_statement, support_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total number of projects that apply concepts which are endorsed by experts specialized in 'Machine Learning'.",
+    "gql": "MATCH (p:`Project`)<-[:AppliedIn]-(c:Concept)-[:EndorsedBy]->(e:Expert{specialization:'Machine Learning'}) RETURN COUNT(p) AS project_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the titles of sources that cite assertions which contradict other assertions with a contradiction severity less than 0.3?",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity < 0.3 RETURN DISTINCT s.title AS source_title",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Calculate the average support strength for each Assertion that supports more than one other Assertion, displaying the statement of the supporting Assertion and its average support strength.",
+    "gql": "MATCH (a:Assertion)-[s:Supports]->(:Assertion) RETURN a, AVG(s.support_strength) AS avg_support_strength, COUNT(s) AS support_count NEXT RETURN a.statement AS assertion_statement, avg_support_strength",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the top 5 Sources by the number of Assertions they have supported, including only those Sources published after 2022. Show the Source title and the count of supporting Assertions.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE s.publication_date > date('2022-12-31') RETURN s.title, COUNT(a) AS assertion_count ORDER BY assertion_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all Assertion nodes that support others with a strength greater than 0.9 and are contradicted with a severity less than 0.5. Include the statement of such Assertions and their confidence scores.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion), (a1)-[c:Contradicts]->(a3:Assertion) WHERE s.support_strength > 0.9 AND c.contradiction_severity < 0.5 RETURN a1.statement, a1.confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Return the names and publication dates of Sources that were used to source Assertions contradicting other Assertions with a severity greater than 0.6, ordered by publication date.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.6 RETURN s.title, s.publication_date ORDER BY s.publication_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all Assertions supported by at least two other Assertions with a support strength greater than 0.8 and show the statement of the target Assertion along with the total support strength it received.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion) WHERE s.support_strength > 0.8 RETURN a2, SUM(s.support_strength) AS total_support, COUNT(a1) AS supporter_count NEXT RETURN a2.statement, total_support",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total number of Projects that have applied Concepts tagged with 'AI' and were sourced from publications authored by 'John Doe'.",
+    "gql": "MATCH (p:`Project`)<-[:AppliedIn]-(c:Concept)-[:TaggedWith]->(t:Tag{name:'AI'}) RETURN COUNT(p) AS total_projects",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Calculate the average confidence score of Assertions that are contradicted by at least three other Assertions with a contradiction severity greater than 0.6.",
+    "gql": "MATCH (a:Assertion)<-[c:Contradicts]-(contradicting:Assertion) WHERE c.contradiction_severity > 0.6 RETURN a, COUNT(contradicting) AS num_contradictions NEXT RETURN AVG(a.confidence_score) AS average_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average confidence score of Assertions that are classified under the 'Technology' Domain and have been endorsed by Experts specializing in 'Computer Science'.",
+    "gql": "MATCH (a:Assertion)-[:ClassifiedUnder]->(d:Domain {name: 'Technology'}), (a)-[:EndorsedBy]->(e:Expert {specialization: 'Computer Science'}) RETURN AVG(a.confidence_score) AS average_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the average confidence scores of Assertions grouped by their evidence types, considering only those Assertions that are supported by at least one other Assertion.",
+    "gql": "MATCH (a:Assertion)-[:Supports]->(:Assertion) RETURN a.evidence_type AS evidence_type, AVG(a.confidence_score) AS average_confidence_score ORDER BY average_confidence_score DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total number of projects that have applied concepts which are related to other concepts with a relationship strength greater than 0.7.",
+    "gql": "MATCH (p:`Project`)<-[:AppliedIn]-(c1:Concept)-[r:RelatesTo]->(c2:Concept) WHERE r.relationship_strength > 0.7 RETURN COUNT(p) AS project_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the titles and publication dates of Sources that are cited in Assertions contradicting other Assertions with a severity greater than 0.5?",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(:Assertion) WHERE c.contradiction_severity > 0.5 RETURN DISTINCT s.title, s.publication_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the average confidence score of Assertions that relate to Concepts within the 'Finance' domain and have been contradicted with a severity higher than 0.6?",
+    "gql": "MATCH (a1:Assertion)-[r:RelatesTo]->(c:Concept)-[:ClassifiedUnder]->(d:Domain {name: 'Finance'}), (a1)-[ct:Contradicts]->(a2:Assertion) WHERE ct.contradiction_severity > 0.6 RETURN AVG(a1.confidence_score) AS average_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all assertions supported by other assertions with a support strength greater than 0.7 and sourced from reports published in 2023.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion)-[:SourcedFrom]->(src:Source {source_type: 'Report'}) WHERE s.support_strength > 0.7 AND src.publication_date >= date('2023-01-01') AND src.publication_date < date('2024-01-01') RETURN a1.assertion_id, a2.assertion_id, s.support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all assertions that are supported by at least two other assertions with a support strength greater than 0.75 and return their statements along with the average support strength.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion) WHERE s.support_strength > 0.75 RETURN a2, AVG(s.support_strength) AS avg_support_strength, COUNT(a1) AS support_count NEXT RETURN a2.statement AS assertion_statement, avg_support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the top 5 Sources by the number of Assertions they have sourced, where those Assertions have a confidence score above 0.8?",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE a.confidence_score > 0.8 RETURN s, COUNT(a) AS assertion_count NEXT RETURN s.title, assertion_count ORDER BY assertion_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the top 5 Domains by the total number of supporting relationships between their associated Assertions. Return Domain names and the count of support relationships.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[s:Supports]->(a2:Assertion) RETURN d, COUNT(s) AS support_count NEXT RETURN d.name, support_count ORDER BY support_count DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are sourced from publications authored by 'John Doe' and are tagged with the tag named 'Machine Learning'.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source {author: 'John Doe'}), (a)-[:TaggedWith]->(t:Tag {name: 'Machine Learning'}) RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of Assertions that are tagged with 'Climate Change' and have been sourced from 'Scientific Journal' type sources.",
+    "gql": "MATCH (a:Assertion)-[:TaggedWith]->(t:Tag {name: 'Climate Change'}), (a)-[:SourcedFrom]->(s:Source {source_type: 'Scientific Journal'}) RETURN AVG(a.confidence_score) AS AverageConfidenceScore",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average confidence score of assertions that contradict other assertions with a severity greater than 0.5 and are sourced from academic papers.",
+    "gql": "MATCH (a1:Assertion)-[:Contradicts]->(a2:Assertion) WHERE a1.contradiction_severity > 0.5 AND a2.evidence_type = 'Academic Paper' RETURN AVG(a1.confidence_score) AS AverageConfidenceScore",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the titles and authors of Sources that have been cited for Assertions which either support or contradict other Assertions with a strength/severity greater than 0.75.",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-(a1:Assertion)-[r:Supports|Contradicts]->(a2:Assertion) WHERE (r.support_strength > 0.75 OR r.contradiction_severity > 0.75) RETURN DISTINCT s.title, s.author",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all Assertions that contradict at least one other Assertion with a severity greater than 0.7 and are supported by at least two Assertions with a support strength greater than 0.8. Return the statement and confidence score of such Assertions.",
+    "gql": "MATCH (a:Assertion)-[c:Contradicts]->(:Assertion) WHERE c.contradiction_severity > 0.7 RETURN a NEXT MATCH (a1:Assertion)-[s:Supports]->(a) WHERE s.support_strength > 0.8 RETURN a, COUNT(a1) AS support_count NEXT RETURN a.statement, a.confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the top 3 Domains with the highest number of contradictory Assertions (based on the 'Contradicts' relationship) and display the domain name along with the count of contradictions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) RETURN d, COUNT(c) AS contradiction_count NEXT RETURN d.name, contradiction_count ORDER BY contradiction_count DESC LIMIT 3",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all Sources that have been cited for both supporting and contradicting Assertions, and list the source titles along with the number of supporting and contradicting citations.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[sup:Supports]->(a2:Assertion) RETURN s, COUNT(sup) AS support_citations, COUNT(con) AS contradict_citations NEXT RETURN s.title, support_citations, contradict_citations",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Determine the average confidence score of Assertions that contradict other Assertions with a severity greater than 0.5 and are endorsed by Experts specialized in 'Cybersecurity'.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion)<-[:EndorsedBy]-(e:Expert {specialization: 'Cybersecurity'}) WHERE c.contradiction_severity > 0.5 RETURN AVG(a1.confidence_score) AS average_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the top 5 Domains by the total number of Assertions classified under them, where those Assertions have been supported by at least one other Assertion with a support strength greater than 0.5.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)<-[s:Supports]-(a2:Assertion) WHERE s.support_strength > 0.5 RETURN d, COUNT(a1) AS assertion_count NEXT RETURN d.name, assertion_count ORDER BY assertion_count DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "For each Domain, calculate the total number of Assertions and the average confidence score of these Assertions, considering only those Domains that have more than 10 associated Assertions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a:Assertion) RETURN d, COUNT(a) AS assertion_count, AVG(a.confidence_score) AS avg_confidence NEXT RETURN d.name, assertion_count, avg_confidence",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Calculate the average support strength for each Assertion that has been contradicted by at least one other Assertion, and return the Assertion statement along with its average support strength.",
+    "gql": "MATCH (a:Assertion)<-[s:Supports]-(:Assertion) RETURN a, AVG(s.support_strength) AS avg_support_strength NEXT MATCH (a)-[:Contradicts]->(:Assertion) RETURN a.statement, avg_support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of Assertions that contradict other Assertions with a severity greater than 0.5 and are classified under the domain 'Healthcare'.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion), (a1)-[:ClassifiedUnder]->(d:Domain) WHERE c.contradiction_severity > 0.5 AND d.name = 'Healthcare' RETURN AVG(a1.confidence_score) AS average_confidence",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the total number of unique Domains associated with Concepts that have been endorsed by Experts specialized in 'Data Science' and have a validity start date after 2020?",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(c:Concept)-[:EndorsedBy]->(e:Expert), (c)-[:SourcedFrom]->(s:Source) WHERE e.specialization = 'Data Science' AND c.validity_start > date('2020-01-01') RETURN COUNT(DISTINCT d) AS unique_domains",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of sources and their publication dates for sources that have been cited in sourcing assertions which both support and contradict other assertions, ensuring each relationship has a strength/severity greater than 0.7.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion)-[sp:Supports]->(:Assertion), (a)-[ct:Contradicts]->(:Assertion) WHERE sp.support_strength > 0.7 AND ct.contradiction_severity > 0.7 RETURN DISTINCT s.title, s.publication_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the average confidence score of Assertions that are related to Concepts in the 'Healthcare' domain, endorsed by Experts specialized in 'Medical Research', and sourced from publications after 2020?",
+    "gql": "MATCH (a:Assertion)-[:RelatesTo]->(c:Concept)-[:ClassifiedUnder]->(d:Domain {name: 'Healthcare'}), (a)-[:EndorsedBy]->(e:Expert {specialization: 'Medical Research'}), (a)-[:SourcedFrom]->(s:Source) WHERE s.publication_date > date('2020-12-31') RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all domains and the average confidence score of assertions classified under each domain, considering only those assertions that have been sourced from sources published after 2022.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.publication_date > date('2022-12-31') RETURN d.name, AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the total number of assertions that are supported by at least three other assertions and are also tagged with more than two tags.",
+    "gql": "MATCH (a:Assertion)<-[s:Supports]-(:Assertion) RETURN a, COUNT(s) AS support_count, COUNT(t) AS tag_count NEXT RETURN COUNT(a) AS total_assertions",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of Assertions that are classified under the 'Healthcare' domain and have been supported by at least two other Assertions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a:Assertion) WHERE d.name = 'Healthcare' RETURN a NEXT MATCH (a)<-[:Supports]-(s:Assertion) RETURN a, COUNT(s) AS support_count NEXT RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the top 5 domains with the highest number of assertions that contradict other assertions, including the count of such contradictions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) RETURN d.name AS domain_name, COUNT(c) AS contradiction_count ORDER BY contradiction_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the top 5 Domains with the highest average confidence scores of associated Assertions, excluding those Domains where the average confidence score is below 0.5.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a:Assertion) RETURN d.name AS domain_name, AVG(a.confidence_score) AS avg_confidence_score ORDER BY avg_confidence_score DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the titles of Sources that have been cited for sourcing Assertions contradicting other Assertions with a severity greater than 0.7, grouped by source title and sorted by the count of such contradictions in descending order.",
+    "gql": "MATCH (src:Source)<-[:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.7 RETURN src, COUNT(c) AS contradiction_count NEXT RETURN src.title, contradiction_count ORDER BY contradiction_count DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average relationship strength of 'RelatesTo' edges connecting Concepts that are also connected via 'Supports' relationships with a support strength greater than 0.5.",
+    "gql": "MATCH (c1:Concept)-[r:RelatesTo]->(c2:Concept), (c1)-[s:Supports]->(c2:Concept) WHERE s.support_strength > 0.5 RETURN AVG(r.relationship_strength) AS avg_relationship_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of Assertions that are tagged with 'Climate Change' and sourced from publications authored by 'Dr. Jane Smith'.",
+    "gql": "MATCH (a:Assertion)-[:TaggedWith]->(:Tag {name: 'Climate Change'}), (a)-[:SourcedFrom]->(s:Source {author: 'Dr. Jane Smith'}) RETURN AVG(a.confidence_score) AS AverageConfidenceScore",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average support strength of assertions that contradict other assertions with a contradiction severity less than 0.3 and are sourced from academic journals.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion)-[:SourcedFrom]->(s:Source {source_type: 'Academic Journal'}) WHERE c.contradiction_severity < 0.3 RETURN AVG(a1.confidence_score) AS avg_support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the total number of Projects that apply Concepts which are related to other Concepts with a relationship strength greater than 0.9 and belong to the same Domain.",
+    "gql": "MATCH (p:`Project`)<-[:AppliedIn]-(c1:Concept)-[r:RelatesTo]->(c2:Concept)-[:ClassifiedUnder]->(d:Domain) WHERE r.relationship_strength > 0.9 RETURN COUNT(p) AS project_count",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Return the names of Domains along with the average confidence score of Assertions classified under them, excluding those with a null confidence score and ordering the results by average score in descending order.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a:Assertion) WHERE a.confidence_score IS NOT NULL RETURN d.name, AVG(a.confidence_score) AS avg_confidence ORDER BY avg_confidence DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total number of Projects that applied Concepts tagged with 'Machine Learning' and were sourced from academic journals.",
+    "gql": "MATCH (p:`Project`)<-[:AppliedIn]-(c:Concept)-[:TaggedWith]->(t:Tag{name:'Machine Learning'}) RETURN COUNT(p) AS total_projects",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many different assertions are sourced from articles authored by 'Alexandra Garner'?",
+    "gql": "MATCH (n1:Source)-[]->(n2:Assertion) WHERE n1.author = \"Alexandra Garner\" RETURN COUNT(DISTINCT n2) as count_alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the source node with source_type 'Article' and title 'People stage bag share'.",
+    "gql": "MATCH (n:Source) WHERE n.source_type = \"Article\" AND n.title = \"People stage bag share\" RETURN n LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Count the number of related assertions with confidence score greater than 0.3.",
+    "gql": "MATCH (n1:Source)-[]->(n2:Assertion) WHERE n2.confidence_score > 0.3 RETURN COUNT(DISTINCT n2) as count_alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of distinct 'Source' nodes connected from 'Assertion' to 'Source', where the assertion_id equals 'AST00069'.",
+    "gql": "MATCH (n1:Assertion)-[]->(n2:Source) WHERE n1.assertion_id = \"AST00069\" RETURN COUNT(DISTINCT n2) as count_alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find Source nodes authored by 'Alexandra Garner' and return one-hop paths (including intermediate nodes and edges) and two-hop paths (containing three-step relationships), with a limit of 5 results each.",
+    "gql": "MATCH p = (n1:Source)-[e1]-(x)-[e2]-(n2:Source) WHERE n1.author = \"Alexandra Garner\" AND n2.author <> \"Alexandra Garner\" RETURN p LIMIT 5 UNION ALL MATCH p = (n1:Source)-[e1]-(x)-[e2]-(y)-[e3]-(n2:Source) WHERE n1.author = \"Alexandra Garner\" AND n2.author <> \"Alexandra Garner\" RETURN p LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find Assertion nodes with confidence score greater than 0.38 and return their connected Source nodes via SourcedFrom edges along with the citation field of the edge, limited to 10 results.",
+    "gql": "MATCH (a:Assertion {assertion_id: \"AST00069\"})-[e:SourcedFrom]->(n:Source) WHERE e.citation = \"Across next box cultural member.\" AND a.confidence_score > 0.38 RETURN n, e.citation LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find path information from Assertion to Source where citation is 'Across next box cultural member.' and confidence_score is greater than 0.3.",
+    "gql": "MATCH (a:Assertion)-[e:SourcedFrom]->(n:Source) WHERE e.citation = \"Across next box cultural member.\" AND a.confidence_score > 0.3 RETURN n, a.confidence_score LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find article nodes authored by 'Alexandra Garner'.",
+    "gql": "MATCH (n:Source) WHERE n.author = \"Alexandra Garner\" RETURN n LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find SourcedFrom edges and corresponding Source nodes related to Assertion ID 'AST00069'.",
+    "gql": "MATCH (n1:Assertion)-[e:SourcedFrom]->(n2:Source) WHERE n1.assertion_id = \"AST00069\" RETURN n1, e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find Source nodes associated with Assertion nodes and the SourcedFrom edges between them, returning at most 10 records.",
+    "gql": "MATCH (n1:Assertion)-[e:SourcedFrom]->(n2:Source) RETURN e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all Assertion nodes reachable from Source nodes within 1 to 3 hops where the Source title is 'People stage bag share', returning at most 5 records.",
+    "gql": "MATCH (n1:Source)-[e]-{1,3}(n2:Assertion) WHERE n1.title = \"People stage bag share\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find Source node information with title 'People stage bag share'.",
+    "gql": "MATCH (n:Source) WHERE n.title = \"People stage bag share\" RETURN n LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find articles authored by 'Alexandra Garner' and return their associated assertion information.",
+    "gql": "MATCH (nodes_1:Source) WHERE nodes_1.author = \"Alexandra Garner\" RETURN nodes_1 NEXT MATCH (nodes_1)<-[edges_1:SourcedFrom]-(nodes_2:Assertion) RETURN nodes_2, nodes_1, edges_1 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the Source node with source_id 'SRC00000' and limit the result to one.",
+    "gql": "MATCH (n:Source) WHERE n.source_id = \"SRC00000\" RETURN n LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all Source nodes connected to the specified Assertion node within 1 to 3 hops range.",
+    "gql": "MATCH (n1:Assertion)-[e]-{1,3}(n2:Source) WHERE n1.assertion_id = \"AST00069\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find two-hop paths from Assertion nodes to Source nodes where the Source title is 'People stage bag share' and the Assertion assertion_id is not equal to 'AST00069', returning paths limited to one result.",
+    "gql": "MATCH p = (n1:Assertion)-[e1]-(x)-[e2]-(n2:Source) WHERE n2.title = \"People stage bag share\" AND n1.assertion_id <> \"AST00069\" RETURN p LIMIT 1",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Count the number of Assertion nodes associated with the Source node with source_id 'SRC00000'.",
+    "gql": "MATCH (n1:Source)-[]->(n2:Assertion) WHERE n1.source_id = \"SRC00000\" RETURN COUNT(DISTINCT n2) as count_alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of Assertion nodes associated with the Source node with publication_date '2025-11-03'.",
+    "gql": "MATCH (n1:Source)-[]->(n2:Assertion) WHERE n1.publication_date = \"2025-11-03\" RETURN COUNT(DISTINCT n2) as count_alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of distinct Assertion nodes associated with the Source node with title 'People stage bag share'.",
+    "gql": "MATCH (n1:Source)-[]->(n2:Assertion) WHERE n1.title = \"People stage bag share\" RETURN COUNT(DISTINCT n2) AS count_alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average confidence score of assertions sourced from publications authored by 'Dr. Jane Smith' and tagged with 'Machine Learning'.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source {author: 'Dr. Jane Smith'}), (a)-[:TaggedWith]->(t:Tag {name: 'Machine Learning'}) RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find assertions that contradict other assertions with a severity greater than 0.5 and were sourced from publications after January 1, 2020.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion), (a1)-[:SourcedFrom]->(s:Source) WHERE c.contradiction_severity > 0.5 AND s.publication_date > date('2020-01-01') RETURN a1.statement, a2.statement, c.contradiction_severity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all assertions that contradict other assertions which were sourced from articles published in 2025, providing the statement of the contradicting assertion and its contradiction severity.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.publication_date >= date('2025-01-01') AND s.publication_date <= date('2025-12-31') RETURN a1.statement, c.contradiction_severity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the number of assertions supported by at least two other assertions with a support strength greater than 0.7.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion) WHERE s.support_strength > 0.7 RETURN a2, count(s) AS support_count NEXT FILTER support_count >= 2 RETURN count(DISTINCT a2) AS num_supported_assertions",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find the top 5 experts who have endorsed the most assertions, along with the number of endorsements and their specialization.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a:Assertion) RETURN e.name, e.specialization, COUNT(a) AS endorsement_count ORDER BY endorsement_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all domains and the total number of concepts and assertions classified under each domain, sorted by the total count in descending order.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(entity) WHERE entity:Concept OR entity:Assertion RETURN d.name, COUNT(entity) AS total_entities ORDER BY total_entities DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are endorsed by experts specialized in 'Machine Learning' and sourced from publications authored by 'John Doe'.",
+    "gql": "MATCH (a:Assertion)-[:EndorsedBy]->(e:Expert {specialization: 'Machine Learning'}), (a)-[:SourcedFrom]->(s:Source {author: 'John Doe'}) RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify domains that classify both concepts and assertions, and count how many of each type are associated with these domains.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(entity) RETURN d.name, entity:Concept AS is_concept, entity:Assertion AS is_assertion, COUNT(entity) AS entity_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are classified under the domain named 'Artificial Intelligence' and have been endorsed by experts specialized in 'Machine Learning'.",
+    "gql": "MATCH (d:Domain {name: 'Artificial Intelligence'})<-[:ClassifiedUnder]-(a:Assertion)-[:EndorsedBy]->(e:Expert {specialization: 'Machine Learning'}) RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all assertions supported by at least two other assertions and sort them by their confidence score in descending order.",
+    "gql": "MATCH (a1:Assertion)-[:Supports]->(a2:Assertion)<-[:Supports]-(a3:Assertion) WHERE a1.assertion_id <> a3.assertion_id RETURN a2.assertion_id, a2.confidence_score ORDER BY a2.confidence_score DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions sourced from publications authored by 'John Doe'.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source {author: 'John Doe'}) RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the names of organizations in the 'Healthcare' industry that were founded before the year 2000, along with their founding dates.",
+    "gql": "MATCH (o:Organization) WHERE o.industry = 'Healthcare' AND o.founded_date < date('2000-01-01') RETURN o.name, o.founded_date",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve the top 5 sources by the number of assertions they have sourced, including the source title and the count of assertions.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) RETURN s.title, COUNT(a) AS assertion_count ORDER BY assertion_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the average confidence score of assertions supported by other assertions with evidence type 'Empirical Data'.",
+    "gql": "MATCH (a1:Assertion)-[:Supports]->(a2:Assertion {evidence_type: 'Empirical Data'}) RETURN AVG(a1.confidence_score) AS average_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are supported by at least two other assertions and belong to the 'Machine Learning' domain.",
+    "gql": "MATCH (a:Assertion)-[:Supports]->(b:Assertion) RETURN a, COUNT(b) AS support_count NEXT FILTER support_count >= 2 MATCH (a)-[:ClassifiedUnder]->(d:Domain{name:'Machine Learning'}) RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are supported by at least two other assertions.",
+    "gql": "MATCH (a:Assertion)<-[:Supports]-(s1:Assertion), (a)<-[:Supports]-(s2:Assertion) WHERE s1 <> s2 RETURN avg(a.confidence_score) AS average_confidence",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions supported by other assertions within the 'Science' domain.",
+    "gql": "MATCH (a1:Assertion)-[:Supports]->(a2:Assertion)-[:ClassifiedUnder]->(d:Domain {name: 'Science'}) RETURN AVG(a1.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all assertions with a validity period overlapping the year 2023 and supported by at least one other assertion.",
+    "gql": "MATCH (a:Assertion)-[:Supports]->(:Assertion) WHERE a.validity_start <= date('2023-12-31') AND a.validity_end >= date('2023-01-01') RETURN a.assertion_id, a.statement, a.validity_start, a.validity_end",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of assertions per evidence type that contradict other assertions, and order the results by count in descending order.",
+    "gql": "MATCH (a:Assertion)-[:Contradicts]->(:Assertion) RETURN a.evidence_type, COUNT(*) AS contradiction_count ORDER BY contradiction_count DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are supported by at least two other assertions and were sourced from publications authored by 'John Doe'. Return the average confidence score.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.author = 'John Doe' RETURN a NEXT MATCH (a)<-[:Supports]-(supporting:Assertion) RETURN a, count(supporting) AS support_count NEXT FILTER support_count >= 2 RETURN avg(a.confidence_score) AS average_confidence_score",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Retrieve the average confidence score of assertions that are tagged with 'AI' and were sourced from publications authored by 'John Doe'.",
+    "gql": "MATCH (a:Assertion)-[:TaggedWith]->(:Tag {name: 'AI'}), (a)-[:SourcedFrom]->(s:Source {author: 'John Doe'}) RETURN AVG(a.confidence_score) AS average_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many assertions have been sourced from publications authored by 'John Doe' and what is the average confidence score of these assertions?",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source {author: 'John Doe'}) RETURN COUNT(a) AS assertion_count, AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which sources have been cited for assertions with a confidence score higher than 0.9, and what are the titles of these sources?",
+    "gql": "MATCH (a:Assertion)-[sf:SourcedFrom]->(s:Source) WHERE a.confidence_score > 0.9 RETURN DISTINCT s.title",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify contradictory assertions where one has a higher confidence score than the other within the same contradiction relationship.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE a1.confidence_score > a2.confidence_score RETURN a1.assertion_id, a1.confidence_score, a2.assertion_id, a2.confidence_score, c.contradiction_severity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Show the average confidence score of assertions grouped by evidence type, excluding those without an evidence type specified.",
+    "gql": "MATCH (a:Assertion) WHERE a.evidence_type IS NOT NULL RETURN a.evidence_type, AVG(a.confidence_score) AS avg_confidence",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve all assertions supported by at least two other assertions, showing the statement and support count.",
+    "gql": "MATCH (a1:Assertion)-[:Supports]->(a2:Assertion) RETURN a2, count(a1) AS support_count NEXT FILTER support_count >= 2 RETURN a2.statement, support_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are sourced from articles authored by 'Alexandra Garner'.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.author = 'Alexandra Garner' RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of assertions that contradict other assertions within the same domain classification.",
+    "gql": "MATCH (a1:Assertion)-[:Contradicts]->(a2:Assertion) WHERE EXISTS((a1)-[:ClassifiedUnder]->(:Domain)<-[:ClassifiedUnder]-(a2)) RETURN COUNT(*) AS contradiction_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the top 5 domains with the highest number of assertions classified under them, and include the average confidence score of those assertions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a:Assertion) RETURN d.name, COUNT(a) AS assertion_count, AVG(a.confidence_score) AS avg_confidence_score ORDER BY assertion_count DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the titles of sources that have been cited for assertions with a confidence score above 0.9, grouped by source title and sorted by the count of citations in descending order.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source) WHERE a.confidence_score > 0.9 RETURN s.title, COUNT(*) AS citation_count ORDER BY citation_count DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are classified under the domain named 'Quantum Mechanics' and were sourced from publications authored by 'Dr. Evelyn Reed'.",
+    "gql": "MATCH (a:Assertion)-[:ClassifiedUnder]->(d:Domain), (a)-[:SourcedFrom]->(s:Source) WHERE d.name = 'Quantum Mechanics' AND s.author = 'Dr. Evelyn Reed' RETURN avg(a.confidence_score) AS average_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Count the number of assertions per evidence type that were sourced from articles published in 2025.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.source_type = 'Article' AND s.publication_date >= date('2025-01-01') AND s.publication_date <= date('2025-12-31') RETURN a.evidence_type, COUNT(*) AS assertion_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve all assertions that are supported by at least two other assertions and have a confidence score greater than 0.8. Return the assertion ID and its confidence score.",
+    "gql": "MATCH (a:Assertion)<-[s:Supports]-(supporting:Assertion) WHERE a.confidence_score > 0.8 RETURN a, COUNT(supporting) AS support_count NEXT FILTER support_count >= 2 RETURN a.assertion_id AS assertion_id, a.confidence_score AS confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all assertions with their supporting assertions, including the support strength, where the supporting assertion has a higher confidence score.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion) WHERE a2.confidence_score > a1.confidence_score RETURN a1.statement AS original_assertion, a2.statement AS supporting_assertion, s.support_strength AS strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are endorsed by experts specialized in 'Climate Science' and are classified under the domain 'Environmental Studies'.",
+    "gql": "MATCH (a:Assertion)-[:EndorsedBy]->(e:Expert)-[:ClassifiedUnder]->(d:Domain) WHERE e.specialization = 'Climate Science' AND d.name = 'Environmental Studies' RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve assertions that contradict other assertions with a severity greater than 0.7, including their statements and validity periods.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.7 RETURN a1.statement, a1.validity_start, a1.validity_end",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average confidence score of assertions supported by other assertions within the 'Machine Learning' domain.",
+    "gql": "MATCH (d:Domain {name: 'Machine Learning'})<-[:ClassifiedUnder]-(a1:Assertion)<-[:Supports]-(a2:Assertion) RETURN AVG(a2.confidence_score) AS avg_confidence",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the top 5 sources by the number of high-confidence assertions (score > 0.95) they are cited in, including the source title and citation count.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source) WHERE a.confidence_score > 0.95 RETURN s.title, COUNT(a) AS citation_count ORDER BY citation_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which experts have endorsed more than 5 assertions with a confidence score greater than 0.8? Return the expert's name and the count of such endorsements.",
+    "gql": "MATCH (e:Expert)<-[en:EndorsedBy]-(a:Assertion) WHERE a.confidence_score > 0.8 RETURN e, COUNT(en) AS endorsement_count NEXT FILTER endorsement_count > 5 RETURN e.name AS expert_name, endorsement_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the names and publication dates of sources that have been cited in assertions with a confidence score greater than 0.8.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE a.confidence_score > 0.8 RETURN s.title, s.publication_date",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the top 5 sources by the number of assertions they support, showing the source title and the count of supported assertions.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion)<-[:Supports]-(:Assertion) RETURN s.title, COUNT(a) AS supported_assertions_count ORDER BY supported_assertions_count DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all assertions with a confidence score greater than 0.90 that are supported by at least one other assertion, showing the statement and support strength.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion) WHERE a1.confidence_score > 0.90 RETURN DISTINCT a1.statement AS statement, s.support_strength AS support_strength",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve all assertions with a confidence score above 0.9 that were sourced from articles published after 2020, including the source title and publication date.",
+    "gql": "MATCH (a:Assertion)-[s:SourcedFrom]->(src:Source {source_type: 'Article'}) WHERE a.confidence_score > 0.9 AND src.publication_date > date('2020-12-31') RETURN a.statement, src.title, src.publication_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the top 5 most connected concepts by the number of relationships they have, including both incoming and outgoing, and display their names along with the total relationship count.",
+    "gql": "MATCH (c:Concept)-[r]-(other) RETURN c.name AS concept_name, COUNT(r) AS total_relationships ORDER BY total_relationships DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the titles of sources that cite assertions with a validity period overlapping the year 2023.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE a.validity_start <= date('2023-12-31') AND a.validity_end >= date('2023-01-01') RETURN s.title",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find assertions that support other assertions with a support strength greater than 0.9 and were sourced from articles published before 2015, returning the statements of both assertions and the support strength.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion), (a1)-[:SourcedFrom]->(src:Source) WHERE s.support_strength > 0.9 AND src.publication_date < date('2015-01-01') RETURN a1.statement, a2.statement, s.support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions grouped by their associated domain and only include domains where the average confidence score is above 0.85.",
+    "gql": "MATCH (a:Assertion)-[:ClassifiedUnder]->(d:Domain) RETURN d, AVG(a.confidence_score) AS avg_confidence NEXT FILTER avg_confidence > 0.85 RETURN d.name AS domain_name, avg_confidence",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which sources have been cited for assertions that contradict other assertions with a severity greater than 0.5? Return the source titles and the count of such citations.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.5 RETURN s.title AS source_title, COUNT(*) AS citation_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count how many sources each author has contributed to, considering only those authors who have contributed to more than two sources.",
+    "gql": "MATCH (s:Source) RETURN s.author AS author, COUNT(s) AS source_count NEXT FILTER source_count > 2 RETURN author, source_count",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Calculate the average support strength for assertions that contradict other assertions with a contradiction severity greater than 0.7.",
+    "gql": "MATCH (a1:Assertion)-[:Contradicts]->(a2:Assertion) WHERE a2.contradiction_severity > 0.7 RETURN AVG(a1.support_strength) AS avg_support_strength",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of assertions supported by other assertions for each domain and list only those domains where this count exceeds 5.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[:Supports]->(a2:Assertion) RETURN d, COUNT(a2) AS support_count NEXT FILTER support_count > 5 RETURN d.name, support_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the total number of projects that applied concepts tagged with 'Machine Learning' and the average duration of these projects in days.",
+    "gql": "MATCH (p:`Project`)<-[:AppliedIn]-(c:Concept)-[:TaggedWith]->(t:Tag) WHERE t.name = 'Machine Learning' RETURN COUNT(p) AS project_count, AVG(p.end_date) AS avg_duration_days",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the total number of assertions supported by other assertions, grouped by the evidence type of the supporting assertion, excluding those without an evidence type.",
+    "gql": "MATCH (a1:Assertion)-[:Supports]->(a2:Assertion) WHERE a1.evidence_type IS NOT NULL RETURN a1.evidence_type, COUNT(a2) AS total_supported",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find domains that classify both concepts and assertions, returning the domain name and the total count of associated concepts and assertions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(entity) WHERE entity:Concept OR entity:Assertion RETURN d.name, COUNT(entity) AS total_entities",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the domains that have assertions contradicting other assertions with a severity greater than 0.8, and return the domain names along with the average contradiction severity.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.8 RETURN d.name, AVG(c.contradiction_severity) AS avg_severity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the names and publication dates of sources that were used for assertions supporting other assertions with a support strength greater than 0.75, sorted by publication date in ascending order.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[sup:Supports]->(a2:Assertion) WHERE sup.support_strength > 0.75 RETURN s.title, s.publication_date ORDER BY s.publication_date ASC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Calculate the total number of assertions that support other assertions and also determine the average confidence score of these supporting assertions grouped by their evidence type.",
+    "gql": "MATCH (a1:Assertion)-[:Supports]->(a2:Assertion) RETURN a1.evidence_type, COUNT(*) AS total_supporting_assertions, AVG(a1.confidence_score) AS average_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which sources have been cited for both supporting and contradicting assertions? Return the source titles and the respective counts of supporting and contradicting citations.",
+    "gql": "MATCH (src:Source)<-[:SourcedFrom]-(a1:Assertion)-[:Supports]->(:Assertion), (src)<-[:SourcedFrom]-(a2:Assertion)-[:Contradicts]->(:Assertion) RETURN src, COUNT(DISTINCT a1) AS supports_count, COUNT(DISTINCT a2) AS contradicts_count NEXT RETURN src.title AS source_title, supports_count, contradicts_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the top 5 most frequently used tags across all assertions and concepts combined? Return the tag names and their usage counts.",
+    "gql": "MATCH (t:Tag)<-[:TaggedWith]-(n) WHERE n:Assertion OR n:Concept RETURN t.name AS tag_name, COUNT(n) AS usage_count ORDER BY usage_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve domains that classify both concepts and assertions, showing domain names and the total count of classified items (concepts + assertions).",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(item) WHERE item:Concept OR item:Assertion RETURN d.name, COUNT(item) AS total_classified_items ORDER BY total_classified_items DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve domains that classify both concepts and assertions, and calculate the average confidence score of the assertions classified under each of these domains, returning only those domains where the average confidence score is above 0.6.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a:Assertion) RETURN d, AVG(a.confidence_score) AS avg_confidence NEXT FILTER avg_confidence > 0.6 RETURN d.name, avg_confidence",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find sources that have been cited for more than five assertions or concepts and return the source titles along with the total citation count.",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-() RETURN s, COUNT(sf) AS citation_count NEXT FILTER citation_count > 5 RETURN s.title, citation_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the titles of sources that have been used to source assertions which contradict other assertions with a severity greater than 0.8, along with the contradiction severity.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion), (a1)-[:SourcedFrom]->(s:Source) WHERE c.contradiction_severity > 0.8 RETURN s.title, c.contradiction_severity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which concepts are supported by at least three assertions with a confidence score above 0.8? Return the concept names and the average confidence score of supporting assertions.",
+    "gql": "MATCH (c:Concept)<-[:RelatesTo]-(a:Assertion)-[:Supports]->(:Assertion) WHERE a.confidence_score > 0.8 RETURN c, COUNT(a) AS support_count, AVG(a.confidence_score) AS avg_confidence NEXT FILTER support_count >= 3 RETURN c.name, avg_confidence",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find sources that were published in the last year and have been cited in assertions with validity periods overlapping with the current year. Return the source title and publication date.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE s.publication_date >= date('2024-01-01') AND a.validity_start <= date('2025-12-31') AND (a.validity_end IS NULL OR a.validity_end >= date('2025-01-01')) RETURN DISTINCT s.title AS source_title, s.publication_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all assertions with a validity start date after 2020-01-01 that are supported by at least two other assertions. Include the assertion statement and the count of supporting assertions.",
+    "gql": "MATCH (a:Assertion)-[:Supports]->(sup:Assertion) WHERE a.validity_start > date('2020-01-01') RETURN a.statement AS assertion_statement, COUNT(sup) AS supporting_assertions_count ORDER BY supporting_assertions_count DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the total number of projects that applied concepts which were sourced from publications authored by 'Jane Smith'?",
+    "gql": "MATCH (p:`Project`)<-[:AppliedIn]-(c:Concept)-[:SourcedFrom]->(s:Source) WHERE s.author = 'Jane Smith' RETURN COUNT(DISTINCT p) AS project_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify experts who have endorsed assertions with an average confidence score greater than 0.75, and list their names along with their affiliations.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a:Assertion) RETURN e, AVG(a.confidence_score) AS avg_confidence NEXT FILTER avg_confidence > 0.75 RETURN e.name, e.affiliation",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total number of assertions that are contradicted by other assertions with a contradiction severity less than 0.3, grouped by the domain name under which these assertions are classified.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion)-[:ClassifiedUnder]->(d:Domain) WHERE c.contradiction_severity < 0.3 RETURN d.name, COUNT(a1) AS total_assertions",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names and publication dates of sources that have been used for assertions which are supported by at least two other assertions, ensuring no duplicate source entries in the result.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion)<-[sup:Supports]-(:Assertion) RETURN s, a, COUNT(sup) AS support_count NEXT FILTER support_count >= 2 RETURN DISTINCT s.title AS source_title, s.publication_date AS publication_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the total number of assertions sourced from each source type and also list the average confidence score of assertions for each source type where the publication date of the source is known.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.publication_date IS NOT NULL RETURN s.source_type, COUNT(a) AS total_assertions, AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which assertions have been supported by at least one other assertion and also contradicted with a severity score greater than 0.6? Return the statement of such assertions and their average confidence score.",
+    "gql": "MATCH (a:Assertion)-[:Supports]->(:Assertion) RETURN DISTINCT a NEXT MATCH (a)-[c:Contradicts]->(:Assertion) WHERE c.contradiction_severity > 0.6 RETURN a.statement, avg(a.confidence_score) AS avg_confidence",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find all assertions that are supported by at least one other assertion with a support strength greater than 0.8 and contradicted by another assertion with a severity greater than 0.7, returning the assertion statement and its average support strength.",
+    "gql": "MATCH (a:Assertion)<-[s:Supports]-(sa:Assertion), (a)-[c:Contradicts]->(ca:Assertion) WHERE s.support_strength > 0.8 AND c.contradiction_severity > 0.7 RETURN a.statement, AVG(s.support_strength) AS avg_support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the total number of assertions supported by other assertions with a support strength greater than 0.7, grouped by the evidence type of the supporting assertion.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion) WHERE s.support_strength > 0.7 RETURN a1.evidence_type, COUNT(*) AS total_supported",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the average relationship strength between concepts that are both tagged with 'Climate Change' and sourced from the same publication.",
+    "gql": "MATCH (c1:Concept)-[:TaggedWith]->(t:Tag {name: 'Climate Change'}), (c2:Concept)-[:TaggedWith]->(t), (c1)-[:SourcedFrom]->(s:Source)<-[:SourcedFrom]-(c2), (c1)-[r:RelatesTo]->(c2) RETURN AVG(r.relationship_strength) AS avg_relationship_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which sources have been cited for assertions that contradict other assertions with a severity greater than 0.7? Return the source titles and the count of such citations.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion), (a1)-[s:SourcedFrom]->(src:Source) WHERE c.contradiction_severity > 0.7 RETURN src.title AS source_title, COUNT(s) AS citation_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What are the names and confidence scores of assertions that are supported by at least two other assertions with support strengths greater than 0.5?",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion) WHERE s.support_strength > 0.5 RETURN a2, COUNT(s) AS support_count NEXT FILTER support_count >= 2 RETURN a2.statement, a2.confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total number of assertions sourced from publications authored by 'Dr. Jane Smith' and tagged with 'Machine Learning'.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source), (a)-[:TaggedWith]->(t:Tag) WHERE s.author = 'Dr. Jane Smith' AND t.name = 'Machine Learning' RETURN COUNT(a) AS total_assertions",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Return the titles of sources and the total number of assertions derived from each source, where the assertions have a confidence score greater than 0.9.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE a.confidence_score > 0.9 RETURN s.title, COUNT(a) AS high_confidence_assertions",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all sources that have contributed to assertions with a confidence score higher than 0.9, listing the source title and the average confidence score of related assertions.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE a.confidence_score > 0.9 RETURN s, AVG(a.confidence_score) AS avg_confidence NEXT RETURN s.title AS source_title, avg_confidence",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all assertions with validity periods overlapping the year 2023 and supported by at least one other assertion with a support strength greater than 0.8. Return the assertion statement, its validity start and end dates, and the highest support strength it received.",
+    "gql": "MATCH (a1:Assertion)<-[s:Supports]-(a2:Assertion) WHERE s.support_strength > 0.8 AND a1.validity_start <= date('2023-12-31') AND a1.validity_end >= date('2023-01-01') RETURN a1.statement, a1.validity_start, a1.validity_end, MAX(s.support_strength) AS max_support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve sources that cite assertions with a confidence score above 0.9, including source titles and citation details.",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-(a:Assertion) WHERE a.confidence_score > 0.9 RETURN s.title, sf.citation",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average relationship strength between concepts that are related within the same domain and tagged with 'Quantum Computing'. Return the average strength.",
+    "gql": "MATCH (c1:Concept)-[r:RelatesTo]->(c2:Concept), (c1)-[:ClassifiedUnder]->(d:Domain)<-[:ClassifiedUnder]-(c2), (c1)-[:TaggedWith]->(t:Tag {name: 'Quantum Computing'}) RETURN AVG(r.relationship_strength) AS avg_relationship_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all sources that cite assertions contradicted with a severity higher than 0.7, and return the source title and the citation details.",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.7 RETURN s.title, sf.citation",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the top 3 experts who have endorsed the most assertions with a confidence score greater than 0.8, returning their names and the count of such endorsements.",
+    "gql": "MATCH (e:Expert)<-[en:EndorsedBy]-(a:Assertion) WHERE a.confidence_score > 0.8 RETURN e.name, COUNT(en) AS endorsement_count ORDER BY endorsement_count DESC LIMIT 3",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve all assertions that support other assertions contradicted by a severity score over 0.7, providing the supporting assertion's statement and its support strength.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion)-[c:Contradicts]->(a3:Assertion) WHERE c.contradiction_severity > 0.7 RETURN a1.statement, s.support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the top 5 sources with the highest number of cited assertions, along with the source title and citation count.",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-(a:Assertion) RETURN s.title, COUNT(a) AS citation_count ORDER BY citation_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all projects that applied concepts sourced from publications authored by 'Dr. Jane Smith' and calculate the total number of such projects.",
+    "gql": "MATCH (p:`Project`)-[:AppliedIn]->(c:Concept)-[:SourcedFrom]->(s:Source{author:'Dr. Jane Smith'}) RETURN COUNT(DISTINCT p) AS total_projects",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names and confidence scores of assertions that contradict other assertions with a severity greater than 0.8, ensuring no duplicates in the results.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.8 RETURN DISTINCT a1.statement, a1.confidence_score ORDER BY a1.confidence_score DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which sources have been cited for assertions that contradict other assertions with a contradiction severity greater than 0.9? Return the source titles and the count of such citations.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.9 RETURN s.title AS source_title, COUNT(c) AS citation_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of domains and the total number of assertions classified under each domain that have been contradicted by at least one other assertion.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[:Contradicts]->(a2:Assertion) RETURN d.name, COUNT(DISTINCT a1) AS total_contradicted_assertions",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the total number of assertions sourced from publications authored by 'John Doe' and return the count.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.author = 'John Doe' RETURN COUNT(a) AS total_assertions",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find sources that have been cited for both assertions and concepts, returning the source title and the count of distinct citations.",
+    "gql": "MATCH (s:Source)<-[cited:SourcedFrom]-(entity) WHERE entity:Assertion OR entity:Concept RETURN s.title, COUNT(DISTINCT cited) AS citation_count ORDER BY citation_count DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the top 5 sources that have been cited for assertions with the highest average confidence scores. Include the source title and the average confidence score.",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-(a:Assertion) RETURN s.title, AVG(a.confidence_score) AS avg_confidence ORDER BY avg_confidence DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the titles of sources that have been used to source assertions which are supported by at least two other assertions with a support strength greater than 0.7.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion)<-[sup:Supports]-(supporting:Assertion) WHERE sup.support_strength > 0.7 RETURN a, s, COUNT(supporting) AS support_count NEXT FILTER support_count >= 2 RETURN DISTINCT s.title AS source_title",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which sources have contributed to assertions that are both supported and contradicted, and what are their titles and publication dates?",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion)-[:Supports]->(:Assertion), (a)-[:Contradicts]->(:Assertion) RETURN DISTINCT s.title AS source_title, s.publication_date AS publication_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the total number of projects that applied concepts from the 'Data Science' domain and were sourced from publications authored by 'Dr. Smith'.",
+    "gql": "MATCH (p:`Project`)<-[:AppliedIn]-(c:Concept)-[:ClassifiedUnder]->(d:Domain{name:'Data Science'}), (c)-[:SourcedFrom]->(s:Source{author:'Dr. Smith'}) RETURN COUNT(DISTINCT p) AS project_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List the names of experts who have endorsed assertions with a validity start date after January 1, 2020, and include the count of such endorsements per expert.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a:Assertion) WHERE a.validity_start > date('2020-01-01') RETURN e.name, COUNT(a) AS endorsement_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List experts who have endorsed assertions with a confidence score greater than 0.9, including the expert's name, specialization, and the total number of such high-confidence endorsements.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a:Assertion) WHERE a.confidence_score > 0.9 RETURN e.name, e.specialization, COUNT(a) AS high_confidence_endorsements",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the top 3 most frequently used tags across all assertions and concepts, along with the tag name and usage count.",
+    "gql": "MATCH (t:Tag)<-[:TaggedWith]-(n) RETURN t.name, COUNT(n) AS usage_count ORDER BY usage_count DESC LIMIT 3",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which assertions contradict others with a severity higher than 0.6 and are also supported by at least one assertion? Return the statement of such assertions along with the maximum contradiction severity and the count of supporting assertions.",
+    "gql": "MATCH (a:Assertion)-[ctr:Contradicts]->(:Assertion), (a)<-[sp:Supports]-(:Assertion) WHERE ctr.contradiction_severity > 0.6 RETURN a.statement, MAX(ctr.contradiction_severity) AS max_contradiction_severity, COUNT(sp) AS support_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the total number of assertions sourced from publications authored by 'John Doe' and having a confidence score above 0.75.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source {author: 'John Doe'}) WHERE a.confidence_score > 0.75 RETURN COUNT(a) AS high_confidence_assertions_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find sources that have been cited for assertions with a confidence score above 0.9 and have also been cited for at least one contradiction. Return the source title and the number of contradictions it's involved in.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion)-[:Contradicts]->(:Assertion) WHERE a.confidence_score > 0.9 RETURN s, COUNT(a) AS contradiction_count NEXT RETURN s.title, contradiction_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the titles and publication dates of sources that have been cited for assertions contradicting other assertions with a severity greater than 0.85?",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.85 RETURN DISTINCT s.title, s.publication_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the top 5 most frequently used tags associated with assertions that have a confidence score greater than 0.95? Return the tag names and their usage counts.",
+    "gql": "MATCH (t:Tag)<-[:TaggedWith]-(a:Assertion) WHERE a.confidence_score > 0.95 RETURN t.name, COUNT(a) AS usage_count ORDER BY usage_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify sources that have contributed to assertions with a confidence score below 0.5 and are of type 'Website'. Provide the source title, URL, and the count of such low-confidence assertions.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source {source_type: 'Website'}) WHERE a.confidence_score < 0.5 RETURN s.title, s.url, COUNT(a) AS low_confidence_assertions_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which sources have contributed to assertions with validity periods overlapping the year 2023? Provide the source titles and the count of such assertions.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE (a.validity_start <= date('2023-12-31') AND a.validity_end >= date('2023-01-01')) OR (a.validity_start >= date('2023-01-01') AND a.validity_start <= date('2023-12-31')) RETURN s.title, COUNT(a) AS assertion_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Return the average confidence score of assertions that contradict other assertions with a severity greater than 0.5 and are classified under the 'Technology' domain.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion)-[:ClassifiedUnder]->(d:Domain) WHERE c.contradiction_severity > 0.5 AND d.name = 'Technology' RETURN AVG(a1.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Return the average confidence score of assertions that contradict other assertions with a severity greater than 0.75, grouped by the domain of the contradicting assertion.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion)-[:ClassifiedUnder]->(d:Domain) WHERE c.contradiction_severity > 0.75 RETURN d.name, AVG(a1.confidence_score) AS avg_confidence",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of domains along with the average confidence score of assertions classified under them, considering only assertions with a validity period starting after January 1, 2020. Order the results by average confidence score in descending order.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a:Assertion) WHERE a.validity_start > date('2020-01-01') RETURN d.name, AVG(a.confidence_score) AS avg_confidence ORDER BY avg_confidence DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are tagged with 'Climate Change' and were sourced from articles published after January 1, 2020. Also, return the count of such assertions.",
+    "gql": "MATCH (a:Assertion)-[:TaggedWith]->(:Tag {name: 'Climate Change'}), (a)-[:SourcedFrom]->(s:Source) WHERE s.source_type = 'Article' AND s.publication_date > date('2020-01-01') RETURN AVG(a.confidence_score) AS avg_confidence_score, COUNT(a) AS total_assertions",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Determine the top 3 most frequently used tags across all concepts and assertions, showing the tag name and its usage count.",
+    "gql": "MATCH (t:Tag)<-[:TaggedWith]-(n) WHERE n:Concept OR n:Assertion RETURN t.name, COUNT(n) AS usage_count ORDER BY usage_count DESC LIMIT 3",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which concepts have been supported by assertions with a support strength higher than 0.9 and also contradicted by other assertions with a contradiction severity less than 0.3? Return the concept names and descriptions.",
+    "gql": "MATCH (c:Concept)<-[:RelatesTo]-(a1:Assertion)-[s:Supports]->(:Assertion) WHERE s.support_strength > 0.9 RETURN c NEXT MATCH (c)<-[:RelatesTo]-(a2:Assertion)-[ct:Contradicts]->(:Assertion) WHERE ct.contradiction_severity < 0.3 RETURN DISTINCT c.name AS concept_name, c.description AS concept_description",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find experts who have endorsed both supporting and contradicting assertions. Display their names and credentials.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)-[:Supports]->(:Assertion) RETURN e NEXT MATCH (e)<-[:EndorsedBy]-(a2:Assertion)-[:Contradicts]->(:Assertion) RETURN DISTINCT e.name AS expert_name, e.credentials AS expert_credentials",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are tagged with concepts belonging to the 'Performance Domain' and have been endorsed by experts specialized in 'Data Science'.",
+    "gql": "MATCH (d:Domain {name: 'Performance Domain'})<-[:ClassifiedUnder]-(c:Concept)-[:TaggedWith]->(a:Assertion), (a)-[:EndorsedBy]->(e:Expert {specialization: 'Data Science'}) RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find experts who have endorsed both concepts and assertions with a validity start date after 2020, and return their names along with the total number of endorsements they've made.",
+    "gql": "MATCH (e:Expert)<-[ed:EndorsedBy]-(entity) WHERE (entity:Concept OR entity:Assertion) AND entity.validity_start > date('2020-01-01') RETURN e.name, COUNT(ed) AS total_endorsements",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which assertions contradict other assertions with a severity higher than 0.9, and what are the titles of the sources from which these contradictory assertions were sourced?",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion), (a1)-[:SourcedFrom]->(s:Source) WHERE c.contradiction_severity > 0.9 RETURN DISTINCT a1.assertion_id AS assertion_id, s.title AS source_title",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Display the source titles and the total number of assertions that contradict other assertions, grouped by source type, excluding sources without a specified publication date.",
+    "gql": "MATCH (a1:Assertion)-[:Contradicts]->(a2:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.publication_date IS NOT NULL RETURN s.source_type, s.title, COUNT(a1) AS contradictory_assertions_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Determine the total number of assertions sourced from publications authored by 'Dr. Smith' and having a confidence score above 0.85.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source {author: 'Dr. Smith'}) WHERE a.confidence_score > 0.85 RETURN COUNT(a) AS high_confidence_assertions_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find assertions with validity periods overlapping the year 2025, supported by other assertions with a support strength greater than 0.8. Return the statement of such assertions and the total support strength received.",
+    "gql": "MATCH (a:Assertion)-[s:Supports]->(a2:Assertion) WHERE a.validity_start <= date('2025-12-31') AND (a.validity_end IS NULL OR a.validity_end >= date('2025-01-01')) AND s.support_strength > 0.8 RETURN a.statement, SUM(s.support_strength) AS total_support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find experts who have endorsed assertions that contradict other assertions with a contradiction severity higher than 0.8 and return their names, affiliations, and the maximum severity of contradictions they are associated with.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.8 RETURN e.name, e.affiliation, MAX(c.contradiction_severity) AS max_contradiction_severity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the titles and publication dates of sources that were cited for both supporting and contradicting assertions, considering only those assertions with a confidence score above 0.85?",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion)-[:Supports]->(:Assertion), (a)-[:Contradicts]->(:Assertion) WHERE a.confidence_score > 0.85 RETURN DISTINCT s.title, s.publication_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names and publication dates of sources that have been cited for assertions with a confidence score below 0.5, sorted by publication date in ascending order.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE a.confidence_score < 0.5 RETURN s.title, s.publication_date ORDER BY s.publication_date ASC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the average confidence score of assertions that contradict other assertions with a severity greater than 0.5 and are sourced from publications authored by 'Prof. Johnson'.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion), (a1)-[:SourcedFrom]->(s:Source {author: 'Prof. Johnson'}) WHERE c.contradiction_severity > 0.5 RETURN AVG(a1.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the titles and authors of sources cited for assertions that contradict other assertions with a severity greater than 0.7, grouped by source title?",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-(a1:Assertion)-[ctr:Contradicts]->(a2:Assertion) WHERE ctr.contradiction_severity > 0.7 RETURN s.title, s.author, COUNT(ctr) AS contradiction_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find experts who have endorsed assertions that are supported by at least two other assertions with a support strength greater than 0.85, and return their names along with the total number of such endorsements.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)<-[s:Supports]-(a2:Assertion) WHERE s.support_strength > 0.85 RETURN e, a1, COUNT(a2) AS support_count NEXT FILTER support_count >= 2 RETURN e.name, COUNT(a1) AS total_endorsements",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Retrieve experts who have endorsed assertions in more than two distinct domains. Include the expert's name and the number of distinct domains.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a:Assertion)-[:ClassifiedUnder]->(d:Domain) RETURN e, COUNT(DISTINCT d) AS domain_count NEXT FILTER domain_count > 2 RETURN e.name, domain_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List the top 5 experts who have endorsed the most assertions with a confidence score greater than 0.8, including their names and the count of such endorsements.",
+    "gql": "MATCH (e:Expert)<-[ed:EndorsedBy]-(a:Assertion) WHERE a.confidence_score > 0.8 RETURN e.name, COUNT(ed) AS endorsement_count ORDER BY endorsement_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average confidence score of assertions supported by other assertions with a support strength greater than 0.75, grouped by the evidence type of the supporting assertions.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion) WHERE s.support_strength > 0.75 RETURN a1.evidence_type, AVG(a2.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all domains and their parent domains, including those domains that do not have a parent domain specified, and order the results alphabetically by domain name.",
+    "gql": "MATCH (d:Domain) RETURN d.name, d.parent_domain ORDER BY d.name ASC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find experts who have endorsed assertions that contradict other assertions with a severity greater than 0.8, and return their names along with the total number of such contradictions they are involved in.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.8 RETURN e.name, COUNT(c) AS contradiction_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of domains and the total number of contradictory relationships where the contradiction severity is greater than 0.7, ordered by the total contradictions descending.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.7 RETURN d.name, COUNT(c) AS total_contradictions ORDER BY total_contradictions DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of experts who have endorsed more than 3 assertions with a confidence score greater than 0.85, and display the average confidence score of the assertions they endorsed.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a:Assertion) WHERE a.confidence_score > 0.85 RETURN e, COUNT(a) AS endorsement_count, AVG(a.confidence_score) AS avg_confidence NEXT FILTER endorsement_count > 3 RETURN e.name, avg_confidence",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the average confidence score of assertions that are tagged with 'reliable' and were sourced from publications authored by 'Dr. Smith'.",
+    "gql": "MATCH (a:Assertion)-[:TaggedWith]->(:Tag {name: 'reliable'}), (a)-[:SourcedFrom]->(s:Source {author: 'Dr. Smith'}) RETURN AVG(a.confidence_score) AS average_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which domains contain assertions that contradict other assertions with a severity greater than 0.8 and also support at least one other assertion? Return the domain names and the count of such conflicting assertions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[ctr:Contradicts]->(a2:Assertion) WHERE ctr.contradiction_severity > 0.8 RETURN d, a1 NEXT MATCH (a1)-[:Supports]->(:Assertion) RETURN d.name, COUNT(DISTINCT a1) AS conflicting_assertions_count",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are sourced from publications published after January 1, 2020, and tagged with 'Climate Change'.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source), (a)-[:TaggedWith]->(t:Tag {name: 'Climate Change'}) WHERE s.publication_date > DATE('2020-01-01') RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions sourced from publications authored by 'Dr. Jane Smith' and published after 2022.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.author = 'Dr. Jane Smith' AND s.publication_date > date('2022-12-31') RETURN AVG(a.confidence_score) AS average_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Determine the average support strength for assertions that contradict other assertions, grouped by the evidence type of the contradicting assertion, and only include groups with an average support strength above 0.5.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion) RETURN a1, AVG(c.contradiction_severity) AS avg_contradiction_severity NEXT FILTER avg_contradiction_severity > 0.5 MATCH (a1)-[s:Supports]->(:Assertion) RETURN a1.evidence_type, AVG(s.support_strength) AS avg_support_strength",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Retrieve the average confidence score of assertions that contradict other assertions with a severity greater than 0.5 and are classified under the 'Data Science' domain.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion)-[:ClassifiedUnder]->(d:Domain {name: 'Data Science'}) WHERE c.contradiction_severity > 0.5 RETURN AVG(a1.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of experts who have endorsed assertions that contradict other assertions with a severity greater than 0.7, and include the expert's specialization.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)-[:Contradicts]->(a2:Assertion) WHERE a1.confidence_score > 0.7 RETURN DISTINCT e.name, e.specialization",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find domains where the average confidence score of assertions is less than 0.5 and these assertions are supported by at least one other assertion. Return the domain name and the average confidence score.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[:Supports]->(a2:Assertion) WHERE a1.confidence_score < 0.5 RETURN d, AVG(a1.confidence_score) AS avg_confidence NEXT RETURN d.name, avg_confidence",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which sources have contributed to assertions that contradict other assertions with a severity greater than 0.75? Provide the source titles and the count of such contradictions.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.75 RETURN s.title AS source_title, COUNT(c) AS contradiction_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the top 3 most frequently used tags across all concepts and assertions? Return the tag name and the frequency count.",
+    "gql": "MATCH (t:Tag)<-[:TaggedWith]-() RETURN t.name, COUNT(*) AS frequency ORDER BY frequency DESC LIMIT 3",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What are the top 3 domains by the total number of assertions classified under them that have a confidence score greater than 0.7? Return domain names and the count of such assertions.",
+    "gql": "MATCH (a:Assertion)-[:ClassifiedUnder]->(d:Domain) WHERE a.confidence_score > 0.7 RETURN d.name AS domain_name, COUNT(a) AS high_confidence_assertions ORDER BY high_confidence_assertions DESC LIMIT 3",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find sources that have been cited by assertions with a confidence score below 0.5 and also by those with a score above 0.9, returning the source titles and IDs.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion) WHERE a1.confidence_score < 0.5 RETURN s NEXT MATCH (s)<-[:SourcedFrom]-(a2:Assertion) WHERE a2.confidence_score > 0.9 RETURN DISTINCT s.source_id, s.title",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are supported by at least one other assertion with a support strength greater than 0.8 and are sourced from publications authored by 'Dr. Smith'.",
+    "gql": "MATCH (a1:Assertion)<-[s:Supports]-(a2:Assertion)-[sf:SourcedFrom]->(src:Source) WHERE s.support_strength > 0.8 AND src.author = 'Dr. Smith' RETURN AVG(a1.confidence_score) AS avg_confidence_score",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Retrieve the average confidence score of assertions supported by other assertions, grouped by the evidence type of the supporting assertions, excluding those with an evidence type of 'Anecdotal'.",
+    "gql": "MATCH (a1:Assertion)-[:Supports]->(a2:Assertion) WHERE a1.evidence_type <> 'Anecdotal' RETURN a1.evidence_type AS evidence_type, AVG(a2.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify experts who have endorsed both supporting and contradicting assertions. Return the expert's name and the number of endorsements for each type of assertion.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)-[:Supports]->(:Assertion), (e)<-[:EndorsedBy]-(a2:Assertion)-[:Contradicts]->(:Assertion) RETURN e, COUNT(DISTINCT a1) AS supports_count, COUNT(DISTINCT a2) AS contradicts_count NEXT RETURN e.name AS expert_name, supports_count, contradicts_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the top 5 sources by the total confidence score of assertions sourced from them, including the source title and the aggregated confidence score.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) RETURN s.title AS source_title, SUM(a.confidence_score) AS total_confidence_score ORDER BY total_confidence_score DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the top 3 domains with the highest average confidence score of related assertions, including the domain name and the average confidence score.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a:Assertion) RETURN d.name, AVG(a.confidence_score) AS avg_confidence_score ORDER BY avg_confidence_score DESC LIMIT 3",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average confidence score of assertions sourced from publications authored by 'Dr. Jane Smith' and published after January 1, 2024.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE s.author = 'Dr. Jane Smith' AND s.publication_date > date('2024-01-01') RETURN AVG(a.confidence_score) AS average_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which sources were used for assertions contradicted by highly-confident assertions (confidence score > 0.95)? Return the source titles and the number of such contradictions.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[:Contradicts]->(a2:Assertion) WHERE a2.confidence_score > 0.95 RETURN s.title AS source_title, COUNT(*) AS contradiction_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which assertions have a confidence score higher than 0.9 and are supported by at least two other assertions? Display the assertion ID and its confidence score.",
+    "gql": "MATCH (a:Assertion)-[:Supports]->(s:Assertion) WHERE a.confidence_score > 0.9 RETURN a, COUNT(s) AS support_count NEXT FILTER support_count >= 2 RETURN a.assertion_id, a.confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average confidence score of assertions that are tagged with 'Machine Learning' and have been sourced from academic journals published after 2020.",
+    "gql": "MATCH (a:Assertion)-[:TaggedWith]->(t:Tag)<-[:TaggedWith]-(a:Assertion)-[:SourcedFrom]->(s:Source) WHERE t.name = 'Machine Learning' AND s.source_type = 'Academic Journal' AND s.publication_date > date('2020-12-31') RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the top 5 most frequently used tags across all assertions and return the tag names along with their usage counts, ordered by the count in descending order.",
+    "gql": "MATCH (a:Assertion)-[:TaggedWith]->(t:Tag) RETURN t.name, COUNT(a) AS usage_count ORDER BY usage_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the names of domains where the supporting assertions have an average support strength greater than 0.75 and at least five supporting relationships.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[s:Supports]->(a2:Assertion) RETURN d, AVG(s.support_strength) AS avg_support, COUNT(s) AS support_count NEXT FILTER avg_support > 0.75 AND support_count >= 5 RETURN d.name, avg_support",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find domains that classify both assertions and concepts, returning the domain name and the total count of classifications involving that domain.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(either) RETURN d, COUNT(either) AS classification_count NEXT RETURN d.name, classification_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve experts who have endorsed assertions that contradict other assertions, displaying the expert name and the number of contradictions they are associated with.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)-[:Contradicts]->(a2:Assertion) RETURN e.name, COUNT(a1) AS contradiction_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify sources that have been cited for both supporting and contradicting assertions, returning the source ID and title.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[sup:Supports]->(a2:Assertion), (s)<-[:SourcedFrom]-(a3:Assertion)-[ctr:Contradicts]->(a4:Assertion) RETURN DISTINCT s.source_id, s.title",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Which experts have endorsed assertions that are supported by at least two other assertions with a combined support strength exceeding 1.5? Return the expert names and the number of such assertions.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)<-[s:Supports]-(a2:Assertion) RETURN e, a1, SUM(s.support_strength) AS total_support, COUNT(s) AS support_count NEXT FILTER support_count >= 2 AND total_support > 1.5 RETURN e.name, COUNT(a1) AS num_assertions",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the titles of sources and the total number of tags associated with assertions sourced from these publications, but only include sources where the total tag count exceeds 5.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion)-[:TaggedWith]->(t:Tag) RETURN s, COUNT(t) AS tag_count NEXT FILTER tag_count > 5 RETURN s.title, tag_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify experts who have endorsed assertions with validity periods overlapping the year 2025, and return their names along with the count of such endorsements.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a:Assertion) WHERE a.validity_start <= date('2025-12-31') AND a.validity_end >= date('2025-01-01') RETURN e.name, COUNT(a) AS endorsements_in_2025",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which experts have endorsed assertions that both support and contradict other assertions, given that these assertions must have a confidence score greater than 0.9? Provide the expert's name and their affiliation.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a:Assertion)-[:Supports]->(:Assertion), (a)-[:Contradicts]->(:Assertion) WHERE a.confidence_score > 0.9 RETURN DISTINCT e.name, e.affiliation",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify experts who have endorsed assertions that both support and contradict other assertions. Return the expert names and their specialization.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)-[:Supports]->(:Assertion), (e)<-[:EndorsedBy]-(a2:Assertion)-[:Contradicts]->(:Assertion) RETURN DISTINCT e.name, e.specialization",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all assertions that are supported by at least two other assertions, showing the assertion ID and the number of supporting assertions.",
+    "gql": "MATCH (a:Assertion)<-[:Supports]-(s:Assertion) RETURN a, COUNT(s) AS support_count NEXT FILTER support_count >= 2 RETURN a.assertion_id AS assertion_id, support_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify domains that classify both concepts and assertions where at least one of the assertions has a confidence score greater than 0.9. Return the domain name and the count of such classified items.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(item) WHERE (item:Concept OR (item:Assertion AND item.confidence_score > 0.9)) RETURN d.name, COUNT(item) AS classified_item_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve experts who have endorsed assertions that are supported by at least two other assertions, each with a support strength greater than 0.85. Return the expert's name and the number of such supported assertions they have endorsed.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a:Assertion)<-[s:Supports]-(sa:Assertion) WHERE s.support_strength > 0.85 RETURN e, a, COUNT(s) AS support_count NEXT FILTER support_count >= 2 RETURN e.name, COUNT(a) AS endorsed_supported_assertions",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions that have been tagged with 'AI' and were sourced from publications authored by 'Jane Smith'.",
+    "gql": "MATCH (t:Tag {name: 'AI'})<-[:TaggedWith]-(a:Assertion)-[:SourcedFrom]->(s:Source {author: 'Jane Smith'}) RETURN AVG(a.confidence_score) AS average_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which experts have endorsed assertions that are supported by other assertions with a support strength greater than 0.85? Return the expert's name and the maximum support strength among the assertions they endorsed.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)<-[s:Supports]-(a2:Assertion) WHERE s.support_strength > 0.85 RETURN e.name, MAX(s.support_strength) AS max_support_strength",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find experts who have endorsed assertions with an average confidence score greater than 0.75. Return the expert\u2019s name and their average confidence score.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a:Assertion) RETURN e, AVG(a.confidence_score) AS avg_confidence NEXT FILTER avg_confidence > 0.75 RETURN e.name, avg_confidence",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve all sources that have been cited for more than five assertions, along with the source title and citation count.",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-(a:Assertion) RETURN s, COUNT(sf) AS citation_count NEXT FILTER citation_count > 5 RETURN s.title, citation_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve assertions that contradict other assertions with a severity greater than 0.9 and were sourced from sources published after 2020, returning the assertion statements and their validity start dates.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion), (a1)-[:SourcedFrom]->(s:Source) WHERE c.contradiction_severity > 0.9 AND s.publication_date > date('2020-12-31') RETURN a1.statement, a1.validity_start",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find domains where more than five assertions contradict other assertions, and return the domain name along with the total number of such contradictory assertions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[:Contradicts]->(a2:Assertion) RETURN d, COUNT(a1) AS contradiction_count NEXT FILTER contradiction_count > 5 RETURN d.name, contradiction_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify domains that have at least one assertion sourced from a publication dated after January 1, 2025, and return the domain names along with the count of such recent assertions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.publication_date > date('2025-01-01') RETURN d.name, COUNT(a) AS recent_assertions_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify assertions that are supported by at least two other assertions and contradicted by at least one other assertion. Return the assertion ID and the counts of supporting and contradicting assertions.",
+    "gql": "MATCH (a:Assertion)<-[:Supports]-(sa:Assertion) RETURN a, COUNT(sa) AS support_count NEXT FILTER support_count >= 2 MATCH (a)<-[:Contradicts]-(ca:Assertion) RETURN a, support_count, COUNT(ca) AS contra_count NEXT FILTER contra_count >= 1 RETURN a.assertion_id, support_count, contra_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Show the names and publication dates of sources that have been cited by assertions with validity starting after 2021, sorted by publication date in descending order.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE a.validity_start > DATE('2021-12-31') RETURN s.title, s.publication_date ORDER BY s.publication_date DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which domains contain assertions contradicted by more than one other assertion with a contradiction severity greater than 0.5? Provide the domain name and the number of such contradictions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.5 RETURN d, COUNT(c) AS contradiction_count NEXT FILTER contradiction_count > 1 RETURN d.name, contradiction_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve sources that have contributed to assertions with validity periods overlapping the year 2022. Return the source title and publication date.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE (a.validity_start <= date('2022-12-31') AND a.validity_end >= date('2022-01-01')) OR (a.validity_start >= date('2022-01-01') AND a.validity_end <= date('2022-12-31')) RETURN s.title, s.publication_date",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify domains that classify assertions with a confidence score greater than 0.8 and return the domain name along with the average confidence score of those assertions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a:Assertion) WHERE a.confidence_score > 0.8 RETURN d.name, AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify assertions that are supported by at least two other assertions and also contradict at least one assertion. Return the assertion ID, statement, number of supporting assertions, and number of contradicting assertions.",
+    "gql": "MATCH (a:Assertion)<-[s:Supports]-(:Assertion) RETURN a, COUNT(s) AS support_count NEXT FILTER support_count >= 2 MATCH (a)-[c:Contradicts]->(:Assertion) RETURN a, support_count, COUNT(c) AS contra_count NEXT FILTER contra_count >= 1 RETURN a.assertion_id, a.statement, support_count, contra_count ORDER BY support_count DESC, contra_count DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the top 10 sources by the total number of citations for both concepts and assertions, including the source title, author, and citation count, ordered by citation count descending.",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-(entity) WHERE entity:Concept OR entity:Assertion RETURN s.title, s.author, COUNT(sf) AS citation_count ORDER BY citation_count DESC LIMIT 10",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which sources have been used to cite both supporting and contradicting assertions with a validity period overlapping the year 2023? Return the source titles and URLs.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion)-[:Supports]->(:Assertion), (a)-[:Contradicts]->(:Assertion) WHERE a.validity_start <= date('2023-12-31') AND a.validity_end >= date('2023-01-01') RETURN DISTINCT s.title, s.url",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify experts who have endorsed assertions with contradictory relationships and calculate the average confidence score of those assertions, displaying the expert's name and specialization.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)-[:Contradicts]->(a2:Assertion) RETURN e.name, e.specialization, AVG(a1.confidence_score) AS avg_confidence",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the total number of assertions supported by each project, along with the project name, ordered by the highest number of supports first.",
+    "gql": "MATCH (p:`Project`)<-[:AppliedIn]-(a:Assertion)<-[:Supports]-(a2:Assertion) RETURN p.name, COUNT(a2) AS total_supports ORDER BY total_supports DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the titles of sources that have been cited for assertions which contradict other assertions with a severity higher than 0.8?",
+    "gql": "MATCH (src:Source)<-[:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.8 RETURN DISTINCT src.title AS source_title",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Calculate the average confidence score of assertions that are supported by at least one other assertion and are classified under domains that are subdomains of 'Science', excluding assertions with evidence type 'Anecdotal'.",
+    "gql": "MATCH (a1:Assertion)-[:Supports]->(a2:Assertion), (a1)-[:ClassifiedUnder]->(d:Domain) WHERE d.parent_domain = 'Science' AND a1.evidence_type <> 'Anecdotal' RETURN AVG(a1.confidence_score) AS avg_confidence_score",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find sources that have been cited in the derivation of assertions which contradict other assertions with a severity greater than 0.8. Return the source title and the count of such citations.",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-(a:Assertion)-[c:Contradicts]->(:Assertion) WHERE c.contradiction_severity > 0.8 RETURN s, COUNT(sf) AS citation_count NEXT RETURN s.title, citation_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the titles of sources and the count of distinct domains the assertions sourced from them belong to, but only include sources that have assertions in more than three domains.",
+    "gql": "MATCH (s:Source)<-[sf:SourcedFrom]-(a:Assertion)-[:ClassifiedUnder]->(d:Domain) RETURN s, COUNT(DISTINCT d) AS domain_count NEXT FILTER domain_count > 3 RETURN s.title, domain_count",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "What are the names and publication dates of sources that have been used to source assertions which contradict other assertions with a contradiction severity greater than 0.85, grouped by source?",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.85 RETURN s.title, s.publication_date, COUNT(c) AS contradiction_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which assertions contradict other assertions with a severity greater than 0.5 and are supported by at least one other assertion? Return the assertion ID and the count of supporting assertions.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.5 RETURN a1 NEXT MATCH (a1)<-[s:Supports]-(a3:Assertion) RETURN a1.assertion_id, COUNT(s) AS support_count",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Which concepts are related to assertions that both support and contradict other assertions? Return the concept names and descriptions.",
+    "gql": "MATCH (c:Concept)<-[:RelatesTo]-(a1:Assertion)-[:Supports]->(:Assertion), (a2:Assertion)-[:Contradicts]->(a1:Assertion) RETURN DISTINCT c.name, c.description",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all experts who have endorsed assertions that contradict other assertions with a severity greater than 0.7. Return the expert's name, specialization, and the count of such contradictory assertions they've endorsed.",
+    "gql": "MATCH (e:Expert)<-[ed:EndorsedBy]-(a1:Assertion)-[ctr:Contradicts]->(a2:Assertion) WHERE ctr.contradiction_severity > 0.7 RETURN e.name AS expert_name, e.specialization AS specialization, COUNT(a1) AS contradictory_endorsements_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find experts who have endorsed assertions with a validity period overlapping with the year 2022, returning their names and the count of such endorsements.",
+    "gql": "MATCH (e:Expert)<-[ed:EndorsedBy]-(a:Assertion) WHERE a.validity_start <= date('2022-12-31') AND a.validity_end >= date('2022-01-01') RETURN e.name, COUNT(ed) AS endorsement_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which sources have been cited for assertions that both support and contradict other assertions? Return the source titles and publication dates, excluding those with null titles.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[:Supports]->(:Assertion), (s)<-[:SourcedFrom]-(a2:Assertion)-[:Contradicts]->(:Assertion) WHERE s.title IS NOT NULL RETURN DISTINCT s.title, s.publication_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List the names of experts who have endorsed assertions that contradict other assertions with a severity greater than 0.8, and also provide the count of such endorsements.",
+    "gql": "MATCH (e:Expert)<-[ed:EndorsedBy]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.8 RETURN e.name, COUNT(ed) AS endorsement_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which assertions have been contradicted with a severity greater than 0.7 and also supported with a strength less than 0.5? Return the assertion statements and their respective contradiction severity and support strength.",
+    "gql": "MATCH (a1:Assertion)<-[ctr:Contradicts]-(a2:Assertion), (a1)<-[sup:Supports]-(a3:Assertion) WHERE ctr.contradiction_severity > 0.7 AND sup.support_strength < 0.5 RETURN a1.statement AS assertion_statement, ctr.contradiction_severity, sup.support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify assertions that are both supported and contradicted by other assertions with a support strength greater than 0.7 and a contradiction severity greater than 0.5. Return the assertion statement, support count, and contradiction count.",
+    "gql": "MATCH (a:Assertion)<-[s:Supports]-(:Assertion), (a)<-[c:Contradicts]-(:Assertion) WHERE s.support_strength > 0.7 AND c.contradiction_severity > 0.5 RETURN a.statement, COUNT(s) AS support_count, COUNT(c) AS contradiction_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify experts who have endorsed assertions with a confidence score higher than 0.85 and these assertions must support at least one other assertion. Return the expert names and their specializations.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)-[:Supports]->(a2:Assertion) WHERE a1.confidence_score > 0.85 RETURN DISTINCT e.name, e.specialization",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names and publication dates of sources cited by assertions that are supported by at least three other assertions and have an evidence type of 'Statistical', ordered by publication date.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion)-[:Supports]->(sa:Assertion) WHERE sa.evidence_type = 'Statistical' RETURN a, s NEXT MATCH (a)-[r:Supports]->(:Assertion) RETURN a, s, COUNT(r) AS support_count NEXT FILTER support_count >= 3 RETURN s.title, s.publication_date ORDER BY s.publication_date",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Identify experts who have endorsed assertions with a confidence score above 0.9 and return their names along with the total number of such endorsements, sorted by the endorsement count in descending order.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a:Assertion) WHERE a.confidence_score > 0.9 RETURN e.name, COUNT(a) AS endorsement_count ORDER BY endorsement_count DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the names of experts who have endorsed assertions that were sourced from websites and also supported by at least one other assertion. Include the endorsement level and the support strength.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)-[:SourcedFrom]->(:Source {source_type: 'Website'}), (a1)<-[:Supports]-(a2:Assertion) RETURN e.name, e.endorsement_level, a2.support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of sources and the total number of citations they received for assertions with a confidence score greater than 0.8.",
+    "gql": "MATCH (s:Source)<-[r:SourcedFrom]-(a:Assertion) WHERE a.confidence_score > 0.8 RETURN s.title, COUNT(r) AS citation_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve experts who have endorsed assertions with a validity period overlapping the year 2023, and return their names along with the endorsement dates.",
+    "gql": "MATCH (e:Expert)<-[ed:EndorsedBy]-(a:Assertion) WHERE a.validity_start <= date('2023-12-31') AND (a.validity_end IS NULL OR a.validity_end >= date('2023-01-01')) RETURN e.name, ed.endorsement_date",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all domains that have at least one assertion contradicting another with a severity higher than 0.7. Return the domain names and the count of such contradictions.",
+    "gql": "MATCH (d:Domain)<-[:ClassifiedUnder]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.7 RETURN d.name, COUNT(c) AS contradiction_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find experts who have endorsed assertions with a contradiction severity greater than 0.7, returning their names, specializations, and the count of such endorsements, ordered by the count in descending order.",
+    "gql": "MATCH (e:Expert)<-[ed:EndorsedBy]-(a:Assertion)-[c:Contradicts]->(:Assertion) WHERE c.contradiction_severity > 0.7 RETURN e.name, e.specialization, COUNT(ed) AS endorsement_count ORDER BY endorsement_count DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Determine the average confidence score of assertions supported by evidence from sources published in the year 2022, grouped by source type.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.publication_date >= date('2022-01-01') AND s.publication_date <= date('2022-12-31') RETURN s.source_type, AVG(a.confidence_score) AS avg_confidence",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total number of assertions that are classified under domains related to 'AI Research' and have been endorsed by experts specializing in 'Machine Learning'.",
+    "gql": "MATCH (d:Domain {name: 'AI Research'})<-[:ClassifiedUnder]-(a:Assertion)-[:EndorsedBy]->(e:Expert {specialization: 'Machine Learning'}) RETURN COUNT(a) AS total_assertions",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find experts who have endorsed assertions that contradict other assertions with a severity greater than 0.8. Return the expert's name and the total number of such contradictions they have indirectly endorsed.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)-[:Contradicts]->(a2:Assertion) WHERE a1.confidence_score > 0.8 RETURN e, COUNT(a2) AS contradiction_count NEXT RETURN e.name, contradiction_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions sourced from publications in the 'Nature' journal and endorsed by experts specialized in 'Data Science'.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(:Source {title: 'Nature'})<-[:EndorsedBy]-(e:Expert {specialization: 'Data Science'}) RETURN AVG(a.confidence_score) AS avg_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the average support strength of assertions that support other assertions which are classified under the 'Healthcare' domain. Only consider supports with a strength greater than 0.5.",
+    "gql": "MATCH (a1:Assertion)-[s:Supports]->(a2:Assertion)-[:ClassifiedUnder]->(d:Domain {name: 'Healthcare'}) WHERE s.support_strength > 0.5 RETURN AVG(s.support_strength) AS average_support_strength",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all assertions that contradict another assertion with a severity greater than 0.6 and are sourced from publications dated after 2020. Return the assertion statement and the source title.",
+    "gql": "MATCH (a1:Assertion)-[c:Contradicts]->(a2:Assertion), (a1)-[:SourcedFrom]->(s:Source) WHERE c.contradiction_severity > 0.6 AND s.publication_date > date('2020-12-31') RETURN a1.statement, s.title",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of experts who have endorsed assertions that contradict other assertions with a contradiction severity greater than 0.9, along with the count of such endorsements.",
+    "gql": "MATCH (e:Expert)<-[:EndorsedBy]-(a1:Assertion)-[c:Contradicts]->(a2:Assertion) WHERE c.contradiction_severity > 0.9 RETURN e.name, COUNT(a1) AS endorsement_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average confidence score of assertions sourced from publications authored by 'Olivia Carter'.",
+    "gql": "MATCH (s:Source {author: 'Olivia Carter'})<-[:SourcedFrom]-(a:Assertion) RETURN AVG(a.confidence_score) AS average_confidence_score",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify experts who have endorsed more than three assertions that are supported by other assertions with a support strength greater than 0.8, and return their names along with the count of such endorsements.",
+    "gql": "MATCH (e:Expert)<-[ed:EndorsedBy]-(a1:Assertion)-[s:Supports]->(a2:Assertion) WHERE s.support_strength > 0.8 RETURN e, COUNT(ed) AS endorsement_count NEXT FILTER endorsement_count > 3 RETURN e.name, endorsement_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the names and publication dates of sources that have been cited for both supporting and contradicting assertions? Ensure each source appears only once in the results.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a1:Assertion)-[:Supports]->(a2:Assertion), (s)<-[:SourcedFrom]-(a3:Assertion)-[:Contradicts]->(a4:Assertion) RETURN DISTINCT s.name, s.publication_date",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find assertions with a confidence score greater than 0.8 and sort them by validity start date in descending order.",
+    "gql": "MATCH (a:Assertion) WHERE a.confidence_score > 0.8 RETURN a ORDER BY a.validity_start DESC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the distribution of assertions based on their validity periods, showing start and end dates?",
+    "gql": "MATCH (a:Assertion) RETURN a.validity_start, a.validity_end, count(*) AS assertion_count ORDER BY a.validity_start, a.validity_end",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many sources were published by each author, and who published the most?",
+    "gql": "MATCH (s:Source) RETURN s.author AS author, count(s) AS source_count NEXT RETURN author, source_count ORDER BY source_count DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the sum of all relationships originating from Concept nodes to other Concepts through 'RelatesTo' edges.",
+    "gql": "MATCH (c1:Concept)-[r:RelatesTo]->(c2:Concept) RETURN count(r) AS total_relationships",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the maximum and minimum confidence scores among all assertions classified under the 'Data Science' domain.",
+    "gql": "MATCH (a:Assertion)-[:ClassifiedUnder]->(d:Domain {name: 'Data Science'}) RETURN MAX(a.confidence_score) AS max_confidence, MIN(a.confidence_score) AS min_confidence",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find organizations founded after January 1, 2005, in the 'Technology' industry and sort them by name in ascending order.",
+    "gql": "MATCH (o:Organization) WHERE o.founded_date > date('2005-01-01') AND o.industry = 'Technology' RETURN o ORDER BY o.name ASC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Is there an assertion with a confidence score greater than 0.9?",
+    "gql": "MATCH (a:Assertion) WHERE a.confidence_score > 0.9 RETURN a",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all assertions with a confidence score higher than the average confidence score of assertions in the 'Data Science' domain.",
+    "gql": "MATCH (a:Assertion)-[:ClassifiedUnder]->(d:Domain{name:'Data Science'}) RETURN avg(a.confidence_score) AS avg_confidence NEXT MATCH (a2:Assertion) WHERE a2.confidence_score > avg_confidence RETURN a2",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many concepts are there in each category, and which category has the highest number of concepts?",
+    "gql": "MATCH (c:Concept) RETURN c.category AS category, COUNT(c) AS concept_count ORDER BY concept_count DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many relationships of type 'RelatesTo' exist between concepts, and what is the average relationship strength?",
+    "gql": "MATCH (c1:Concept)-[r:RelatesTo]->(c2:Concept) RETURN count(r) AS relationship_count, avg(r.relationship_strength) AS average_strength",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average confidence score of assertions grouped by their evidence type, and identify the evidence type with the highest average confidence.",
+    "gql": "MATCH (a:Assertion) RETURN a.evidence_type AS evidence_type, AVG(a.confidence_score) AS avg_confidence ORDER BY avg_confidence DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all assertions with a confidence score higher than the average confidence score of assertions endorsed by 'Dr. Jane Smith'.",
+    "gql": "MATCH (e:Expert{name:'Dr. Jane Smith'})-[:EndorsedBy]->(a:Assertion) RETURN avg(a.confidence_score) AS avg_confidence NEXT MATCH (assert:Assertion) WHERE assert.confidence_score > avg_confidence RETURN assert",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all sources published by 'Alexandra Garner' and sort them by publication date in ascending order.",
+    "gql": "MATCH (s:Source) WHERE s.author = 'Alexandra Garner' RETURN s ORDER BY s.publication_date ASC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Is there an organization named 'Barker-Knight'?",
+    "gql": "MATCH (o:Organization) WHERE o.name = 'Barker-Knight' RETURN o",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Does a project named 'Harness Distributed Platforms' exist?",
+    "gql": "MATCH (p:`Project`) WHERE p.name = 'Harness Distributed Platforms' RETURN p",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Is there a concept with the name 'Word such' in the database?",
+    "gql": "MATCH (c:Concept) WHERE c.name = 'Word such' RETURN c",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Does an assertion with the ID 'AST00069' exist?",
+    "gql": "MATCH (a:Assertion {assertion_id: 'AST00069'}) RETURN a",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve all sources published by 'Alexandra Garner' in the year 2025, sorted by publication date in ascending order.",
+    "gql": "MATCH (s:Source) WHERE s.author = 'Alexandra Garner' AND s.publication_date >= date('2025-01-01') AND s.publication_date <= date('2025-12-31') RETURN s ORDER BY s.publication_date ASC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify organizations founded after January 1, 2010, in the 'Technology' industry, sorted by their founding date in descending order.",
+    "gql": "MATCH (o:Organization) WHERE o.founded_date > date('2010-01-01') AND o.industry = 'Technology' RETURN o ORDER BY o.founded_date DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all assertions with a confidence score greater than 0.75 and sort them by their validity start date in ascending order.",
+    "gql": "MATCH (a:Assertion) WHERE a.confidence_score > 0.75 RETURN a ORDER BY a.validity_start ASC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Identify all tags associated with the assertion having ID 'AST00069' via the 'TaggedWith' relationship.",
+    "gql": "MATCH (a:Assertion {assertion_id: 'AST00069'})-[:TaggedWith]->(t:Tag) RETURN t",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all assertions that are supported by the assertion with ID 'AST00001' through the 'Supports' relationship.",
+    "gql": "MATCH (a:Assertion)-[:Supports]->(b:Assertion) WHERE a.assertion_id = 'AST00001' RETURN b",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find assertions with a validity start date after January 1, 2024, and a non-null evidence type, sorted by validity start date in descending order.",
+    "gql": "MATCH (a:Assertion) WHERE a.validity_start > date('2024-01-01') AND a.evidence_type IS NOT NULL RETURN a ORDER BY a.validity_start DESC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Identify organizations founded after January 1, 2010, in the 'Technology' industry, and sort them by their founding date in ascending order.",
+    "gql": "MATCH (o:Organization) WHERE o.founded_date > date('2010-01-01') AND o.industry = 'Technology' RETURN o ORDER BY o.founded_date ASC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve assertions with a confidence score greater than 0.8 and evidence type 'Observational', sorted by their validity start date in ascending order.",
+    "gql": "MATCH (a:Assertion) WHERE a.confidence_score > 0.8 AND a.evidence_type = 'Observational' RETURN a ORDER BY a.validity_start ASC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all sources that are linked to assertions with a confidence score greater than 0.9 and their publication dates.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source) WHERE a.confidence_score > 0.9 RETURN s.title, s.publication_date",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all assertions with a confidence score greater than 0.8 and a non-null evidence type, sorted by their validity start date in descending order.",
+    "gql": "MATCH (a:Assertion) WHERE a.confidence_score > 0.8 AND a.evidence_type IS NOT NULL RETURN a ORDER BY a.validity_start DESC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find assertions with a validity start date after January 1, 2024, and a confidence score greater than 0.75, sorted by validity start date in ascending order.",
+    "gql": "MATCH (a:Assertion) WHERE a.validity_start > date('2024-01-01') AND a.confidence_score > 0.75 RETURN a ORDER BY a.validity_start ASC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all assertions that are supported by assertions sourced from articles authored by 'Alexandra Garner'.",
+    "gql": "MATCH (a:Assertion)-[:SourcedFrom]->(s:Source) WHERE s.author = 'Alexandra Garner' RETURN a NEXT MATCH (b:Assertion)-[:Supports]->(a) RETURN b",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all assertions with a confidence score greater than the confidence score of the assertion with ID 'AST00069'.",
+    "gql": "MATCH (a:Assertion{assertion_id:'AST00069'}) RETURN a.confidence_score AS target_score NEXT MATCH (b:Assertion) WHERE b.confidence_score > target_score RETURN b",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify all projects that started after the start date of the project named 'Harness Distributed Platforms'.",
+    "gql": "MATCH (p:`Project`{name:'Harness Distributed Platforms'}) RETURN p.start_date AS reference_date NEXT MATCH (pr:`Project`) WHERE pr.start_date > reference_date RETURN pr",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all 2-hop paths starting from an Assertion node with assertion_id 'AST00069' connecting to other nodes, ensuring the end node is not the same Assertion node.",
+    "gql": "MATCH p = (n1:Assertion)-[e1]-(x)-[e2]-(n2) WHERE n1.assertion_id = \"AST00069\" AND n2.assertion_id <> \"AST00069\" RETURN p LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve up to 10 assertions along with their source and relationship where the source's title is 'People stage bag share'.",
+    "gql": "MATCH (nodes_1:Source) WHERE nodes_1.title = \"People stage bag share\" RETURN nodes_1 NEXT MATCH (nodes_1)<-[edges_1:SourcedFrom]-(nodes_2:Assertion) RETURN nodes_2, nodes_1, edges_1 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List one-hop paths from assertions to sources where the source's URL is 'http://wise.org/', including the connecting edge.",
+    "gql": "MATCH (n1:Assertion)-[e:SourcedFrom]->(n2:Source) WHERE n2.url = \"http://wise.org/\" RETURN n1, e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find up to 5 nodes connected to a Source node with url 'http://wise.org/' within 1 to 3 hops.",
+    "gql": "MATCH (n1:Source)-[e]-{1,3}(n2) WHERE n1.url = \"http://wise.org/\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find variable-length paths (1 to 3 hops) between a Source node with url 'http://wise.org/' and an Assertion node, returning up to 5 pairs of connected nodes.",
+    "gql": "MATCH (n1:Source)-[e]-{1,3}(n2:Assertion) WHERE n1.url = \"http://wise.org/\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve a two-hop path where the first node is an Assertion with assertion_id 'AST00069' and the second node is a Source with a different title than the first Source connected to it.",
+    "gql": "MATCH p = (n1:Assertion)-[e1]-(x)-[e2]-(n2:Source) WHERE n1.assertion_id = \"AST00069\" AND n2.title <> \"People stage bag share\" RETURN p LIMIT 1",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify variable-length paths between a Source node with author 'Alexandra Garner' and any Assertion nodes within 1 to 3 hops.",
+    "gql": "MATCH (n1:Source)-[e]-{1,3}(n2:Assertion) WHERE n1.author = \"Alexandra Garner\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Combine two-hop and three-hop paths starting from a Source node titled 'People stage bag share', ensuring end nodes are Sources with titles different from the start node.",
+    "gql": "MATCH p = (n1:Source)-[e1]-(x)-[e2]-(n2:Source) WHERE n1.title = \"People stage bag share\" AND n2.title <> \"People stage bag share\" RETURN p LIMIT 5 UNION ALL MATCH p = (n1:Source)-[e1]-(x)-[e2]-(y)-[e3]-(n2:Source) WHERE n1.title = \"People stage bag share\" AND n2.title <> \"People stage bag share\" RETURN p LIMIT 5",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find Assertions that are sourced from a Source with source_id 'SRC00000' and have a confidence score greater than 0.3, returning the related edge property citation along with the Assertion node.",
+    "gql": "MATCH (a:Source {source_id: \"SRC00000\"})<-[e:SourcedFrom]->(n:Assertion) WHERE e.citation IS NOT NULL AND n.confidence_score > 0.3 RETURN n, e.citation LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find two-hop and three-hop paths starting from an Assertion node with assertion_id 'AST00069' and ending at another Assertion node with a different assertion_id.",
+    "gql": "MATCH p = (n1:Assertion)-[e1]-(x)-[e2]-(n2:Assertion) WHERE n1.assertion_id = \"AST00069\" AND n2.assertion_id <> \"AST00069\" RETURN p LIMIT 5 UNION ALL MATCH p = (n1:Assertion)-[e1]-(x)-[e2]-(y)-[e3]-(n2:Assertion) WHERE n1.assertion_id = \"AST00069\" AND n2.assertion_id <> \"AST00069\" RETURN p LIMIT 5",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "List all Assertion nodes with confidence scores less than 0.5.",
+    "gql": "MATCH (n:Assertion) WHERE n.confidence_score < 0.5 RETURN n LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve the assertion and its sourced from relationship where the source has title 'People stage bag share'.",
+    "gql": "MATCH (n1:Assertion)-[e:SourcedFrom]->(n2:Source) WHERE n2.title = \"People stage bag share\" RETURN n1, e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find two-hop paths between sources that share the same author but are not the same source.",
+    "gql": "MATCH p = (n1:Source)-[e1]-(x)-[e2]-(n2:Source) WHERE n1.author = n2.author AND n1.source_id <> n2.source_id RETURN p LIMIT 1",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find assertions with confidence scores greater than 0.35 that are sourced from articles titled 'People stage bag share'.",
+    "gql": "MATCH (s:Source {title: \"People stage bag share\"})<-[:SourcedFrom]-(a:Assertion) WHERE a.confidence_score > 0.35 RETURN a, s LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List one assertion that has a null evidence type.",
+    "gql": "MATCH (n:Assertion) WHERE n.evidence_type IS NULL RETURN n LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find connected nodes up to 3 hops away from a Source node with title 'People stage bag share'.",
+    "gql": "MATCH (n1:Source)-[e]-{1,3}(n2) WHERE n1.title = \"People stage bag share\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Count how many distinct Sources are connected to assertions having a confidence score less than 0.5.",
+    "gql": "MATCH (n1:Assertion)-[]->(n2:Source) WHERE n1.confidence_score < 0.5 RETURN COUNT(DISTINCT n2) as count_alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find assertions with confidence scores greater than 0.35 that are sourced from articles authored by Alexandra Garner.",
+    "gql": "MATCH (s:Source {author: \"Alexandra Garner\"})<-[:SourcedFrom]-(a:Assertion) WHERE a.confidence_score > 0.35 RETURN a, s LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all SourcedFrom relationships along with their destination Source nodes, limiting to 10 records.",
+    "gql": "MATCH (n1)-[e:SourcedFrom]->(n2:Source) RETURN e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Get detailed information about assertions connected to a particular source ID including confidence scores.",
+    "gql": "MATCH (nodes_1:Source) WHERE nodes_1.source_id = \"SRC00000\" RETURN nodes_1 NEXT MATCH (nodes_1)<-[edges_1:SourcedFrom]-(nodes_2:Assertion) RETURN nodes_2, nodes_1, edges_1 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Return edges and connected nodes for relationships of type SourcedFrom or any other specified edge type leading to Source nodes authored by 'Alexandra Garner'.",
+    "gql": "MATCH (n1)-[e:SourcedFrom]->(n2:Source) WHERE n2.author = \"Alexandra Garner\" RETURN e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all assertions sourced from articles with a confidence score greater than 0.3.",
+    "gql": "MATCH (a:Assertion)-[e:SourcedFrom]->(s:Source) WHERE s.source_type = \"Article\" AND a.confidence_score > 0.3 RETURN s, e.citation LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify one-hop connections from an assertion back to another source where the original source ID is SRC00000 and the second source title differs.",
+    "gql": "MATCH p = (n1:Source)-[e1]-(x)-[e2]-(n2:Source) WHERE n1.source_id = \"SRC00000\" AND n2.title <> \"People stage bag share\" RETURN p LIMIT 5 UNION ALL MATCH p = (n1:Source)-[e1]-(x)-[e2]-(y)-[e3]-(n2:Source) WHERE n1.source_id = \"SRC00000\" AND n2.title <> \"People stage bag share\" RETURN p LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all sources connected within 1 to 3 hops from the source with author 'Alexandra Garner'.",
+    "gql": "MATCH (n1:Source)-[e]-{1,3}(n2:Source) WHERE n1.author = \"Alexandra Garner\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Retrieve the Source node authored by 'Alexandra Garner' and titled 'People stage bag share'.",
+    "gql": "MATCH (n:Source) WHERE n.author = \"Alexandra Garner\" AND n.title = \"People stage bag share\" RETURN n LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find up to 5 nodes connected within 1 to 3 hops from the source with ID 'SRC00000'.",
+    "gql": "MATCH (s:Source)-[]-{1,3}(connected) WHERE s.source_id = \"SRC00000\" RETURN s, connected LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all nodes within 1 to 3 hops of an Assertion with assertion_id 'AST00069'.",
+    "gql": "MATCH (n1:Assertion)-[e]-{1,3}(n2) WHERE n1.assertion_id = \"AST00069\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve paths where a Source node connects through intermediate nodes back to another Source node with different source_id.",
+    "gql": "MATCH p = (n1:Source)-[e1]-(x)-[e2]-(n2:Source) WHERE n1.source_id = \"SRC00000\" AND n2.source_id <> \"SRC00000\" RETURN p LIMIT 5 UNION ALL MATCH p = (n1:Source)-[e1]-(x)-[e2]-(y)-[e3]-(n2:Source) WHERE n1.source_id = \"SRC00000\" AND n2.source_id <> \"SRC00000\" RETURN p LIMIT 5",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find both two-hop and three-hop paths starting from an Assertion node with assertion_id 'AST00069' to a Source node whose title is not 'People stage bag share'. Return results from both patterns combined.",
+    "gql": "MATCH p = (n1:Assertion)-[e1]-(x)-[e2]-(n2:Source) WHERE n1.assertion_id = \"AST00069\" AND n2.title <> \"People stage bag share\" RETURN p LIMIT 5 UNION ALL MATCH p = (n1:Assertion)-[e1]-(x)-[e2]-(y)-[e3]-(n2:Source) WHERE n1.assertion_id = \"AST00069\" AND n2.title <> \"People stage bag share\" RETURN p LIMIT 5",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find other nodes connected via variable length paths (1 to 3 edges) to the source titled 'People stage bag share', returning only distinct end nodes.",
+    "gql": "MATCH (n1:Source)-[e]-{1,3}(n2) WHERE n1.title = \"People stage bag share\" RETURN DISTINCT n2 LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve assertions with evidence types set to null and their linked sources published by 'wise.org'.",
+    "gql": "MATCH (s:Source {url: \"http://wise.org/\"})<-[:SourcedFrom]-(a:Assertion) WHERE a.evidence_type IS NULL RETURN a, s LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which assertions have a citation containing the phrase 'Across next box cultural member' and were linked to sources?",
+    "gql": "MATCH (s:Source)<-[e:SourcedFrom]-(a:Assertion) WHERE e.citation = \"Across next box cultural member.\" RETURN a, s LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Show me up to one assertion with a confidence score higher than 0.38 along with its source title.",
+    "gql": "MATCH (s:Source)<-[:SourcedFrom]-(a:Assertion) WHERE a.confidence_score > 0.38 RETURN a, s.title LIMIT 1",
+    "difficulty": "medium"
+  }
+]

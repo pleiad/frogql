@@ -67,41 +67,77 @@ impl DiskGraphStore {
 
         let node_count = pager.header.node_count;
         let edge_count = pager.header.edge_count;
+        let string_table_root = pager.header.string_table_root;
         let node_label_root = pager.header.label_index_root;
         let edge_label_root = pager.header.edge_label_index_root;
         let adjacency_root = pager.header.adjacency_root;
+        let node_locs_root = pager.header.node_locs_root;
+        let edge_topo_root = pager.header.edge_topo_root;
 
         // Load string table (compact, needed for ID resolution)
-        let st_pages = collect_st_pages(&mut pager)?;
+        let st_pages = if string_table_root != 0 {
+            disk_index::read_u32_chain(&mut pager, string_table_root)?
+        } else {
+            collect_st_pages(&mut pager)?
+        };
         let strings = StringTable::load(&st_pages, &mut pager)?;
 
-        // Scan node/edge data pages for record locations and topology
-        let mut node_locs = Vec::with_capacity(node_count as usize);
-        let mut edge_locs = Vec::with_capacity(edge_count as usize);
-        let mut edge_src = Vec::with_capacity(edge_count as usize);
-        let mut edge_tgt = Vec::with_capacity(edge_count as usize);
-        let mut edge_directed = Vec::with_capacity(edge_count as usize);
-        let page_count = pager.header.page_count;
-        for pg in 1..page_count {
-            let page = pager.read_page(pg)?;
-            match page.page_type() {
-                PageType::NodeData => {
-                    for i in 0..page.cell_count() {
-                        node_locs.push((pg, i));
+        let (node_locs, edge_locs, edge_src, edge_tgt, edge_directed);
+
+        let has_fast_index = node_locs_root != 0 && edge_topo_root != 0;
+
+        if has_fast_index {
+            // Fast path: read pre-built indexes
+            node_locs = disk_index::read_node_locs(&mut pager, node_locs_root)?;
+            let (el, es, et, ed) = disk_index::read_edge_topo(&mut pager, edge_topo_root)?;
+            edge_locs = el;
+            edge_src = es;
+            edge_tgt = et;
+            edge_directed = ed;
+        } else {
+            // Legacy: full page scan
+            let mut nl = Vec::with_capacity(node_count as usize);
+            let mut el = Vec::with_capacity(edge_count as usize);
+            let mut es = Vec::with_capacity(edge_count as usize);
+            let mut et = Vec::with_capacity(edge_count as usize);
+            let mut ed = Vec::with_capacity(edge_count as usize);
+            let page_count = pager.header.page_count;
+            for pg in 1..page_count {
+                let page = pager.read_page(pg)?;
+                match page.page_type() {
+                    PageType::NodeData => {
+                        for i in 0..page.cell_count() {
+                            nl.push((pg, i));
+                        }
                     }
-                }
-                PageType::EdgeData => {
-                    for i in 0..page.cell_count() {
-                        let (offset, end) = cell_bounds(&page, i);
-                        let decoded = record::decode_edge(&page.data[offset..end]);
-                        edge_locs.push((pg, i));
-                        edge_src.push(decoded.src_internal_id);
-                        edge_tgt.push(decoded.tgt_internal_id);
-                        edge_directed.push(decoded.directed);
+                    PageType::EdgeData => {
+                        for i in 0..page.cell_count() {
+                            let (offset, end) = cell_bounds(&page, i);
+                            let decoded = record::decode_edge(&page.data[offset..end]);
+                            el.push((pg, i));
+                            es.push(decoded.src_internal_id);
+                            et.push(decoded.tgt_internal_id);
+                            ed.push(decoded.directed);
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
+            node_locs = nl;
+            edge_locs = el;
+            edge_src = es;
+            edge_tgt = et;
+            edge_directed = ed;
+
+            // Upgrade the file with fast-open indexes
+            let st_page_list = strings.page_numbers().to_vec();
+            let str = disk_index::write_u32_list(&mut pager, &st_page_list)?;
+            let nlr = disk_index::write_node_locs(&mut pager, &node_locs)?;
+            let etr = disk_index::write_edge_topo(&mut pager, &edge_locs, &edge_src, &edge_tgt, &edge_directed)?;
+            pager.header.string_table_root = str;
+            pager.header.node_locs_root = nlr;
+            pager.header.edge_topo_root = etr;
+            pager.write_header()?;
         }
 
         Ok(DiskGraphStore {

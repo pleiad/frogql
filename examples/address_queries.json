@@ -1,0 +1,237 @@
+[
+  {
+    "question": "What is the total number of households in Arecibo county?",
+    "gql": "MATCH (t1:zip_data)<-[zip_code:ZIP_CODE]-(t2:country) WHERE t2.county = 'ARECIBO' RETURN sum(t1.households)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Please list the numbers of males in all the residential areas in Arecibo county.",
+    "gql": "MATCH (t1:zip_data)<-[zip_code:ZIP_CODE]-(t2:country) WHERE t2.county = 'ARECIBO' RETURN sum(t1.male_population)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among all the residential areas in Delaware, how many of them implement daylight saving?",
+    "gql": "MATCH (t1:zip_data)<-[zip_code:ZIP_CODE]-(t2:country) WHERE (t2.county = 'DELAWARE' AND t1.daylight_savings = 'Yes') RETURN count(t1.zip_code)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Please list the Asian populations of all the residential areas with the bad alias \"URB San Joaquin\".",
+    "gql": "MATCH (t1:zip_data)<-[zip_code:ZIP_CODE]-(t2:avoid) WHERE t2.bad_alias = 'URB San Joaquin' RETURN sum(t1.asian_population)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the residential areas with the bad alias \"Internal Revenue Service\", how many of them are in the Eastern time zone?",
+    "gql": "MATCH (t1:zip_data)<-[zip_code:ZIP_CODE]-(t2:avoid) WHERE (t2.bad_alias = 'Internal Revenue Service' AND t1.time_zone = 'Eastern') RETURN count(t1.zip_code)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Please list the bad alias of all the residential areas with a median female age of over 32.",
+    "gql": "MATCH (t1:zip_data)<-[zip_code:ZIP_CODE]-(t2:avoid) WHERE t1.female_median_age > 32 RETURN DISTINCT t2.bad_alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the alias of the city called Hartford?",
+    "gql": "MATCH (t1:zip_data)<-[zip_code:ZIP_CODE]-(t2:alias) WHERE t1.city = 'Hartford' RETURN DISTINCT t2.alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many counties are there in Alabama?",
+    "gql": "MATCH (t1:state)<-[state:STATE]-(t2:country) WHERE t1.name = 'Alabama' RETURN count(t2.county)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many post offices are there in New York?",
+    "gql": "MATCH (t1:state)<-[state:STATE]-(t2:zip_data) WHERE (t1.abbreviation = 'NY' AND t2.type = 'Post Office') RETURN count(DISTINCT t2.zip_code)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "In the state where Lisa Murkowski is the representative, how many cities have zero employees?",
+    "gql": "MATCH (t1:congress)<-[t2:state]-(t3:zip_data) WHERE (t1.first_name = 'Murkowski' AND t1.last_name = 'Lisa' AND t3.employees = 0) RETURN count(t3.city)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many males are there in New Haven County's residential areas?",
+    "gql": "MATCH (t1:zip_data)<-[zip_code:ZIP_CODE]-(t2:country) WHERE t2.county = 'NEW HAVEN' RETURN sum(t1.male_population)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Show the alias for the county at coordinate (18.090875, -66.867756).",
+    "gql": "MATCH (t1:zip_data)<-[zip_code:ZIP_CODE]-(t2:alias) WHERE (t1.latitude = 18.090875 AND t1.longitude = -66.867756) RETURN t2.alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "For the city with the most elders, what's its area code?",
+    "gql": "MATCH (t1:zip_data)<-[zip_code:ZIP_CODE]-(t2:area_code) RETURN t2.area_code ORDER BY t1.over_65 DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "For the county represented by Thompson Bennie G, how many bad aliases does it have?",
+    "gql": "MATCH (t1:zip_congress)<-[t2:avoid]-(t3:congress) WHERE (t3.first_name = 'Thompson' AND t3.last_name = 'Bennie G') RETURN count(DISTINCT t2.bad_alias)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many counties are there in Virginia State?",
+    "gql": "MATCH (t1:state)<-[state:STATE]-(t2:country) WHERE t1.name = 'Virginia' RETURN count(t2.county)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the longitude and latitude for the district represented by Grayson Alan?",
+    "gql": "MATCH (t1:zip_data)<-[t2:zip_congress]-(t3:congress) WHERE (t3.first_name = 'Grayson' AND t3.last_name = 'Alan') RETURN t1.latitude, t1.longitude",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all representatives of districts which have more than 30 000 population in 2020.",
+    "gql": "MATCH (t1:zip_data)<-[t2:zip_congress]-(t3:congress) WHERE t1.population_2020 > 30000 RETURN t3.first_name, t3.last_name",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many zip codes are under Barre, VT?",
+    "gql": "MATCH (t1:CBSA)<-[cbsa:CBSA]-(t2:zip_data) WHERE t1.CBSA_name = 'Barre, VT' RETURN count(t2.zip_code)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the difference between the 2020 population and the 2010 population for the districts represented by Griffin Tim.",
+    "gql": "MATCH (t1:zip_data)<-[t2:zip_congress]-(t3:congress) WHERE (t3.first_name = 'Griffin' AND t3.last_name = 'Tim') RETURN (t1.population_2020 - t1.population_2010)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Give the name of the country and state of the city with elevation of 1039.",
+    "gql": "MATCH (t1:state)<-[t2:country]-(t3:zip_data) WHERE t3.elevation = 1039 RETURN DISTINCT t1.name, t2.state",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the Asian population in the city with the alias Leeds?",
+    "gql": "MATCH (t1:alias)<-[zip_code:ZIP_CODE]-(t2:zip_data) WHERE t1.alias = 'Leeds' RETURN sum(t2.asian_population)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Among the cities with area code 608, how many cities implement daylight savings?",
+    "gql": "MATCH (t1:area_code)<-[zip_code:ZIP_CODE]-(t2:zip_data) WHERE (t1.area_code = 608 AND t2.daylight_savings = 'Yes') RETURN count(t2.city)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Provide the average elevation of the cities with alias Amherst.",
+    "gql": "MATCH (t1:alias)<-[zip_code:ZIP_CODE]-(t2:zip_data) WHERE t1.alias = 'Amherst' RETURN avg(t2.elevation)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the country and state of the city named Dalton?",
+    "gql": "MATCH (t1:state)<-[t2:country]-(t3:zip_data) WHERE t3.city = 'Dalton' RETURN t2.county",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the difference in the number of cities with P.O. box only and cities with Post Office among the cities with area code 787?",
+    "gql": "MATCH (t1:area_code)<-[zip_code:ZIP_CODE]-(t2:zip_data) WHERE t1.area_code = 787 RETURN (count(CASE WHEN t2.type = 'P.O. Box Only' THEN 1 ELSE NULL END) - count(CASE WHEN t2.type = 'Post Office' THEN 1 ELSE NULL END)) AS DIFFERENCE",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Among the postal points in the District of Columbia, how many of them have an area with above 20000 black population?",
+    "gql": "MATCH (t1:country)<-[zip_code:ZIP_CODE]-(t2:zip_data) WHERE (t1.county = 'DISTRICT OF COLUMBIA' AND t2.black_population > 20000) RETURN count(t1.zip_code)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Provide the zip code, city, and congress representative's full names of the area which has highest population in 2020.",
+    "gql": "MATCH (t1:zip_data)<-[t2:zip_congress]-(t3:congress) RETURN t1.zip_code, t1.city, t3.first_name, t3.last_name ORDER BY t1.population_2020 DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the daylight savings areas in the Midwest region, how many postal points are there in Illinois?",
+    "gql": "MATCH (t1:state)<-[state:STATE]-(t2:zip_data) WHERE (t1.name = 'Illinois' AND t2.daylight_savings = 'Yes' AND t2.region = 'Midwest') RETURN count(t2.zip_code)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Compare the numbers of postal points under Smith Adrian and Heck Joe.",
+    "gql": "MATCH (t1:congress)<-[district:DISTRICT]-(t2:zip_congress) RETURN CASE WHEN count(CASE WHEN (t1.first_name = 'Smith' AND t1.last_name = 'Adrian') THEN t2.zip_code ELSE NULL END) > count(CASE WHEN (t1.first_name = 'Heck' AND t1.last_name = 'Joe') THEN t2.zip_code ELSE NULL END) THEN 'Smith Adrian>Heck Joe' ELSE 'Smith Adrian<=Heck Joe' END AS COMPARE",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Provide the zip codes and the congress representatives' names of the postal points which are affiliated with Readers Digest.",
+    "gql": "MATCH (t1:zip_data)<-[t2:zip_congress]-(t3:congress) WHERE t1.organization = 'Readers Digest' RETURN t1.zip_code, t3.first_name, t3.last_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What was the population of Wilcox County in 2010?",
+    "gql": "MATCH (t1:country)<-[zip_code:ZIP_CODE]-(t2:zip_data) WHERE t1.county = 'WILCOX' RETURN sum(t2.population_2010)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the number of households in the \"FL-10\" district?",
+    "gql": "MATCH (t1:zip_data)<-[zip_code:ZIP_CODE]-(t2:zip_congress) RETURN sum(CASE WHEN t2.district = 'FL-10' THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many cities does congressman Pierluisi Pedro represent?",
+    "gql": "MATCH (t1:zip_data)<-[t2:zip_congress]-(t3:congress) WHERE (t3.first_name = 'Pierluisi' AND t3.last_name = 'Pedro') RETURN count(DISTINCT t1.city)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Indicate the name of the congressman represent in Guanica.",
+    "gql": "MATCH (t1:zip_data)<-[t2:zip_congress]-(t3:congress) WHERE t1.city = 'Guanica' RETURN t3.first_name, t3.last_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the difference in the number of bad alias between Aguada city and Aguadilla city?",
+    "gql": "MATCH (t1:avoid)<-[zip_code:ZIP_CODE]-(t2:zip_data) RETURN (count(CASE WHEN t2.city = 'Aguada' THEN t1.bad_alias ELSE NULL END) - count(CASE WHEN t2.city = 'Aguadilla' THEN t1.bad_alias ELSE NULL END)) AS DIFFERENCE",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Provide the population of Arecibo in 2020.",
+    "gql": "MATCH (t1:country)<-[zip_code:ZIP_CODE]-(t2:zip_data) WHERE t1.county = 'ARECIBO' RETURN sum(t2.population_2020)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "In cities that do not implement daylight savings, what is the total number of cities?",
+    "gql": "MATCH (t1:area_code)<-[zip_code:ZIP_CODE]-(t2:zip_data) WHERE t2.daylight_savings = 'No' RETURN count(t1.area_code)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List down the names of the cities belonging to Noble, Oklahoma.",
+    "gql": "MATCH (t1:state)<-[t2:country]-(t3:zip_data) WHERE (t1.name = 'Oklahoma' AND t2.county = 'NOBLE') RETURN t3.city",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the elevation of the city belonging to Hampden, Massachusetts?",
+    "gql": "MATCH (t1:state)<-[t2:country]-(t3:zip_data) WHERE (t1.name = 'Massachusetts' AND t2.county = 'HAMPDEN') RETURN t3.elevation",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average of the white population in the cities with area code 920?",
+    "gql": "MATCH (t1:area_code)<-[zip_code:ZIP_CODE]-(t2:zip_data) WHERE t1.area_code = 920 RETURN avg(t2.white_population)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of postal points in the district represented by Kirkpatrick Ann.",
+    "gql": "MATCH (t1:congress)<-[district:DISTRICT]-(t2:zip_congress) WHERE (t1.first_name = 'Kirkpatrick' AND t1.last_name = 'Ann') RETURN count(t2.zip_code)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Who are the congress representatives of the postal points in Garfield?",
+    "gql": "MATCH (t1:zip_data)<-[t2:zip_congress]-(t3:congress) WHERE t1.city = 'Garfield' RETURN t3.first_name, t3.last_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of postal points under New York-Newark-Jersey City, NY-NJ-PA.",
+    "gql": "MATCH (t1:CBSA)<-[cbsa:CBSA]-(t2:zip_data) WHERE t1.CBSA_name = 'New York-Newark-Jersey City, NY-NJ-PA' RETURN count(t2.zip_code)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many postal points are there under the congress representative in Puerto Rico?",
+    "gql": "MATCH (t1:congress)<-[district:DISTRICT]-(t2:zip_congress) WHERE t1.state = 'Puerto Rico' RETURN count(t2.zip_code)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Describe the number of postal points and the countries in West Virginia.",
+    "gql": "MATCH (t1:state)<-[state:STATE]-(t2:country) WHERE t1.name = 'West Virginia' RETURN count(DISTINCT t2.zip_code), count(DISTINCT t2.county)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many postal points are there under the congress representative from the House of Representatives in Mississippi?",
+    "gql": "MATCH (t1:congress)<-[district:DISTRICT]-(t2:zip_congress) WHERE t1.state = 'Mississippi' RETURN count(t2.zip_code)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many postal points with unique post office types are there in Ohio?",
+    "gql": "MATCH (t1:state)<-[state:STATE]-(t2:zip_data) WHERE (t1.name = 'Ohio' AND t2.type = 'Unique Post Office') RETURN count(t2.zip_code)",
+    "difficulty": "medium"
+  }
+]

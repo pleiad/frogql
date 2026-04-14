@@ -22,6 +22,10 @@ struct Decomposition {
     internal_vars: Vec<u8>,
     /// For each triple: (src_var, tgt_var, edge_var_name)
     triple_info: Vec<(u8, u8, Option<String>)>,
+    /// Join boundaries: triple index ranges for each sub-query in a Join.
+    /// E.g., for `Q1, Q2` with 3 triples from Q1 and 2 from Q2: [(0,3), (3,5)].
+    /// Empty means the whole pattern is a single path.
+    join_boundaries: Vec<(usize, usize)>,
 }
 
 #[derive(Clone)]
@@ -152,10 +156,12 @@ fn decompose(pattern: &PathPattern, index: &TripleIndex) -> Option<Decomposition
     let mut internal_vars = Vec::new();
     let mut triple_info = Vec::new();
     let mut fresh_counter = 0u32;
+    let mut join_boundaries = Vec::new();
 
-    let _last_var = decompose_pattern(
+    let _last_var = decompose_pattern_top(
         pattern, index, &mut triples, &mut var_name_to_id, &mut var_id_to_name,
         &mut filters, &mut internal_vars, &mut triple_info, &mut fresh_counter,
+        &mut join_boundaries,
     )?;
 
     if triples.is_empty() {
@@ -163,8 +169,43 @@ fn decompose(pattern: &PathPattern, index: &TripleIndex) -> Option<Decomposition
     }
 
     Some(Decomposition {
-        triples, var_id_to_name, filters, internal_vars, triple_info,
+        triples, var_id_to_name, filters, internal_vars, triple_info, join_boundaries,
     })
+}
+
+/// Top-level decomposition that tracks join boundaries.
+fn decompose_pattern_top(
+    pattern: &PathPattern,
+    index: &TripleIndex,
+    triples: &mut Vec<TriplePattern>,
+    names: &mut HashMap<String, u8>,
+    id_to_name: &mut Vec<String>,
+    filters: &mut Vec<ExtractedFilter>,
+    internal: &mut Vec<u8>,
+    triple_info: &mut Vec<(u8, u8, Option<String>)>,
+    fresh: &mut u32,
+    join_boundaries: &mut Vec<(usize, usize)>,
+) -> Option<u8> {
+    match pattern {
+        PathPattern::Join(p1, p2) => {
+            let start1 = triples.len();
+            decompose_pattern_top(p1, index, triples, names, id_to_name, filters, internal, triple_info, fresh, join_boundaries)?;
+            // If p1 was not itself a join, record its boundary
+            if join_boundaries.is_empty() || join_boundaries.last().unwrap().1 != triples.len() {
+                join_boundaries.push((start1, triples.len()));
+            }
+
+            let start2 = triples.len();
+            let result = decompose_pattern_top(p2, index, triples, names, id_to_name, filters, internal, triple_info, fresh, join_boundaries)?;
+            // If p2 was not itself a join, record its boundary
+            if join_boundaries.last().unwrap().1 != triples.len() {
+                join_boundaries.push((start2, triples.len()));
+            }
+
+            Some(result)
+        }
+        _ => decompose_pattern(pattern, index, triples, names, id_to_name, filters, internal, triple_info, fresh),
+    }
 }
 
 fn decompose_pattern(
@@ -180,6 +221,7 @@ fn decompose_pattern(
 ) -> Option<u8> {
     match pattern {
         PathPattern::Join(p1, p2) => {
+            // Join at non-top level: decompose both sides without boundary tracking
             decompose_pattern(p1, index, triples, names, id_to_name, filters, internal, triple_info, fresh)?;
             decompose_pattern(p2, index, triples, names, id_to_name, filters, internal, triple_info, fresh)
         }
@@ -379,9 +421,17 @@ fn convert_results<G: GraphAccess>(
 ) -> IntermediateResult {
     let mut rows = Vec::new();
 
+    // Determine which triple ranges correspond to separate paths.
+    // If join_boundaries is non-empty, each boundary produces a separate path.
+    // Otherwise, all triples form a single path.
+    let ranges: Vec<(usize, usize)> = if decomp.join_boundaries.is_empty() {
+        vec![(0, decomp.triple_info.len())]
+    } else {
+        decomp.join_boundaries.clone()
+    };
+
     for tuple in tuples {
         let mut assignment = Assignment::new();
-        let mut path_elements = Vec::new();
 
         // Build assignment, excluding internal variables
         for &(var_id, value) in tuple {
@@ -392,26 +442,32 @@ fn convert_results<G: GraphAccess>(
             assignment.extend(name.clone(), PathValue::Node(value));
         }
 
-        // Build path from triples
-        for &(src_var, tgt_var, ref edge_var) in decomp.triple_info.iter() {
-            let src_id = tuple.iter().find(|(v, _)| *v == src_var).map(|(_, id)| *id);
-            let tgt_id = tuple.iter().find(|(v, _)| *v == tgt_var).map(|(_, id)| *id);
+        // Build one path per range
+        let mut paths = Vec::new();
+        for &(start, end) in &ranges {
+            let mut path_elements = Vec::new();
+            for ti in start..end {
+                let (src_var, tgt_var, ref edge_var) = decomp.triple_info[ti];
+                let src_id = tuple.iter().find(|(v, _)| *v == src_var).map(|(_, id)| *id);
+                let tgt_id = tuple.iter().find(|(v, _)| *v == tgt_var).map(|(_, id)| *id);
 
-            if let (Some(src), Some(tgt)) = (src_id, tgt_id) {
-                if path_elements.is_empty() {
-                    path_elements.push(PathValue::Node(src));
-                }
-                if let Some(eid) = find_edge(graph, src, tgt) {
-                    path_elements.push(PathValue::EdgeDirectional(eid));
-                    if let Some(ref ev) = edge_var {
-                        assignment.extend(ev.clone(), PathValue::EdgeDirectional(eid));
+                if let (Some(src), Some(tgt)) = (src_id, tgt_id) {
+                    if path_elements.is_empty() {
+                        path_elements.push(PathValue::Node(src));
                     }
+                    if let Some(eid) = find_edge(graph, src, tgt) {
+                        path_elements.push(PathValue::EdgeDirectional(eid));
+                        if let Some(ref ev) = edge_var {
+                            assignment.extend(ev.clone(), PathValue::EdgeDirectional(eid));
+                        }
+                    }
+                    path_elements.push(PathValue::Node(tgt));
                 }
-                path_elements.push(PathValue::Node(tgt));
             }
+            paths.push(Path(path_elements));
         }
 
-        rows.push(ResultRow::new(Path(path_elements), assignment));
+        rows.push(ResultRow::with_paths(paths, assignment));
     }
 
     IntermediateResult::new(rows)

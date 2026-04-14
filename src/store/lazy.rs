@@ -19,6 +19,7 @@ use crate::pager::page::{Page, PageType, PAGE_SIZE};
 use crate::pager::pager::Pager;
 use crate::typing::label_type::LabelType;
 
+use super::disk_index;
 use super::record::{self, PropValue};
 use super::string_table::StringTable;
 
@@ -64,9 +65,22 @@ impl LazyGraphStore {
     pub fn open_with_cache(db_path: &Path, cache_size: usize) -> io::Result<Self> {
         let mut pager = Pager::open_with_cache(db_path, cache_size)?;
 
+        let string_table_root = pager.header.string_table_root;
+        let node_locs_root = pager.header.node_locs_root;
+        let edge_topo_root = pager.header.edge_topo_root;
+        let label_index_root = pager.header.label_index_root;
+        let edge_label_index_root = pager.header.edge_label_index_root;
+        let adjacency_root = pager.header.adjacency_root;
+
         // Load string table (needed to resolve label names for indexes)
-        let st_pages = collect_pages_by_type(&mut pager, PageType::StringTable)?;
+        let st_pages = if string_table_root != 0 {
+            disk_index::read_u32_chain(&mut pager, string_table_root)?
+        } else {
+            collect_pages_by_type(&mut pager, PageType::StringTable)?
+        };
         let strings = StringTable::load(&st_pages, &mut pager)?;
+
+        let has_fast_index = node_locs_root != 0 && edge_topo_root != 0;
 
         let mut store = LazyGraphStore {
             pager: RefCell::new(pager),
@@ -85,22 +99,137 @@ impl LazyGraphStore {
             undirected_adj: HashMap::new(),
         };
 
-        // Scan all pages to build indexes (read-only, records not kept)
-        let page_count = store.pager.borrow().header.page_count;
+        if has_fast_index {
+            // Fast path: read pre-built indexes directly
+            store.load_from_indexes(
+                node_locs_root, edge_topo_root,
+                label_index_root, edge_label_index_root,
+                adjacency_root,
+            )?;
+        } else {
+            // Legacy file: full page scan, then upgrade the file with new indexes
+            store.load_from_page_scan()?;
+            store.upgrade_file(db_path)?;
+        }
+
+        Ok(store)
+    }
+
+    /// Fast open: read node locs, edge topology, label indexes, and adjacency
+    /// directly from pre-built index pages.
+    fn load_from_indexes(
+        &mut self,
+        node_locs_root: u32,
+        edge_topo_root: u32,
+        label_index_root: u32,
+        edge_label_index_root: u32,
+        adjacency_root: u32,
+    ) -> io::Result<()> {
+        let mut pager = self.pager.borrow_mut();
+
+        // Node locations
+        let raw_node_locs = disk_index::read_node_locs(&mut pager, node_locs_root)?;
+        self.node_count = raw_node_locs.len() as u32;
+        self.node_locs = raw_node_locs.into_iter()
+            .map(|(pg, ci)| RecordLoc { page_num: pg, cell_index: ci })
+            .collect();
+
+        // Edge topology (locations + src/tgt/directed)
+        let (raw_edge_locs, edge_src, edge_tgt, edge_directed) =
+            disk_index::read_edge_topo(&mut pager, edge_topo_root)?;
+        self.edge_count = raw_edge_locs.len() as u32;
+        self.edge_locs = raw_edge_locs.into_iter()
+            .map(|(pg, ci)| RecordLoc { page_num: pg, cell_index: ci })
+            .collect();
+        self.edge_src = edge_src;
+        self.edge_tgt = edge_tgt;
+        self.edge_directed = edge_directed;
+
+        // Label indexes (already persisted by save_graph)
+        if label_index_root != 0 {
+            let label_entries = disk_index::read_label_index_root(&mut pager, label_index_root)?;
+            for (label_sid, first_page) in label_entries {
+                let label = self.strings.resolve(label_sid).unwrap().to_string();
+                let ids = disk_index::read_u32_chain(&mut pager, first_page)?;
+                self.label_to_nodes.insert(label, ids);
+            }
+        }
+        if edge_label_index_root != 0 {
+            let label_entries = disk_index::read_label_index_root(&mut pager, edge_label_index_root)?;
+            for (label_sid, first_page) in label_entries {
+                let label = self.strings.resolve(label_sid).unwrap().to_string();
+                let ids = disk_index::read_u32_chain(&mut pager, first_page)?;
+                self.label_to_edges.insert(label, ids);
+            }
+        }
+
+        // Adjacency index (already persisted by save_graph)
+        if adjacency_root != 0 {
+            let adj_entries = disk_index::read_adjacency_root(&mut pager, adjacency_root)?;
+            for (node_iid, first_page) in adj_entries {
+                let triples = disk_index::read_triple_chain(&mut pager, first_page)?;
+                for (edge_iid, _other_node_iid, kind) in triples {
+                    match kind {
+                        0 => self.outgoing.entry(node_iid).or_default().push(edge_iid),
+                        1 => self.incoming.entry(node_iid).or_default().push(edge_iid),
+                        2 => self.undirected_adj.entry(node_iid).or_default().push(edge_iid),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Legacy fallback: scan all pages to build indexes.
+    fn load_from_page_scan(&mut self) -> io::Result<()> {
+        let page_count = self.pager.borrow().header.page_count;
         for pg in 1..page_count {
-            let page = store.pager.borrow_mut().read_page(pg)?;
+            let page = self.pager.borrow_mut().read_page(pg)?;
             match page.page_type() {
                 PageType::NodeData => {
-                    store.index_nodes_from_page(pg, &page);
+                    self.index_nodes_from_page(pg, &page);
                 }
                 PageType::EdgeData => {
-                    store.index_edges_from_page(pg, &page);
+                    self.index_edges_from_page(pg, &page);
                 }
                 _ => {}
             }
         }
+        Ok(())
+    }
 
-        Ok(store)
+    /// Upgrade a legacy .gdb file by writing fast-open index pages.
+    fn upgrade_file(&self, db_path: &Path) -> io::Result<()> {
+        // Re-open the file in read-write mode to append index pages
+        let mut pager = Pager::open(db_path)?;
+
+        // Write string table page directory
+        let st_page_list = self.strings.page_numbers().to_vec();
+        let st_root = disk_index::write_u32_list(&mut pager, &st_page_list)?;
+
+        // Write node locations
+        let node_locs: Vec<(u32, u16)> = self.node_locs.iter()
+            .map(|loc| (loc.page_num, loc.cell_index))
+            .collect();
+        let node_locs_root = disk_index::write_node_locs(&mut pager, &node_locs)?;
+
+        // Write edge topology
+        let edge_locs: Vec<(u32, u16)> = self.edge_locs.iter()
+            .map(|loc| (loc.page_num, loc.cell_index))
+            .collect();
+        let edge_topo_root = disk_index::write_edge_topo(
+            &mut pager, &edge_locs, &self.edge_src, &self.edge_tgt, &self.edge_directed,
+        )?;
+
+        // Update header
+        pager.header.string_table_root = st_root;
+        pager.header.node_locs_root = node_locs_root;
+        pager.header.edge_topo_root = edge_topo_root;
+        pager.write_header()?;
+
+        Ok(())
     }
 
     // --- Index building (scan-time, lightweight) ---

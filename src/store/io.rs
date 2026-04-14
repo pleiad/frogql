@@ -23,6 +23,10 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
     let mut node_pages: Vec<u32> = Vec::new();
     let mut edge_pages: Vec<u32> = Vec::new();
 
+    // Track record locations for the fast-open index
+    let mut node_locs: Vec<(u32, u16)> = Vec::new();
+    let mut edge_locs: Vec<(u32, u16)> = Vec::new();
+
     // Write nodes
     for (nid, name) in graph.node_names.iter().enumerate() {
         let labels = Graph::label_strings(&graph.node_labels[nid]);
@@ -30,7 +34,8 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
         let label_sids = intern_strings(&labels, &mut strings, &mut pager)?;
         let encoded_props = encode_props(&graph.node_props[nid], &mut strings, &mut pager)?;
         let cell = record::encode_node(user_id_sid, &label_sids, &encoded_props);
-        store_cell(&mut pager, PageType::NodeData, &cell, &mut node_pages)?;
+        let loc = store_cell(&mut pager, PageType::NodeData, &cell, &mut node_pages)?;
+        node_locs.push(loc);
     }
 
     // Write edges
@@ -43,7 +48,8 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
             user_id_sid, &label_sids, &encoded_props,
             graph.edge_src[eid], graph.edge_tgt[eid], graph.edge_directed[eid],
         );
-        store_cell(&mut pager, PageType::EdgeData, &cell, &mut edge_pages)?;
+        let loc = store_cell(&mut pager, PageType::EdgeData, &cell, &mut edge_pages)?;
+        edge_locs.push(loc);
     }
 
     // --- Write on-disk indexes ---
@@ -87,12 +93,25 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
     let adj_entries: Vec<(u32, Vec<(u32, u32, u8)>)> = adj.into_iter().collect();
     let adj_root = disk_index::write_adjacency_index(&mut pager, &adj_entries)?;
 
+    // --- Write string table page directory ---
+    let st_page_list = strings.page_numbers().to_vec();
+    let st_root = disk_index::write_u32_list(&mut pager, &st_page_list)?;
+
+    // --- Write fast-open indexes (node locs + edge topology) ---
+    let node_locs_root = disk_index::write_node_locs(&mut pager, &node_locs)?;
+    let edge_topo_root = disk_index::write_edge_topo(
+        &mut pager, &edge_locs, &graph.edge_src, &graph.edge_tgt, &graph.edge_directed,
+    )?;
+
     // Update header
     pager.header.node_count = graph.node_names.len() as u32;
     pager.header.edge_count = graph.edge_names.len() as u32;
     pager.header.label_index_root = node_label_root;
     pager.header.edge_label_index_root = edge_label_root;
     pager.header.adjacency_root = adj_root;
+    pager.header.string_table_root = st_root;
+    pager.header.node_locs_root = node_locs_root;
+    pager.header.edge_topo_root = edge_topo_root;
     pager.write_header()?;
 
     Ok(())
@@ -102,7 +121,12 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
 pub fn load_graph(db_path: &Path) -> io::Result<Graph> {
     let mut pager = Pager::open(db_path)?;
 
-    let st_pages = collect_pages_by_type(&mut pager, PageType::StringTable)?;
+    let st_root = pager.header.string_table_root;
+    let st_pages = if st_root != 0 {
+        disk_index::read_u32_chain(&mut pager, st_root)?
+    } else {
+        collect_pages_by_type(&mut pager, PageType::StringTable)?
+    };
     let strings = StringTable::load(&st_pages, &mut pager)?;
 
     let mut node_names: Vec<String> = Vec::new();
@@ -198,21 +222,21 @@ fn decode_props(encoded: &[(u32, PropValue)], strings: &StringTable) -> Props {
     props
 }
 
-fn store_cell(pager: &mut Pager, page_type: PageType, cell: &[u8], pages: &mut Vec<u32>) -> io::Result<()> {
+fn store_cell(pager: &mut Pager, page_type: PageType, cell: &[u8], pages: &mut Vec<u32>) -> io::Result<(u32, u16)> {
     if let Some(&last_pg) = pages.last() {
         let mut page = pager.read_page(last_pg)?;
-        if page.insert_cell(cell).is_some() {
+        if let Some(cell_idx) = page.insert_cell(cell) {
             pager.write_page(last_pg, &page)?;
-            return Ok(());
+            return Ok((last_pg, cell_idx));
         }
     }
     let pg = pager.allocate_page()?;
     let mut page = Page::new(page_type);
-    page.insert_cell(cell)
+    let cell_idx = page.insert_cell(cell)
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "cell too large for page"))?;
     pager.write_page(pg, &page)?;
     pages.push(pg);
-    Ok(())
+    Ok((pg, cell_idx))
 }
 
 fn cell_bounds(page: &Page, index: u16) -> (usize, usize) {

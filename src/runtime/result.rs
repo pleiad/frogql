@@ -3,30 +3,71 @@ use std::fmt;
 use crate::model::value::{Path, Value};
 use super::assignment::Assignment;
 
-/// A single result row: a matched path + variable bindings.
+/// A single result row: a tuple of matched paths + variable bindings.
+///
+/// A simple pattern like `()-[]->()` produces a single path: `paths = [p]`.
+/// A join `Q1, Q2` produces the concatenation of path tuples: `paths = [...p̄₁, ...p̄₂]`.
+/// This matches the paper semantics where `⟦Q1, Q2⟧` yields `(p̄₁ × p̄₂, μ₁ ∪ μ₂)`.
 #[derive(Debug, Clone)]
 pub struct ResultRow {
-    pub path: Path,
+    pub paths: Vec<Path>,
     pub assignment: Assignment,
 }
 
 impl ResultRow {
     pub fn new(path: Path, assignment: Assignment) -> Self {
-        Self { path, assignment }
+        Self { paths: vec![path], assignment }
+    }
+
+    pub fn with_paths(paths: Vec<Path>, assignment: Assignment) -> Self {
+        Self { paths, assignment }
+    }
+
+    /// The "current" (last) path — used by concat/repetition to extend.
+    pub fn path(&self) -> &Path {
+        self.paths.last().unwrap()
     }
 
     /// Concatenate two grouped result rows.
     pub fn concat_group(&self, other: &ResultRow) -> ResultRow {
+        // For concat_group (repetition), we extend the last path
+        let mut paths = self.paths.clone();
+        if let Some(last) = paths.last_mut() {
+            *last = last.concat(other.path());
+        }
         ResultRow {
-            path: self.path.concat(&other.path),
+            paths,
             assignment: self.assignment.concat_group(&other.assignment),
         }
+    }
+
+    /// Extend the last path in this row by concatenating with `extension`.
+    /// Used by concat operations (edge/node append).
+    pub fn extend_path(&self, extension: &Path, assignment: Assignment) -> ResultRow {
+        let mut paths = self.paths.clone();
+        if let Some(last) = paths.last_mut() {
+            *last = last.concat(extension);
+        }
+        ResultRow { paths, assignment }
+    }
+
+    /// Like extend_path but replaces the last path entirely (for node concat where path doesn't grow).
+    pub fn with_same_paths(&self, assignment: Assignment) -> ResultRow {
+        ResultRow { paths: self.paths.clone(), assignment }
+    }
+
+    /// Join two result rows: concatenate path tuples.
+    pub fn join(r1: &ResultRow, r2: &ResultRow, assignment: Assignment) -> ResultRow {
+        let mut paths = r1.paths.clone();
+        paths.extend(r2.paths.iter().cloned());
+        ResultRow { paths, assignment }
     }
 }
 
 impl fmt::Display for ResultRow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", self.path, self.assignment)
+        let path_strs: Vec<String> = self.paths.iter().map(|p| format!("{}", p)).collect();
+        write!(f, "{} {}", path_strs.join(", "), self.assignment)
     }
 }
 
@@ -59,7 +100,7 @@ impl IntermediateResult {
                 .map(|r| {
                     let mut mu = r.assignment.clone();
                     mu.to_group();
-                    ResultRow::new(r.path.clone(), mu)
+                    ResultRow::with_paths(r.paths.clone(), mu)
                 })
                 .collect(),
         }

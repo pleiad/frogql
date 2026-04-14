@@ -1,0 +1,2447 @@
+[
+  {
+    "question": "List all products along with their BOM version details, including only those products which have at least one BOM version associated, sorted by product name and version number.",
+    "gql": "MATCH (p:`Product`)-[:HasBomVersion]->(bv:BomVersion) RETURN p.name AS ProductName, bv.version_number AS VersionNumber ORDER BY p.name, bv.version_number",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total quantity required for all materials used in assemblies that are part of product 'P000001'.",
+    "gql": "MATCH (p:`Product`{Product_id:'P000001'})-[:ConsistsOf]->(a:Assembly)-[:ConsistsOf]->(m:Material) RETURN SUM(m.quantity_required) AS total_quantity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all products along with their associated manufacturing orders and the total quantity ordered for each product, sorted by the total quantity in descending order.",
+    "gql": "MATCH (p:`Product`)<-[r:OrderedFor]-(mo:ManufacturingOrder) RETURN p.name AS ProductName, SUM(r.required_quantity) AS TotalQuantityOrdered ORDER BY TotalQuantityOrdered DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Display the average lead time of materials grouped by supplier name, including suppliers who haven't supplied any materials yet.",
+    "gql": "OPTIONAL MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material) RETURN s.name AS SupplierName, AVG(m.lead_time) AS AverageLeadTime ORDER BY AverageLeadTime",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the average lead time of materials grouped by their categories, considering only those materials that are directly used in products.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material) RETURN m.category, AVG(m.lead_time) AS average_lead_time",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find suppliers who provide materials used in products with a revision level of 'A', returning supplier names and the count of distinct materials supplied.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`) WHERE p.revision_level = 'A' RETURN s.name AS SupplierName, COUNT(m) AS MaterialsSuppliedCount",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all products along with their total required quantities of materials, grouped by product name and ordered by the total quantity in descending order.",
+    "gql": "MATCH (p:`Product`)-[c:ConsistsOf]->(m:Material) RETURN p.name AS ProductName, SUM(c.quantity_required) AS TotalQuantityRequired ORDER BY TotalQuantityRequired DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify all work centers that are involved in manufacturing products which have undergone engineering changes, showing distinct work center names.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`)-[:ModifiedBy]->(:EngineeringChange) RETURN DISTINCT wc.name AS WorkCenterName",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Determine the count of manufacturing orders per status, including statuses with zero orders, and order the results by the count in ascending order.",
+    "gql": "MATCH (mo:ManufacturingOrder) RETURN mo.status AS OrderStatus, COUNT(*) AS OrderCount ORDER BY OrderCount ASC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the average lead time of materials used in assemblies which are part of products having a revision level of 'Rev2'.",
+    "gql": "MATCH (p:`Product`{revision_level:'Rev2'})-[:ConsistsOf]->(a:Assembly)-[:ConsistsOf]->(m:Material) RETURN AVG(m.lead_time) AS AverageLeadTime",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all engineering changes that affect products currently in 'Active' status, and include details about the change reason and approval status.",
+    "gql": "MATCH (ec:EngineeringChange)<-[:ModifiedBy]-(p:`Product`) WHERE p.status = 'Active' RETURN ec.reason_code, ec.approval_status, ec.description",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all products that have at least one material with a lead time greater than 20 days, along with the total number of such materials per product.",
+    "gql": "MATCH (p:`Product`)-[c:ConsistsOf]->(m:Material) WHERE m.lead_time > 20 RETURN p.Product_id, COUNT(m) AS material_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the names of suppliers who supply materials used in products that are currently in 'Active' status, ensuring no duplicate supplier names in the result.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`) WHERE p.status = 'Active' RETURN DISTINCT s.name",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify work centers that are capable of manufacturing products with a cycle time less than 30 minutes, and return the product names and work center names.",
+    "gql": "MATCH (p:`Product`)-[m:ManufacturedAt]->(w:WorkCenter) WHERE m.cycle_time < 30 RETURN p.name AS ProductName, w.name AS WorkCenterName",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find materials that can substitute for other materials, showing the original material name, substitute material name, and the priority ranking of the substitution.",
+    "gql": "MATCH (m1:Material)-[s:SubstitutesFor]->(m2:Material) RETURN m1.name AS OriginalMaterial, m2.name AS SubstituteMaterial, s.priority_ranking AS PriorityRanking",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of alternative components (materials/assemblies) used in each product, considering only those with an alternative flag set to true.",
+    "gql": "MATCH (p:`Product`)-[co:ConsistsOf]->(comp) WHERE co.alternative_flag = true RETURN p.Product_id, COUNT(comp) AS alternative_component_count LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify all products that have at least one material substitute and return the product name along with the count of substitutes.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material)-[s:SubstitutesFor]->(:Material) RETURN p.name, COUNT(s) AS substitute_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average cycle time for all manufacturing processes at work centers that have manufactured at least one assembly with a weight greater than 50 units.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(a:Assembly) WHERE a.weight > 50 RETURN AVG(ma.cycle_time) AS AverageCycleTime",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify all manufacturing orders that involve products requiring materials with a unit cost higher than 50, including the order ID, product name, and total quantity of such expensive materials per order.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[o:OrderedFor]->(p:`Product`)-[c:ConsistsOf]->(m:Material) WHERE m.unit_cost > 50 RETURN mo.ManufacturingOrder_id AS OrderID, p.name AS ProductName, SUM(c.quantity_required) AS TotalExpensiveMaterialsQuantity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Show all manufacturing orders with their due dates and the corresponding product names, including those orders where the product has been discontinued (status is 'Discontinued'), and sort the results by due date in ascending order.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[r:OrderedFor]->(p:`Product`) WHERE p.status = 'Discontinued' RETURN mo.ManufacturingOrder_id, mo.due_date, p.name ORDER BY mo.due_date ASC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all work centers along with the count of distinct products they are involved in manufacturing, sorted by the count in descending order.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`) RETURN wc.name AS WorkCenterName, COUNT(p) AS ProductCount ORDER BY ProductCount DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of distinct materials used in each product, considering only those materials that have a lead time greater than 10 days, and order the results by the count in descending order.",
+    "gql": "MATCH (p:`Product`)-[co:ConsistsOf]->(m:Material) WHERE m.lead_time > 10 RETURN p.name AS ProductName, COUNT(m) AS DistinctMaterialCount ORDER BY DistinctMaterialCount DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the top 5 work centers with the highest total setup time required for manufacturing products, including the work center name and the total setup time.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(p:`Product`) RETURN wc.name AS WorkCenterName, SUM(ma.setup_time) AS TotalSetupTime ORDER BY TotalSetupTime DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the names of products along with the latest effective date of their bill of material versions, including only those products where the latest version status is 'Active'.",
+    "gql": "MATCH (p:`Product`)-[:HasBomVersion]->(bv:BomVersion) RETURN p, MAX(bv.effective_date) AS LatestEffectiveDate NEXT MATCH (p)-[:HasBomVersion]->(bv:BomVersion{effective_date:LatestEffectiveDate}) WHERE bv.status = 'Active' RETURN p.name AS ProductName, bv.effective_date AS LatestEffectiveDate",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "List suppliers who supply materials used in products with a status of 'Discontinued', showing the supplier name and the total number of such materials.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material)<-[co:ConsistsOf]-(p:`Product`) WHERE p.status = 'Discontinued' RETURN s.name AS SupplierName, COUNT(m.Material_id) AS DiscontinuedMaterialsCount",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Show suppliers who have provided materials for products with at least two different revision levels, listing supplier name and the count of distinct revision levels involved.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`) RETURN s.name AS SupplierName, COUNT(p.revision_level) AS RevisionLevelsCount ORDER BY RevisionLevelsCount DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all manufacturing orders with their corresponding product names and the total quantity of materials required for each product in those orders, sorted by the order due date.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[o:OrderedFor]->(p:`Product`)-[c:ConsistsOf]->(m:Material) RETURN mo.ManufacturingOrder_id AS OrderID, p.name AS ProductName, SUM(c.quantity_required) AS TotalMaterialQuantity ORDER BY mo.due_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify all products that have at least one alternative material in their bill of materials, and return the product name along with the count of such alternative materials.",
+    "gql": "MATCH (p:`Product`)-[c:ConsistsOf]->(m:Material) WHERE c.alternative_flag = true RETURN p.name AS ProductName, COUNT(m) AS AlternativeMaterialCount",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the top 5 work centers by the number of distinct products they manufacture, including the work center name and the count of distinct products.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(p:`Product`) RETURN wc.name AS WorkCenterName, COUNT(p) AS DistinctProductCount ORDER BY DistinctProductCount DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find suppliers who supply materials that are substitutes for other materials, and return the supplier names along with the count of such substitute relationships.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m1:Material)-[:SubstitutesFor]->(m2:Material) RETURN s.name AS SupplierName, COUNT(*) AS SubstituteRelationships",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all materials that have at least one substitute material, showing the original material name, substitute material name, and the substitution reason.",
+    "gql": "MATCH (m1:Material)-[sf:SubstitutesFor]->(m2:Material) RETURN m1.name AS OriginalMaterial, m2.name AS SubstituteMaterial, sf.substitution_reason AS Reason",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve all engineering changes that were implemented after their deadline, including the change ID, description, effective date, and implementation deadline.",
+    "gql": "MATCH (ec:EngineeringChange) WHERE ec.implementation_deadline < ec.effective_date RETURN ec.EngineeringChange_id AS ChangeID, ec.description AS Description, ec.effective_date AS EffectiveDate, ec.implementation_deadline AS Deadline",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all engineering changes that have been implemented (implementation status 'Completed') and affected products or assemblies manufactured at work centers located in 'Factory A'. Return the engineering change ID, description, and the name of the work center.",
+    "gql": "MATCH (ec:EngineeringChange)<-[mb:ModifiedBy]-(n)-[ma:ManufacturedAt]->(wc:WorkCenter) WHERE mb.implementation_status = 'Completed' AND wc.location = 'Factory A' RETURN ec.EngineeringChange_id AS ChangeID, ec.description AS Description, wc.name AS WorkCenterName",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the top 3 suppliers by the total quantity of materials they supply, considering only materials used in active products (status = 'Active'), and return the supplier name along with the total quantity supplied.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material)<-[co:ConsistsOf]-(p:`Product`) WHERE p.status = 'Active' RETURN s.name AS SupplierName, SUM(co.quantity_required) AS TotalQuantitySupplied ORDER BY TotalQuantitySupplied DESC LIMIT 3",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all materials that can substitute for other materials, including the original material name, substitute material name, and the substitution reason, ordered by the priority ranking of the substitution.",
+    "gql": "MATCH (m1:Material)-[sf:SubstitutesFor]->(m2:Material) RETURN m1.name AS OriginalMaterial, m2.name AS SubstituteMaterial, sf.substitution_reason AS Reason ORDER BY sf.priority_ranking ASC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the average cycle time for manufacturing products at each work center, considering only those work centers which have manufactured more than 5 distinct products, and display the results sorted by average cycle time in descending order.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(p:`Product`) RETURN wc, COUNT(p) AS ProductCount, AVG(ma.cycle_time) AS AvgCycleTime NEXT RETURN wc.name AS WorkCenterName, AvgCycleTime ORDER BY AvgCycleTime DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify suppliers who supply materials used in products that are part of manufacturing orders with a status of 'Completed', returning the supplier name and the count of distinct materials supplied.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`)<-[:OrderedFor]-(mo:ManufacturingOrder) WHERE mo.status = 'Completed' RETURN s.name AS SupplierName, COUNT(m.Material_id) AS MaterialsSuppliedCount",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all products that have undergone at least two engineering changes and are currently in 'Active' status. Display the product name, number of changes, and current status.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange) WHERE p.status = 'Active' RETURN p, COUNT(ec) AS ChangeCount NEXT RETURN p.name AS ProductName, ChangeCount, p.status AS CurrentStatus",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all products that have at least one substitute material with a higher unit cost, displaying the product name and the count of such substitute materials.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material)<-[:SubstitutesFor]-(sm:Material) WHERE sm.unit_cost > m RETURN p.name AS ProductName, COUNT(sm) AS SubstituteMaterialsWithHigherCost",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all suppliers who provide materials used in products with a status of 'Active', including the total minimum order quantity per supplier, sorted by this quantity in descending order.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`) WHERE p.status = 'Active' RETURN s.name AS SupplierName, SUM(sf.minimum_order_quantity) AS TotalMinimumOrderQuantity ORDER BY TotalMinimumOrderQuantity DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the top 10 most substituted materials, showing the original material name, substitute material name, substitution reason, and the count of substitution occurrences.",
+    "gql": "MATCH (m1:Material)-[sf:SubstitutesFor]-(m2:Material) RETURN m1, m2, sf.substitution_reason AS Reason, COUNT(sf) AS SubstitutionCount NEXT RETURN m1.name AS OriginalMaterial, m2.name AS SubstituteMaterial, Reason, SubstitutionCount ORDER BY SubstitutionCount DESC LIMIT 10",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all products that have at least one engineering change modification with an impact level of 'High', and list their names along with the count of such high-impact changes.",
+    "gql": "MATCH (p:`Product`)-[mb:ModifiedBy]->(ec:EngineeringChange) WHERE mb.change_impact_level = 'High' RETURN p.name AS ProductName, COUNT(ec) AS HighImpactChangesCount",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the engineering changes that affected products or assemblies which are associated with work centers located in 'Factory A'. Include the engineering change ID, description, and approval status.",
+    "gql": "MATCH (ec:EngineeringChange)<-[mb:ModifiedBy]-(n)-[ma:ManufacturedAt]->(wc:WorkCenter) WHERE wc.location = 'Factory A' RETURN DISTINCT ec.EngineeringChange_id AS EngineeringChangeID, ec.description AS Description, ec.approval_status AS ApprovalStatus",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of suppliers who supply materials used in products with a status of 'Active', along with the count of distinct materials supplied by each supplier.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material)<-[co:ConsistsOf]-(p:`Product`) WHERE p.status = 'Active' RETURN s.name AS SupplierName, COUNT(m) AS DistinctMaterialsCount",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the top 5 suppliers based on the total quantity of materials they have supplied, considering only those materials used in products with a status of 'Active'.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`) WHERE p.status = 'Active' RETURN s.name AS SupplierName, SUM(m.unit_cost) AS TotalSuppliedValue ORDER BY TotalSuppliedValue DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all work centers that are involved in manufacturing products which have undergone engineering changes, including the total cycle time spent at each work center for such products.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange) RETURN wc.name AS WorkCenterName, SUM(ma.cycle_time) AS TotalCycleTime",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Determine the total setup time required for all manufacturing processes involving assemblies that are part of products with a BomVersion status of 'Approved'.",
+    "gql": "MATCH (bv:BomVersion{status:'Approved'})<-[:HasBomVersion]-(p:`Product`)<-[:ConsistsOf]-(a:Assembly)<-[ma:ManufacturedAt]-(wc:WorkCenter) RETURN SUM(ma.setup_time) AS TotalSetupTime",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the top 5 products with the highest total material cost, calculated based on the unit cost of materials and their required quantities in the BOM, and display the product name and total cost.",
+    "gql": "MATCH (p:`Product`)-[c:ConsistsOf]->(m:Material) RETURN p.name AS ProductName, SUM(m.unit_cost) AS TotalMaterialCost ORDER BY TotalMaterialCost DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find suppliers related to material 'M000001' with contract terms of 'Long Term' in a two-hop path, and limit the return to 1 path.",
+    "gql": "MATCH p = (n1:Material)-[e1:SourcedFrom]-(x)-[e2]-(n2:Material) WHERE n1.Material_id = \"M000001\" AND n2.Material_id <> \"M000001\" RETURN p LIMIT 1",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find results from material 'M000001' connected through 1 to 3 hops of any type of edges to nodes with 'Supplier' label, and limit the return to 5 records.",
+    "gql": "MATCH (n1:Material)-[e]-{1,3}(n2:Supplier) WHERE n1.Material_id = \"M000001\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find nodes with specific material ID and further obtain downstream nodes directly connected to it and related edge information.",
+    "gql": "MATCH (nodes_1:Material) WHERE nodes_1.Material_id = \"M000001\" RETURN nodes_1 NEXT MATCH (nodes_1)-[edges_1:SourcedFrom]->(nodes_2:Supplier) RETURN nodes_2, nodes_1, edges_1 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the number of distinct target nodes associated with Material nodes having specific attribute values (name = 'Employee wait').",
+    "gql": "MATCH (n1:Material)-[]->(n2) WHERE n1.name = \"Employee wait\" RETURN COUNT(DISTINCT n2) as count_alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all paths from Material nodes to Supplier nodes connected through SourcedFrom edges, return these edges and target Supplier nodes, limited to 10 records.",
+    "gql": "MATCH (n1:Material)-[e:SourcedFrom]->(n2) RETURN e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Precisely find material node information with material ID 'M000001'.",
+    "gql": "MATCH (n:Material) WHERE n.Material_id = \"M000001\" RETURN n LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Calculate the number of distinct suppliers connected to material 'M000001'.",
+    "gql": "MATCH (n1:Material)-[]->(n2) WHERE n1.Material_id = \"M000001\" RETURN COUNT(DISTINCT n2) as count_alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all paths from material 'M000001' reaching other materials through one or two hops (up to three hops), and the target material cannot be 'M000001' itself. Union all qualifying one-hop and two-hop paths, each taking top 5.",
+    "gql": "MATCH p = (n1:Material)-[]-(x)-[]-(n2:Material) WHERE n1.Material_id = \"M000001\" AND n2.Material_id <> \"M000001\" RETURN p LIMIT 5 UNION ALL MATCH p = (n1:Material)-[]-(x)-[]-(y)-[]-(n2:Material) WHERE n1.Material_id = \"M000001\" AND n2.Material_id <> \"M000001\" RETURN p LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all supplier nodes connected from material 'M000001' through 1 to 3 hops, return the starting material and final supplier information, limit to 5 pairs.",
+    "gql": "MATCH (n1:Material)-[]-{1,3}(n2) WHERE n1.Material_id = \"M000001\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Get target nodes pointed to by sourcing relationships with contract terms of 'Long Term' and minimum order quantity greater than 800, return the node and delivery_schedule attribute in the sourcing relationship, show at most 10 results.",
+    "gql": "MATCH (a:Material {Material_id: \"M000001\"})-[e:SourcedFrom]->(n) WHERE e.contract_terms = \"Long Term\" AND e.minimum_order_quantity > 800 RETURN n, e.delivery_schedule LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve two-hop paths from material 'M000001' through intermediate nodes to another material (not 'M000001'), where the destination material must be different from the starting material, return only the first 1 such path.",
+    "gql": "MATCH p = (n1:Material)-[]-(x)-[]-(n2:Material) WHERE n1.Material_id = \"M000001\" AND n2.Material_id <> \"M000001\" RETURN p LIMIT 1",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all downstream nodes and their relationships connected to material with Material_id 'M000001', and limit the return to 10 records.",
+    "gql": "MATCH (nodes_1:Material) WHERE nodes_1.Material_id = \"M000001\" RETURN nodes_1 NEXT MATCH (nodes_1)-[edges_1:SourcedFrom]->(nodes_2) RETURN nodes_2, nodes_1, edges_1 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all materials belonging to category 'Hardware' and their associated sourcing information, and limit the return to top 10 records.",
+    "gql": "MATCH (m:Material)-[s:SourcedFrom]->(sup) WHERE m.category = \"Hardware\" RETURN s, sup LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find supplier information of materials with category 'Hardware' connected through 'SourcedFrom' edges, where contract terms are 'Long Term'.",
+    "gql": "MATCH (n1:Material)-[e:SourcedFrom]->(n2) WHERE n1.category = \"Hardware\" AND e.contract_terms = \"Long Term\" RETURN n1, e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find suppliers connected to material 'M000001' through 'SourcedFrom' edges, and filter records where minimum order quantity is greater than 800.",
+    "gql": "MATCH (a:Material {Material_id: \"M000001\"})-[e:SourcedFrom]->(n) WHERE e.minimum_order_quantity > 800 RETURN n, e.supplier_part_number LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of distinct suppliers associated with materials in category 'Hardware'.",
+    "gql": "MATCH (n1:Material)-[]->(n2) WHERE n1.category = \"Hardware\" RETURN COUNT(DISTINCT n2) as supplier_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find supplier nodes related to material 'M000001' and the sourcing relationship edges between them, and limit the return to top 10 results.",
+    "gql": "MATCH (n:Material)-[e:SourcedFrom]->(s) WHERE n.Material_id = \"M000001\" RETURN e, s LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all materials with category 'Hardware' and return their information, return at most 10 records.",
+    "gql": "MATCH (n:Material) WHERE n.category = \"Hardware\" RETURN n LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials with name 'Employee wait' but specification not equal to 'Talk including pressure conference analysis.', connected through SourcedFrom relationship to supplier nodes forming a two-hop path, return the path and take only one.",
+    "gql": "MATCH p = (n1:Material)-[e1:SourcedFrom]->(x)<-[e2]-(n2:Material) WHERE n1.name = \"Employee wait\" AND n2.specification <> \"Talk including pressure conference analysis.\" RETURN p LIMIT 1",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the total quantity required for each material used in products that are currently in 'Active' status, grouped by material name.",
+    "gql": "MATCH (p:`Product`)-[c:ConsistsOf]->(m:Material) WHERE p.status = 'Active' RETURN m.name, SUM(c.quantity_required) AS total_quantity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average cycle time for manufacturing products at each work center, considering only those products that have been modified by at least one engineering change, and order the results by average cycle time ascending.",
+    "gql": "MATCH (p:`Product`)-[:ManufacturedAt]->(w:WorkCenter), (p)-[:ModifiedBy]->(:EngineeringChange) RETURN w.name, AVG(w.cycle_time) AS avg_cycle_time ORDER BY avg_cycle_time ASC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all suppliers who provide materials that are substitutes for other materials, including the original and substitute material names and substitution reason.",
+    "gql": "MATCH (m1:Material)<-[:SubstitutesFor]-(m2:Material)-[:SourcedFrom]->(s:Supplier) RETURN s.name AS supplier_name, m1.name AS original_material, m2.name AS substitute_material, m2.substitution_reason",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the average setup time and cycle time for products assembled at work centers with operating hours '24/7', grouped by product name.",
+    "gql": "MATCH (p:`Product`)-[ma:ManufacturedAt]->(wc:WorkCenter) WHERE wc.operating_hours = '24/7' RETURN p.name, avg(ma.setup_time) AS avg_setup_time, avg(ma.cycle_time) AS avg_cycle_time",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the top 5 work centers with the highest total capacity that have been used to manufacture products with a 'Revision' status of 'D' and sort them by their operating hours.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`) WHERE p.revision_level = 'D' RETURN wc.WorkCenter_id, wc.name, wc.capacity, wc.operating_hours ORDER BY wc.capacity DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the total quantity required of each material across all products and assemblies?",
+    "gql": "MATCH (v)-[c:ConsistsOf]->(m:Material) RETURN m.Material_id, m.name, SUM(c.quantity_required) AS total_quantity_required",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total quantity required for all materials used in products that are currently in 'Development' status, grouped by material category.",
+    "gql": "MATCH (p:`Product`{status:'Development'})-[:ConsistsOf]->(m:Material) RETURN m.category AS MaterialCategory, SUM(m.quantity_required) AS TotalQuantityRequired",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average cycle time for manufacturing orders grouped by the product's unit of measure, excluding orders with a status of 'Cancelled'.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`) WHERE mo.status <> 'Cancelled' RETURN p.unit_of_measure AS UnitOfMeasure, AVG(mo.cycle_time) AS AverageCycleTime",
+    "difficulty": "medium"
+  },
+  {
+    "question": "For each manufacturing order with a status of 'Completed', find the total quantity required of each material used in the ordered products or assemblies, grouped by material name.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[r:OrderedFor]->(n)-[:ConsistsOf]->(m:Material) WHERE mo.status = 'Completed' RETURN m.name, SUM(r.required_quantity) AS total_quantity_required",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of materials and their total required quantities across all products and assemblies, excluding those with an alternative flag set to true in their relationships.",
+    "gql": "MATCH (n)-[co:ConsistsOf]->(m:Material) WHERE co.alternative_flag <> true RETURN m.name, SUM(co.quantity_required) AS total_quantity_required",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the total quantity required for each material used in products that are currently in 'Active' status, grouped by material name and ordered by the total quantity in descending order.",
+    "gql": "MATCH (p:`Product`{status:'Active'})-[:ConsistsOf]->(m:Material) RETURN m.name, SUM(m.quantity_required) AS total_quantity ORDER BY total_quantity DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which products have at least one substitute material with a priority ranking below 5? Return the product ID and the count of such substitute materials.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material)-[:SubstitutesFor]->(sm:Material) WHERE sm.priority_ranking < 5 RETURN p.Product_id, COUNT(sm) AS substitute_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the latest effective BomVersion for each product and assembly, including the version number and effective date.",
+    "gql": "MATCH (bv:BomVersion)<-[:HasBomVersion]-(p_or_a) RETURN p_or_a, bv ORDER BY bv.effective_date DESC NEXT RETURN p_or_a.name, bv.version_number, bv.effective_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Calculate the average setup time for manufacturing operations at work centers that have a capacity greater than 100 units.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(entity) WHERE wc.capacity > 100 RETURN avg(entity.setup_time) AS average_setup_time",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the top 5 most substituted materials along with their substitution reason and approval level, ordered by priority ranking?",
+    "gql": "MATCH (m1:Material)-[s:SubstitutesFor]->(m2:Material) RETURN m1.name, s.substitution_reason, s.approval_level ORDER BY s.priority_ranking LIMIT 5",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which products have at least one substitute material with a higher unit cost? Provide the product ID, name, and the count of such substitute materials.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m1:Material) RETURN p, m1 NEXT MATCH (m2:Material)-[:SubstitutesFor]->(m1) WHERE m2.unit_cost > m1 RETURN p.Product_id, p.name, COUNT(m2) AS substitute_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all products that have at least one material with a unit cost higher than 100, and list their names along with the total number of such expensive materials they contain.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material) WHERE m.unit_cost > 100 RETURN p.name, COUNT(m) AS expensive_material_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all engineering changes that affect products currently in 'Development' status, including the change description and the product name.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange) WHERE p.status = 'Development' RETURN ec.description, p.name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify suppliers who provide materials used in products that are ordered in manufacturing orders with quantities greater than 50. Return distinct supplier names and the count of such products.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`)<-[:OrderedFor]-(mo:ManufacturingOrder) WHERE mo.quantity > 50 RETURN DISTINCT s.name, COUNT(p) AS product_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify all suppliers who provide materials that are used in products with a revision level of 'C'. Include supplier names and contact info in the results.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`{revision_level:'C'}) RETURN DISTINCT s.name, s.contact_info",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total quantity required for all materials used in products that have at least one engineering change with an approval status of 'Approved'. Return the product ID and the sum of quantity required.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material), (p)-[:ModifiedBy]->(ec:EngineeringChange) WHERE ec.approval_status = 'Approved' RETURN p.Product_id, SUM(m.quantity_required) AS total_quantity_required",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all materials that can substitute for other materials with a priority ranking less than 5, along with the names of both the original and substitute materials.",
+    "gql": "MATCH (m1:Material)-[s:SubstitutesFor]->(m2:Material) WHERE s.priority_ranking < 5 RETURN m1.name AS original_material, m2.name AS substitute_material",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List suppliers who provide materials used in products with a revision level of 'C', including supplier contact information and the count of distinct materials supplied.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`) WHERE p.revision_level = 'C' RETURN s.Supplier_id, s.name, s.contact_info, COUNT(DISTINCT m) AS material_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the total quantity required for each material used in products that are currently in 'Active' status.",
+    "gql": "MATCH (p:`Product`{status:'Active'})-[co:ConsistsOf]->(m:Material) RETURN m.name, sum(co.quantity_required) AS total_quantity_required",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which work centers are capable of manufacturing products with a status of 'Active', and what are their operating hours?",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`) WHERE p.status = 'Active' RETURN DISTINCT wc.name, wc.operating_hours",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the top 5 suppliers by the number of distinct materials they supply, along with their contact information.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material) RETURN s.name, s.contact_info, COUNT(DISTINCT m) AS material_count ORDER BY material_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total quantity required for all materials used in assemblies that are manufactured at work centers with a capacity greater than 100.",
+    "gql": "MATCH (a:Assembly)-[:ConsistsOf]->(m:Material), (a)-[:ManufacturedAt]->(wc:WorkCenter) WHERE wc.capacity > 100 RETURN SUM(m.quantity_required) AS total_quantity_required",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names and due dates of manufacturing orders for products that have at least one engineering change with an approval status of 'Pending'.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange) WHERE ec.approval_status = 'Pending' RETURN DISTINCT mo.ManufacturingOrder_id, mo.due_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which products have at least one material with a unit cost greater than 500, and what are their names and statuses?",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material) WHERE m.unit_cost > 500 RETURN DISTINCT p.name, p.status",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the top 5 suppliers by the number of materials they supply, showing the supplier name and the count of supplied materials.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material) RETURN s.name, COUNT(m) AS material_count ORDER BY material_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify materials that substitute for other materials with a priority ranking below 5, including the original material's name, unit cost, and the substituted material's name and specification.",
+    "gql": "MATCH (m1:Material)-[s:SubstitutesFor]->(m2:Material) WHERE s.priority_ranking < 5 RETURN m1.name AS original_name, m1.unit_cost AS original_cost, m2.name AS substitute_name, m2.specification AS substitute_spec",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve manufacturing orders which involve products having at least one alternative material component. Show the order ID and product name involved.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`)-[co:ConsistsOf]->(m:Material) WHERE co.alternative_flag = true RETURN DISTINCT mo.ManufacturingOrder_id, p.name",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all products along with their latest BOM version status and effective date, sorted by product name.",
+    "gql": "MATCH (p:`Product`)-[:HasBomVersion]->(bv:BomVersion) RETURN p, bv ORDER BY bv.effective_date DESC NEXT RETURN p.name AS product_name, bv.status AS bom_status, bv.effective_date AS effective_date ORDER BY p.name ASC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Calculate the total quantity required for each material used in products, grouped by material category and sorted descending by total quantity.",
+    "gql": "MATCH (p:`Product`)-[co:ConsistsOf]->(m:Material) RETURN m.category AS material_category, SUM(co.quantity_required) AS total_quantity_required ORDER BY total_quantity_required DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all materials that substitute for other materials with a higher unit cost, including the substitution reason and priority ranking.",
+    "gql": "MATCH (m1:Material)-[s:SubstitutesFor]->(m2:Material) WHERE m1.unit_cost > m2.unit_cost RETURN m1.name, m2.name, s.substitution_reason, s.priority_ranking",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the top 5 suppliers by the number of distinct materials they supply, and calculate the average lead time of those materials.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material) RETURN s.name, count(DISTINCT m) AS material_count, avg(m.lead_time) AS avg_lead_time ORDER BY material_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the names and capacities of work centers that manufacture products with a unit of measure 'PCS', along with the average setup time for those manufacturing processes.",
+    "gql": "MATCH (p:`Product`)-[ma:ManufacturedAt]->(wc:WorkCenter) WHERE p.unit_of_measure = 'PCS' RETURN wc.name, wc.capacity, AVG(ma.setup_time) AS avg_setup_time",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify substitute materials that have a higher priority ranking than 5, returning the original material name, substitute material name, and the substitution reason.",
+    "gql": "MATCH (m1:Material)<-[s:SubstitutesFor]-(m2:Material) WHERE s.priority_ranking > 5 RETURN m1.name, m2.name, s.substitution_reason",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What are the names and specifications of materials that are substitutes for materials used in active products, and what is their average lead time?",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material) WHERE p.status = 'Active' RETURN m NEXT MATCH (m)-[:SubstitutesFor]->(sm:Material) RETURN sm.name, sm.specification, avg(sm.lead_time) AS average_lead_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the total quantity required for each product that consists of materials, grouped by product ID and name, considering only active products.",
+    "gql": "MATCH (p:`Product`{status:'Active'})-[c:ConsistsOf]->(:Material) RETURN p.Product_id AS product_id, p.name AS product_name, SUM(c.quantity_required) AS total_quantity_required",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the names and capacities of work centers that manufacture products with a revision level of 'D', along with the product names.",
+    "gql": "MATCH (p:`Product`{revision_level:'D'})-[:ManufacturedAt]->(w:WorkCenter) RETURN w.name AS work_center_name, w.capacity AS capacity, p.name AS product_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all products that have at least one material with a unit cost exceeding 500, along with the total cost of materials for each product.",
+    "gql": "MATCH (p:`Product`)-[c:ConsistsOf]->(m:Material) WHERE m.unit_cost > 500 RETURN p.Product_id, p.name, SUM(c.quantity_required) AS total_material_cost",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average cycle time for manufacturing orders grouped by the status of the manufacturing order and the location of the associated work center.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(:`Product`)-[:ManufacturedAt]->(wc:WorkCenter) RETURN mo.status AS order_status, wc.location AS work_center_location, AVG(wc.cycle_time) AS average_cycle_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all products along with their total material cost, calculated from the quantity required and unit cost of each material they consist of, ordered by the highest total cost first.",
+    "gql": "MATCH (p:`Product`)-[c:ConsistsOf]->(m:Material) RETURN p.Product_id, p.name, SUM(c.quantity_required) AS total_material_cost ORDER BY total_material_cost DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the latest BOM version for each product that is currently active. Display the product ID, product name, BOM version number, and effective date.",
+    "gql": "MATCH (p:`Product`)-[h:HasBomVersion]->(bv:BomVersion) WHERE bv.status = 'Active' RETURN p, bv ORDER BY bv.effective_date DESC NEXT RETURN p.Product_id, p.name, bv.version_number, bv.effective_date",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which engineering changes have been implemented for products with a status of 'Active', and what is the change impact level for each?",
+    "gql": "MATCH (p:`Product`{status:'Active'})-[mb:ModifiedBy]->(ec:EngineeringChange) RETURN ec.description AS change_description, mb.change_impact_level, p.name AS product_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the total quantity required for each material used in products that have at least one manufacturing order with status 'In Progress'.",
+    "gql": "MATCH (mo:ManufacturingOrder{status:'In Progress'})-[:OrderedFor]->(p:`Product`)-[co:ConsistsOf]->(m:Material) RETURN m.Material_id, m.name, SUM(co.quantity_required) AS total_quantity_required",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify all products that have at least one substitute material with a priority ranking below 5, and return the product name along with the number of such substitutes.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material)-[:SubstitutesFor]->(sm:Material) WHERE sm.priority_ranking < 5 RETURN p.name, count(sm) AS num_substitutes",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the average lead time of materials used in products that are manufactured at work centers located in 'Zone B'?",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material), (p)-[:ManufacturedAt]->(wc:WorkCenter) WHERE wc.location = 'Zone B' RETURN AVG(m.lead_time) AS avg_lead_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many distinct suppliers provide materials that are part of products with a status of 'Active'?",
+    "gql": "MATCH (sup:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`) WHERE p.status = 'Active' RETURN COUNT(DISTINCT sup) AS supplier_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List the top 5 most frequently used materials in terms of quantity required across all products and assemblies, including their names and total quantity used.",
+    "gql": "MATCH (n)-[c:ConsistsOf]->(m:Material) RETURN m.name AS material_name, SUM(c.quantity_required) AS total_quantity ORDER BY total_quantity DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total number of manufacturing orders and their average quantity for products that are linked to the 'Electronics' category materials.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`)-[:ConsistsOf]->(m:Material) WHERE m.category = 'Electronics' RETURN COUNT(mo) AS total_orders, AVG(mo.quantity) AS average_quantity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all work centers capable of operating more than 40 units of capacity and the count of distinct products manufactured at each, ordered by the count in descending order.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`) WHERE wc.capacity > 40 RETURN wc.name, COUNT(DISTINCT p) AS product_count ORDER BY product_count DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the names and capacities of work centers that have manufactured products with a revision level of 'D', ordered by capacity in descending order.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`) WHERE p.revision_level = 'D' RETURN wc.name, wc.capacity ORDER BY wc.capacity DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the top 5 suppliers by the total unit cost of materials they supply, including the supplier name and the aggregated unit cost.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material) RETURN s.name, sum(m.unit_cost) AS total_unit_cost ORDER BY total_unit_cost DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the names of products that have at least two different versions recorded in the BOM versions, along with the latest effective date among those versions.",
+    "gql": "MATCH (p:`Product`)-[:HasBomVersion]->(bv:BomVersion) RETURN p, COUNT(bv) AS version_count, MAX(bv.effective_date) AS latest_effective_date NEXT FILTER version_count >= 2 RETURN p.name, latest_effective_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all work centers along with their locations and the count of distinct products manufactured at each, excluding those work centers that have never been used for manufacturing.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`) RETURN wc.WorkCenter_id, wc.location, COUNT(DISTINCT p) AS distinct_products_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the cumulative quantity required for each material across all assemblies and products, but only include materials whose total quantity exceeds 100 units.",
+    "gql": "MATCH (n)-[co:ConsistsOf]->(m:Material) RETURN m, SUM(co.quantity_required) AS total_quantity NEXT FILTER total_quantity > 100 RETURN m.Material_id, m.name, total_quantity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Show the latest effective date of BOM versions for each product name, considering only those BOM versions that are in 'Approved' status.",
+    "gql": "MATCH (p:`Product`)-[:HasBomVersion]->(bv:BomVersion) WHERE bv.status = 'Approved' RETURN p.name, MAX(bv.effective_date) AS latest_effective_date",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify products that have undergone engineering changes with a 'Critical' impact level and are currently in 'Active' status. Include the product name, change description, and effective date of the change.",
+    "gql": "MATCH (p:`Product`{status:'Active'})-[mb:ModifiedBy{change_impact_level:'Critical'}]->(ec:EngineeringChange) RETURN p.name, ec.description, ec.effective_date",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the top 10 suppliers by total cost of materials provided, considering only materials used in active products, and include the supplier name and total cost.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material)<-[co:ConsistsOf]-(p:`Product`{status:'Active'}) RETURN s.name, SUM(m.unit_cost) AS total_cost ORDER BY total_cost DESC LIMIT 10",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Retrieve the names of work centers and the number of distinct products manufactured at each center, where the product's revision level is 'A'.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(p:`Product`) WHERE p.revision_level = 'A' RETURN wc.name, COUNT(DISTINCT p) AS product_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the top 5 suppliers by the total minimum order quantity across all materials they supply, including supplier name and the aggregated minimum order quantity.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material) RETURN s.name, SUM(sf.minimum_order_quantity) AS total_min_order_qty ORDER BY total_min_order_qty DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the total number of manufacturing orders and the sum of their quantities grouped by product name for products that have at least one engineering change recorded.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`)-[:ModifiedBy]->(:EngineeringChange) RETURN p.name, COUNT(mo) AS total_orders, SUM(mo.quantity) AS total_quantity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all products that have at least one engineering change recorded and list their names along with the count of associated engineering changes, sorted by the count in descending order.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange) RETURN p.name, COUNT(ec) AS change_count ORDER BY change_count DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average unit cost of materials for each product category, considering only materials that are not substitutes for any other material.",
+    "gql": "MATCH (m:Material) WHERE NOT EXISTS ((m)<-[:SubstitutesFor]-(:Material)) RETURN m.category, AVG(m.unit_cost) AS avg_unit_cost ORDER BY avg_unit_cost DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify products that have undergone more than two engineering changes and are manufactured at work centers with a capacity greater than 50. Return the product name and the number of engineering changes.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange), (p)-[:ManufacturedAt]->(wc:WorkCenter) WHERE wc.capacity > 50 RETURN p, COUNT(ec) AS change_count NEXT FILTER change_count > 2 RETURN p.name, change_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of products that have at least one substitute material with a higher unit cost, along with the product's revision level and status.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material)<-[:SubstitutesFor]-(sm:Material) WHERE sm.unit_cost > m RETURN DISTINCT p.name AS product_name, p.revision_level AS revision_level, p.status AS product_status",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find materials that do not have any substitutes, returning their names and categories.",
+    "gql": "MATCH (m:Material) WHERE NOT EXISTS((m)-[:SubstitutesFor]->(:Material)) RETURN m.name AS material_name, m.category AS category",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the average lead time of materials grouped by their category, excluding materials without a specified category.",
+    "gql": "MATCH (m:Material) WHERE m.category IS NOT NULL RETURN m.category AS category, AVG(m.lead_time) AS average_lead_time ORDER BY average_lead_time DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average lead time and total unit cost of materials grouped by their categories, excluding materials without a specified category.",
+    "gql": "MATCH (m:Material) WHERE m.category IS NOT NULL RETURN m.category, AVG(m.lead_time) AS avg_lead_time, SUM(m.unit_cost) AS total_unit_cost ORDER BY total_unit_cost DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the average cycle time for each work center that has manufactured more than five different products, showing the work center name and its average cycle time.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`) RETURN wc, COUNT(DISTINCT p) AS product_count NEXT FILTER product_count > 5 MATCH (wc)<-[:ManufacturedAt]-(p:`Product`) RETURN wc.name, AVG(p.cycle_time) AS avg_cycle_time",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find the top 3 most frequently substituted materials in assemblies, including the original material name, substitute material name, and substitution count.",
+    "gql": "MATCH (m1:Material)<-[s:SubstitutesFor]-(m2:Material) RETURN m1, m2, COUNT(s) AS substitution_count NEXT RETURN m1.name AS original_material, m2.name AS substitute_material, substitution_count ORDER BY substitution_count DESC LIMIT 3",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the list of all products along with their latest BOM version number and effective date, including those products which do not have any BOM versions defined yet.",
+    "gql": "MATCH (p:`Product`)-[:HasBomVersion]->(bv:BomVersion) RETURN p, bv ORDER BY bv.effective_date DESC NEXT RETURN p.Product_id, p.name, bv.version_number, bv.effective_date",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all engineering changes that affect products or assemblies with a BomVersion status of 'Approved', including the change description and effective date.",
+    "gql": "MATCH (ec:EngineeringChange)<-[mb:ModifiedBy]-(n)-[:HasBomVersion]->(bv:BomVersion {status: 'Approved'}) RETURN DISTINCT ec.description AS ChangeDescription, ec.effective_date AS EffectiveDate",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the top 3 suppliers by total value of materials supplied (calculated as unit cost multiplied by minimum order quantity), including supplier names and the calculated total values.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material) RETURN s.name, SUM(m.unit_cost * sf.minimum_order_quantity) AS total_value ORDER BY total_value DESC LIMIT 3",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the average lead time of materials grouped by supplier name, considering only those materials that are part of products with a unit of measure 'KG'.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`) WHERE p.unit_of_measure = 'KG' RETURN s.name AS SupplierName, AVG(m.lead_time) AS AverageLeadTime",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify suppliers who provide materials used in products that are in 'Development' status, and return the supplier name along with the average lead time of the materials they supply for those products.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`{status:'Development'}) RETURN s.name, AVG(m.lead_time) AS avg_lead_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the names of products that consist of at least three different materials, and what is the total unit cost of materials for each of these products?",
+    "gql": "MATCH (p:`Product`)-[co:ConsistsOf]->(m:Material) RETURN p, COUNT(DISTINCT m) AS material_count, SUM(m.unit_cost) AS total_unit_cost NEXT FILTER material_count >= 3 RETURN p.name, total_unit_cost",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Return the names of suppliers who supply materials that are substitutes for other materials, along with the count of such substitute relationships and the earliest delivery schedule among them.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m1:Material)-[:SubstitutesFor]->(:Material) RETURN s.name, COUNT(m1) AS substitute_count, MIN(s.delivery_schedule) AS earliest_delivery",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all engineering changes that affect products with a status of 'Discontinued'. Return the engineering change description, effective date, and the affected product name.",
+    "gql": "MATCH (p:`Product`)-[mb:ModifiedBy]->(ec:EngineeringChange) WHERE p.status = 'Discontinued' RETURN ec.description AS ChangeDescription, ec.effective_date AS EffectiveDate, p.name AS ProductName",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List work centers along with the number of unique products they have manufactured and the average cycle time for those products, excluding work centers located in 'Asia'.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`) WHERE wc.location <> 'Asia' RETURN wc.name AS work_center_name, COUNT(DISTINCT p) AS unique_products_count, AVG(p.revision_level) AS avg_cycle_time ORDER BY unique_products_count DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve materials that do not have any substitute alternatives, showing their names and categories, sorted alphabetically by category.",
+    "gql": "MATCH (m:Material) WHERE NOT EXISTS((m)-[:SubstitutesFor]->(:Material)) RETURN m.name AS material_name, m.category AS category ORDER BY m.category ASC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve all suppliers who provide materials that are substitutes for other materials, including the original and substitute material names, and order them by supplier name.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m1:Material)<-[:SubstitutesFor]-(m2:Material) RETURN s.name AS supplier_name, m2.name AS original_material, m1.name AS substitute_material ORDER BY s.name",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the most recent engineering change for each product and assembly, displaying the change description, reason code, and the effective date of the change.",
+    "gql": "MATCH (ec:EngineeringChange)<-[mb:ModifiedBy]-(entity) RETURN entity, ec ORDER BY ec.effective_date DESC NEXT RETURN entity.name, ec.description, ec.reason_code, ec.effective_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average unit cost of materials that are part of products with a revision level of 'C' and are sourced from suppliers with a contract term indicating 'Net 30'. Return the average unit cost.",
+    "gql": "MATCH (p:`Product`{revision_level:'C'})-[:ConsistsOf]->(m:Material)-[:SourcedFrom]->(s:Supplier) WHERE s.contract_terms = 'Net 30' RETURN AVG(m.unit_cost) AS average_unit_cost",
+    "difficulty": "hard"
+  },
+  {
+    "question": "For each work center that has manufactured products with more than one Bom version, find the work center ID, name, and the number of distinct Bom versions associated with the products it has manufactured.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`)-[:HasBomVersion]->(bv:BomVersion) RETURN wc, COUNT(DISTINCT bv) AS bom_version_count NEXT FILTER bom_version_count > 1 RETURN wc.WorkCenter_id, wc.name, bom_version_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average setup time for manufacturing orders of products that have undergone at least two engineering changes.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange) RETURN p, COUNT(ec) AS ChangeCount NEXT FILTER ChangeCount >= 2 MATCH (p)-[m:ManufacturedAt]->(:WorkCenter) RETURN AVG(m.setup_time) AS AverageSetupTime",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Identify suppliers who provide materials used in products that are currently in 'Active' status, including supplier name, material name, and the delivery schedule agreed upon.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material)<-[co:ConsistsOf]-(p:`Product`) WHERE p.status = 'Active' RETURN s.name AS supplier_name, m.name AS material_name, sf.delivery_schedule AS delivery_schedule",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Determine which materials are used across multiple products and list these materials with their names, the number of different products they are part of, and the average lead time of those materials, filtering out materials with less than two product associations.",
+    "gql": "MATCH (m:Material)<-[co:ConsistsOf]-(p:`Product`) RETURN m, COUNT(DISTINCT p) AS product_count, AVG(m.lead_time) AS avg_lead_time NEXT FILTER product_count >= 2 RETURN m.name AS material_name, product_count, avg_lead_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all products along with their associated assemblies and materials, including the quantity required for each component, where the product status is 'Active'.",
+    "gql": "MATCH (p:`Product`{status:'Active'})-[co:ConsistsOf]->(component) RETURN p.name AS product_name, component.name AS component_name, co.quantity_required",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all work centers along with their total setup time and average cycle time for manufacturing products, ordered by total setup time descending.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(p:`Product`) RETURN wc.WorkCenter_id, wc.name, SUM(ma.setup_time) AS total_setup_time, AVG(ma.cycle_time) AS average_cycle_time ORDER BY total_setup_time DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all products that have at least one engineering change affecting them and are manufactured at a work center located in 'Factory A'. Include the product name and the number of associated engineering changes.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange), (p)-[:ManufacturedAt]->(wc:WorkCenter) WHERE wc.location = 'Factory A' RETURN p.name, COUNT(ec) AS num_engineering_changes",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve products that have at least two engineering changes with different reason codes. Include the product ID, name, and the count of distinct reason codes.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange) RETURN p, COUNT(DISTINCT ec.reason_code) AS reason_codes_count NEXT FILTER reason_codes_count >= 2 RETURN p.Product_id, p.name, reason_codes_count",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find all engineering changes that have been implemented with a high impact level and are associated with products or assemblies whose status is not 'Obsolete'. Return the change description and the affected item's name.",
+    "gql": "MATCH (ec:EngineeringChange)<-[mb:ModifiedBy]-(n) WHERE mb.change_impact_level = 'High' AND n.status <> 'Obsolete' RETURN ec.description, n.name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the average setup time and total cycle time for each work center that has manufactured more than 5 products. Order the results by average setup time descending.",
+    "gql": "MATCH (p:`Product`)-[m:ManufacturedAt]->(w:WorkCenter) RETURN w, COUNT(p) AS ProductCount, AVG(m.setup_time) AS AvgSetupTime, SUM(m.cycle_time) AS TotalCycleTime NEXT FILTER ProductCount > 5 RETURN w.name AS WorkCenterName, AvgSetupTime, TotalCycleTime ORDER BY AvgSetupTime DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average setup time for manufacturing orders grouped by the product's status and ordered by the average setup time in ascending order.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`), (p)-[:ManufacturedAt]->(wc:WorkCenter) RETURN p.status, AVG(wc.setup_time) AS avg_setup_time ORDER BY avg_setup_time ASC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the top 3 work centers with the highest total resource requirements across all manufacturing processes they are involved in, including both products and assemblies.",
+    "gql": "MATCH (n)-[:ManufacturedAt]->(wc:WorkCenter) RETURN wc.WorkCenter_id, wc.name, SUM(n.resource_requirements) AS total_resource_requirements ORDER BY total_resource_requirements DESC LIMIT 3",
+    "difficulty": "medium"
+  },
+  {
+    "question": "For each engineering change with approval status 'Approved', list the associated products that were modified, along with the change impact level and the product\u2019s unit of measure.",
+    "gql": "MATCH (p:`Product`)-[mb:ModifiedBy]->(ec:EngineeringChange) WHERE ec.approval_status = 'Approved' RETURN ec.EngineeringChange_id, p.Product_id, mb.change_impact_level, p.unit_of_measure",
+    "difficulty": "medium"
+  },
+  {
+    "question": "For each BomVersion associated with active products, calculate the total quantity required of all constituent materials, returning the BomVersion ID and the computed total.",
+    "gql": "MATCH (bv:BomVersion)<-[:HasBomVersion]-(p:`Product`{status:'Active'})-[:ConsistsOf]->(m:Material) RETURN bv.BomVersion_id AS bom_version_id, SUM(m.quantity_required) AS total_material_quantity_required",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names and contact info of suppliers who supply materials used in products that have been modified by engineering changes with an approval status of 'Approved'. Ensure no duplicates in the supplier listing.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material)-[:SourcedFrom]->(s:Supplier), (p)-[:ModifiedBy]->(ec:EngineeringChange) WHERE ec.approval_status = 'Approved' RETURN DISTINCT s.name, s.contact_info",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all Engineering Changes that impact products or assemblies with a change impact level of 'High', and return the engineering change description, the impacted product or assembly name, and the implementation status.",
+    "gql": "MATCH (ec:EngineeringChange)<-[m:ModifiedBy]-(p_or_a) WHERE m.change_impact_level = 'High' RETURN ec.description, p_or_a.name, m.implementation_status",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the top 10 products by the number of distinct materials used in their assembly, including the product name and the count of distinct materials.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material) RETURN p.name AS product_name, COUNT(DISTINCT m) AS distinct_material_count ORDER BY distinct_material_count DESC LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the top 5 most frequently substituted materials along with their substitution reason and approval level, ordered by the number of substitutions.",
+    "gql": "MATCH (m1:Material)-[s:SubstitutesFor]->(m2:Material) RETURN m1.Material_id, s.substitution_reason, s.approval_level, COUNT(*) AS substitution_count ORDER BY substitution_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the latest BOM version for each active product, including the product ID, BOM version number, and effective date, sorted by the effective date in descending order.",
+    "gql": "MATCH (p:`Product`)-[:HasBomVersion]->(bv:BomVersion) WHERE p.status = 'Active' RETURN p.Product_id, bv.version_number, bv.effective_date ORDER BY bv.effective_date DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the top 5 work centers with the highest total setup time for manufacturing active products, including the work center name and total setup time.",
+    "gql": "MATCH (p:`Product`)-[m:ManufacturedAt]->(w:WorkCenter) WHERE p.status = 'Active' RETURN w.name, SUM(m.setup_time) AS total_setup_time ORDER BY total_setup_time DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the total quantity of materials required for all active products, grouped by material category and sorted by the total quantity in descending order?",
+    "gql": "MATCH (p:`Product`{status:'Active'})-[c:ConsistsOf]->(m:Material) RETURN m.category, SUM(c.quantity_required) AS total_quantity ORDER BY total_quantity DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average lead time of materials used in products that have at least one substitute material, grouped by the original material's supplier reference.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material)<-[:SubstitutesFor]-(sm:Material) RETURN m.supplier_reference, AVG(m.lead_time) AS average_lead_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the average cycle time for manufacturing products at work centers with operating hours listed as '24/7', grouped by work center name.",
+    "gql": "MATCH (p:`Product`)-[ma:ManufacturedAt]->(wc:WorkCenter) WHERE wc.operating_hours = '24/7' RETURN wc.name AS work_center_name, AVG(ma.cycle_time) AS average_cycle_time",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify products that have at least one alternative component in their bill of materials, returning the product name and the count of alternative components used.",
+    "gql": "MATCH (p:`Product`)-[co:ConsistsOf{alternative_flag:true}]->(component) RETURN p.name AS product_name, COUNT(component) AS alternative_component_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average quantity required for each material used across all active product BOMs, grouped by material category.",
+    "gql": "MATCH (m:Material)<-[co:ConsistsOf]-(p:`Product`{status:'Active'}) RETURN m.category AS MaterialCategory, AVG(co.quantity_required) AS AvgQuantityRequired",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the total number of manufacturing orders and the sum of quantities ordered for products that are manufactured at work centers with a capacity over 100 units, grouped by work center location.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`)-[:ManufacturedAt]->(wc:WorkCenter) WHERE wc.capacity > 100 RETURN wc.location, COUNT(mo) AS total_orders, SUM(mo.quantity) AS total_quantities",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the total number of engineering changes implemented for each product that has undergone more than two changes, and return the product name along with the count of changes.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange) RETURN p.name AS product_name, COUNT(ec) AS change_count ORDER BY change_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the average cycle time for manufacturing products at each work center, considering only those work centers that have processed more than five distinct products, and return the work center name and average cycle time.",
+    "gql": "MATCH (p:`Product`)-[ma:ManufacturedAt]->(wc:WorkCenter) RETURN wc, COUNT(DISTINCT p) AS product_count, AVG(ma.cycle_time) AS avg_cycle_time NEXT FILTER product_count > 5 RETURN wc.name AS work_center_name, avg_cycle_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all suppliers who provide materials used in products with a status of 'Active', and return the supplier name, material name, and the total quantity required for those materials across all active products.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[co:ConsistsOf]-(p:`Product`) WHERE p.status = 'Active' RETURN s.name AS supplier_name, m.name AS material_name, SUM(co.quantity_required) AS total_quantity_required",
+    "difficulty": "hard"
+  },
+  {
+    "question": "For each BomVersion that is currently active (status = 'Active'), list the related products or assemblies, including the version number and expiration date, sorted by the product or assembly name.",
+    "gql": "MATCH (bv:BomVersion)<-[hbv:HasBomVersion]-(item) WHERE bv.status = 'Active' RETURN item.name AS item_name, bv.version_number, bv.expiration_date ORDER BY item.name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all engineering changes that affect products manufactured at work centers located in 'Factory A', including the change description and the product name.",
+    "gql": "MATCH (ec:EngineeringChange)<-[:ModifiedBy]-(p:`Product`)-[:ManufacturedAt]->(wc:WorkCenter) WHERE wc.location = 'Factory A' RETURN ec.description, p.name",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify all work centers that are involved in the manufacturing of products which have undergone at least one engineering change, and return the work center names along with the count of distinct products they are associated with.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`)-[:ModifiedBy]->(:EngineeringChange) RETURN wc.name, COUNT(DISTINCT p) AS product_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all manufacturing orders with their due dates and the corresponding product names for orders where the ordered quantity exceeds the average quantity of all manufacturing orders.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`) WHERE mo.quantity > mo RETURN mo.ManufacturingOrder_id, mo.due_date, p.name",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Determine the total cost of materials (unit cost multiplied by quantity required) for each active product, considering only those materials that have a unit cost greater than 100, and sort the results by total cost in descending order.",
+    "gql": "MATCH (p:`Product`{status:'Active'})-[co:ConsistsOf]->(m:Material) WHERE m.unit_cost > 100 RETURN p.name, SUM(m.unit_cost) AS total_cost ORDER BY total_cost DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify work centers that have manufactured products with more than one engineering change and return the work center name along with the count of such distinct products.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange) RETURN wc, p, COUNT(ec) AS ec_count NEXT FILTER ec_count > 1 RETURN wc.name, COUNT(DISTINCT p) AS distinct_product_count",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "List all products that have undergone at least one engineering change which was approved, along with the latest change's effective date and description.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange) WHERE ec.approval_status = 'Approved' RETURN p, ec ORDER BY ec.effective_date DESC NEXT RETURN p.name, ec.effective_date, ec.description",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify products that have been modified by at least two engineering changes and are part of a manufacturing order with status 'Completed'. Include the product name and the count of distinct engineering changes.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange), (p)<-[:OrderedFor]-(mo:ManufacturingOrder) WHERE mo.status = 'Completed' RETURN p, COUNT(DISTINCT ec) AS ec_count NEXT FILTER ec_count >= 2 RETURN p.name, ec_count",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "List all work centers that manufacture both products and assemblies, along with their names and the total number of distinct items (products and assemblies) they are responsible for producing.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(n) RETURN wc.name, COUNT(DISTINCT n) AS total_items_produced",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of materials that are used in more than five different assemblies or products, and also show the average quantity required across all usages.",
+    "gql": "MATCH (m:Material)<-[co:ConsistsOf]-(n) RETURN m, COUNT(n) AS usage_count, AVG(co.quantity_required) AS avg_quantity NEXT FILTER usage_count > 5 RETURN m.name, avg_quantity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify all manufacturing orders that involve products requiring more than 5 distinct materials, and return the order ID, product name, and the count of required materials.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`)-[co:ConsistsOf]->(m:Material) RETURN mo, p, COUNT(DISTINCT m) AS material_count NEXT FILTER material_count > 5 RETURN mo.ManufacturingOrder_id, p.name, material_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the top 5 most frequently substituted materials, including the material name, substitution count, and the highest priority ranking among substitutions.",
+    "gql": "MATCH (m:Material)-[sf:SubstitutesFor]->(:Material) RETURN m.name, COUNT(sf) AS substitution_count, MAX(sf.priority_ranking) AS max_priority ORDER BY substitution_count DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify work centers that have manufactured at least five different products, and return the work center names along with the count of distinct products they have manufactured.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`) RETURN wc, COUNT(DISTINCT p) AS product_count NEXT FILTER product_count >= 5 RETURN wc.name AS work_center_name, product_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all suppliers who supply materials used in products that are currently in 'Development' status, including the supplier name and the count of distinct materials supplied for such products.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[co:ConsistsOf]-(p:`Product`{status:'Development'}) RETURN s.name AS supplier_name, COUNT(DISTINCT m) AS distinct_materials_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List the top 5 most substituted materials by priority ranking, including the original material name, substitute material name, and the reason for substitution.",
+    "gql": "MATCH (m1:Material)<-[sf:SubstitutesFor]-(m2:Material) RETURN m1.name AS original_material, m2.name AS substitute_material, sf.substitution_reason ORDER BY sf.priority_ranking DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which suppliers provide materials that are used in products with a status of 'Discontinued', and what is the average lead time of those materials for each supplier?",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`) WHERE p.status = 'Discontinued' RETURN s.name, AVG(m.lead_time) AS avg_lead_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find the top 5 work centers by total setup time required for manufacturing products, excluding those with less than 3 associated manufacturing orders.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(p:`Product`)<-[:OrderedFor]-(mo:ManufacturingOrder) RETURN wc, SUM(ma.setup_time) AS total_setup_time, COUNT(mo) AS order_count NEXT FILTER order_count >= 3 RETURN wc.name, total_setup_time ORDER BY total_setup_time DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "For each product that has substitutes, calculate the average priority ranking of its substitute materials and list only those with an average ranking above 5.",
+    "gql": "MATCH (m:Material)<-[so:SubstitutesFor]-(orig_m:Material)<-[:ConsistsOf]-(p:`Product`) RETURN p, AVG(so.priority_ranking) AS avg_priority NEXT FILTER avg_priority > 5 RETURN p.name, avg_priority",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the latest BomVersion for each product and assembly, including the version number and expiration date, sorted by the expiration date in ascending order.",
+    "gql": "MATCH (entity)-[:HasBomVersion]->(bv:BomVersion) RETURN entity, bv ORDER BY bv.expiration_date ASC NEXT RETURN entity.name AS entity_name, bv.version_number AS version_number, bv.expiration_date AS expiration_date",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify all engineering changes that have not been implemented yet (implementation_status is not 'Completed') and list the change description, reason code, and the affected product or assembly names.",
+    "gql": "MATCH (ec:EngineeringChange)<-[mb:ModifiedBy]-(entity) WHERE mb.implementation_status <> 'Completed' OR mb.implementation_status IS NULL RETURN ec.description AS change_description, ec.reason_code AS reason_code, entity.name AS affected_entity_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the top 10 work centers with the highest total setup time across all manufacturing orders, including only those with more than 5 associated manufacturing activities. Return the work center name and the aggregated setup time.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(:`Product`)<-[:OrderedFor]-(mo:ManufacturingOrder) RETURN wc, SUM(ma.setup_time) AS total_setup_time, COUNT(mo) AS activity_count NEXT FILTER activity_count > 5 RETURN wc.name, total_setup_time ORDER BY total_setup_time DESC LIMIT 10",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List the top 5 suppliers by total contract value, calculated as the product of unit cost and minimum order quantity for materials they supply, including only those suppliers whose materials are part of active BOM versions.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(n)-[:HasBomVersion]->(:BomVersion{status:'Active'}) RETURN s, SUM(m.unit_cost) AS total_contract_value NEXT RETURN s.Supplier_id, s.name, total_contract_value ORDER BY total_contract_value DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all work centers along with their locations and the average setup time for manufacturing products or assemblies, excluding those with no setup time recorded.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(prod_or_ass) WHERE ma.setup_time IS NOT NULL RETURN wc.name, wc.location, AVG(ma.setup_time) AS avg_setup_time",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify all suppliers who provide materials used in products that are currently in 'Development' status, and return the supplier names and the count of distinct materials supplied.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material)<-[co:ConsistsOf]-(p:`Product`{status:'Development'}) RETURN s.name, COUNT(DISTINCT m) AS material_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all engineering changes that were implemented before their deadline and affected either a product or an assembly, returning the change description and the effective date of the change.",
+    "gql": "MATCH (ec:EngineeringChange)<-[mb:ModifiedBy]-(p_or_a) WHERE ec.effective_date < ec.implementation_deadline RETURN ec.description, ec.effective_date",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average lead time of materials grouped by supplier, only considering those suppliers whose total supplied material cost exceeds $1000, returning the supplier name and average lead time.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material) RETURN s, SUM(m.unit_cost) AS total_cost, AVG(m.lead_time) AS avg_lead_time NEXT FILTER total_cost > 1000 RETURN s.name AS supplier_name, avg_lead_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all products that have been modified by at least two engineering changes with different impact levels, and list the product ID, name, and the count of distinct impact levels.",
+    "gql": "MATCH (p:`Product`)-[mb:ModifiedBy]->(ec:EngineeringChange) RETURN p, COUNT(DISTINCT mb.change_impact_level) AS impact_levels NEXT FILTER impact_levels >= 2 RETURN p.Product_id, p.name, impact_levels",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the top 5 products with the highest total cycle time across all work centers involved in their manufacturing, including the product name and the aggregated cycle time.",
+    "gql": "MATCH (p:`Product`)-[ma:ManufacturedAt]->(wc:WorkCenter) RETURN p.name AS product_name, SUM(ma.cycle_time) AS total_cycle_time ORDER BY total_cycle_time DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "For each supplier, calculate the average lead time of materials they supply that are used in products with a status of 'Active', and return the supplier name and the average lead time.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`{status:'Active'}) RETURN s.name AS supplier_name, AVG(m.lead_time) AS avg_lead_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names and statuses of products that have at least two different versions of their BOM (Bill of Materials) and are manufactured at work centers with a capacity greater than 50.",
+    "gql": "MATCH (p:`Product`)-[:HasBomVersion]->(bv:BomVersion), (p)-[ma:ManufacturedAt]->(wc:WorkCenter) WHERE wc.capacity > 50 RETURN p, COUNT(DISTINCT bv) AS bom_versions NEXT FILTER bom_versions >= 2 RETURN p.name AS product_name, p.status AS product_status",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify all products that have at least one material substitute with a higher priority ranking than 5, and list the product names along with the count of such substitutes.",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material)-[s:SubstitutesFor]->(:Material) WHERE s.priority_ranking > 5 RETURN p.name, COUNT(s) AS substitute_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find work centers capable of manufacturing products with a cycle time less than 2 hours, returning the work center ID, name, and the average cycle time, excluding work centers with no such products.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(p:`Product`) WHERE ma.cycle_time < 2 RETURN wc.WorkCenter_id, wc.name, AVG(ma.cycle_time) AS avg_cycle_time",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the top 5 work centers with the highest total cycle time for manufacturing products, including their names and total cycle times.",
+    "gql": "MATCH (p:`Product`)-[m:ManufacturedAt]->(w:WorkCenter) RETURN w, SUM(m.cycle_time) AS total_cycle_time NEXT RETURN w.name AS work_center_name, total_cycle_time ORDER BY total_cycle_time DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the total quantity required for each material used in products that are in 'Development' status, grouping by material category and ordering by total quantity in descending order.",
+    "gql": "MATCH (p:`Product`{status:'Development'})-[:ConsistsOf]->(m:Material) RETURN m.category AS material_category, SUM(m.quantity_required) AS total_quantity_required ORDER BY total_quantity_required DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve a list of materials that substitute for others within the same category, showing both original and substitute material names, their categories, and the reason for substitution, excluding those without a specified substitution reason.",
+    "gql": "MATCH (m1:Material)-[sf:SubstitutesFor]->(m2:Material) WHERE m1.category = m2.category AND sf.substitution_reason IS NOT NULL RETURN m1.name AS original_material, m2.name AS substitute_material, m1.category, sf.substitution_reason",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the top 5 most frequently substituted materials along with their substitution counts and the average priority ranking of these substitutions.",
+    "gql": "MATCH (m1:Material)-[s:SubstitutesFor]->(m2:Material) RETURN m1.name AS original_material, COUNT(s) AS substitution_count, AVG(s.priority_ranking) AS avg_priority_ranking ORDER BY substitution_count DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which manufacturing orders are associated with products that have undergone engineering changes approved after their order date, and what are the statuses of these orders?",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange) WHERE ec.effective_date > mo RETURN mo.ManufacturingOrder_id AS order_id, mo.status AS order_status",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all work centers along with their total capacity and the count of distinct products they have manufactured, sorted by the highest capacity first.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`) RETURN wc.WorkCenter_id, wc.name, wc.capacity, COUNT(DISTINCT p) AS product_count ORDER BY wc.capacity DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the average lead time of materials grouped by their categories, only for those categories where the average lead time exceeds 10 days.",
+    "gql": "MATCH (m:Material) RETURN m.category AS category, AVG(m.lead_time) AS avg_lead_time NEXT FILTER avg_lead_time > 10 RETURN category, avg_lead_time",
+    "difficulty": "medium"
+  },
+  {
+    "question": "For each product that has been modified by an engineering change, list the product ID, name, latest effective date of its BOM version, and the description of the most recent engineering change.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange), (p)-[:HasBomVersion]->(bv:BomVersion) RETURN p, ec, bv ORDER BY ec.effective_date DESC, bv.effective_date DESC LIMIT 1 NEXT RETURN p.Product_id, p.name, bv.effective_date AS latest_bom_date, ec.description AS latest_ec_description",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find the total quantity of each material required across all products, considering only those materials which have a unit cost greater than 50, and order the results by total quantity descending.",
+    "gql": "MATCH (p:`Product`)-[co:ConsistsOf]->(m:Material) WHERE m.unit_cost > 50 RETURN m.Material_id, m.name, SUM(co.quantity_required) AS total_quantity ORDER BY total_quantity DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all manufacturing orders with their associated product names and statuses, including those orders where the product has been discontinued, and sort them by order date in descending order.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`) RETURN mo.ManufacturingOrder_id, p.name AS product_name, p.status AS product_status, mo.order_date ORDER BY mo.order_date DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve all suppliers who provide materials used in products with a status of 'Development', including supplier name, contact info, and the count of distinct materials supplied.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`) WHERE p.status = 'Development' RETURN s.name AS supplier_name, s.contact_info AS contact_info, COUNT(DISTINCT m) AS materials_count",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify products that have undergone at least two engineering changes, displaying the product name, the number of changes, and the latest effective date of these changes.",
+    "gql": "MATCH (p:`Product`)-[mb:ModifiedBy]->(ec:EngineeringChange) RETURN p, COUNT(ec) AS change_count, MAX(ec.effective_date) AS latest_change_date NEXT FILTER change_count >= 2 RETURN p.name AS ProductName, change_count AS NumberOfChanges, latest_change_date AS LatestEffectiveDate",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify work centers that are operating at over 90% capacity and list their name, location, and the total setup time required for all products manufactured at these work centers.",
+    "gql": "MATCH (wc:WorkCenter)-[ma:ManufacturedAt]-(p:`Product`) WHERE wc.capacity > 0.9 RETURN wc, SUM(ma.setup_time) AS total_setup_time NEXT RETURN wc.name AS work_center_name, wc.location AS location, total_setup_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all products that have undergone at least one engineering change and calculate the average cycle time for manufacturing these products across all associated work centers.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange), (p)-[ma:ManufacturedAt]->(wc:WorkCenter) RETURN p, AVG(ma.cycle_time) AS avg_cycle_time NEXT RETURN p.name AS product_name, avg_cycle_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the top 5 most frequently substituted materials in active products, including the original material name, substitute material name, and the count of substitutions, ordered by substitution frequency.",
+    "gql": "MATCH (m1:Material)<-[sf:SubstitutesFor]-(m2:Material)<-[co:ConsistsOf]-(p:`Product`{status:'Active'}) RETURN m1.name AS original_material, m2.name AS substitute_material, COUNT(sf) AS substitution_frequency ORDER BY substitution_frequency DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find materials that are substitutes for other materials with a higher unit cost, and return the original material name, substitute material name, and the difference in unit cost, ordered by the cost difference descending.",
+    "gql": "MATCH (m1:Material)-[s:SubstitutesFor]->(m2:Material) WHERE m1.unit_cost < m2.unit_cost RETURN m1.name AS original_material, m2.name AS substitute_material, (m2.unit_cost - m1.unit_cost) AS cost_difference ORDER BY cost_difference DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the total quantity required for each material category used in products that have at least one associated engineering change, grouped by material category and sorted by total quantity descending.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(:EngineeringChange), (p)-[co:ConsistsOf]->(m:Material) RETURN m.category AS material_category, SUM(co.quantity_required) AS total_quantity_required ORDER BY total_quantity_required DESC",
+    "difficulty": "hard"
+  },
+  {
+    "question": "For each product that has at least one associated engineering change, calculate the average lead time of its constituent materials. Only consider materials that have a unit cost greater than 50. Return the product name and the calculated average lead time.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(:EngineeringChange), (p)-[:ConsistsOf]->(m:Material) WHERE m.unit_cost > 50 RETURN p.name AS product_name, AVG(m.lead_time) AS average_lead_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find manufacturing orders for products that have at least two different Bom versions, returning the order ID, product name, and the count of distinct Bom versions associated.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`)-[:HasBomVersion]->(bv:BomVersion) RETURN mo, p, COUNT(DISTINCT bv) AS bom_version_count NEXT FILTER bom_version_count >= 2 RETURN mo.ManufacturingOrder_id, p.name, bom_version_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify the top 10 suppliers by total cost of materials supplied, where the unit cost of each material is multiplied by the minimum order quantity, and only include suppliers who supply at least 5 distinct materials.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material) RETURN s, SUM(m.unit_cost) AS total_cost, COUNT(DISTINCT m) AS material_count NEXT FILTER material_count >= 5 RETURN s.Supplier_id, s.name, total_cost ORDER BY total_cost DESC LIMIT 10",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names and specifications of materials that are substitutes for other materials with a higher unit cost, along with the substitution priority ranking and approval level.",
+    "gql": "MATCH (m1:Material)<-[sf:SubstitutesFor]-(m2:Material) WHERE m1.unit_cost < m2.unit_cost RETURN m1.name AS original_material_name, m1.specification AS original_specification, sf.priority_ranking AS priority_ranking, sf.approval_level AS approval_level",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the top 5 suppliers by the total quantity of materials ordered, including the supplier name and the aggregated quantity.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material)<-[co:ConsistsOf]-(item) RETURN s.name, SUM(co.quantity_required) AS total_quantity ORDER BY total_quantity DESC LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Determine the average setup time for manufacturing operations at each work center, including only those work centers that have manufactured more than 3 distinct products or assemblies. Return the work center name and the average setup time.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(n) RETURN wc, AVG(ma.setup_time) AS avg_setup_time, COUNT(DISTINCT n) AS item_count NEXT FILTER item_count > 3 RETURN wc.name, avg_setup_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all products that have at least one alternative material component, showing the product name, material name, and whether it's marked as an alternative.",
+    "gql": "MATCH (p:`Product`)-[c:ConsistsOf]->(m:Material) WHERE c.alternative_flag = true RETURN p.name AS product_name, m.name AS material_name, c.alternative_flag AS is_alternative",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all suppliers who provide materials used in products with a status of 'Active', along with the supplier name, material name, and product name.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`) WHERE p.status = 'Active' RETURN s.name AS supplier_name, m.name AS material_name, p.name AS product_name",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which engineering changes have affected products that are subsequently used in manufacturing orders with quantities exceeding 100 units? Provide the engineering change descriptions and the total quantity of affected manufacturing orders.",
+    "gql": "MATCH (ec:EngineeringChange)<-[:ModifiedBy]-(p:`Product`)<-[:OrderedFor]-(mo:ManufacturingOrder) WHERE mo.quantity > 100 RETURN ec.description, SUM(mo.quantity) AS total_quantity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all work centers that are involved in the manufacturing of products with a status of 'Active', along with the total number of distinct products they are associated with and the average setup time required for these products.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(p:`Product`) WHERE p.status = 'Active' RETURN wc.name, COUNT(DISTINCT p) AS product_count, AVG(ma.setup_time) AS avg_setup_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all engineering changes that have impacted products manufactured at work centers located in 'Factory A'. Include the engineering change description and the count of affected products.",
+    "gql": "MATCH (ec:EngineeringChange)<-[mb:ModifiedBy]-(p:`Product`)-[ma:ManufacturedAt]->(wc:WorkCenter) WHERE wc.location = 'Factory A' RETURN ec.description, COUNT(p) AS affected_product_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "For each supplier, find the total minimum order quantity for materials they supply, and list only those suppliers whose total minimum order quantity exceeds 1000, sorted by this total in descending order.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material) RETURN s, SUM(sf.minimum_order_quantity) AS total_min_order_qty NEXT FILTER total_min_order_qty > 1000 RETURN s.name, total_min_order_qty ORDER BY total_min_order_qty DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the top 10 suppliers by the total quantity of materials ordered, including supplier name and the sum of minimum order quantities.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material) RETURN s.name AS supplier_name, SUM(sf.minimum_order_quantity) AS total_min_order_quantity ORDER BY total_min_order_quantity DESC LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all engineering changes that impact products or assemblies with a change impact level categorized as 'High', and include the engineering change description and the impacted product or assembly name.",
+    "gql": "MATCH (ec:EngineeringChange)<-[mb:ModifiedBy]-(n) WHERE mb.change_impact_level = 'High' RETURN ec.description AS change_description, n.name AS impacted_entity_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average unit cost of materials that are substitutes for other materials, grouped by the original material's category and return the category along with the average cost.",
+    "gql": "MATCH (m:Material)<-[:SubstitutesFor]-(sm:Material) RETURN m.category, AVG(sm.unit_cost) AS average_unit_cost",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the top 3 work centers with the highest total cycle time for manufacturing products, and return the work center name along with the aggregated cycle time.",
+    "gql": "MATCH (wc:WorkCenter)<-[ma:ManufacturedAt]-(p:`Product`) RETURN wc.name, SUM(ma.cycle_time) AS total_cycle_time ORDER BY total_cycle_time DESC LIMIT 3",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all suppliers who provide materials used in products that are part of manufacturing orders with a quantity greater than 100, including the supplier's name, address, and contact information.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`)<-[:OrderedFor]-(mo:ManufacturingOrder) WHERE mo.quantity > 100 RETURN DISTINCT s.name, s.address, s.contact_info",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify engineering changes that affect either products or assemblies which are currently in 'Active' status BomVersions. Include the change description, reason code, and effective date of the change.",
+    "gql": "MATCH (ec:EngineeringChange)<-[:ModifiedBy]-(item)-[:HasBomVersion]->(bv:BomVersion) WHERE bv.status = 'Active' RETURN DISTINCT ec.description, ec.reason_code, ec.effective_date",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all Products that have at least one Engineering Change with 'Approved' status and are manufactured at Work Centers with a capacity greater than 100. Return the Product name, Engineering Change description, and Work Center name.",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange{approval_status:'Approved'}), (p)-[:ManufacturedAt]->(wc:WorkCenter) WHERE wc.capacity > 100 RETURN p.name, ec.description, wc.name",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names and unit costs of Materials that substitute for other Materials with a priority ranking higher than 2, along with the substituted Material's name and specification.",
+    "gql": "MATCH (m:Material)-[sf:SubstitutesFor]->(sm:Material) WHERE sf.priority_ranking > 2 RETURN m.name AS material_name, m.unit_cost, sm.name AS substituted_material_name, sm.specification",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify materials that are substitutes for other materials with a priority ranking below 5, and return the original material name along with the substitute material name and substitution reason.",
+    "gql": "MATCH (m1:Material)-[sf:SubstitutesFor]->(m2:Material) WHERE sf.priority_ranking < 5 RETURN m1.name AS original_material, m2.name AS substitute_material, sf.substitution_reason AS reason",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify all work centers that are involved in manufacturing products requiring more than 5 distinct materials, and return their names along with the count of such materials.",
+    "gql": "MATCH (wc:WorkCenter)<-[:ManufacturedAt]-(p:`Product`)-[:ConsistsOf]->(m:Material) RETURN wc, COUNT(DISTINCT m) AS distinct_material_count NEXT FILTER distinct_material_count > 5 RETURN wc.name, distinct_material_count",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Identify products that have at least two different versions of their BOM and are manufactured at work centers located in 'Factory A', returning the product name and BOM version count.",
+    "gql": "MATCH (p:`Product`)-[:HasBomVersion]->(bv:BomVersion), (p)-[:ManufacturedAt]->(wc:WorkCenter) WHERE wc.location = 'Factory A' RETURN p, COUNT(DISTINCT bv) AS bom_versions NEXT FILTER bom_versions >= 2 RETURN p.name, bom_versions",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Determine the average cycle time for manufacturing orders grouped by product status, excluding orders with a status of 'Cancelled'.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`) WHERE mo.status <> 'Cancelled' RETURN p.status, AVG(mo.cycle_time) AS average_cycle_time",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average setup time for each work center that has manufactured products, and return only those work centers where the average setup time exceeds 2 hours.",
+    "gql": "MATCH (p:`Product`)-[m:ManufacturedAt]->(w:WorkCenter) RETURN w, AVG(m.setup_time) AS avg_setup_time NEXT FILTER avg_setup_time > 2 RETURN w.name AS work_center_name, avg_setup_time",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the names of products that have at least one engineering change with an approval status of 'Approved' and were ordered in manufacturing orders with a quantity greater than 100.",
+    "gql": "MATCH (p:`Product`)<-[:OrderedFor]-(mo:ManufacturingOrder) WHERE mo.quantity > 100 RETURN p NEXT MATCH (p)-[:ModifiedBy]->(ec:EngineeringChange) WHERE ec.approval_status = 'Approved' RETURN DISTINCT p.name AS product_name",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all materials that are substitutes for other materials with a higher unit cost, including the original material name, substitute material name, and the difference in their unit costs.",
+    "gql": "MATCH (orig_m:Material)<-[so:SubstitutesFor]-(sub_m:Material) WHERE sub_m.unit_cost > orig_m.unit_cost RETURN orig_m.name AS original_material, sub_m.name AS substitute_material, (sub_m.unit_cost - orig_m.unit_cost) AS cost_difference ORDER BY cost_difference DESC",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Determine the average unit cost of materials grouped by category, but only include categories where the average lead time of materials is more than 10 days, returning the category and the computed average unit cost.",
+    "gql": "MATCH (m:Material) RETURN m.category AS category, AVG(m.unit_cost) AS avg_unit_cost, AVG(m.lead_time) AS avg_lead_time NEXT FILTER avg_lead_time > 10 RETURN category, avg_unit_cost",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve all Manufacturing Orders that involve Products having at least two different versions recorded in BomVersion. Display the Manufacturing Order ID, order date, and the count of distinct BomVersions associated with its products.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`)-[:HasBomVersion]->(bv:BomVersion) RETURN mo, COUNT(DISTINCT bv) AS version_count NEXT FILTER version_count >= 2 RETURN mo.ManufacturingOrder_id, mo.order_date, version_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List the top 10 materials by total cost (unit cost * quantity required) used in the production of active products, including the material name and calculated total cost.",
+    "gql": "MATCH (m:Material)<-[co:ConsistsOf]-(p:`Product`{status:'Active'}) RETURN m.name, SUM(m.unit_cost) AS total_cost ORDER BY total_cost DESC LIMIT 10",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the list of suppliers who supply materials used in products with a specific status ('Active'), including supplier name, material name, and the unit cost of the material.",
+    "gql": "MATCH (s:Supplier)<-[sf:SourcedFrom]-(m:Material)<-[:ConsistsOf]-(p:`Product`{status:'Active'}) RETURN s.name AS supplier_name, m.name AS material_name, m.unit_cost",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of products which have at least one substitute material available, along with the original and substitute material names.",
+    "gql": "MATCH (p:`Product`)-[co:ConsistsOf]->(m:Material), (m)-[sf:SubstitutesFor]->(sm:Material) RETURN p.name AS product_name, m.name AS original_material, sm.name AS substitute_material",
+    "difficulty": "hard"
+  },
+  {
+    "question": "For each engineering change that has been approved, find the associated products or assemblies affected and list the change's effective date, approval status, and the names of the affected entities.",
+    "gql": "MATCH (ec:EngineeringChange {approval_status: 'Approved'})<-[mb:ModifiedBy]-(entity) RETURN ec.effective_date, ec.approval_status, entity.name AS affected_entity_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "For each BomVersion associated with products, determine the number of distinct materials used and filter to show only those versions where more than 10 distinct materials are used. Return the BomVersion ID, version number, and the count of materials.",
+    "gql": "MATCH (bv:BomVersion)<-[:HasBomVersion]-(p:`Product`)-[:ConsistsOf]->(m:Material) RETURN bv, COUNT(DISTINCT m) AS material_count NEXT FILTER material_count > 10 RETURN bv.BomVersion_id, bv.version_number, material_count",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all engineering changes that affect more than one product or assembly, and include the change description along with the count of affected items.",
+    "gql": "MATCH (ec:EngineeringChange)<-[mb:ModifiedBy]-(n) RETURN ec, COUNT(n) AS affected_items NEXT FILTER affected_items > 1 RETURN ec.description AS change_description, affected_items",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average lead time of materials grouped by supplier, but only include suppliers who supply more than 3 distinct materials. Return the supplier name and the average lead time.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material) RETURN s, COUNT(DISTINCT m) AS material_count, AVG(m.lead_time) AS avg_lead_time NEXT FILTER material_count > 3 RETURN s.name AS supplier_name, avg_lead_time",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify materials that have substitutes with a higher unit cost and are used in manufacturing orders with a quantity greater than 100. Return the original material name, substitute material name, and the difference in unit costs.",
+    "gql": "MATCH (orig_m:Material)<-[so:SubstitutesFor]-(sub_m:Material), (orig_m)<-[:ConsistsOf]-(p_or_a)<-[:OrderedFor]-(mo:ManufacturingOrder) WHERE sub_m.unit_cost > orig_m.unit_cost AND mo.quantity > 100 RETURN orig_m.name, sub_m.name, (sub_m.unit_cost - orig_m.unit_cost) AS cost_difference",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the names of products and their corresponding BOM version numbers that have at least one material with a lead time greater than 10 days?",
+    "gql": "MATCH (p:`Product`)-[:HasBomVersion]->(bv:BomVersion), (p)-[:ConsistsOf]->(m:Material) WHERE m.lead_time > 10 RETURN DISTINCT p.name, bv.version_number",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the top 3 suppliers by the total unit cost of materials they supply, including the supplier name and the aggregated unit cost.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material) RETURN s.name, SUM(m.unit_cost) AS total_unit_cost ORDER BY total_unit_cost DESC LIMIT 3",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all manufacturing orders that involve products manufactured at work centers with a capacity below the average capacity across all work centers, listing the order ID, product name, and work center name.",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`)-[:ManufacturedAt]->(wc:WorkCenter) RETURN wc, AVG(wc.capacity) AS avg_capacity NEXT MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`)-[:ManufacturedAt]->(wc:WorkCenter) WHERE wc.capacity < avg_capacity RETURN mo.ManufacturingOrder_id, p.name, wc.name",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Retrieve the names of products that have at least one substitute material, along with the count of such substitute relationships and the highest priority ranking among them.",
+    "gql": "MATCH (p:`Product`)-[co:ConsistsOf]->(m:Material)<-[sf:SubstitutesFor]-(sm:Material) RETURN p.name AS product_name, COUNT(sf) AS substitute_count, MAX(sf.priority_ranking) AS highest_priority",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify materials that are substitutes for other materials with a higher lead time, and list the original material name, the substitute material name, and the difference in lead time between them.",
+    "gql": "MATCH (m1:Material)-[s:SubstitutesFor]->(m2:Material) WHERE m2.lead_time > m1.lead_time RETURN m1.name AS original_material, m2.name AS substitute_material, (m2.lead_time - m1.lead_time) AS lead_time_difference",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the names of engineering changes that have been implemented for products which are ordered in manufacturing orders with a quantity greater than 100, along with the implementation deadline and description of each change.",
+    "gql": "MATCH (ec:EngineeringChange)<-[:ModifiedBy]-(p:`Product`)<-[:OrderedFor]-(mo:ManufacturingOrder) WHERE mo.quantity > 100 RETURN DISTINCT ec.description, ec.implementation_deadline",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What are the top 10 most expensive materials (by unit cost) that have a lead time greater than 10 days?",
+    "gql": "MATCH (m:Material) WHERE m.lead_time > 10 RETURN m ORDER BY m.unit_cost DESC LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which work centers have a capacity greater than 100 units and operate more than 40 hours per week, sorted by capacity in descending order?",
+    "gql": "MATCH (w:WorkCenter) WHERE w.capacity > 100 AND w.operating_hours > '40' RETURN w ORDER BY w.capacity DESC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many suppliers provide materials with a lead time greater than 30 days, and what is the average delivery schedule length in days for these suppliers?",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material) WHERE m.lead_time > 30 RETURN count(DISTINCT s) AS supplier_count, avg(m.lead_time) AS average_lead_time",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many manufacturing orders are overdue, based on their due dates being before today's date?",
+    "gql": "MATCH (mo:ManufacturingOrder) WHERE mo.due_date < date() RETURN count(mo)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the maximum capacity among all work centers, and which work center has this capacity?",
+    "gql": "MATCH (w:WorkCenter) RETURN w.name AS WorkCenterName, w.capacity AS Capacity ORDER BY w.capacity DESC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Count the number of engineering changes that have been approved and implemented before their deadline.",
+    "gql": "MATCH (ec:EngineeringChange) WHERE ec.approval_status = 'approved' AND ec.implementation_deadline < date() RETURN count(ec)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the average unit cost of materials categorized as 'Electronics'?",
+    "gql": "MATCH (m:Material) WHERE m.category = 'Electronics' RETURN AVG(m.unit_cost) AS average_unit_cost",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many products are currently in 'Active' status, and what is the average lead time for materials used in these products?",
+    "gql": "MATCH (p:`Product`) WHERE p.status = 'Active' RETURN p NEXT MATCH (p)-[:ConsistsOf]->(m:Material) RETURN count(DISTINCT p) AS active_product_count, avg(m.lead_time) AS average_lead_time",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify assemblies that weigh between 20 and 80 units, have an assembly type of 'Component', and sort them by their dimensions in ascending order.",
+    "gql": "MATCH (a:Assembly) WHERE a.weight >= 20 AND a.weight <= 80 AND a.assembly_type = 'Component' RETURN a ORDER BY a.dimensions ASC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What manufacturing orders have quantities ranging from 500 to 2000, are not in 'Completed' status, and are sorted by due date?",
+    "gql": "MATCH (mo:ManufacturingOrder) WHERE mo.quantity >= 500 AND mo.quantity <= 2000 AND mo.status <> 'Completed' RETURN mo ORDER BY mo.due_date",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve assemblies with a weight between 30 and 100 units, and an assembly type of 'Module', sorted by their drawing number alphabetically.",
+    "gql": "MATCH (a:Assembly) WHERE a.weight >= 30 AND a.weight <= 100 AND a.assembly_type = 'Module' RETURN a ORDER BY a.drawing_number ASC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which manufacturing orders have a status of 'In Progress', a quantity greater than 500, and are due before October 1, 2024, sorted by order date?",
+    "gql": "MATCH (mo:ManufacturingOrder) WHERE mo.status = 'In Progress' AND mo.quantity > 500 AND mo.due_date < date('2024-10-01') RETURN mo ORDER BY mo.order_date",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List all materials categorized as 'Hardware' with a lead time less than 30 days, sorted by their name in alphabetical order.",
+    "gql": "MATCH (m:Material) WHERE m.category = 'Hardware' AND m.lead_time < 30 RETURN m ORDER BY m.name ASC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List all assemblies that weigh between 30 and 100 units, have an assembly type of 'Module', and are sorted by their dimensions in ascending order.",
+    "gql": "MATCH (a:Assembly) WHERE a.weight >= 30 AND a.weight <= 100 AND a.assembly_type = 'Module' RETURN a ORDER BY a.dimensions ASC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which materials have a lead time greater than 20 days and a unit cost higher than 100, sorted by unit cost in descending order?",
+    "gql": "MATCH (m:Material) WHERE m.lead_time > 20 AND m.unit_cost > 100 RETURN m ORDER BY m.unit_cost DESC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Identify work centers with a capacity greater than 100 units, operating hours exceeding '40 hours per week', and located in 'Plant 2', sorted by capacity in descending order.",
+    "gql": "MATCH (w:WorkCenter) WHERE w.capacity > 100 AND w.operating_hours > '40 hours per week' AND w.location = 'Plant 2' RETURN w ORDER BY w.capacity DESC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the total quantity of all materials sourced from suppliers located in the 'USA'?",
+    "gql": "MATCH (m:Material)-[:SourcedFrom]->(s:Supplier) WHERE s.location = 'USA' RETURN sum(m.quantity_required) AS total_quantity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Is there any product with the ID 'P000074' in the database?",
+    "gql": "MATCH (p:`Product`) WHERE p.Product_id = 'P000074' RETURN p",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Does the supplier named 'Global Tech Solutions' provide any materials?",
+    "gql": "MATCH (s:Supplier)-[:SourcedFrom]->(m:Material) WHERE s.name = 'Global Tech Solutions' RETURN COUNT(m) > 0 AS provides_materials",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Does a material with the ID 'M000123' exist in the database?",
+    "gql": "MATCH (m:Material) WHERE m.Material_id = 'M000123' RETURN m",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What manufacturing orders have quantities ranging from 500 to 2000, are not in 'Completed' status, and are due before October 1, 2024, sorted by due date?",
+    "gql": "MATCH (mo:ManufacturingOrder) WHERE mo.quantity >= 500 AND mo.quantity <= 2000 AND mo.status <> 'Completed' AND mo.due_date < date('2024-10-01') RETURN mo ORDER BY mo.due_date",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all materials categorized as 'Hardware' with a lead time less than 30 days and a unit cost below 50, sorted by their name alphabetically.",
+    "gql": "MATCH (m:Material) WHERE m.category = 'Hardware' AND m.lead_time < 30 AND m.unit_cost < 50 RETURN m ORDER BY m.name ASC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which manufacturing orders have a quantity greater than the total quantity of all manufacturing orders for the product 'Smartphone X1'?",
+    "gql": "MATCH (mo:ManufacturingOrder)-[:OrderedFor]->(p:`Product`{name:'Smartphone X1'}) RETURN sum(mo.quantity) AS totalQuantity NEXT MATCH (mo2:ManufacturingOrder) WHERE mo2.quantity > totalQuantity RETURN mo2",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the shortest path connecting the material with ID 'M000123' to any product categorized as 'Active'?",
+    "gql": "MATCH (m:Material{Material_id:'M000123'})-[]-{1,10}(p:`Product`{status:'Active'}) RETURN p.Product_id LIMIT 1",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "List all assemblies that weigh more than the assembly named 'Contain inside Assembly'.",
+    "gql": "MATCH (a:Assembly) WHERE a.name = 'Contain inside Assembly' RETURN a.weight AS target_weight NEXT MATCH (b:Assembly) WHERE b.weight > target_weight RETURN b",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify manufacturing orders with a quantity greater than the order with ManufacturingOrder_id 'MO000291'.",
+    "gql": "MATCH (mo:ManufacturingOrder) WHERE mo.ManufacturingOrder_id = 'MO000291' RETURN mo.quantity AS target_quantity NEXT MATCH (other_mo:ManufacturingOrder) WHERE other_mo.quantity > target_quantity RETURN other_mo",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which engineering changes have an implementation deadline earlier than the change with EngineeringChange_id 'EC00068'?",
+    "gql": "MATCH (ec:EngineeringChange) WHERE ec.EngineeringChange_id = 'EC00068' RETURN ec.implementation_deadline AS deadline NEXT MATCH (other_ec:EngineeringChange) WHERE other_ec.implementation_deadline < deadline RETURN other_ec",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Does a manufacturing order with the ID 'MO000291' exist in the database?",
+    "gql": "MATCH (mo:ManufacturingOrder) WHERE mo.ManufacturingOrder_id = 'MO000291' RETURN mo",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Are there any assemblies with a weight greater than 50 units and an assembly type of 'Module'?",
+    "gql": "MATCH (a:Assembly) WHERE a.weight > 50 AND a.assembly_type = 'Module' RETURN a",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which products consist of the material with the ID 'M000210'?",
+    "gql": "MATCH (p:`Product`)-[:ConsistsOf]->(m:Material) WHERE m.Material_id = 'M000210' RETURN p",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What products are directly associated with the engineering change having the ID 'EC00068'?",
+    "gql": "MATCH (p:`Product`)-[:ModifiedBy]->(ec:EngineeringChange) WHERE ec.EngineeringChange_id = 'EC00068' RETURN p",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the shortest path connecting the manufacturing order with ID 'MO000291' to the product it is ordered for?",
+    "gql": "MATCH (mo:ManufacturingOrder{ManufacturingOrder_id:'MO000291'})-[:OrderedFor]->(p:`Product`) RETURN mo, p",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which products and the product named 'Sort write' are both connected to the same material?",
+    "gql": "MATCH (p1:`Product`)-[:ConsistsOf]->(m:Material)<-[:ConsistsOf]-(p2:`Product`) WHERE p2.name = 'Sort write' RETURN p1, m, p2",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Show the shortest path between the manufacturing order with ID 'MO000291' and the supplier of its related materials.",
+    "gql": "MATCH (mo:ManufacturingOrder{ManufacturingOrder_id:'MO000291'})-[:OrderedFor]->(p:`Product`)-[:ConsistsOf]->(m:Material)-[:SourcedFrom]->(s:Supplier) RETURN mo, p, m, s",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Count the number of work centers with a capacity greater than 100 units.",
+    "gql": "MATCH (w:WorkCenter) WHERE w.capacity > 100 RETURN count(w)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many materials are categorized as 'Electronics'?",
+    "gql": "MATCH (m:Material) WHERE m.category = 'Electronics' RETURN count(m)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the average lead time for all materials?",
+    "gql": "MATCH (m:Material) RETURN avg(m.lead_time) AS average_lead_time",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the maximum unit cost among all materials?",
+    "gql": "MATCH (m:Material) RETURN MAX(m.unit_cost) AS max_unit_cost",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many manufacturing orders are currently in 'In Progress' status?",
+    "gql": "MATCH (mo:ManufacturingOrder) WHERE mo.status = 'In Progress' RETURN count(mo)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Calculate the total quantity of all manufacturing orders.",
+    "gql": "MATCH (mo:ManufacturingOrder) RETURN SUM(mo.quantity) AS total_quantity",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the total number of products in the database?",
+    "gql": "MATCH (p:`Product`) RETURN count(p) AS total_products",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which work centers and the work center with ID 'WC0016' are both used to manufacture the same product?",
+    "gql": "MATCH (wc1:WorkCenter{WorkCenter_id:'WC0016'})<-[:ManufacturedAt]-(p:`Product`)-[:ManufacturedAt]->(wc2:WorkCenter) RETURN DISTINCT wc2.WorkCenter_id AS WorkCenterID",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all products that are linked to work centers with operating hours exceeding '40 hours per week' through the 'ManufacturedAt' relationship.",
+    "gql": "MATCH (p:`Product`)-[:ManufacturedAt]->(w:WorkCenter) WHERE w.operating_hours > '40 hours per week' RETURN p",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which engineering changes modify products that are composed of materials with a unit cost higher than 150?",
+    "gql": "MATCH (ec:EngineeringChange)<-[:ModifiedBy]-(p:`Product`)-[:ConsistsOf]->(m:Material) WHERE m.unit_cost > 150 RETURN DISTINCT ec",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many suppliers are located in the 'USA'?",
+    "gql": "MATCH (s:Supplier) WHERE s.location = 'USA' RETURN count(s)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many products are currently in 'Active' status?",
+    "gql": "MATCH (p:`Product`) WHERE p.status = 'Active' RETURN count(p)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the shortest path connecting the work center 'WC0016' to all the products it manufactures?",
+    "gql": "MATCH (wc:WorkCenter{WorkCenter_id:'WC0016'})-[:ManufacturedAt]-(p:`Product`) RETURN wc, p",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Show the shortest traversal path from any product in 'Active' status to its associated BOM versions.",
+    "gql": "MATCH (p:`Product`{status:'Active'})-[:HasBomVersion]->(b:BomVersion) RETURN p.Product_id, b.BomVersion_id ORDER BY p.Product_id",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the shortest path between the product with ID 'P000074' and the supplier of its materials?",
+    "gql": "MATCH (p:`Product`{Product_id:'P000074'})-[:ConsistsOf]->(m:Material)-[:SourcedFrom]->(s:Supplier) RETURN p, m, s",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which work centers are used to manufacture products in 'Active' status?",
+    "gql": "MATCH (p:`Product`)-[:ManufacturedAt]->(w:WorkCenter) WHERE p.status = 'Active' RETURN DISTINCT w",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which products are manufactured at the work center with ID 'WC0016'?",
+    "gql": "MATCH (p:`Product`)-[:ManufacturedAt]->(w:WorkCenter) WHERE w.WorkCenter_id = 'WC0016' RETURN p",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Is there any engineering change record with the ID 'EC00068' in the database?",
+    "gql": "MATCH (ec:EngineeringChange) WHERE ec.EngineeringChange_id = 'EC00068' RETURN ec",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Does the supplier named 'Advanced Components Ltd.' provide any materials?",
+    "gql": "MATCH (s:Supplier {name: 'Advanced Components Ltd.'})-[:SourcedFrom]->(m:Material) RETURN COUNT(m) > 0 AS provides_materials",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find assemblies that weigh more than the assembly named 'Contain inside Assembly'.",
+    "gql": "MATCH (a:Assembly) WHERE a.name = 'Contain inside Assembly' RETURN a NEXT MATCH (b:Assembly) WHERE b.weight > a RETURN b",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve products created after the product with ID 'P000074'.",
+    "gql": "MATCH (p1:`Product`{Product_id:'P000074'}), (p2:`Product`) WHERE p2.created_date > p1 RETURN p2",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Show suppliers who provide materials with a lead time longer than the average lead time of all materials.",
+    "gql": "MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material) RETURN AVG(m.lead_time) AS avg_lead_time NEXT MATCH (s:Supplier)<-[:SourcedFrom]-(m:Material) WHERE m.lead_time > avg_lead_time RETURN DISTINCT s",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find the material with ID 'M000001' and its supplier relationship where the delivery schedule is 'Weekly'.",
+    "gql": "MATCH (n1:Material)-[e:SourcedFrom]->(n2) WHERE n1.Material_id = \"M000001\" AND e.delivery_schedule = \"Weekly\" RETURN n1, e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Get the details of the material named 'Employee wait'.",
+    "gql": "MATCH (n:Material) WHERE n.name = \"Employee wait\" RETURN n LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all suppliers for materials with contract terms 'Long Term' and minimum order quantity greater than 800.",
+    "gql": "MATCH (m:Material)-[s:SourcedFrom]->(sup) WHERE s.contract_terms = \"Long Term\" AND s.minimum_order_quantity > 800 RETURN sup, s.supplier_part_number LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve paths of length up to 3 starting from the material named 'Employee wait' and ending at any connected nodes.",
+    "gql": "MATCH (n1:Material)-[e]-{1,3}(n2) WHERE n1.name = \"Employee wait\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Get details of the material with unit cost equal to 33.01.",
+    "gql": "MATCH (n:Material) WHERE n.unit_cost = 33.01 RETURN n LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find a two-hop path from a Material to another node via SourcedFrom relationship where the first material has category 'Hardware' and the second node is not of the same category, returning only one such path.",
+    "gql": "MATCH p = (n1:Material)-[e1:SourcedFrom]-(x)-[e2]-(n2) WHERE n1.category = \"Hardware\" AND n2.category <> \"Hardware\" RETURN p LIMIT 1",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Get all Material nodes that have a specification equal to 'Talk including pressure conference analysis.'.",
+    "gql": "MATCH (n:Material) WHERE n.specification = \"Talk including pressure conference analysis.\" RETURN n LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List suppliers where delivery schedule is 'Weekly' and minimum order quantity is greater than 500.",
+    "gql": "MATCH (a:Material {supplier_reference: \"REF-0396\"})-[e:SourcedFrom]->(n) WHERE e.delivery_schedule = \"Weekly\" AND e.minimum_order_quantity > 500 RETURN n, e.supplier_part_number LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all paths where two Material nodes share a common neighbor, ensuring they don't have the same name property ('Employee wait'), limiting results to 5 per subquery.",
+    "gql": "MATCH p = (n1:Material)-[e1]-(x)-[e2]-(n2:Material) WHERE n1.name = \"Employee wait\" AND n2.name <> \"Employee wait\" RETURN p LIMIT 5 UNION ALL MATCH p = (n1:Material)-[e1]-(x)-[e2]-(y)-[e3]-(n2:Material) WHERE n1.name = \"Employee wait\" AND n2.name <> \"Employee wait\" RETURN p LIMIT 5",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Find the material with ID 'M000001' and its supplier relationship where the contract terms are 'Long Term'.",
+    "gql": "MATCH (n1:Material)-[e:SourcedFrom]->(n2) WHERE n1.Material_id = \"M000001\" AND e.contract_terms = \"Long Term\" RETURN n1, e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Get materials sourced from suppliers with delivery schedule 'Weekly' and minimum order quantity greater than 500.",
+    "gql": "MATCH (a:Material {Material_id: \"M000001\"})-[e:SourcedFrom]->(n) WHERE e.delivery_schedule = \"Weekly\" AND e.minimum_order_quantity > 500 RETURN n, e.supplier_part_number LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the material with ID 'M000001' and its sourcing details where the lead time is 18 days.",
+    "gql": "MATCH (n1:Material)-[e:SourcedFrom]->(n2) WHERE n1.Material_id = \"M000001\" AND n1.lead_time = 18 RETURN n1, e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify suppliers linked to the material named 'Employee wait' via SourcedFrom relationships, showing supplier details and connection properties.",
+    "gql": "MATCH (nodes_1:Material) WHERE nodes_1.name = \"Employee wait\" RETURN nodes_1 NEXT MATCH (nodes_1)-[edges_1:SourcedFrom]->(nodes_2) RETURN nodes_2, nodes_1, edges_1 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find connections where the delivery_schedule is 'Weekly' and the lead_time of the material exceeds 10 days, returning the related node and supplier_part_number.",
+    "gql": "MATCH (a:Material {Material_id: \"M000001\"})-[e:SourcedFrom]->(n) WHERE e.delivery_schedule = \"Weekly\" AND a.lead_time > 10 RETURN n, e.supplier_part_number LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify merged multi-hop paths beginning from the Material named 'Employee wait', ending at any other Material whose specification differs.",
+    "gql": "MATCH p = (n1:Material)-[e1]-(x)-[e2]-(n2:Material) WHERE n1.name = \"Employee wait\" AND n2.specification <> \"Talk including pressure conference analysis.\" RETURN p LIMIT 5 UNION ALL MATCH p = (n1:Material)-[e1]-(x)-[e2]-(y)-[e3]-(n2:Material) WHERE n1.name = \"Employee wait\" AND n2.specification <> \"Talk including pressure conference analysis.\" RETURN p LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify variable-length paths up to 3 steps starting from a Material node with name 'Employee wait' and ending at any connected node.",
+    "gql": "MATCH (n1:Material)-[e:SourcedFrom]->{1,3}(n2) WHERE n1.name = \"Employee wait\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Count the distinct number of nodes connected via outgoing relationships from Material nodes where the unit cost is greater than 30.",
+    "gql": "MATCH (n1:Material)-[]->(n2) WHERE n1.unit_cost > 30 RETURN COUNT(DISTINCT n2) as count_alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve a two-hop path where the starting material has category 'Hardware' and the ending material does not have the same specification.",
+    "gql": "MATCH p = (n1:Material)-[e1]-(x)-[e2]-(n2:Material) WHERE n1.category = \"Hardware\" AND n2.specification <> \"Talk including pressure conference analysis.\" RETURN p LIMIT 1",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Count the distinct suppliers connected to materials with lead time greater than 10 days.",
+    "gql": "MATCH (n1:Material)-[]->(n2:Supplier) WHERE n1.lead_time > 10 RETURN COUNT(DISTINCT n2) as count_alias",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify materials supplied weekly with a lead time exceeding 10 days, showing the material and unit cost, up to 10 entries.",
+    "gql": "MATCH (a:Material)-[e:SourcedFrom]->(n) WHERE e.delivery_schedule = \"Weekly\" AND a.lead_time > 10 RETURN n, a.unit_cost LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find a two-hop path starting and ending with Material nodes where the first Material has category 'Hardware' and the second Material does not have category 'Hardware', returning only one such path.",
+    "gql": "MATCH p = (n1:Material)-[e1]-(x)-[e2]-(n2:Material) WHERE n1.category = \"Hardware\" AND n2.category <> \"Hardware\" RETURN p LIMIT 1",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Show one-hop connections from Material nodes with specification containing 'pressure conference analysis' via SourcedFrom edges, displaying source node, relationship, and destination node information for up to 10 matches.",
+    "gql": "MATCH (n1:Material)-[e:SourcedFrom]->(n2) WHERE n1.specification = \"Talk including pressure conference analysis.\" RETURN n1, e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify all nodes related to the material named 'Employee wait' through any relationship, returning only those with lead time less than 20 days.",
+    "gql": "MATCH (n:Material) WHERE n.name = \"Employee wait\" AND n.lead_time < 20 RETURN n LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Return the first material node with specification 'Talk including pressure conference analysis.'.",
+    "gql": "MATCH (n:Material) WHERE n.specification = \"Talk including pressure conference analysis.\" RETURN n LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all materials sourced from suppliers with contract terms 'Long Term', returning the supplier part number and delivery schedule.",
+    "gql": "MATCH (m:Material)-[s:SourcedFrom]->(sup) WHERE s.contract_terms = \"Long Term\" RETURN s.supplier_part_number, s.delivery_schedule LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find two-hop paths between materials that do not share the same name, showing the full path details.",
+    "gql": "MATCH p = (m1:Material)-[e1]-(x)-[e2]-(m2:Material) WHERE m1.name = \"Employee wait\" AND m2.name <> \"Employee wait\" RETURN p LIMIT 1",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List suppliers for material 'M000001' where minimum order quantity exceeds 500, displaying supplier reference and lead time.",
+    "gql": "MATCH (a:Material {Material_id: \"M000001\"})-[e:SourcedFrom]->(n) WHERE e.minimum_order_quantity > 500 RETURN n, e.supplier_reference LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all two-hop paths where the starting Material has category 'Hardware' and the ending node is not of the same category, returning up to 5 such paths.",
+    "gql": "MATCH p = (n1:Material)-[e1]-(x)-[e2]-(n2) WHERE n1.category = \"Hardware\" AND n2.category <> \"Hardware\" RETURN p LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List sourcing relationships and associated supplier nodes for materials with unit cost greater than 30, filtering only SourcedFrom edge types.",
+    "gql": "MATCH (n1:Material)-[e:SourcedFrom]->(n2) WHERE n1.unit_cost > 30 RETURN e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve details of all materials that have a lead time greater than 10 days.",
+    "gql": "MATCH (n:Material) WHERE n.lead_time > 10 RETURN n LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find up to 5 paths of length 1 to 3 connecting materials to suppliers where the material name is 'Employee wait'.",
+    "gql": "MATCH (n1:Material)-[e]-{1,3}(n2:Supplier) WHERE n1.name = \"Employee wait\" RETURN n1, n2 LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Return information about the supplier reference 'REF-0396' limited to one result.",
+    "gql": "MATCH (n:Material) WHERE n.supplier_reference = \"REF-0396\" RETURN n LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Show the relationship between materials and their sourcing suppliers where the minimum order quantity exceeds 500.",
+    "gql": "MATCH (n1:Material)-[e:SourcedFrom]->(n2:Supplier) WHERE e.minimum_order_quantity > 500 RETURN n1, e, n2 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all suppliers sourcing materials with a minimum order quantity greater than 500 and contract terms set to 'Long Term'.",
+    "gql": "MATCH (a:Material)-[e:SourcedFrom]->(n) WHERE e.contract_terms = \"Long Term\" AND e.minimum_order_quantity > 500 RETURN n, e.supplier_part_number LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the supplier details and delivery schedule for the material with ID 'M000001'.",
+    "gql": "MATCH (m:Material)-[s:SourcedFrom]->(sup) WHERE m.Material_id = \"M000001\" RETURN sup, s.delivery_schedule LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all materials that are sourced from suppliers under long-term contract terms.",
+    "gql": "MATCH (m:Material)-[s:SourcedFrom]->(sup) WHERE s.contract_terms = \"Long Term\" RETURN m, s, sup LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify paths between two Material nodes through a common supplier relationship, ensuring one has a specific material ID and the other does not match that same ID.",
+    "gql": "MATCH p = (n1:Material)-[e1:SourcedFrom]-(x)-[e2:SourcedFrom]-(n2:Material) WHERE n1.Material_id = \"M000001\" AND n2.Material_id <> \"M000001\" RETURN p LIMIT 5 UNION ALL MATCH p = (n1:Material)-[e1:SourcedFrom]-(x)-[e2:SourcedFrom]-(y)-[e3:SourcedFrom]-(n2:Material) WHERE n1.Material_id = \"M000001\" AND n2.Material_id <> \"M000001\" RETURN p LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find Materials whose lead time exceeds 15 days and unit cost is less than 50 dollars.",
+    "gql": "MATCH (n:Material) WHERE n.lead_time > 15 AND n.unit_cost < 50 RETURN n LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Starting from a Material node with specification 'Talk including pressure conference analysis.', find all directly connected nodes via SourcedFrom edges.",
+    "gql": "MATCH (nodes_1:Material) WHERE nodes_1.specification = \"Talk including pressure conference analysis.\" RETURN nodes_1 NEXT MATCH (nodes_1)-[edges_1:SourcedFrom]->(nodes_2) RETURN nodes_2, nodes_1, edges_1 LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find paths connecting two Material nodes through intermediate nodes, where the first Material has category 'Hardware' and the second does not have the same Material_id.",
+    "gql": "MATCH p = (n1:Material)-[e1]-(x)-[e2]-(n2:Material) WHERE n1.category = \"Hardware\" AND n2.Material_id <> \"M000001\" RETURN p LIMIT 5 UNION ALL MATCH p = (n1:Material)-[e1]-(x)-[e2]-(y)-[e3]-(n2:Material) WHERE n1.category = \"Hardware\" AND n2.Material_id <> \"M000001\" RETURN p LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What materials are sourced from suppliers under a 'Long Term' contract?",
+    "gql": "MATCH (m:Material)-[r:SourcedFrom]->(s) WHERE r.contract_terms = \"Long Term\" RETURN m.name, s.identity LIMIT 20",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve materials with a minimum order quantity between 800 and 900.",
+    "gql": "MATCH (m:Material)-[r:SourcedFrom]->(s) WHERE r.minimum_order_quantity >= 800 AND r.minimum_order_quantity <= 900 RETURN m.Material_id, r.minimum_order_quantity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve materials with a lead time greater than 10 days. Return their name and lead time, ordered by lead time in descending order, limited to 5 results.",
+    "gql": "MATCH (n:Material) WHERE n.lead_time > 10 RETURN n.name, n.lead_time ORDER BY n.lead_time DESC LIMIT 5",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List Material_id and supplier_reference for materials where supplier_reference is provided.",
+    "gql": "MATCH (n:Material) WHERE n.supplier_reference IS NOT NULL RETURN n.Material_id, n.supplier_reference",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve the name of materials that are categorized as 'Hardware', limited to 10 results.",
+    "gql": "MATCH (n:Material) WHERE n.category = \"Hardware\" RETURN n.name LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all suppliers connected via a 'SourcedFrom' relationship to the material named 'Employee wait', and return their identities and names.",
+    "gql": "MATCH (m:Material)-[r:SourcedFrom]->(s) WHERE m.name = \"Employee wait\" RETURN s.identity, s.name LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the supplier part number and contract terms for the 'SourcedFrom' relationship originating from the material with Material_id 'M000001'.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b) WHERE a.Material_id = \"M000001\" RETURN r.supplier_part_number, r.contract_terms LIMIT 20",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the material with Material_id 'M000001' and return its name.",
+    "gql": "MATCH (n:Material) WHERE n.Material_id = \"M000001\" RETURN n.name LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Starting from the material named 'Employee wait', find all nodes reachable within 1 to 3 hops and return their IDs and names (if available), limited to 5 results.",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2) WHERE n1.name = \"Employee wait\" RETURN n2.Material_id AS id, n2.name LIMIT 5",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "What suppliers are associated with the material named 'Employee wait'?",
+    "gql": "MATCH (a:Material)--(b:Supplier) WHERE a.name = \"Employee wait\" RETURN b.id, b.name LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the category of materials that have a unit cost of 33.01. Limit to 10 results.",
+    "gql": "MATCH (n:Material) WHERE n.unit_cost = 33.01 RETURN n.category LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find sourcing relationships where the minimum order quantity is greater than 800. Return the Material_id, minimum_order_quantity, and the supplier node identity.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b) WHERE r.minimum_order_quantity > 800 RETURN a.Material_id, r.minimum_order_quantity, b.identity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve materials that belong to the 'Hardware' category and have a lead_time of 18, returning their Material_id and supplier_reference.",
+    "gql": "MATCH (n:Material) WHERE n.category = \"Hardware\" AND n.lead_time = 18 RETURN n.Material_id, n.supplier_reference LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials with contract terms set to 'Long Term' through a SourcedFrom relationship and return the material name and minimum order quantity.",
+    "gql": "MATCH (m:Material)-[r:SourcedFrom]->(s) WHERE r.contract_terms = \"Long Term\" RETURN m.name, r.minimum_order_quantity LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve all materials and their connected entities via either SourcedFrom or other potential supply chain relationships up to 4 hops away.",
+    "gql": "MATCH (m:Material)-[:SourcedFrom]->{1,4}(e) RETURN m.Material_id, e LIMIT 10",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "Get all entities directly connected (in any direction) to the material named 'Employee wait'.",
+    "gql": "MATCH (m:Material)--(e) WHERE m.name = \"Employee wait\" RETURN e LIMIT 5",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find suppliers linked to the material named 'Employee wait' through a SourcedFrom relationship, and return the material name and supplier reference.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b) WHERE a.name = \"Employee wait\" RETURN a.name, b.supplier_reference LIMIT 20",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify paths up to 3 hops long starting from a Material node with Material_id 'M000001' that reach any other node, and return the starting and ending node identities.",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2) WHERE n1.Material_id = \"M000001\" RETURN n1.identity, n2.identity LIMIT 10",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all materials sourced from a supplier with whom the contract terms are 'Long Term'. Return the supplier's ID and name.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]-(b:Supplier) WHERE a.name = \"Employee wait\" RETURN b.Material_id, b.name LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the category and unit_cost of the Material with Material_id 'M000001'.",
+    "gql": "MATCH (n:Material) WHERE n.Material_id = \"M000001\" RETURN n.category, n.unit_cost LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List the unit cost of materials named 'Employee wait'.",
+    "gql": "MATCH (n:Material) WHERE n.name = \"Employee wait\" RETURN n.unit_cost LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which materials are sourced from suppliers with a minimum order quantity greater than 500?",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b:Supplier) WHERE r.minimum_order_quantity > 500 RETURN a.id, a.name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find materials and their associated suppliers where the minimum order quantity is greater than 800.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b:Supplier) WHERE r.minimum_order_quantity > 800 RETURN a.id, r.minimum_order_quantity, b.id",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all Material nodes with a unit cost greater than 30. Return their name, unit cost, and category.",
+    "gql": "MATCH (n:Material) WHERE n.unit_cost > 30 RETURN n.name, n.unit_cost, n.category",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all nodes directly connected (one hop, undirected) to the Material named 'Employee wait'. Return their identity and name if available.",
+    "gql": "MATCH (a:Material)--(b) WHERE a.name = \"Employee wait\" RETURN b.identity, b.name LIMIT 5",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve all Material nodes that are not in the 'Hardware' category. Return their Material_id and category.",
+    "gql": "MATCH (n:Material) WHERE NOT n.category = \"Hardware\" RETURN n.Material_id, n.category LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List the name of the material and the title or name of its supplier based on the SourcedFrom relationship.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b) RETURN a.name, b.name LIMIT 20",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many materials belong to the 'Hardware' category?",
+    "gql": "MATCH (n:Material) WHERE n.category = \"Hardware\" RETURN count(n.Material_id)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find the material name and unit cost for the material with Material_id 'M000001'.",
+    "gql": "MATCH (n:Material) WHERE n.Material_id = \"M000001\" RETURN n.name, n.unit_cost LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List materials with a lead time greater than 10 days, showing their name, lead time, and category.",
+    "gql": "MATCH (n:Material) WHERE n.lead_time > 10 RETURN n.name, n.lead_time, n.category",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Return the top 5 most expensive materials (by unit cost) that cost more than 30, ordered by unit cost in descending order.",
+    "gql": "MATCH (n:Material) WHERE n.unit_cost > 30 RETURN n.name, n.unit_cost ORDER BY n.unit_cost DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What are the distinct categories of materials available in the database?",
+    "gql": "MATCH (n:Material) RETURN DISTINCT n.category",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials whose unit cost is between 30 and 50, and return their Material_id and unit cost.",
+    "gql": "MATCH (n:Material) WHERE n.unit_cost >= 30 AND n.unit_cost <= 50 RETURN n.Material_id, n.unit_cost",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all nodes reachable within 1 to 2 hops from the material with Material_id 'M000001'.",
+    "gql": "MATCH (n1:Material)-[]-{1,2}(n2) WHERE n1.Material_id = \"M000001\" RETURN n2.identity, n2.label LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many distinct suppliers are reachable within 3 hops from the material named 'Employee wait'?",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2) WHERE n1.name = \"Employee wait\" RETURN count(DISTINCT n2.identity)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find materials with a lead time greater than 10 days and return their name, lead time, and unit cost.",
+    "gql": "MATCH (n:Material) WHERE n.lead_time > 10 RETURN n.name, n.lead_time, n.unit_cost",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List the names of materials and their associated supplier part numbers through the SourcedFrom relationship.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b) RETURN a.name, r.supplier_part_number LIMIT 20",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve materials that belong to either the 'Hardware' category or have a lead time of 18, returning their Material_id and category.",
+    "gql": "MATCH (n:Material) WHERE n.category = \"Hardware\" OR n.lead_time = 18 RETURN n.Material_id, n.category",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find suppliers connected to the material with Material_id 'M000001' through one or two undirected relationships, and return the supplier's identity and any available name or reference, limited to 5 results.",
+    "gql": "MATCH (n1:Material)-[]-{1,2}(n2) WHERE n1.Material_id = \"M000001\" RETURN n2.identity, n2.supplier_reference LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify nodes reachable within 1 to 2 hops from the material named 'Employee wait', and return their identities and labels if available, limited to 5 results.",
+    "gql": "MATCH (n1:Material)-[]-{1,2}(n2) WHERE n1.name = \"Employee wait\" RETURN n2.identity, n2.label LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many distinct Supplier nodes are reachable from the Material with Material_id 'M000001' within 1 to 3 hops?",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2:Supplier) WHERE n1.Material_id = \"M000001\" RETURN count(DISTINCT n2.identity)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve all Materials with lead_time greater than 10 days. Return their name, lead_time, and Material_id.",
+    "gql": "MATCH (n:Material) WHERE n.lead_time > 10 RETURN n.name, n.lead_time, n.Material_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all materials with a unit cost between 30 and 40.",
+    "gql": "MATCH (n:Material) WHERE n.unit_cost >= 30 AND n.unit_cost <= 40 RETURN n.Material_id, n.unit_cost",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find suppliers reachable within 1 to 3 sourcing steps from the material named 'Employee wait'.",
+    "gql": "MATCH (m:Material)-[:SourcedFrom]->{1,3}(s) WHERE m.name = \"Employee wait\" RETURN s.name LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the unit cost of the material with Material_id 'M000001'.",
+    "gql": "MATCH (m:Material) WHERE m.Material_id = \"M000001\" RETURN m.unit_cost LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the lead time for the material in the 'Hardware' category named 'Employee wait'?",
+    "gql": "MATCH (m:Material) WHERE m.category = \"Hardware\" AND m.name = \"Employee wait\" RETURN m.lead_time LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials that are not in the 'Software' category.",
+    "gql": "MATCH (m:Material) WHERE NOT m.category = \"Software\" RETURN m.Material_id, m.category LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find suppliers connected to the material named 'Employee wait' via one to three SourcedFrom relationships.",
+    "gql": "MATCH (n1:Material)-[:SourcedFrom]->{1,3}(n2) WHERE n1.name = \"Employee wait\" RETURN n2.identity LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all materials sourced from suppliers with a minimum order quantity greater than 800, and return the material name, supplier part number, and delivery schedule.",
+    "gql": "MATCH (m:Material)-[r:SourcedFrom]->(s) WHERE r.minimum_order_quantity > 800 RETURN m.name, r.supplier_part_number, r.delivery_schedule",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find materials in the 'Hardware' category with a lead time between 10 and 20 days, and return their name and lead time.",
+    "gql": "MATCH (m:Material) WHERE m.category = \"Hardware\" AND m.lead_time >= 10 AND m.lead_time <= 20 RETURN m.name, m.lead_time",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve the names of materials and their associated supplier reference for all SourcedFrom relationships, limited to 20 results.",
+    "gql": "MATCH (m:Material)-[r:SourcedFrom]->(s) RETURN m.name, r.supplier_reference LIMIT 20",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find materials with unit cost greater than 30, and return their Material_id, name, and unit cost.",
+    "gql": "MATCH (m:Material) WHERE m.unit_cost > 30 RETURN m.Material_id, m.name, m.unit_cost",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all materials that are sourced from a supplier with contract terms 'Long Term'.",
+    "gql": "MATCH (m:Material)-[r:SourcedFrom]->(s) WHERE r.contract_terms = \"Long Term\" RETURN m.Material_id, m.name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the material with Material_id 'M000001'.",
+    "gql": "MATCH (n:Material) WHERE n.Material_id = \"M000001\" RETURN n.Material_id, n.name LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials that have a unit cost specified (i.e., not null).",
+    "gql": "MATCH (n:Material) WHERE n.unit_cost IS NOT NULL RETURN n.Material_id, n.unit_cost",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials connected via 'SourcedFrom' or other edge types within 1 to 4 hops and return their IDs.",
+    "gql": "MATCH (n1:Material)-[:SourcedFrom]->{1,4}(n2) RETURN n1.Material_id, n2.identity LIMIT 10",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Count how many nodes are reachable within 1 to 3 hops from the material with Material_id 'M000001'.",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2) WHERE n1.Material_id = \"M000001\" RETURN count(n2.identity)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Get the unit cost of materials that have a lead time of 18 days. Return the unit cost.",
+    "gql": "MATCH (n:Material) WHERE n.lead_time = 18 RETURN n.unit_cost LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve the Material_id and category for materials where the supplier_reference is exactly 'REF-0396'. Limit to 10 results.",
+    "gql": "MATCH (n:Material) WHERE n.supplier_reference = \"REF-0396\" RETURN n.Material_id, n.category LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List materials with a unit_cost greater than 30. Return their name, unit_cost, and lead_time.",
+    "gql": "MATCH (n:Material) WHERE n.unit_cost > 30 RETURN n.name, n.unit_cost, n.lead_time",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve the source Material, target Supplier, and contract terms for all SourcedFrom relationships where the minimum_order_quantity is greater than 800.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b:Supplier) WHERE r.minimum_order_quantity > 800 RETURN a.Material_id, r.contract_terms, b.identity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count how many Supplier nodes are reachable within 1 to 3 hops from the Material named 'Employee wait'.",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2:Supplier) WHERE n1.name = \"Employee wait\" RETURN count(n2.identity)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all direct SourcedFrom relationships from Materials to Suppliers where the unit cost of the material is greater than 30. Return the material ID, relationship delivery schedule, and supplier identity.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b:Supplier) WHERE a.unit_cost > 30 RETURN a.Material_id, r.delivery_schedule, b.identity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Return the Material_id of the Material node with the name 'Employee wait'.",
+    "gql": "MATCH (n:Material) WHERE n.name = \"Employee wait\" RETURN n.Material_id LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all suppliers connected to the material named 'Employee wait' via a SourcedFrom relationship.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b) WHERE a.name = \"Employee wait\" RETURN b LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve materials and their sourcing relationships where the minimum order quantity is greater than 800.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b) WHERE r.minimum_order_quantity > 800 RETURN a.Material_id, r.minimum_order_quantity, b LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Get the ID and category of materials that belong to the 'Hardware' category.",
+    "gql": "MATCH (n:Material) WHERE n.category = \"Hardware\" RETURN n.Material_id, n.category LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many Material nodes have a unit_cost of 33.01?",
+    "gql": "MATCH (n:Material) WHERE n.unit_cost = 33.01 RETURN count(n.identity)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find paths of length 1 to 4 from Material to Supplier using only SourcedFrom edges, and return the identities of the start and end nodes.",
+    "gql": "MATCH (n1:Material)-[:SourcedFrom]->{1,4}(n2:Supplier) RETURN n1.identity, n2.identity LIMIT 10",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "List all materials with a unit cost greater than 30, returning their name, unit cost, and specification.",
+    "gql": "MATCH (n:Material) WHERE n.unit_cost > 30 RETURN n.name, n.unit_cost, n.specification",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Return material and supplier identifiers along with the minimum order quantity for sourcing relationships requiring more than 800 units.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b:Supplier) WHERE r.minimum_order_quantity > 800 RETURN a.Material_id, r.minimum_order_quantity, b.identity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the names of suppliers connected to the material named 'Employee wait' via one or more 'SourcedFrom' relationships within 1 to 3 hops.",
+    "gql": "MATCH (n1:Material)-[:SourcedFrom]->{1,3}(n2:Supplier) WHERE n1.name = \"Employee wait\" RETURN n2.name LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List the names and unit costs of all Hardware materials with a unit cost greater than 30, ordered by unit cost in descending order, limited to 5 results.",
+    "gql": "MATCH (n:Material) WHERE n.category = \"Hardware\" AND n.unit_cost > 30 RETURN n.name, n.unit_cost ORDER BY n.unit_cost DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find all paths of length 1 to 3 from materials with lead_time equal to 18 to other nodes, and return the destination node's identity and name if available.",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2) WHERE n1.lead_time = 18 RETURN n2.identity, n2.name LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Identify materials with supplier_reference 'REF-0396' and find nodes reachable within 1 to 3 relationship hops, returning the destination node IDs and names.",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2) WHERE n1.supplier_reference = \"REF-0396\" RETURN n2.identity, n2.name LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find suppliers connected to the material 'M000001' within 1 to 2 hops, regardless of direction.",
+    "gql": "MATCH (m:Material)-[]-{1,2}(s) WHERE m.Material_id = \"M000001\" RETURN s.identity, s.name LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find materials that belong to either the 'Hardware' category or have a unit cost of 33.01.",
+    "gql": "MATCH (n:Material) WHERE n.category = \"Hardware\" OR n.unit_cost = 33.01 RETURN n.Material_id, n.category",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find entities connected to the material with Material_id 'M000001' within 1 to 2 hops, regardless of direction.",
+    "gql": "MATCH (n1:Material)-[]-{1,2}(n2) WHERE n1.Material_id = \"M000001\" RETURN n2.identity, n2.name LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find materials that have a lead time of 18 days.",
+    "gql": "MATCH (n:Material) WHERE n.lead_time = 18 RETURN n.Material_id LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials in the 'Hardware' category connected via 'SourcedFrom' edges within 1 to 4 hops to other nodes, returning source and destination IDs.",
+    "gql": "MATCH (n1:Material)-[:SourcedFrom]->{1,4}(n2) WHERE n1.category = \"Hardware\" RETURN n1.Material_id, n2.identity LIMIT 10",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Count the distinct nodes of type Supplier reachable within 3 directed hops from a Material with lead_time 18.",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2:Supplier) WHERE n1.lead_time = 18 RETURN count(DISTINCT n2.identity)",
+    "difficulty": "extra hard"
+  },
+  {
+    "question": "List the names and titles of nodes connected by a one-hop SourcedFrom relationship from Material to another node.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b) RETURN a.name, b.title LIMIT 20",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the name of materials and the contract terms of their sourcing relationships, limited to 20 results.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b:Supplier) RETURN a.name, r.contract_terms LIMIT 20",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify materials with lead time greater than 10 days and unit cost less than 50.",
+    "gql": "MATCH (m:Material) WHERE m.lead_time > 10 AND m.unit_cost < 50 RETURN m.name, m.lead_time, m.unit_cost ORDER BY m.unit_cost DESC LIMIT 5",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials with minimum order quantity over 800 from their sourcing relationships.",
+    "gql": "MATCH (m:Material)-[r:SourcedFrom]->(s) WHERE r.minimum_order_quantity > 800 RETURN m.name, r.minimum_order_quantity ORDER BY r.minimum_order_quantity DESC LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve materials in the 'Hardware' category with unit cost above 30.",
+    "gql": "MATCH (m:Material) WHERE m.category = \"Hardware\" AND m.unit_cost > 30 RETURN m.name, m.unit_cost, m.supplier_reference",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find all nodes within 1 to 2 undirected hops from the Material with Material_id 'M000001', returning their IDs and names, limited to 5.",
+    "gql": "MATCH (n1:Material)-[]-{1,2}(n2) WHERE n1.Material_id = \"M000001\" RETURN n2.id, n2.name LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all materials whose category is either 'Hardware' or 'Software'.",
+    "gql": "MATCH (n:Material) WHERE n.category = \"Hardware\" OR n.category = \"Software\" RETURN n.Material_id, n.category",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find sourcing relationships where the minimum order quantity is greater than 500, and return material ID, order quantity, and supplier ID.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b) WHERE r.minimum_order_quantity > 500 RETURN a.Material_id, r.minimum_order_quantity, b.identity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What are the contract terms and delivery schedule for the supplier relationship of the material named 'Employee wait'?",
+    "gql": "MATCH (m:Material)-[r:SourcedFrom]->(s) WHERE m.name = \"Employee wait\" RETURN r.contract_terms, r.delivery_schedule",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the name of the material and the identity of its supplier based on the SourcedFrom relationship?",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b) RETURN a.name, b.identity LIMIT 20",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find materials with unit cost greater than 30 that are connected within 1 to 3 hops to any supplier node, and return the material ID and supplier ID.",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2) WHERE n1.unit_cost > 30 RETURN n1.Material_id, n2.identity LIMIT 5",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the names of materials where the lead_time is 18.",
+    "gql": "MATCH (n:Material) WHERE n.lead_time = 18 RETURN n.name LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials with the name 'Employee wait' and return their category and unit cost.",
+    "gql": "MATCH (n:Material) WHERE n.name = \"Employee wait\" RETURN n.Material_id, n.category, n.unit_cost LIMIT 5",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many materials have a lead time of 18 days?",
+    "gql": "MATCH (n:Material) WHERE n.lead_time = 18 RETURN count(n.Material_id)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve materials that do not have the category 'Electronics'.",
+    "gql": "MATCH (n:Material) WHERE NOT n.category = \"Electronics\" RETURN n.Material_id, n.category LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve materials that do not have the name 'Employee wait'.",
+    "gql": "MATCH (n:Material) WHERE NOT n.name = \"Employee wait\" RETURN n.Material_id, n.name LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials with the name 'Employee wait' and return their Material_id and unit_cost.",
+    "gql": "MATCH (n:Material) WHERE n.name = \"Employee wait\" RETURN n.Material_id, n.unit_cost LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Get the lead time for materials with Material_id 'M000001'.",
+    "gql": "MATCH (n:Material) WHERE n.Material_id = \"M000001\" RETURN n.lead_time LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials that are either in the 'Hardware' category or supplied under 'Long Term' contract terms. Return their Material_id and unit cost.",
+    "gql": "MATCH (n:Material)-[r:SourcedFrom]-() WHERE n.category = \"Hardware\" OR r.contract_terms = \"Long Term\" RETURN n.Material_id, n.unit_cost",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve the Material_id and name of materials linked to any supplier where the delivery schedule is 'Weekly'.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b) WHERE r.delivery_schedule = \"Weekly\" RETURN a.Material_id, a.name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Count the number of distinct nodes reachable within 1 to 3 hops from the material with category 'Hardware', limited to 5 results.",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2) WHERE n1.category = \"Hardware\" RETURN count(DISTINCT n2.identity)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the Material_id and unit_cost for the material with Material_id exactly equal to 'M000001'.",
+    "gql": "MATCH (n:Material) WHERE n.Material_id = \"M000001\" RETURN n.Material_id, n.unit_cost LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List the names of materials with unit cost 33.01.",
+    "gql": "MATCH (n:Material) WHERE n.unit_cost = 33.01 RETURN n.name LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials that belong to either the 'Hardware' category or have a unit cost greater than 30.",
+    "gql": "MATCH (n:Material) WHERE n.category = \"Hardware\" OR n.unit_cost > 30 RETURN n.Material_id, n.category",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Retrieve materials that are not sourced under 'Short Term' contract terms.",
+    "gql": "MATCH (n:Material)-[r:SourcedFrom]->() WHERE NOT r.contract_terms = \"Short Term\" RETURN n.Material_id, r.contract_terms LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find materials with a lead time greater than 15 days.",
+    "gql": "MATCH (n:Material) WHERE n.lead_time > 15 RETURN n.name, n.lead_time, n.supplier_reference",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List materials that have a lead time greater than 15 days.",
+    "gql": "MATCH (n:Material) WHERE n.lead_time > 15 RETURN n.name, n.lead_time, n.Material_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials with unit_cost exactly 33.01. Return their Material_id and unit_cost, limited to 10 results.",
+    "gql": "MATCH (n:Material) WHERE n.unit_cost = 33.01 RETURN n.Material_id, n.unit_cost LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What are the contract terms and delivery schedule for materials sourced from suppliers with a minimum order quantity greater than 800?",
+    "gql": "MATCH (m:Material)-[r:SourcedFrom]->(s) WHERE r.minimum_order_quantity > 800 RETURN m.Material_id, r.contract_terms, r.delivery_schedule",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find materials that are not in the 'Obsolete' category.",
+    "gql": "MATCH (n:Material) WHERE NOT n.category = \"Obsolete\" RETURN n.Material_id, n.category LIMIT 10",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many nodes of type Material can be reached within 1 to 3 hops from a material with name 'Employee wait'?",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2:Material) WHERE n1.name = \"Employee wait\" RETURN count(n2.Material_id)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "List all suppliers connected to the material 'Employee wait' via one or more SourcedFrom relationships up to 3 hops away.",
+    "gql": "MATCH (n1:Material)-[:SourcedFrom]->{1,3}(n2:Supplier) WHERE n1.name = \"Employee wait\" RETURN n2.identity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find material-supplier sourcing relationships where the minimum order quantity is greater than 500.",
+    "gql": "MATCH (a:Material)-[r:SourcedFrom]->(b:Supplier) WHERE r.minimum_order_quantity > 500 RETURN a.Material_id, r.minimum_order_quantity, b.identity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Retrieve materials with lead time equal to 18 days.",
+    "gql": "MATCH (m:Material) WHERE m.lead_time = 18 RETURN m.Material_id, m.name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Find materials with lead time greater than 10 that are connected within 1 to 3 hops to another node. Return the material ID and the connected node ID.",
+    "gql": "MATCH (n1:Material)-[]->{1,3}(n2) WHERE n1.lead_time > 10 RETURN n1.Material_id, n2.identity",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Retrieve the name, lead time, and unit cost of all materials with a lead time greater than 15.",
+    "gql": "MATCH (n:Material) WHERE n.lead_time > 15 RETURN n.name, n.lead_time, n.unit_cost",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many nodes are reachable within 1 to 3 hops from the material named 'Employee wait'?",
+    "gql": "MATCH (m:Material)-[]->{1,3}(n) WHERE m.name = \"Employee wait\" RETURN count(n.identity)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Find all nodes reachable within 1 to 2 hops from the Material named 'Employee wait', regardless of direction.",
+    "gql": "MATCH (n1:Material)-[]-{1,2}(n2) WHERE n1.name = \"Employee wait\" RETURN n2",
+    "difficulty": "hard"
+  }
+]

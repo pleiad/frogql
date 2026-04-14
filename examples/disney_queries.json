@@ -1,0 +1,112 @@
+[
+  {
+    "question": "Who is the director of the movie Pinocchio?",
+    "gql": "MATCH (director:director) WHERE director.name = 'Pinocchio' RETURN director",
+    "difficulty": "easy"
+  },
+  {
+    "question": "The song \"Once Upon a Dream\" is associated with the movie directed by whom?",
+    "gql": "MATCH (t1:characters)<-[name:NAME]-(t2:director) WHERE t1.song = 'Once Upon a Dream' RETURN t2.director",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Who is the villain of the movie \"Beauty and the Beast\"?",
+    "gql": "MATCH (characters:characters) WHERE characters.movie_title = 'Beauty and the Beast' RETURN characters.villian AS villian",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which movie is the character Robin Hood in?",
+    "gql": "MATCH (characters:characters) WHERE characters.hero = 'Robin Hood' RETURN characters.movie_title AS movie_title",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Give the name of the movie which the song \"I Thought I Lost You\" is associated with.",
+    "gql": "MATCH (characters:characters) WHERE characters.song = 'I Thought I Lost You' RETURN characters.movie_title AS movie_title",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How much is the total gross of the movie with a song titled \"Little Wonders\"?",
+    "gql": "MATCH (t1:movies_total_gross)-[movie_title:MOVIE_TITLE]->(t2:characters) WHERE t2.song = 'Little Wonders' RETURN t1.total_gross",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the Motion Picture Association of America rating for the movie featuring a villain named Turbo?",
+    "gql": "MATCH (t1:movies_total_gross)-[movie_title:MOVIE_TITLE]->(t2:characters) WHERE t2.villian = 'Turbo' RETURN t1.MPAA_rating",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many PG adventure movies did Ron Clements direct?",
+    "gql": "MATCH (t1:director)<-[movie_title:MOVIE_TITLE]-(t2:movies_total_gross) WHERE (t1.director = 'Ron Clements' AND t2.MPAA_rating = 'PG' AND t2.genre = 'Adventure') RETURN count(*)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many horror movies are there?",
+    "gql": "MATCH (movies_total_gross:movies_total_gross) WHERE movies_total_gross.genre = 'Horror' RETURN count(movies_total_gross.movie_title)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Who is the villain in the movie \"The Great Mouse Detective\"?",
+    "gql": "MATCH (characters:characters) WHERE characters.movie_title = 'The Great Mouse Detective' RETURN characters.villian AS villian",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which director has made the most movies?",
+    "gql": "MATCH (director:director) RETURN director, count(director.name) ORDER BY count(director.name) DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Who are the voice actors for all the heroes?",
+    "gql": "MATCH (t1:characters)-[hero:HERO]->(t2:`voice-actors`) WHERE t2.movie = t1.movie_title RETURN t2.`voice-actor`",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Who voiced the villain in \"The Rescuers\"?",
+    "gql": "MATCH (t1:`voice-actors`)-[movie:MOVIE]->(t2:characters) WHERE (t2.movie_title = 'The Rescuers' AND t1.character = t2.villian) RETURN t1.`voice-actor`",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the directors of movies that feature a song.",
+    "gql": "MATCH (t1:characters)<-[name:NAME]-(t2:director) WHERE t1.song IS NOT NULL RETURN t2.director",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the PG-13 romantic comedy movie titles and their release dates.",
+    "gql": "MATCH (movies_total_gross:movies_total_gross) WHERE (movies_total_gross.MPAA_rating = 'PG-13' AND movies_total_gross.genre = 'Romantic Comedy') RETURN movies_total_gross.movie_title AS movie_title, movies_total_gross.release_date AS release_date",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List the movie titles and associated songs directed by Ron Clements.",
+    "gql": "MATCH (t1:characters)<-[name:NAME]-(t2:director) WHERE t2.director = 'Ron Clements' RETURN t1.movie_title, t1.song",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which movies had the main character named Donald Duck and who directed them?",
+    "gql": "MATCH (t1:characters)<-[name:NAME]-(t2:director) WHERE t1.hero = 'Donald Duck' RETURN t1.movie_title, t2.director",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Describe the hero, director, and the release date of Mulan.",
+    "gql": "MATCH (t1:characters)<-[name:NAME]-(t2:director) WHERE t1.movie_title = 'Mulan' RETURN t1.hero, t2.director, t1.release_date",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Provide the director's name of Wreck-It Ralph movie.",
+    "gql": "MATCH (director:director) WHERE director.name = 'Wreck-It Ralph' RETURN director",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Provide the name of the song from the movie directed by Ben Sharpsteen.",
+    "gql": "MATCH (t1:characters)<-[name:NAME]-(t2:director) WHERE t2.director = 'Ben Sharpsteen' RETURN t1.song",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Indicate the release date of the film The Lion King directed by Roger Allers.",
+    "gql": "MATCH (t1:characters)<-[name:NAME]-(t2:director) WHERE (t2.director = 'Roger Allers' AND t1.movie_title = 'The Lion King') RETURN t1.release_date",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which movies of director Wolfgang Reitherman do not have villain?",
+    "gql": "MATCH (t1:characters)<-[name:NAME]-(t2:director) WHERE (t2.director = 'Wolfgang Reitherman' AND t1.villian IS NULL) RETURN t1.movie_title",
+    "difficulty": "medium"
+  }
+]

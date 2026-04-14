@@ -198,8 +198,11 @@ fn print_raw_table(store: &LazyGraphStore, ir: &IntermediateResult, max_rows: us
     let display_rows: Vec<Vec<String>> = ir.rows.iter().take(max_rows).map(|row| {
         let mut cells = Vec::new();
 
-        // Path column: raw IDs (n0 e200 n1332)
-        let path_str = format!("{}", row.path);
+        // Path column: tuple of paths, separated by " | "
+        let path_str = row.paths.iter()
+            .map(|p| format!("{}", p))
+            .collect::<Vec<_>>()
+            .join(" | ");
         cells.push(path_str);
 
         // Variable columns: labels + properties

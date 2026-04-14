@@ -1,0 +1,262 @@
+[
+  {
+    "question": "How many players were born after the year 1985?",
+    "gql": "MATCH (player:Player) WHERE substring(player.DOB, 1, 4) > 1985 RETURN count(player.Player_Id)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many players are from Australia?",
+    "gql": "MATCH (t1:Player)<-[country_id:COUNTRY_ID]-(t2:Country) RETURN count(CASE WHEN t2.Country_Name = 'Australia' THEN t1.Player_Id ELSE NULL END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the players whose bowling skill is \"Legbreak\", when was the oldest one of them born?",
+    "gql": "MATCH (t1:Player)<-[bowling_id:BOWLING_ID]-(t2:Bowling_Style) WHERE t2.Bowling_Skill = 'Legbreak' RETURN min(t1.DOB)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "For how many times has SC Ganguly played as team captain in a match?",
+    "gql": "MATCH (t1:Player)<-[t2:Player_Match]-(t3:Rolee) WHERE t1.Player_Name = 'SC Ganguly' RETURN sum(CASE WHEN t3.Role_Desc = 'Captain' THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among all the matches SC Ganguly has played in, what is the highest winning margin?",
+    "gql": "MATCH (t1:Player)<-[t2:Player_Match]-(t3:Match) WHERE t1.Player_Name = 'SC Ganguly' RETURN max(t3.Win_Margin)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Give the name of the youngest player.",
+    "gql": "MATCH (player:Player) RETURN player.Player_Name AS Player_Name ORDER BY player.DOB DESC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many Indian cities are there in the database?",
+    "gql": "MATCH (t1:City)<-[country_id:COUNTRY_ID]-(t2:Country) RETURN sum(CASE WHEN t2.Country_Name = 'India' THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Who is the oldest player?",
+    "gql": "MATCH (player:Player) RETURN player.Player_Name AS Player_Name ORDER BY player.DOB ASC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many players were born in the 90s?",
+    "gql": "MATCH (player:Player) WHERE ('1990-01-01' <= player.DOB AND player.DOB <= '1999-12-31') RETURN count(player.Player_Id) AS cnt",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List the id of the player who won the Orange Cap for 2 consecutive seasons.",
+    "gql": "MATCH (season:Season) RETURN season.Orange_Cap AS Orange_Cap",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many umpires are from South Africa?",
+    "gql": "MATCH (t1:Country)<-[umpire_country:UMPIRE_COUNTRY]-(t2:Umpire) RETURN sum(CASE WHEN t1.Country_Name = 'South Africa' THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many Orange Cap awards were won by CH Gayle?",
+    "gql": "MATCH (t1:Player)<-[orange_cap:ORANGE_CAP]-(t2:Season) RETURN sum(CASE WHEN t1.Player_Name = 'CH Gayle' THEN 1 ELSE 0 END) AS cnt",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many players with left-hand batting style are from India?",
+    "gql": "MATCH (t1:Batting_Style)<-[t2:Player]-(t3:Country) WHERE t3.Country_Name = 'India' RETURN sum(CASE WHEN t1.Batting_hand = 'Left-hand bat' THEN 1 ELSE 0 END) AS cnt",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Name the player who is born on July 7, 1981.",
+    "gql": "MATCH (player:Player) WHERE player.DOB = '1981-07-07' RETURN player.Player_name AS Player_name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many matches were played by the player with player ID 2?",
+    "gql": "MATCH (player_match:Player_Match) RETURN sum(CASE WHEN player_match.Player_Id = 2 THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many cities are located in South Africa?",
+    "gql": "MATCH (t1:City)-[country_id:COUNTRY_ID]->(t2:Country) RETURN sum(CASE WHEN t2.Country_Name = 'South Africa' THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many overs were there in the first innings of match ID \"335996\"?",
+    "gql": "MATCH (ball_by_ball:Ball_by_Ball) WHERE (ball_by_ball.Match_Id = 335996 AND ball_by_ball.Innings_No = 1) RETURN count(ball_by_ball.Over_Id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the over IDs, ball IDs, and innings numbers of the match ID \"336004\" while the batsman got the maximum scores.",
+    "gql": "MATCH (batsman_scored:Batsman_Scored) WHERE batsman_scored.Match_Id = 336004 RETURN batsman_scored.Over_Id AS Over_Id, batsman_scored.Ball_Id AS Ball_Id, batsman_scored.Innings_No AS Innings_No ORDER BY batsman_scored.Runs_Scored DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Describe any five matches IDs that reached over ID 20.",
+    "gql": "MATCH (ball_by_ball:Ball_by_Ball) WHERE ball_by_ball.Over_Id = 20 RETURN ball_by_ball.Match_Id AS Match_Id LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many players got out in the first inning of match ID \"548335\"?",
+    "gql": "MATCH (wicket_taken:Wicket_Taken) WHERE wicket_taken.Innings_No = 1 RETURN sum(CASE WHEN wicket_taken.Match_Id = 548335 THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many players got out by being stumped in the second innings of all matches?",
+    "gql": "MATCH (t1:Wicket_Taken)-[kind_out:KIND_OUT]->(t2:Out_Type) WHERE t2.Out_Name = 'stumped' RETURN sum(CASE WHEN t1.Innings_No = 2 THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the total winning match for Deccan Chargers.",
+    "gql": "MATCH (t1:Team)<-[match_winner:MATCH_WINNER]-(t2:Match) WHERE t1.Team_Name = 'Deccan Chargers' RETURN sum(t2.Match_Winner)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the total venues located in Pune City.",
+    "gql": "MATCH (t1:Venue)<-[city_id:CITY_ID]-(t2:City) WHERE t2.City_Name = 'Pune' RETURN sum(t1.Venue_Name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What are the average extra runs given in the second innings of every match?",
+    "gql": "MATCH (extra_runs:Extra_Runs) WHERE extra_runs.Innings_No = 2 RETURN avg(extra_runs.Innings_No)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the name of the players born between 1970 and 1990 in descending order of age.",
+    "gql": "MATCH (player:Player) WHERE ('1970-01-01' <= player.DOB AND player.DOB <= '1990-12-31') RETURN player.Player_Name AS Player_Name ORDER BY player.DOB DESC",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Of the wickets taken in the third overs, how many are without the involvement of fielders?",
+    "gql": "MATCH (wicket_taken:Wicket_Taken) WHERE wicket_taken.Over_Id = 3 RETURN sum(CASE WHEN wicket_taken.Fielders = '' THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "From which country does the most umpires are from? How many of them are from the mentioned country?",
+    "gql": "MATCH (t1:Umpire)-[umpire_country:UMPIRE_COUNTRY]->(t2:Country) RETURN t2.Country_Id, count(t1.Umpire_Id) ORDER BY count(t1.Umpire_Id) DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the difference in the average number of players out by lbw and runout in the matches?",
+    "gql": "MATCH (t1:Wicket_Taken)<-[out_id:OUT_ID]-(t2:Out_Type) WHERE t2.Out_Name = 'lbw' RETURN avg(t1.Player_Out)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many players are older than Gurkeerat Singh player?",
+    "gql": "MATCH (player:Player) WHERE player.Player_Name <> 'Gurkeerat Singh' RETURN sum(CASE WHEN player.DOB < '1990-06-29' THEN 1 ELSE 0 END)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many players bat with their left hands?",
+    "gql": "MATCH (t1:Player)<-[batting_id:BATTING_ID]-(t2:Batting_Style) RETURN sum(CASE WHEN t2.Batting_hand = 'Left-hand bat' THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average number of extra runs made as noballs?",
+    "gql": "MATCH (t1:Extra_Runs)<-[extra_id:EXTRA_ID]-(t2:Extra_Type) WHERE t2.Extra_Name = 'noballs' RETURN avg(t1.Extra_Runs)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the player's ID of the top five players, by descending order, in terms of bowling skill.",
+    "gql": "MATCH (player:Player) RETURN player.Player_Id AS Player_Id ORDER BY player.Bowling_skill DESC LIMIT 5",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many players were born before 10/16/1975, and have a bowling skill of less than 3?",
+    "gql": "MATCH (player:Player) WHERE (player.DOB < '1975-10-16' AND player.Bowling_skill < 3) RETURN count(*)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the name of the youngest player?",
+    "gql": "MATCH (player:Player) RETURN player.Player_Name AS Player_Name ORDER BY player.DOB DESC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the total number of runs scored by the batsmen during the 2nd inning of the match ID 335988?",
+    "gql": "MATCH (batsman_scored:Batsman_Scored) WHERE (batsman_scored.Match_Id = 335988 AND batsman_scored.Innings_No = 2) RETURN sum(batsman_scored.Runs_Scored)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the South African players, how many were born before 4/11/1980?",
+    "gql": "MATCH (t1:Player)<-[country_id:COUNTRY_ID]-(t2:Country) WHERE t2.Country_Name = 'South Africa' RETURN sum(CASE WHEN t1.DOB < '1980-4-11' THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many cities are in U.A.E?",
+    "gql": "MATCH (t1:City)<-[country_id:COUNTRY_ID]-(t2:country) RETURN sum(CASE WHEN t2.Country_Name = 'U.A.E' THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many overs were there in each innings of match ID \"336011\"?",
+    "gql": "MATCH (ball_by_ball:Ball_by_Ball) WHERE ball_by_ball.Match_Id = 336011 RETURN sum(CASE WHEN ball_by_ball.Innings_No = 1 THEN 1 ELSE 0 END) AS IN1, sum(CASE WHEN ball_by_ball.Innings_No = 2 THEN 1 ELSE 0 END) AS IN2",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the ball IDs, scores, and innings numbers in the over ID 20 of match ID \"335988\".",
+    "gql": "MATCH (batsman_scored:Batsman_Scored) WHERE (batsman_scored.Match_Id = 335988 AND batsman_scored.Over_Id = 20) RETURN batsman_scored.Ball_Id AS Ball_Id, batsman_scored.Runs_Scored AS Runs_Scored, batsman_scored.Innings_No AS Innings_No",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many matches did Mohammad Hafeez play?",
+    "gql": "MATCH (t1:Player_Match)<-[player_id:PLAYER_ID]-(t2:Player) RETURN sum(CASE WHEN t2.Player_Name = 'Mohammad Hafeez' THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the matches with a total of two innings.",
+    "gql": "MATCH (wicket_taken:Wicket_Taken) WHERE wicket_taken.innings_no = 2 RETURN count(wicket_taken.Match_Id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many venues are located at Centurion, South Africa?",
+    "gql": "MATCH (t1:Venue)<-[t2:City]-(t3:Country) WHERE (t3.country_name = 'South Africa' AND t2.city_name = 'Centurion') RETURN count(t1.Venue_name)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many times did K Goel played as a player only?",
+    "gql": "MATCH (t1:Player_Match)<-[t2:Player]-(t3:Rolee) WHERE (t2.Player_Name = 'K Goel' AND t3.Role_Id = 3) RETURN count(t1.Match_Id)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the average winning margin of the matches held in Newlands?",
+    "gql": "MATCH (t1:Match)<-[venue_id:VENUE_ID]-(t2:Venue) WHERE t2.venue_name = 'Newlands' RETURN avg(t1.win_margin)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the difference between the number of matches where SC Ganguly played as a Captain and those matches where he played other roles?",
+    "gql": "MATCH (t1:Player_Match)<-[t2:Player]-(t3:Rolee) WHERE t2.Player_Name = 'SC Ganguly' RETURN (sum(CASE WHEN t3.Role_Id = 1 THEN 1 ELSE 0 END) - sum(CASE WHEN t3.Role_Id > 1 THEN 1 ELSE 0 END))",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many players have the bowling skill greater than 2?",
+    "gql": "MATCH (player:Player) WHERE player.Bowling_skill > 2 RETURN count(player.Player_Name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Provide the country ID of East London.",
+    "gql": "MATCH (city:City) WHERE city.City_Name = 'East London' RETURN city.Country_id AS Country_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many players are Indians?",
+    "gql": "MATCH (t1:Player)<-[country_id:COUNTRY_ID]-(t2:Country) WHERE t2.Country_Name = 'India' RETURN count(t1.Player_Id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many players have left arm fast in bowling skill?",
+    "gql": "MATCH (t1:Player)<-[bowling_id:BOWLING_ID]-(t2:Bowling_Style) WHERE t2.Bowling_skill = 'Left-arm fast' RETURN count(t1.Player_Id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many times did SC Ganguly be the man of the match?",
+    "gql": "MATCH (t1:Player)-[t2:Match]->(t3:Player_Match) WHERE t1.Player_Name = 'SC Ganguly' RETURN count(t2.Man_of_the_Match)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Count the matches that were won by wickets in all season.",
+    "gql": "MATCH (t1:Match)<-[win_id:WIN_ID]-(t2:Win_By) WHERE t2.Win_type = 'wickets' RETURN count(t1.Match_Id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many of the players are from Sri Lanka?",
+    "gql": "MATCH (t1:Player)<-[country_id:COUNTRY_ID]-(t2:Country) WHERE t2.Country_Name = 'Sri Lanka' RETURN count(*)",
+    "difficulty": "medium"
+  }
+]

@@ -1,3 +1,13 @@
 /target
 *.gdb
 !examples/*.gdb
+# Large generated databases (re-create with scripts/convert_dev_datasets.py)
+examples/neoflix.gdb
+examples/olympics.gdb
+examples/address.gdb
+examples/recommendations.gdb
+examples/twitter.gdb
+examples/video_games.gdb
+examples/bluesky.gdb
+examples/buzzoverflow.gdb
+examples/books.gdb

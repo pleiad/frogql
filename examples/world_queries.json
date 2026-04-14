@@ -1,0 +1,282 @@
+[
+  {
+    "question": "Which country has the shortest life expectancy?",
+    "gql": "MATCH (country:Country) RETURN country.Name AS Name ORDER BY country.LifeExpectancy LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List any five countries which use English as an official language.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE (t2.Language = 'English' AND t2.IsOfficial = 'T') RETURN t1.Name LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average population per city in Karnataka district.",
+    "gql": "MATCH (city:City) WHERE city.District = 'Karnataka' RETURN avg(city.Population)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List the languages used in the USA.",
+    "gql": "MATCH (countrylanguage:CountryLanguage) WHERE countrylanguage.CountryCode = 'USA' RETURN countrylanguage.Language AS Language",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many countries use Portuguese?",
+    "gql": "MATCH (countrylanguage:CountryLanguage) RETURN sum(CASE WHEN countrylanguage.Language = 'Portuguese' THEN 1 ELSE 0 END)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many cities are there in England?",
+    "gql": "MATCH (city:City) WHERE city.District = 'England' RETURN count(city.ID)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the capital city and population of San Marino?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) WHERE t1.Name = 'San Marino' RETURN t1.Capital, t2.Population",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the languages used in Turkmenistan.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE t1.Name = 'Turkmenistan' RETURN t2.Language",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List any five countries which use English as an official language.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE (t2.Language = 'English' AND t2.IsOfficial = 'T') RETURN t1.Name LIMIT 5",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Provide the name, located country, and life expectancy of the most populated city",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) RETURN t2.Name, t1.Code, t1.LifeExpectancy ORDER BY t2.Population DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the district name of the city with the smallest population.",
+    "gql": "MATCH (city:City) RETURN city.District AS District ORDER BY city.Population LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "In which continent does the country with the smallest surface area belongs?",
+    "gql": "MATCH (country:Country) RETURN country.Continent AS Continent ORDER BY country.SurfaceArea LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Who is the head of the state where the most crowded city belongs?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) RETURN t1.HeadOfState ORDER BY t2.Population DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the countries that officially use the English language, what country has the highest capital?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE (t2.Language = 'English' AND t2.IsOfficial = 'T') RETURN t1.Code ORDER BY t1.Capital DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List down the cities that belong to the country with a life expectancy of 66.4.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) WHERE t1.LifeExpectancy = 66.4 RETURN t2.Name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Give the head of the state of the country with the lowest percentage use of English as their language.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE t2.Language = 'English' RETURN t1.HeadOfState ORDER BY t2.Percentage LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the surface area of the country where Sutton Coldfield city belongs?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) WHERE t2.Name = 'Sutton Coldfield' RETURN t1.SurfaceArea",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List down the languages of the countries that have population below 8000.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE t1.Population < 8000 RETURN t2.Language",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Give the cities and district names that belong to the country with Hajastan as its local name.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) WHERE t1.LocalName = 'Hajastan' RETURN t2.Name, t2.District",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many languages are used in Cyprus?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) RETURN sum(CASE WHEN t1.Name = 'Cyprus' THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Provide the language used by the people of Belize.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE t1.Name = 'Belize' RETURN t2.Language",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List down the districts belong to the country headed by Adolf Ogi.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) WHERE t1.HeadOfState = 'Adolf Ogi' RETURN t2.District",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Who is the head of the country where Santa Catarina district belongs?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) WHERE t2.District = 'Santa Catarina' RETURN t1.HeadOfState",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What country declared its independence in 1994?",
+    "gql": "MATCH (country:Country) WHERE country.IndepYear = 1994 RETURN country.Name AS Name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List all the countries in Asia.",
+    "gql": "MATCH (country:Country) WHERE country.Continent = 'Asia' RETURN country.Name AS Name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What country in Asia has the largest gross national product(GNP)?",
+    "gql": "MATCH (country:Country) WHERE country.Continent = 'Asia' RETURN country.Name AS Name ORDER BY country.GNP DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many cities are in the Philippines?",
+    "gql": "MATCH (city:City) WHERE city.Name = 'PHL' RETURN count(city.ID)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the local name of Ukraine that they are also known for?",
+    "gql": "MATCH (country:Country) WHERE country.Name = 'Ukraine' RETURN country.LocalName AS LocalName",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many countries have Socialistic Republic form of government?",
+    "gql": "MATCH (country:Country) WHERE country.GovernmentForm = 'Socialistic Republic' RETURN count(country.Code)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the form of government that the city of Manila has?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) WHERE t2.Name = 'Manila' RETURN t1.GovernmentForm",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all the languages used in Europe.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE t1.Continent = 'Europe' RETURN t2.Language",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Who is the head of state of the country where the city of Pyongyang is under?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) WHERE t2.Name = 'Pyongyang' RETURN t1.HeadOfState",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many unofficial languages are used in Italy?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE t1.Name = 'Italy' RETURN sum(CASE WHEN t2.IsOfficial = 'F' THEN 1 ELSE 0 END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What city in Russia has the least population?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) WHERE t1.Name = 'Russian Federation' RETURN t2.Name ORDER BY t2.Population ASC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all the cities in the country where there is high life expectancy at birth.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) RETURN t2.Name ORDER BY t1.LifeExpectancy DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all the official and unofficial languages used by the country that declared its independence in 1830.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE t1.IndepYear = 1830 RETURN t2.Language, t2.IsOfficial",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the capital city of the country with largest population?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) RETURN t1.Capital ORDER BY t1.Population DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all the countries in the continent of Asia that use English as their unofficial language.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE (t1.Continent = 'Asia' AND t2.IsOfficial = 'F') RETURN t1.Name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average GNP of all countries that use Arabic language.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE t2.Language = 'Arabic' RETURN avg(t1.GNP)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which country has the smallest surface area?",
+    "gql": "MATCH (country:Country) RETURN country.Name AS Name ORDER BY country.SurfaceArea ASC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Write down the name of the largest population country.",
+    "gql": "MATCH (country:Country) RETURN country.Name AS Name ORDER BY country.Population DESC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the language of the smallest population country?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) RETURN t2.Language ORDER BY t1.Population ASC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List down the name of countries whereby English is their official language.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE (t2.Language = 'English' AND t2.IsOfficial = 'T') RETURN t1.Name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List down the official language of the countries which declared independence after 1990,",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE (t1.IndepYear > 1990 AND t2.IsOfficial = 'T') RETURN t1.Name, t2.Language",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List down languages used in Malaysia.",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE t1.Name = 'Malaysia' RETURN t2.Language",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which country has the most crowded city in the world?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:City) RETURN t1.Name ORDER BY t2.Population DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average life expentancy of countries that speak Arabic?",
+    "gql": "MATCH (t1:Country)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE t2.Language = 'Arabic' RETURN avg(t1.LifeExpectancy)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What city has the highest population?",
+    "gql": "MATCH (city:City) RETURN city.Name AS Name ORDER BY city.Population DESC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What country has the largest surface area?",
+    "gql": "MATCH (country:Country) RETURN country.Name AS Name ORDER BY country.SurfaceArea DESC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many countries have a life expectancy of 75.1?",
+    "gql": "MATCH (country:Country) WHERE country.LifeExpectancy = 75.1 RETURN count(*)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the year of independence of Brunei?",
+    "gql": "MATCH (country:Country) WHERE country.Name = 'Brunei' RETURN country.IndepYear AS IndepYear",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many countries have no GNP?",
+    "gql": "MATCH (country:Country) WHERE country.GNP = 0 RETURN count(*)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the average surface area of all countries?",
+    "gql": "MATCH (country:Country) RETURN avg(country.SurfaceArea)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many languages are there in the country where Tocantins district belongs?",
+    "gql": "MATCH (t1:City)<-[countrycode:COUNTRYCODE]-(t2:CountryLanguage) WHERE t1.District = 'Tocantins' RETURN count(DISTINCT t2.Language)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many cities are there in the country ruled by Kostis Stefanopoulos?",
+    "gql": "MATCH (t1:City)<-[code:CODE]-(t2:Country) WHERE t2.HeadOfState = 'Kostis Stefanopoulos' RETURN count(DISTINCT t1.Name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the life expectancy of the countries that uses Japanese as their language?",
+    "gql": "MATCH (t1:CountryLanguage)<-[code:CODE]-(t2:Country) WHERE t1.Language = 'Japanese' RETURN avg(t2.LifeExpectancy)",
+    "difficulty": "medium"
+  }
+]

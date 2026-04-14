@@ -279,8 +279,8 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                         for &idx in indices {
                             let r2 = &ir2.rows[idx];
                             if r1.assignment.can_unify(&r2.assignment) {
-                                rows.push(ResultRow::new(
-                                    r1.path.cross(&r2.path),
+                                rows.push(ResultRow::join(
+                                    r1, r2,
                                     r1.assignment.unify(&r2.assignment),
                                 ));
                                 if self.limit_reached(&rows, limit) { break 'outer; }
@@ -296,8 +296,8 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let mut rows = Vec::new();
         'outer2: for r1 in &ir1.rows {
             for r2 in &ir2.rows {
-                rows.push(ResultRow::new(
-                    r1.path.cross(&r2.path),
+                rows.push(ResultRow::join(
+                    r1, r2,
                     r1.assignment.unify(&r2.assignment),
                 ));
                 if self.limit_reached(&rows, limit) { break 'outer2; }
@@ -365,7 +365,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let mut rows = Vec::new();
 
         'outer: for r1 in &ir1.rows {
-            let Some(last_node) = r1.path.last_node_id() else { continue };
+            let Some(last_node) = r1.path().last_node_id() else { continue };
 
             let edge_ids = if is_right {
                 self.graph.outgoing_edges(last_node)
@@ -387,12 +387,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 if !r1.assignment.can_unify(&edge_mu) {
                     continue;
                 }
-                rows.push(ResultRow::new(
-                    r1.path.concat(&Path(vec![
+                rows.push(r1.extend_path(
+                    &Path(vec![
                         PathValue::Node(last_node),
                         edge_pv,
                         PathValue::Node(other_node),
-                    ])),
+                    ]),
                     r1.assignment.unify(&edge_mu),
                 ));
                 if self.limit_reached(&rows, limit) { break 'outer; }
@@ -408,7 +408,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let mut rows = Vec::new();
 
         'outer: for r1 in &ir1.rows {
-            let Some(last_node) = r1.path.last_node_id() else { continue };
+            let Some(last_node) = r1.path().last_node_id() else { continue };
 
             for &eid in &self.graph.undirected_edges_of(last_node) {
                 if !self.filter_edge(eid, desc) {
@@ -423,12 +423,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 if !r1.assignment.can_unify(&edge_mu) {
                     continue;
                 }
-                rows.push(ResultRow::new(
-                    r1.path.concat(&Path(vec![
+                rows.push(r1.extend_path(
+                    &Path(vec![
                         PathValue::Node(last_node),
                         edge_pv,
                         PathValue::Node(other_node),
-                    ])),
+                    ]),
                     r1.assignment.unify(&edge_mu),
                 ));
                 // Second orientation: other_node → edge → last_node
@@ -458,7 +458,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let mut rows = Vec::new();
 
         for r1 in &ir1.rows {
-            let Some(last_node) = r1.path.last_node_id() else { continue };
+            let Some(last_node) = r1.path().last_node_id() else { continue };
             if !self.filter_node(last_node, desc) {
                 continue;
             }
@@ -468,8 +468,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 continue;
             }
             // Node concat: the last node already IS the node, so path doesn't grow
-            rows.push(ResultRow::new(
-                r1.path.clone(),
+            rows.push(r1.with_same_paths(
                 r1.assignment.unify(&node_mu),
             ));
             if self.limit_reached(&rows, limit) { break; }
@@ -521,20 +520,20 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         // Build hash map: first_node_id → Vec<index into ir2.rows>
         let mut ir2_by_first: HashMap<Id, Vec<usize>> = HashMap::new();
         for (i, r2) in ir2.rows.iter().enumerate() {
-            if let Some(first) = r2.path.first_node_id() {
+            if let Some(first) = r2.path().first_node_id() {
                 ir2_by_first.entry(first).or_default().push(i);
             }
         }
 
         let mut rows = Vec::new();
         'outer: for r1 in &ir1.rows {
-            let Some(last) = r1.path.last_node_id() else { continue };
+            let Some(last) = r1.path().last_node_id() else { continue };
             let Some(matches) = ir2_by_first.get(&last) else { continue };
             for &idx in matches {
                 let r2 = &ir2.rows[idx];
                 if r1.assignment.can_unify(&r2.assignment) {
-                    rows.push(ResultRow::new(
-                        r1.path.concat(&r2.path),
+                    rows.push(r1.extend_path(
+                        r2.path(),
                         r1.assignment.unify(&r2.assignment),
                     ));
                     if limit > 0 && rows.len() >= limit { break 'outer; }
@@ -566,7 +565,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         // Build hash map once: first_node_id → indices in grouped.rows
         let mut grouped_by_first: HashMap<Id, Vec<usize>> = HashMap::new();
         for (i, r) in grouped.rows.iter().enumerate() {
-            if let Some(first) = r.path.first_node_id() {
+            if let Some(first) = r.path().first_node_id() {
                 grouped_by_first.entry(first).or_default().push(i);
             }
         }
@@ -575,7 +574,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         for _ in 1..n {
             let mut new_rows = Vec::new();
             for r in &res.rows {
-                let Some(last) = r.path.last_node_id() else { continue };
+                let Some(last) = r.path().last_node_id() else { continue };
                 let Some(matches) = grouped_by_first.get(&last) else { continue };
                 for &idx in matches {
                     new_rows.push(r.concat_group(&grouped.rows[idx]));

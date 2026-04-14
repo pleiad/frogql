@@ -1,0 +1,232 @@
+[
+  {
+    "question": "List all players' given name who are good at both left and right hand and playing the forward position.",
+    "gql": "MATCH (master:Master) WHERE (master.shootCatch IS NULL AND master.pos = 'F') RETURN master.nameGiven AS nameGiven",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Who are the players who were not in the Hall of Fame list.",
+    "gql": "MATCH (master:Master) WHERE master.hofID IS NULL RETURN master.firstName AS firstName, master.lastName AS lastName",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the average weight of players who have height greater than 72 inches.",
+    "gql": "MATCH (master:Master) WHERE master.height > 72 RETURN avg(master.weight)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "State the nick name of player ID 'aubinje01'. List all the teams and season he played for.",
+    "gql": "MATCH (t1:Master)<-[t2:Goalies]-(t3:Teams) WHERE t1.playerID = 'aubinje01' RETURN DISTINCT t1.nameNick, t3.year, t3.name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Name the deceased players whose death country is different from his birth country order by birth year.",
+    "gql": "MATCH (master:Master) WHERE master.birthCountry <> master.deathCountry RETURN master.firstName AS firstName, master.lastName AS lastName ORDER BY master.birthYear",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Who are the players played both in NHL and WHA. List the given name and first year they were in NHL and first year in WHA.",
+    "gql": "MATCH (master:Master) WHERE (master.firstNHL IS NOT NULL AND master.firstWHA IS NOT NULL) RETURN master.nameGiven AS nameGiven, master.firstNHL AS firstNHL, master.firstWHA AS firstWHA",
+    "difficulty": "easy"
+  },
+  {
+    "question": "State the nick name of the tallest player? If the player had left NHL, mention the last season he was with NHL.",
+    "gql": "MATCH (master:Master) RETURN master.nameNick AS nameNick, master.lastNHL AS lastNHL ORDER BY master.height DESC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many players and coaches are awarded after death?",
+    "gql": "MATCH (awardsmisc:AwardsMisc) WHERE awardsmisc.note IS NOT NULL RETURN count(awardsmisc.note)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many teams have the same total number of postseason wins and postseason loses?",
+    "gql": "MATCH (goalies:Goalies) WHERE goalies.PostW = goalies.PostL RETURN DISTINCT count(goalies.tmID)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Please list the name of the person who was in the Hall of Fame in the year 1978.",
+    "gql": "MATCH (hof:HOF) WHERE hof.year = 1978 RETURN hof.name AS name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many people were in the Hall of Fame's Builder category?",
+    "gql": "MATCH (hof:HOF) WHERE hof.category = 'Builder' RETURN count(hof.hofID)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Among the coaches whose team has over 30 wins in a year, how many of them are born in the USA?",
+    "gql": "MATCH (t1:Master)<-[coachid:COACHID]-(t2:Coaches) WHERE (t2.W > 30 AND t1.birthCountry = 'USA') RETURN count(t2.coachID)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the coaches who have taught teams from the NHL League, how many of them are from Canada?",
+    "gql": "MATCH (t1:Master)<-[coachid:COACHID]-(t2:Coaches) WHERE (t2.lgID = 'NHL' AND t1.birthCountry = 'Canada') RETURN count(t2.coachID)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the coaches who have gotten in the Hall of Fame, how many of them have a weight of over 195?",
+    "gql": "MATCH (t1:Master)<-[hofid:HOFID]-(t2:HOF) WHERE t1.weight > 195 RETURN count(DISTINCT t1.coachID)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the players who became coaches, how many of them have gotten in the Hall of Fame?",
+    "gql": "MATCH (t1:Master)<-[hofid:HOFID]-(t2:HOF) WHERE (t1.playerID IS NOT NULL AND t1.coachID IS NOT NULL) RETURN count(t1.playerID)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Please list the birth cities of the players who have won an award in the year 1970.",
+    "gql": "MATCH (t1:Master)<-[playerid:PLAYERID]-(t2:AwardsPlayers) WHERE t2.year = 1970 RETURN DISTINCT t1.birthCity",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many players born in Toronto have won the All-Rookie award?",
+    "gql": "MATCH (t1:Master)<-[playerid:PLAYERID]-(t2:AwardsPlayers) WHERE (t2.award = 'All-Rookie' AND t1.birthCity = 'Toronto') RETURN count(t1.playerID)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the players who have won the All-Rookie award, how many of them have died?",
+    "gql": "MATCH (t1:Master)<-[playerid:PLAYERID]-(t2:AwardsPlayers) WHERE (t2.award = 'All-Rookie' AND t1.deathYear IS NOT NULL) RETURN count(t1.playerID)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the players who died in Massachussets, how many of them have won an award?",
+    "gql": "MATCH (t1:Master)<-[playerid:PLAYERID]-(t2:AwardsPlayers) WHERE t1.deathState = 'MA' RETURN count(DISTINCT t1.playerID)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Please list the awards the players who died in Arlington have won.",
+    "gql": "MATCH (t1:Master)<-[playerid:PLAYERID]-(t2:AwardsPlayers) WHERE t1.deathCity = 'Kemptville' RETURN t2.award",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Please list the positions of the players who were born in Canada and have won the All-Rookie award.",
+    "gql": "MATCH (t1:Master)<-[playerid:PLAYERID]-(t2:AwardsPlayers) WHERE (t1.birthCountry = 'Canada' AND t2.award = 'All-Rookie') RETURN DISTINCT t1.pos",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many years did player Id \"healygl01\" play?",
+    "gql": "MATCH (goalies:Goalies) WHERE goalies.playerID = 'healygl01' RETURN count(goalies.year)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which position did Mike Antonovich play?",
+    "gql": "MATCH (t1:Master)<-[playerid:PLAYERID]-(t2:AwardsPlayers) WHERE (t1.firstName = 'Mike' AND t1.lastName = 'Antonovich') RETURN t1.pos",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many years did player Id \"cleghsp01\" make to the Stanley Cup finals?",
+    "gql": "MATCH (scoringsc:ScoringSC) WHERE scoringsc.playerID = 'cleghsp01' RETURN count(scoringsc.year)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Who made the most assists in a single game in the Stanley Cup finals ?",
+    "gql": "MATCH (scoringsc:ScoringSC) RETURN scoringsc.playerID AS playerID ORDER BY scoringsc.A DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What position did player id \"hartgi01\" play in his Stanley Cup finals performance?",
+    "gql": "MATCH (scoringsc:ScoringSC) WHERE scoringsc.playerID = 'hartgi01' RETURN DISTINCT scoringsc.pos AS pos",
+    "difficulty": "easy"
+  },
+  {
+    "question": "For the team which had three different goalies in the 2011 postseason games, how many games did they win in the regular season?",
+    "gql": "MATCH (t1:Goalies)<-[tmid:TMID]-(t2:Teams) WHERE t2.year = 2011 RETURN sum(t2.W)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many former athletes go on to become coaches after retiring?",
+    "gql": "MATCH (master:Master) WHERE (master.playerID IS NOT NULL AND master.coachID IS NOT NULL) RETURN count(master.playerID)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Among the teams with the most number of ties, how many penalty was committed by a player or coach that is not on the ice? Indicate the name of the team.",
+    "gql": "MATCH (teams:Teams) RETURN teams.BenchMinor AS BenchMinor, teams.name AS name ORDER BY teams.T DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the position of the 9th oldest hockey player?",
+    "gql": "MATCH (master:Master) WHERE master.birthYear IS NOT NULL RETURN master.pos AS pos ORDER BY master.birthYear, master.birthMon, master.birthDay LIMIT 8",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many players, whose shooting/catching hand is both left and right, debuted their first NHL in 2011?",
+    "gql": "MATCH (master:Master) WHERE (master.shootCatch IS NULL AND master.firstNHL = '2011') RETURN count(master.playerID)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the highest total points a team got in a year?",
+    "gql": "MATCH (teams:Teams) RETURN sum(teams.Pts), teams.year AS year ORDER BY sum(teams.Pts) DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the coaches who have taught the Philadelphia Flyers, how many of them are born in March?",
+    "gql": "MATCH (t1:Coaches)<-[t2:Teams]-(t3:Master) WHERE (t2.name = 'Philadelphia Flyers' AND t3.birthMon = 3) RETURN count(DISTINCT t3.coachID)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Among the coaches who are born in the USA, how many of them used to train the Philadelphia Flyers?",
+    "gql": "MATCH (t1:Coaches)<-[t2:Teams]-(t3:Master) WHERE (t2.name = 'Philadelphia Flyers' AND t3.birthCountry = 'USA') RETURN count(DISTINCT t3.coachID)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many coaches who have taught the Buffalo Sabres have died?",
+    "gql": "MATCH (t1:Coaches)<-[t2:Teams]-(t3:Master) WHERE (t2.name = 'Buffalo Sabres' AND t3.deathYear IS NOT NULL) RETURN count(DISTINCT t3.coachID)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many hall of famers both played and coached in the league?",
+    "gql": "MATCH (master:Master) WHERE (master.hofID IS NOT NULL AND master.playerID IS NOT NULL AND master.coachID IS NOT NULL) RETURN count(master.playerID)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the number of players whose last name is Green that played in the league but not coached?",
+    "gql": "MATCH (master:Master) WHERE (master.lastName = 'Green' AND master.coachID IS NULL) RETURN count(master.playerID)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "For the goalie whose last name is \"Young\", how many teams did he play in?",
+    "gql": "MATCH (t1:Goalies)<-[playerid:PLAYERID]-(t2:Master) WHERE t2.lastName = 'Young' RETURN count(DISTINCT t1.tmID)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "For the goalie whose legendsID is \"P196402\" , how many games did he play in the league?",
+    "gql": "MATCH (t1:Goalies)<-[playerid:PLAYERID]-(t2:Master) WHERE t2.legendsID = 'P196402' RETURN sum(t1.GP)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many Haileybury Hockey Club goalies became a hall of famer?",
+    "gql": "MATCH (t1:Goalies)-[t2:Master]->(t3:Teams) WHERE (t3.name = 'Haileybury Hockey Club' AND t2.hofID IS NOT NULL) RETURN count(DISTINCT t1.playerID)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "State the player ID and coach ID of person who have become coach after retirement.",
+    "gql": "MATCH (master:Master) WHERE (master.playerID IS NOT NULL AND master.coachID IS NOT NULL) RETURN master.playerID AS playerID, master.coachID AS coachID",
+    "difficulty": "easy"
+  },
+  {
+    "question": "State the player ID of player with average height of 75.",
+    "gql": "MATCH (master:Master) RETURN DISTINCT master.playerID AS playerID",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Who is the heaviest player? State player ID of 5 heaviest players.",
+    "gql": "MATCH (master:Master) RETURN master.playerID AS playerID ORDER BY master.weight DESC LIMIT 5",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the full name of players origin from Finland?",
+    "gql": "MATCH (master:Master) WHERE master.birthCountry = 'Finland' RETURN DISTINCT master.firstName AS firstName, master.lastName AS lastName",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List down player ID of players who have passed away.",
+    "gql": "MATCH (master:Master) WHERE (master.deathYear IS NOT NULL AND master.playerID IS NOT NULL) RETURN DISTINCT master.playerID AS playerID",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the total number of game played for players from USA?",
+    "gql": "MATCH (t1:Master)<-[playerid:PLAYERID]-(t2:Scoring) WHERE t1.birthCountry = 'USA' RETURN count(t2.GP)",
+    "difficulty": "medium"
+  }
+]

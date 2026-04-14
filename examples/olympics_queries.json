@@ -1,0 +1,377 @@
+[
+  {
+    "question": "How many Olympic competitors are from Finland?",
+    "gql": "MATCH (t1:person_region)<-[id:ID]-(t2:noc_region) WHERE t2.region_name = 'Finland' RETURN count(t1.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Please list the names of all the Olympic competitors from Finland.",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t1.region_name = 'Finland' RETURN t3.full_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "The Olympic competitor John Aalberg is from which region?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t3.full_name = 'John Aalberg' RETURN t1.region_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the NOC code of the region where the tallest male Olympic competitor is from?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t3.gender = 'M' RETURN t1.noc ORDER BY t3.height DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among all the Olympic competitors from Finland, how many of them are female?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE (t1.region_name = 'Finland' AND t3.gender = 'F') RETURN count(t3.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "For how many times has London held the Olympic games?",
+    "gql": "MATCH (t1:games_city)<-[id:ID]-(t2:city) WHERE t2.city_name = 'London' RETURN count(t1.games_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average height of the male Olympic competitors from Finland?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE (t1.region_name = 'Finland' AND t3.gender = 'M') RETURN avg(t3.height)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many Olympic Games has London hosted?",
+    "gql": "MATCH (t1:games_city)<-[t2:city]-(t3:games) WHERE t2.city_name = 'London' RETURN count(t3.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Tell the number of swimming related events.",
+    "gql": "MATCH (t1:sport)<-[sport_id:SPORT_ID]-(t2:event) WHERE t1.sport_name = 'Swimming' RETURN count(t2.event_name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "For Peter Kohnke, show the name of his/her region.",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t3.full_name = 'Peter Kohnke' RETURN t1.region_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Give the name of the tallest athlete from Sweden.",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t1.region_name = 'Sweden' RETURN t3.full_name ORDER BY t3.height DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many athletes in the database are from Guatemala?",
+    "gql": "MATCH (t1:person_region)<-[id:ID]-(t2:noc_region) WHERE t2.region_name = 'Guatemala' RETURN count(t1.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many competitor ids does Martina Kohlov have?",
+    "gql": "MATCH (t1:person)<-[person_id:PERSON_ID]-(t2:games_competitor) WHERE t1.full_name = 'Martina Kohlov' RETURN count(t2.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What are the names of the events under Art Competitions?",
+    "gql": "MATCH (t1:sport)<-[sport_id:SPORT_ID]-(t2:event) WHERE t1.sport_name = 'Art Competitions' RETURN t2.event_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many gold medals does Henk Jan Zwolle have?",
+    "gql": "MATCH (t1:person)<-[person_id:PERSON_ID]-(t2:games_competitor)<-[t3:competitor_event]-(t4:medal) WHERE (t1.full_name = 'Henk Jan Zwolle' AND t4.medal_name = 'Gold') RETURN count(t1.id)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many athletes are from Australia?",
+    "gql": "MATCH (t1:noc_region)<-[region_id:REGION_ID]-(t2:person_region) WHERE t1.region_name = 'Australia' RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many Summer games were held in Stockholm?",
+    "gql": "MATCH (t1:games_city)<-[t2:city]-(t3:games) WHERE (t2.city_name = 'Stockholm' AND t3.season = 'Summer') RETURN count(t3.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many athletes competed in the 1992 Summer Olympics?",
+    "gql": "MATCH (t1:games)<-[games_id:GAMES_ID]-(t2:games_competitor) WHERE t1.games_name = '1928 Summer' RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Where is competitor Estelle Nze Minko from?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t3.full_name = 'Estelle Nze Minko' RETURN t1.region_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many males from Belgium have participated in an Olympic Games?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE (t1.region_name = 'Belgium' AND t3.gender = 'M') RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many persons participated in the Sapporo Olympics?",
+    "gql": "MATCH (t1:games_competitor)<-[t2:games_city]-(t3:city) WHERE t3.city_name = 'Sapporo' RETURN count(t1.person_id)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many persons in total have participated in 12 meter Mixed Sailing competitions?",
+    "gql": "MATCH (t1:competitor_event)<-[t2:event]-(t3:sport) WHERE t2.event_name = 'Sailing Mixed 12 metres' RETURN count(t1.competitor_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many different events are there of Modern Pentathlon?",
+    "gql": "MATCH (t1:sport)<-[sport_id:SPORT_ID]-(t2:event) WHERE t1.sport_name = 'Modern Pentathlon' RETURN count(DISTINCT t2.event_name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average age of the persons who participated in the 1992 Summer Games.",
+    "gql": "MATCH (t1:games)<-[t2:games_competitor]-(t3:person) WHERE t1.games_name = '1992 Summer' RETURN avg(t2.age)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List out years that only have summer games.",
+    "gql": "MATCH (games:games) WHERE games.season <> 'Winter' RETURN games.games_year AS games_year",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many Olympics games were held during the 90s?",
+    "gql": "MATCH (games:games) WHERE ('1990' <= games.games_year AND games.games_year <= '1999') RETURN count(games.games_year)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many athletes participated in the 2014 Winter Olympics?",
+    "gql": "MATCH (t1:games)<-[games_id:GAMES_ID]-(t2:games_competitor) WHERE t1.games_name = '2014 Winter' RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many athletes from region 151 have won a medal?",
+    "gql": "MATCH (t1:competitor_event)<-[t2:games_competitor]-(t3:person_region) WHERE (t3.region_id = 151 AND t1.medal_id <> 4) RETURN count(t3.person_id)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many athlete from China participate in the 2016 Summer Olympics?",
+    "gql": "MATCH (t1:games)<-[t2:games_competitor]-(t3:person)<-[t4:person_region]-(t5:noc_region) WHERE (t1.games_name = '2016 Summer' AND t5.region_name = 'China') RETURN count(t3.id)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many athletes from Malaysia have won a medal?",
+    "gql": "MATCH (t1:medal)<-[t2:competitor_event]-(t3:games_competitor)<-[t4:person_region]-(t5:noc_region) WHERE (t5.region_name = 'Malaysia' AND t1.id <> 4) RETURN count(t3.person_id)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the average height of male athletes playing basketball sport?",
+    "gql": "MATCH (t1:sport)<-[t2:event]-(t3:competitor_event)<-[t4:games_competitor]-(t5:person) WHERE (t1.sport_name = 'Basketball' AND t5.gender = 'M') RETURN avg(t5.height)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many female athletes are from the Philippines?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE (t1.region_name = 'Philippines' AND t3.gender = 'F') RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which region is Yao Ming from?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t3.full_name = 'Yao Ming' RETURN t1.region_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many Olympic games were held in London?",
+    "gql": "MATCH (t1:games_city)<-[id:ID]-(t2:city) WHERE t2.city_name = 'London' RETURN count(t1.games_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many athletes over the age of 59 competed in the 2016 Summer Olympics?",
+    "gql": "MATCH (t1:games)<-[games_id:GAMES_ID]-(t2:games_competitor) WHERE (t1.games_name = '2016 Summer' AND t2.age > 59) RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average age of the athletes from the United States of America who competed in the 2016 Summer Olympics?",
+    "gql": "MATCH (t1:games)<-[games_id:GAMES_ID]-(t2:games_competitor)<-[t3:person_region]-(t4:noc_region) WHERE (t1.games_name = '2016 Summer' AND t4.region_name = 'USA') RETURN avg(t2.age)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which region does the NOC code \"COL\" stand for?",
+    "gql": "MATCH (noc_region:noc_region) WHERE noc_region.noc = 'COL' RETURN noc_region.region_name AS region_name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "State the name of sport id 19.",
+    "gql": "MATCH (sport:sport) WHERE sport.id = 19 RETURN sport.sport_name AS sport_name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Give the id of the event \"Shooting Mixed Skeet\".",
+    "gql": "MATCH (event:event) WHERE event.event_name = 'Shooting Mixed Skeet' RETURN event.id AS id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Provide hockey's sport id.",
+    "gql": "MATCH (sport:sport) WHERE sport.sport_name = 'Hockey' RETURN sport.id AS id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Tell the weight of Dagfinn Sverre Aarskog.",
+    "gql": "MATCH (person:person) WHERE person.full_name = 'Dagfinn Sverre Aarskog' RETURN person.weight AS weight",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the id of Rio de Janeiro?",
+    "gql": "MATCH (city:city) WHERE city.city_name = 'Rio de Janeiro' RETURN city.id AS id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many kinds of events belong to the sport of cycling?",
+    "gql": "MATCH (t1:sport)<-[sport_id:SPORT_ID]-(t2:event) WHERE t1.sport_name = 'Cycling' RETURN count(t2.event_name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is Vijay Singh Chauhan's region name?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t3.full_name = 'Vijay Singh Chauhan' RETURN t1.region_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many 20 years old athletes were there in the 1984 Summer Olympic Games?",
+    "gql": "MATCH (t1:games)<-[games_id:GAMES_ID]-(t2:games_competitor) WHERE (t1.games_name = '1984 Summer' AND t2.age = 20) RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many games has Prithipal Singh participated in?",
+    "gql": "MATCH (t1:person)<-[person_id:PERSON_ID]-(t2:games_competitor) WHERE t1.full_name = 'Prithipal Singh' RETURN count(t2.games_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "State the number of athletes in the 1984 Summer Olympic Games who were more than 50 years old.",
+    "gql": "MATCH (t1:games)<-[games_id:GAMES_ID]-(t2:games_competitor) WHERE (t1.games_name = '1984 Summer' AND t2.age > 50) RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many kinds of events does athletics have?",
+    "gql": "MATCH (t1:sport)<-[sport_id:SPORT_ID]-(t2:event) WHERE t1.sport_name = 'Athletics' RETURN count(t2.event_name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Who is the heaviest athlete from Russia?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t1.region_name = 'Russia' RETURN t3.full_name ORDER BY t3.weight DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Give the height of the tallest athlete from Portugal.",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t1.region_name = 'Portugal' RETURN t3.height ORDER BY t3.height DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average weight of male athletes from Tonga.",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE (t1.region_name = 'Tonga' AND t3.gender = 'M') RETURN avg(t3.weight)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "From 1900 to 1992, how many games did London host?",
+    "gql": "MATCH (t1:games_city)<-[t2:city]-(t3:games) WHERE (t2.city_name = 'London' AND 1900 <= t3.games_year AND t3.games_year <= 1992) RETURN count(t3.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many Summer games are there that were held in Paris?",
+    "gql": "MATCH (t1:games_city)<-[t2:city]-(t3:games) WHERE (t2.city_name = 'Paris' AND t3.season = 'Summer') RETURN count(t3.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many competitors were there who participated in 2000 Summer with age 31?",
+    "gql": "MATCH (t1:games)<-[games_id:GAMES_ID]-(t2:games_competitor) WHERE (t1.games_name = '2000 Summer' AND t2.age = 31) RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many male competitors were there who participated in 1948 Summer?",
+    "gql": "MATCH (t1:games)<-[t2:games_competitor]-(t3:person) WHERE (t1.games_name = '1948 Summer' AND t3.gender = 'M') RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average age of competitors who participated in 1988 Winter?",
+    "gql": "MATCH (t1:games)<-[t2:games_competitor]-(t3:person) WHERE t1.games_name = '1988 Winter' RETURN avg(t2.age)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many people who are below 30 and participated in the summer season?",
+    "gql": "MATCH (t1:games)<-[games_id:GAMES_ID]-(t2:games_competitor) WHERE (t1.season = 'Summer' AND t2.age < 30) RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average age of the people who participated in the winter season?",
+    "gql": "MATCH (t1:games)<-[games_id:GAMES_ID]-(t2:games_competitor) WHERE t1.season = 'Winter' RETURN avg(t2.age)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "State the event name of Basketball.",
+    "gql": "MATCH (t1:sport)<-[sport_id:SPORT_ID]-(t2:event) WHERE t1.sport_name = 'Basketball' RETURN t2.event_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Who is the heaviest athlete?",
+    "gql": "MATCH (person:person) RETURN person.full_name AS full_name ORDER BY person.weight DESC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many Belgian men have competed in an Olympic Games?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE (t1.region_name = 'Belgium' AND t3.gender = 'M') RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many athletes took part in the Olympic games held in Barcelona?",
+    "gql": "MATCH (t1:games_competitor)<-[t2:games_city]-(t3:city) WHERE t3.city_name = 'Barcelona' RETURN count(t1.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many different football events are there?",
+    "gql": "MATCH (t1:sport)<-[sport_id:SPORT_ID]-(t2:event) WHERE t1.sport_name = 'Football' RETURN count(t2.event_name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "In Barcelona, how many Olympic games were held?",
+    "gql": "MATCH (t1:games_city)<-[id:ID]-(t2:city) WHERE t2.city_name = 'Barcelona' RETURN count(t1.games_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many competitors over the age of 30 participated in the 1992 Winter Olympics?",
+    "gql": "MATCH (t1:games)<-[games_id:GAMES_ID]-(t2:games_competitor) WHERE (t1.games_name = '1992 Winter' AND t2.age > 30) RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the name of competitors from Argentina.",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t1.region_name = 'Argentina' RETURN t3.full_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average age of Argentina's athletes who participated in the Summer Olympics in 2012?",
+    "gql": "MATCH (t1:games)<-[games_id:GAMES_ID]-(t2:games_competitor)<-[t3:person_region]-(t4:noc_region) WHERE (t1.games_name = '2012 Summer' AND t4.region_name = 'Argentina') RETURN avg(t2.age)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Provide the name of competitors from Greece.",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t1.region_name = 'Greece' RETURN t3.full_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average age of the competitors who participated in the 1924 Winter.",
+    "gql": "MATCH (t1:games)<-[games_id:GAMES_ID]-(t2:games_competitor) WHERE t1.games_name = '1924 Winter' RETURN avg(t2.age)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the NOC code of the region of the competitors weighted 77 kg?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE t3.weight = 77 RETURN t1.noc",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Give the NOC code and region name of the heaviest competitor.",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) RETURN t1.noc, t1.region_name ORDER BY t3.weight DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average weight of the competitors who won a silver medal?",
+    "gql": "MATCH (t1:person)<-[person_id:PERSON_ID]-(t2:games_competitor)<-[t3:competitor_event]-(t4:medal) WHERE t4.medal_name = 'Silver' RETURN avg(t1.weight)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Compute the average height of competitors whose age ranges from 22 to 28.",
+    "gql": "MATCH (t1:person)<-[person_id:PERSON_ID]-(t2:games_competitor) WHERE (22 <= t2.age AND t2.age <= 28) RETURN avg(t1.height)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many female competitors were from Iran?",
+    "gql": "MATCH (t1:noc_region)<-[t2:person_region]-(t3:person) WHERE (t1.region_name = 'Iran' AND t3.gender = 'F') RETURN count(t2.person_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the competitors with age ranges 24 and below, calculate the difference between the number of competitors who weighed greater than 70 kg and competitors who weighted less than 70 kg.",
+    "gql": "MATCH (t1:person)<-[person_id:PERSON_ID]-(t2:games_competitor) WHERE t2.age < 24 RETURN (count(CASE WHEN t1.weight > 70 THEN 1 ELSE NULL END) - count(CASE WHEN t1.weight < 70 THEN 1 ELSE NULL END))",
+    "difficulty": "hard"
+  }
+]

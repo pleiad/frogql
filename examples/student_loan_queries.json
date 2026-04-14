@@ -1,0 +1,487 @@
+[
+  {
+    "question": "How many students have never been absent from school?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) WHERE longest_absense_from_school.month = 0 RETURN count(longest_absense_from_school.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "For the students who have been absent from school for the longest time, how many months have they been absent?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) RETURN max(longest_absense_from_school.month)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many students belong to the navy department?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'navy' RETURN count(enlist.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Among the students that have been absent from school for more than 5 months, how many of them are male?",
+    "gql": "MATCH (t1:longest_absense_from_school)<-[name:NAME]-(t2:male) WHERE t1.month >= 5 RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the students that have filed for bankruptcy, how many of them have been absent from school for over 5 months?",
+    "gql": "MATCH (t1:filed_for_bankrupcy)<-[name:NAME]-(t2:longest_absense_from_school) WHERE t2.month > 5 RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many students are unemployed and have payment due?",
+    "gql": "MATCH (t1:unemployed)<-[name:NAME]-(t2:no_payment_due) RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many disabled students have never been absent from school?",
+    "gql": "MATCH (t1:longest_absense_from_school)<-[name:NAME]-(t2:disabled) WHERE t1.month = 0 RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average time for a disabled student to be absent from school?",
+    "gql": "MATCH (t1:longest_absense_from_school)<-[name:NAME]-(t2:disabled) RETURN avg(t1.month)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Name all students enlisted in the foreign legion.",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'foreign_legion' RETURN enlist.name AS name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Does student348 have a due payment?",
+    "gql": "MATCH (no_payment_due:no_payment_due) WHERE no_payment_due.name = 'student348' RETURN no_payment_due.bool AS bool",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which school is student829 enrolled in?",
+    "gql": "MATCH (enrolled:enrolled) WHERE enrolled.name = 'student829' RETURN enrolled.school AS school",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many months has student217 been absent?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) WHERE longest_absense_from_school.name = 'student217' RETURN longest_absense_from_school.month AS month",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List all students that have been absent for 6 months.",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) WHERE longest_absense_from_school.month = 6 RETURN longest_absense_from_school.name AS name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which organization did student285 enlist?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.name = 'student285' RETURN enlist.organ AS organ",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many male students have no due payments?",
+    "gql": "MATCH (t1:no_payment_due)<-[name:NAME]-(t2:male) WHERE t1.bool = 'neg' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of students from UCSD enlisted in the peace corps.",
+    "gql": "MATCH (t1:enlist)<-[name:NAME]-(t2:enrolled) WHERE (t2.school = 'ucsd' AND t1.organ = 'peace_corps') RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the total number of students in the school?",
+    "gql": "MATCH (person:person) RETURN count(person.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many students were absence for 4 month?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) WHERE longest_absense_from_school.month = 4 RETURN count(longest_absense_from_school.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the number of unemployed and bankrupt students?",
+    "gql": "MATCH (t1:unemployed)<-[name:NAME]-(t2:filed_for_bankrupcy) RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many unemployed and bankrupt students that have payment dues?",
+    "gql": "MATCH (t1:unemployed)<-[t2:filed_for_bankrupcy]-(t3:no_payment_due) WHERE t3.bool = 'pos' RETURN count(t1.name)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the average absence period of a student?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) RETURN avg(longest_absense_from_school.month)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the average absence period of a disabled student?",
+    "gql": "MATCH (t1:longest_absense_from_school)<-[name:NAME]-(t2:disabled) RETURN avg(t1.month)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many students enlisted in the fire-department?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'fire_department' RETURN count(enlist.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many students who have never been absent from school?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) WHERE longest_absense_from_school.month = 0 RETURN count(longest_absense_from_school.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many students have been absent above 2 months?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) WHERE longest_absense_from_school.month > 2 RETURN count(longest_absense_from_school.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "State the number of students do not have payment due.",
+    "gql": "MATCH (no_payment_due:no_payment_due) WHERE no_payment_due.bool = 'neg' RETURN count(no_payment_due.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Give the number of students who have payment due.",
+    "gql": "MATCH (no_payment_due:no_payment_due) WHERE no_payment_due.bool = 'pos' RETURN count(no_payment_due.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many unemployed students are enlisted in the navy organization?",
+    "gql": "MATCH (t1:unemployed)<-[name:NAME]-(t2:enlist) WHERE t2.organ = 'navy' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Count the number of male students who belong to foreign legion.",
+    "gql": "MATCH (t1:male)<-[name:NAME]-(t2:enlist) WHERE t2.organ = 'foreign_legion' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the average duration of absense of disabled students.",
+    "gql": "MATCH (t1:longest_absense_from_school)<-[name:NAME]-(t2:disabled) RETURN avg(t1.month)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many unemployed disabled students have been absent for 8 months from school?",
+    "gql": "MATCH (t1:longest_absense_from_school)<-[t2:unemployed]-(t3:disabled) WHERE t1.month = 8 RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many disabled students have been absent for 3 months from school?",
+    "gql": "MATCH (t1:longest_absense_from_school)<-[name:NAME]-(t2:disabled) WHERE t1.month = 3 RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the gender of student1000?",
+    "gql": "MATCH (male:male) WHERE male.name = 'studenT1000' RETURN count(male.name) AS result",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many students are disabled?",
+    "gql": "MATCH (disabled:disabled) RETURN count(disabled.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many students have been absents for more than 6 months?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) WHERE longest_absense_from_school.month > 6 RETURN count(longest_absense_from_school.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many students are enlisted in the army?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'army' RETURN count(enlist.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find the average number of absences for each student.",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) RETURN avg(longest_absense_from_school.month)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the students enlisted in marines, how many of them are disabled?",
+    "gql": "MATCH (t1:enlist)<-[name:NAME]-(t2:disabled) WHERE t1.organ = 'marines' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many unemployed students still have payment due?",
+    "gql": "MATCH (t1:unemployed)<-[name:NAME]-(t2:no_payment_due) WHERE t2.bool = 'pos' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many male students join more than one organization?",
+    "gql": "MATCH (t1:male)<-[name:NAME]-(t2:enlist) RETURN count(DISTINCT t1.name) AS a, count(t2.organ) AS num LIMIT 1",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many students has the longest absense from school for 5 months?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) WHERE longest_absense_from_school.month = 5 RETURN count(longest_absense_from_school.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many students are enlisted in the Army organization?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'army' RETURN count(enlist.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many students are enrolled in UCLA school?",
+    "gql": "MATCH (enrolled:enrolled) WHERE enrolled.school = 'ucla' RETURN count(enrolled.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List at least 5 students who has the longest absense from schoool?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) RETURN longest_absense_from_school.name AS name ORDER BY longest_absense_from_school.month DESC LIMIT 5",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many of the students joined two organization?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ >= 2 RETURN count(enlist.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many students are enlisted in the Navy organization?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'navy' RETURN count(enlist.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many male stuents do not have payment due?",
+    "gql": "MATCH (t1:male)<-[name:NAME]-(t2:no_payment_due) WHERE t2.bool = 'neg' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many students are enlisted in the Peace Corps organization are enrolled in UCSD school?",
+    "gql": "MATCH (t1:enlist)<-[name:NAME]-(t2:enrolled) WHERE (t1.organ = 'peace_corps' AND t2.school = 'ucsd') RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the unemployed students, how many of them have no payment due?",
+    "gql": "MATCH (t1:unemployed)<-[name:NAME]-(t2:no_payment_due) WHERE t2.bool = 'neg' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many unemployed students have never been absent?",
+    "gql": "MATCH (t1:longest_absense_from_school)-[name:NAME]->(t2:unemployed) WHERE t1.month = 0 RETURN count(t2.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many unemployed students are enlisted in the Army organization?",
+    "gql": "MATCH (t1:enlist)-[name:NAME]->(t2:unemployed) WHERE t1.organ = 'army' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many unemployed students have payment due?",
+    "gql": "MATCH (t1:no_payment_due)-[name:NAME]->(t2:unemployed) WHERE t1.bool = 'pos' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many disabled students have payment due?",
+    "gql": "MATCH (t1:disabled)-[name:NAME]->(t2:no_payment_due) WHERE t2.bool = 'pos' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many students enlisted in the navy?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'navy' RETURN count(enlist.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Provide the students' names and schools who enrolled for 15 months.",
+    "gql": "MATCH (enrolled:enrolled) WHERE enrolled.month = 15 RETURN enrolled.name AS name, enrolled.school AS school",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List down the enrolled schools and duration of student214.",
+    "gql": "MATCH (enrolled:enrolled) WHERE enrolled.name = 'student214' RETURN enrolled.school AS school, enrolled.month AS month",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Among students who have been absent for nine months, how many of them are disabled?",
+    "gql": "MATCH (t1:disabled)-->(t2:longest_absense_from_school) WHERE t2.month = 9 RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the number of students who are not disabled.",
+    "gql": "MATCH (t1:person)-->(t2:disabled) RETURN count(CASE WHEN t2.name IS NULL THEN t1.name END) AS number",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many unemployed students filed for bankruptcy?",
+    "gql": "MATCH (t1:unemployed)-[name:NAME]->(t2:filed_for_bankrupcy) RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the students with payment due, how many of them are unemployed?",
+    "gql": "MATCH (t1:no_payment_due)-[name:NAME]->(t2:unemployed) WHERE t1.bool = 'pos' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many students are filed for bankruptcy?",
+    "gql": "MATCH (filed_for_bankrupcy:filed_for_bankrupcy) RETURN count(filed_for_bankrupcy.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many students enlist in the air force organization?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'air_force' RETURN count(enlist.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the organization enlisted by student168?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.name = 'student168' RETURN enlist.organ AS organ",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many disabled male students joined an organization?",
+    "gql": "MATCH (t1:disabled)-[t2:male]->(t3:enlist) RETURN count(t1.name)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Please provide a disability breakdown for each school.",
+    "gql": "MATCH (t1:enrolled)-[name:NAME]->(t2:disabled) RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many students is disabled and unemployed at the same time?",
+    "gql": "MATCH (t1:disabled)-[name:NAME]->(t2:unemployed) RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average absent month for a unemployed male students?",
+    "gql": "MATCH (t1:unemployed)-[t2:longest_absense_from_school]->(t3:male) RETURN avg(t2.month) AS avg",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Calculate the average duration of absense of disabled male students.",
+    "gql": "MATCH (t1:longest_absense_from_school)-[t2:disabled]->(t3:male) RETURN avg(t1.month)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "State the number of male students who do not have payment due.",
+    "gql": "MATCH (t1:no_payment_due)-[name:NAME]->(t2:male) WHERE t1.bool = 'pos' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "State the number of students who filed for bankruptcy and have payment due.",
+    "gql": "MATCH (t1:filed_for_bankrupcy)-[name:NAME]->(t2:no_payment_due) WHERE t2.bool = 'pos' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the status of payment of student 124?",
+    "gql": "MATCH (no_payment_due:no_payment_due) WHERE no_payment_due.name = 'student124' RETURN no_payment_due.bool AS bool",
+    "difficulty": "easy"
+  },
+  {
+    "question": "State the number of disabled students who have payment due.",
+    "gql": "MATCH (t1:no_payment_due)<-[name:NAME]-(t2:disabled) WHERE t1.bool = 'neg' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List out the number of disabled students who enlisted in marines.",
+    "gql": "MATCH (t1:disabled)<-[name:NAME]-(t2:enlist) WHERE t2.organ = 'marines' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List out the number of students who filed for bankruptcy and enlisted in navy.",
+    "gql": "MATCH (t1:enlist)<-[name:NAME]-(t2:filed_for_bankrupcy) WHERE t1.organ = 'navy' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many students in the Air Force?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'air_force' RETURN count(enlist.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many students have been absent less than 4 months?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) WHERE longest_absense_from_school.month < 4 RETURN count(longest_absense_from_school.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Count the number of female students who belong to marines organization.",
+    "gql": "MATCH (t1:person)-[t2:enlist]->(t3:male) WHERE (t2.organ = 'marines' AND t3.name IS NULL) RETURN count(*)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Mention the status of payment of student 299.",
+    "gql": "MATCH (no_payment_due:no_payment_due) WHERE no_payment_due.name = 'student299' RETURN no_payment_due.bool AS bool",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many students are enlisted to the air force?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'air_force' RETURN count(enlist.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many students have absent from school?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) WHERE longest_absense_from_school.month > 1 RETURN count(longest_absense_from_school.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Provide the names of the students enlisted in the fire department.",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'fire_department' RETURN enlist.name AS name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many disabled students have payment due?",
+    "gql": "MATCH (t1:no_payment_due)<-[name:NAME]-(t2:disabled) WHERE t1.bool = 'pos' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the students that filed for bankruptcy, how many of them have been enrolled in OCC?",
+    "gql": "MATCH (t1:filed_for_bankrupcy)<-[name:NAME]-(t2:enrolled) WHERE t2.school = 'occ' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many disabled students are male?",
+    "gql": "MATCH (t1:male)<-[name:NAME]-(t2:disabled) RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many male students are enrolled at OCC?",
+    "gql": "MATCH (t1:enrolled)<-[name:NAME]-(t2:male) WHERE t1.school = 'occ' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many students have never been absent in school?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) WHERE longest_absense_from_school.month = 0 RETURN count(longest_absense_from_school.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What are the names of the students who joined the Marines?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'marines' RETURN enlist.name AS name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many students enlisted in the Navy?",
+    "gql": "MATCH (enlist:enlist) WHERE enlist.organ = 'navy' RETURN count(enlist.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the name of the organization which most of the students are enlisted in?",
+    "gql": "MATCH (enlist:enlist) RETURN enlist.organ AS organ, count(enlist.organ) AS num",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many students have absences of no more than 3 months?",
+    "gql": "MATCH (longest_absense_from_school:longest_absense_from_school) WHERE longest_absense_from_school.month < 3 RETURN count(longest_absense_from_school.name)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Among the students that have a payment due, how many students are unemployed?",
+    "gql": "MATCH (t1:no_payment_due)<-[name:NAME]-(t2:unemployed) WHERE t1.bool = 'pos' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many disabled students have zero absences?",
+    "gql": "MATCH (t1:disabled)<-[name:NAME]-(t2:longest_absense_from_school) WHERE t2.month = 0 RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many of the unemployed students are disabled?",
+    "gql": "MATCH (t1:unemployed)<-[name:NAME]-(t2:disabled) RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many bankrupt students are there in the Marines?",
+    "gql": "MATCH (t1:filed_for_bankrupcy)<-[name:NAME]-(t2:enlist) WHERE t2.organ = 'marines' RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the students who filed for bankruptcy, how many students are disabled?",
+    "gql": "MATCH (t1:disabled)<-[name:NAME]-(t2:filed_for_bankrupcy) RETURN count(t1.name)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the students who filed for bankruptcy with an absence in school of no more than 6 months, how many students enlisted for the fire department?",
+    "gql": "MATCH (t1:longest_absense_from_school)-[t2:filed_for_bankrupcy]->(t3:enlist) WHERE t3.organ = 'fire_department' RETURN count(t1.name)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many employed disabled students have zero absences?",
+    "gql": "MATCH (t1:longest_absense_from_school)-[t2:disabled]->(t3:unemployed) WHERE t1.month = 0 RETURN count(t1.name)",
+    "difficulty": "hard"
+  }
+]

@@ -1,0 +1,362 @@
+[
+  {
+    "question": "Among the books published by publisher ID 1929, how many of them have over 500 pages?",
+    "gql": "MATCH (book:book) WHERE (book.publisher_id = 1929 AND book.num_pages > 500) RETURN count(*)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the publication date of the book with the most pages?",
+    "gql": "MATCH (book:book) RETURN book.publication_date AS publication_date ORDER BY book.num_pages DESC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many books were published by publisher \"Thomas Nelson\"?",
+    "gql": "MATCH (t1:book)<-[publisher_id:PUBLISHER_ID]-(t2:publisher) WHERE t2.publisher_name = 'Thomas Nelson' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the books published by publisher \"Thomas Nelson\", how many of them have over 300 pages?",
+    "gql": "MATCH (t1:book)<-[publisher_id:PUBLISHER_ID]-(t2:publisher) WHERE (t2.publisher_name = 'Thomas Nelson' AND t1.num_pages > 300) RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many books are in English?",
+    "gql": "MATCH (t1:book)<-[language_id:LANGUAGE_ID]-(t2:book_language) WHERE t2.language_name = 'English' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the cheapest order price of the book \"The Little House\"?",
+    "gql": "MATCH (t1:book)<-[book_id:BOOK_ID]-(t2:order_line) WHERE t1.title = 'The Little House' RETURN min(t2.price)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Among the books ordered by Lucas Wyldbore, how many of them are over 300 pages?",
+    "gql": "MATCH (t1:book)<-[book_id:BOOK_ID]-(t2:order_line)-[t3:cust_order]->(t4:customer) WHERE (t4.first_name = 'Lucas' AND t4.last_name = 'Wyldbore' AND t1.num_pages > 300) RETURN count(*)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the total price of all the books ordered by Lucas Wyldbore?",
+    "gql": "MATCH (t1:order_line)-[t2:cust_order]->(t3:customer) WHERE (t3.first_name = 'Lucas' AND t3.last_name = 'Wyldbore') RETURN sum(t1.price)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which city does the address id 547 belong to?",
+    "gql": "MATCH (address:address) WHERE address.address_id = 547 RETURN address.city AS city",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many orders has Cordy Dumbarton made?",
+    "gql": "MATCH (t1:customer)<-[customer_id:CUSTOMER_ID]-(t2:cust_order) WHERE (t1.first_name = 'Cordy' AND t1.last_name = 'Dumbarton') RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many books were published by Kensington?",
+    "gql": "MATCH (t1:book)<-[publisher_id:PUBLISHER_ID]-(t2:publisher) WHERE t2.publisher_name = 'Kensington' RETURN count(t1.book_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many books did David Foster Wallace write?",
+    "gql": "MATCH (t1:book)-[t2:book_author]->(t3:author) WHERE t3.author_name = 'David Foster Wallace' RETURN count(t1.title)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many orders does the book \"O Xar\u00e1\" have?",
+    "gql": "MATCH (t1:book)<-[book_id:BOOK_ID]-(t2:order_line) WHERE t1.title = 'O Xar\u00e1' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Give the number of Ukrainian addresses in the database.",
+    "gql": "MATCH (t1:country)<-[country_id:COUNTRY_ID]-(t2:address) WHERE t1.country_name = 'Ukraine' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which country does \u017dirovnica city belong to?",
+    "gql": "MATCH (t1:country)<-[country_id:COUNTRY_ID]-(t2:address) WHERE t2.city = '\u017dirovnica' RETURN t1.country_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average number of pages of David Coward's books?",
+    "gql": "MATCH (t1:book)-[t2:book_author]->(t3:author) WHERE t3.author_name = 'David Coward' RETURN avg(t1.num_pages)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the cost of the slowest and least expensive shipping method?",
+    "gql": "MATCH (shipping_method:shipping_method) RETURN shipping_method.method_name AS method_name ORDER BY shipping_method.cost ASC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the full name of the customer who owns the \"aalleburtonkc@yellowbook.com\" e-mail address?",
+    "gql": "MATCH (customer:customer) WHERE customer.email = 'aalleburtonkc@yellowbook.com' RETURN customer.first_name AS first_name, customer.last_name AS last_name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Among Daisey Lamball's orders, how many were shipped via International shipping?",
+    "gql": "MATCH (t1:customer)-[t2:cust_order]->(t3:shipping_method) WHERE (t1.first_name = 'Daisey' AND t1.last_name = 'Lamball' AND t3.method_name = 'International') RETURN count(*)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many orders did Antonia Poltun return?",
+    "gql": "MATCH (t1:order_status)<-[status_id:STATUS_ID]-(t2:order_history)-[t3:cust_order]->(t4:customer) WHERE (t1.status_value = 'Returned' AND t4.first_name = 'Antonia' AND t4.last_name = 'Poltun') RETURN count(*)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many books did A.R. Braunmuller write?",
+    "gql": "MATCH (t1:author)<-[author_id:AUTHOR_ID]-(t2:book_author) WHERE t1.author_name = 'A.R. Braunmuller' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the name of the publisher with publisher ID 22?",
+    "gql": "MATCH (publisher:publisher) WHERE publisher.publisher_id = 22 RETURN publisher.publisher_name AS publisher_name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many of the books authored by Al Gore have less than 400 pages?",
+    "gql": "MATCH (t1:book)-[t2:book_author]->(t3:author) WHERE (t3.author_name = 'Al Gore' AND t1.num_pages < 400) RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the total price of books ordered by customer named Lucas Wyldbore.",
+    "gql": "MATCH (t1:order_line)-[t2:cust_order]->(t3:customer) WHERE (t3.first_name = 'Lucas' AND t3.last_name = 'Wyldbore') RETURN sum(t1.price)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Among the books that cost less than 1 dollar, how many were published by Berkley Trade?",
+    "gql": "MATCH (t1:publisher)-[t2:book]->(t3:order_line) WHERE (t1.publisher_name = 'Berkley' AND t3.price < 1) RETURN count(*)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Provide the contact email of Moss Zarb.",
+    "gql": "MATCH (customer:customer) WHERE (customer.first_name = 'Moss' AND customer.last_name = 'Zarb') RETURN customer.email AS email",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Name the streets in Dallas.",
+    "gql": "MATCH (address:address) WHERE address.city = 'Dallas' RETURN address.street_name AS street_name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Count the number of books written by Orson Scott Card.",
+    "gql": "MATCH (t1:book)-[t2:book_author]->(t3:author) WHERE t3.author_name = 'Orson Scott Card' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many books were published by Ace Hardcover?",
+    "gql": "MATCH (t1:book)<-[publisher_id:PUBLISHER_ID]-(t2:publisher) WHERE t2.publisher_name = 'Ace Hardcover' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many books were published in Japanese?",
+    "gql": "MATCH (t1:book_language)<-[language_id:LANGUAGE_ID]-(t2:book) WHERE t1.language_name = 'Japanese' RETURN count(t2.book_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Sum the total price of the orders for The Prophet book.",
+    "gql": "MATCH (t1:order_line)<-[book_id:BOOK_ID]-(t2:book) WHERE t2.title = 'The Prophet' RETURN sum(t1.price)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many customers are from Australia?",
+    "gql": "MATCH (t1:customer_address)-[t2:address]->(t3:country) WHERE t3.country_name = 'Australia' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all the authors named \"George\".",
+    "gql": "MATCH (author:author) WHERE author.author_name STARTS WITH 'George' RETURN author.author_name AS author_name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the average price for the order line?",
+    "gql": "MATCH (order_line:order_line) RETURN avg(order_line.price)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many publishers have the word \"book\" in their name?",
+    "gql": "MATCH (publisher:publisher) WHERE publisher.publisher_name CONTAINS 'book' RETURN count(*)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many addresses are from the Philippines?",
+    "gql": "MATCH (t1:address)-[country_id:COUNTRY_ID]->(t2:country) WHERE t2.country_name = 'Philippines' RETURN count(t2.country_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many of the customer addresses are inactive?",
+    "gql": "MATCH (t1:customer_address)<-[status_id:STATUS_ID]-(t2:address_status) WHERE t2.address_status = 'Inactive' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Other than zero, what is the lowest price paid by a customer for an order?",
+    "gql": "MATCH (order_line:order_line) WHERE order_line.price <> 0 RETURN min(order_line.price)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many customers have an address that is located in the city of Villeneuve-la-Garenne?",
+    "gql": "MATCH (address:address) WHERE address.city = 'Villeneuve-la-Garenne' RETURN count(address.address_id)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many authors are named Adam?",
+    "gql": "MATCH (author:author) WHERE author.author_name STARTS WITH 'Adam' RETURN count(*)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many customers use a Yahoo! Mail e-mail address?",
+    "gql": "MATCH (customer:customer) WHERE customer.email ENDS WITH '@yahoo.com' RETURN count(*)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What are the city addresses of the customers located in the United States of America?",
+    "gql": "MATCH (t1:country)<-[country_id:COUNTRY_ID]-(t2:address) WHERE t1.country_name = 'United States of America' RETURN DISTINCT t2.city",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many customers ordered the book titled \"Anleitung zum Zickigsein\"",
+    "gql": "MATCH (t1:book)<-[book_id:BOOK_ID]-(t2:order_line) WHERE t1.title = 'Anleitung zum Zickigsein' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the most expensive price paid by a customer for the book \"Bite Me If You Can (Argeneau #6)\"?",
+    "gql": "MATCH (t1:book)<-[book_id:BOOK_ID]-(t2:order_line) WHERE t1.title = 'Bite Me If You Can (Argeneau #6)' RETURN max(t2.price)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all the titles of the Spanish books published by Alfaguara.",
+    "gql": "MATCH (t1:book_language)-[t2:book]->(t3:publisher) WHERE (t1.language_name = 'Spanish' AND t3.publisher_name = 'Alfaguara') RETURN t2.title",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Among the books that were published by Scholastic, how many were written by J.K Rowling?",
+    "gql": "MATCH (t1:book)<-[publisher_id:PUBLISHER_ID]-(t2:publisher)-[t3:book_author]->(t4:author) WHERE (t2.publisher_name = 'Scholastic' AND t4.author_name = 'J.K. Rowling') RETURN count(*)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Indicate the last number of each street.",
+    "gql": "MATCH (address:address) RETURN address.street_number AS street_number",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Indicate the complete address of customers located in Lazaro Cardenas.",
+    "gql": "MATCH (address:address) WHERE address.city = 'Lazaro Cardenas' RETURN address.street_number AS street_number, address.street_name AS street_name, address.city AS city, address.country_id AS country_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Indicate the ISBN13 of all the books that have less than 140 pages and more than 135.",
+    "gql": "MATCH (book:book) WHERE (book.num_pages < 140 AND book.num_pages > 135) RETURN book.isbn13 AS isbn13",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Indicate the title of the six books with the greatest potential value as collectibles.",
+    "gql": "MATCH (book:book) RETURN book.title AS title ORDER BY book.publication_date ASC LIMIT 6",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many books were ordered in the last month of the year 2020?",
+    "gql": "MATCH (cust_order:cust_order) WHERE cust_order.order_date STARTS WITH '2020-12' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Indicate the full name of all customers whose last name begins with the letter K.",
+    "gql": "MATCH (customer:customer) WHERE customer.last_name STARTS WITH 'K' RETURN customer.first_name AS first_name, customer.last_name AS last_name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "In which cities are the customers of Costa Rica located?",
+    "gql": "MATCH (t1:address)-[country_id:COUNTRY_ID]->(t2:country) WHERE t2.country_name = 'Costa Rica' RETURN t1.city",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the full name of the customers who live in Baiyin city?",
+    "gql": "MATCH (t1:address)-[t2:customer_address]->(t3:customer) WHERE t1.city = 'Baiyin' RETURN t3.first_name, t3.last_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the highest price at which a customer bought the book 'The Prophet'?",
+    "gql": "MATCH (t1:book)<-[book_id:BOOK_ID]-(t2:order_line) WHERE t1.title = 'The Prophet' RETURN max(t2.price)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many books under 300 pages has HarperCollins Publishers published?",
+    "gql": "MATCH (t1:book)<-[publisher_id:PUBLISHER_ID]-(t2:publisher) WHERE (t2.publisher_name = 'HarperCollins Publishers' AND t1.num_pages < 300) RETURN count(*)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many books have been published in Japanese?",
+    "gql": "MATCH (t1:book_language)<-[language_id:LANGUAGE_ID]-(t2:book) WHERE t1.language_name = 'Japanese' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average number of pages in the books written by Jennifer Crusie?",
+    "gql": "MATCH (t1:book)-[t2:book_author]->(t3:author) WHERE t3.author_name = 'Jennifer Crusie' RETURN avg(t1.num_pages)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many books written by Akira Watanabe are available on Gravity?",
+    "gql": "MATCH (t1:author)<-[author_id:AUTHOR_ID]-(t2:book_author) WHERE t1.author_name = 'Akira Watanabe' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Identify the cost difference between Priority and Express shipping methods.",
+    "gql": "MATCH (shipping_method:shipping_method) RETURN (sum(CASE WHEN shipping_method.method_name = 'Priority' THEN shipping_method.cost ELSE 0 END) - sum(CASE WHEN shipping_method.method_name = 'Express' THEN shipping_method.cost ELSE 0 END))",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Provide the International Standard Book Number of the book The Mystery in the Rocky Mountains.",
+    "gql": "MATCH (book:book) WHERE book.title = 'The Mystery in the Rocky Mountains' RETURN book.isbn13 AS isbn13",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many pages does 'Seaward' have?",
+    "gql": "MATCH (book:book) WHERE book.title = 'Seaward' RETURN book.num_pages AS num_pages",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List 10 addresses located in Poland.",
+    "gql": "MATCH (t1:address)-[country_id:COUNTRY_ID]->(t2:country) WHERE t2.country_name = 'Poland' RETURN t1.street_number, t1.street_name, t1.city LIMIT 10",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average number of book pages written by Zilpha Keatley Snyder?",
+    "gql": "MATCH (t1:book_author)-[t2:author]->(t3:book) WHERE t2.author_name = 'Zilpha Keatley Snyder' RETURN avg(t3.num_pages)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the full name of customer with email ckupis4@tamu.edu?",
+    "gql": "MATCH (customer:customer) WHERE customer.email = 'ckupis4@tamu.edu' RETURN customer.first_name AS first_name, customer.last_name AS last_name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which book has the most number of pages?",
+    "gql": "MATCH (book:book) RETURN book.title AS title ORDER BY book.num_pages DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many books were written by author A.J. Ayer?",
+    "gql": "MATCH (t1:book_author)<-[author_id:AUTHOR_ID]-(t2:author) WHERE t2.author_name = 'A.J. Ayer' RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average of English books among all books published by Carole Marsh Mysteries?",
+    "gql": "MATCH (t1:book_language)-[t2:book]->(t3:publisher) WHERE t3.publisher_name = 'Carole Marsh Mysteries' RETURN (toFloat(sum(CASE WHEN t1.language_name = 'English' THEN 1 ELSE 0 END)) / count(*))",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many books were ordered by customer Kandy Adamec?",
+    "gql": "MATCH (t1:order_line)-[t2:cust_order]->(t3:customer) WHERE (t3.first_name = 'Kandy' AND t3.last_name = 'Adamec') RETURN count(*)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "What is the sum of the number of pages of the books ordered by Mick Sever?",
+    "gql": "MATCH (t1:book)<-[book_id:BOOK_ID]-(t2:order_line)-[t3:cust_order]->(t4:customer) WHERE (t4.first_name = 'Mick' AND t4.last_name = 'Sever') RETURN sum(t1.num_pages)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "In books published by Ace Book, what is the percentage of English books published?",
+    "gql": "MATCH (t1:book_language)-[t2:book]->(t3:publisher) WHERE t3.publisher_name = 'Ace Book' RETURN ((toFloat(sum(CASE WHEN t1.language_name = 'English' THEN 1 ELSE 0 END)) * 100) / count(*))",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Among the books purchased by less than 1 dollar, what is the difference between the number of books with less than 500 pages and books with greater than 500 pages?",
+    "gql": "MATCH (t1:book)<-[book_id:BOOK_ID]-(t2:order_line) WHERE t2.price < 1 RETURN (sum(CASE WHEN t1.num_pages < 500 THEN 1 ELSE 0 END) - sum(CASE WHEN t1.num_pages > 500 THEN 1 ELSE 0 END)) AS dif",
+    "difficulty": "extra hard"
+  }
+]

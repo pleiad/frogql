@@ -1,0 +1,422 @@
+[
+  {
+    "question": "How many more games were sold on game platform ID 50 than on game platform ID 51 in region ID 1?",
+    "gql": "MATCH (t:region_sales) WHERE t.region_id = 1 RETURN ((sum(CASE WHEN t.game_platform_id = 50 THEN t.num_sales ELSE 0 END) - sum(CASE WHEN t.game_platform_id = 51 THEN t.num_sales ELSE 0 END)) * 100000) AS nums",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many action games are there in total?",
+    "gql": "MATCH (t1:game)<-[id:ID]-(t2:genre) WHERE t2.genre_name = 'Action' RETURN count(t1.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many games were sold on the DS platform on average in the 4 different regions?",
+    "gql": "MATCH (t1:region_sales)<-[t2:game_platform]-(t3:platform) WHERE t3.platform_name = 'DS' RETURN ((sum(t1.num_sales) * 100000) / 4)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Tell the number of games whose publisher id is 352.",
+    "gql": "MATCH (t:game_publisher) WHERE t.publisher_id = 352 RETURN DISTINCT t.game_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List the genre id of the game Pro Evolution Soccer 2012.",
+    "gql": "MATCH (t:game) WHERE t.game_name = 'Pro Evolution Soccer 2012' RETURN t.genre_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "State the region id of Japan.",
+    "gql": "MATCH (t:region) WHERE t.region_name = 'Japan' RETURN t.id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Show the id of the game platform with the most sales in region 2.",
+    "gql": "MATCH (t:region_sales) WHERE t.region_id = 2 RETURN t.game_platform_id, sum(t.num_sales) ORDER BY sum(t.num_sales) DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which genre has the most games? Show its id.",
+    "gql": "MATCH (t:game) RETURN t.genre_id, count(t.id) ORDER BY count(t.id) DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the id of the game \"Resident Evil Archives: Resident Evil\"?",
+    "gql": "MATCH (t:game) WHERE t.game_name = 'Resident Evil Archives: Resident Evil' RETURN t.genre_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Show the number of games which were released on X360 in 2010.",
+    "gql": "MATCH (t1:platform)<-[t2:game_platform]-(t3:game_publisher) WHERE (t1.platform_name = 'X360' AND t2.release_year = 2010) RETURN count(DISTINCT t3.game_id)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "State the publisher name of the game \"ModNation Racers\".",
+    "gql": "MATCH (t1:publisher)<-[t2:game_publisher]-(t3:game) WHERE t3.game_name = 'ModNation Racers' RETURN t1.publisher_name",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many platforms are available for the game Pro Evolution Soccer 2016?",
+    "gql": "MATCH (t1:game_platform)<-[id:ID]-(t2:platform)<-[t3:game_publisher]-(t4:game) WHERE t4.game_name = 'Pro Evolution Soccer 2016' RETURN count(t2.id)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many games in the database belong to the genre of sports?",
+    "gql": "MATCH (t1:game)<-[id:ID]-(t2:genre) WHERE t2.genre_name = 'Sports' RETURN count(t1.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many more sports games than simulation games?",
+    "gql": "MATCH (t1:genre)<-[genre_id:GENRE_ID]-(t2:game) RETURN (count(CASE WHEN t1.genre_name = 'Sports' THEN t2.id ELSE NULL END) - count(CASE WHEN t1.genre_name = 'Simulation' THEN t2.id ELSE NULL END))",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Give the number of games which were published by Ascaron Entertainment GmbH.",
+    "gql": "MATCH (t1:publisher)<-[publisher_id:PUBLISHER_ID]-(t2:game_publisher) WHERE t1.publisher_name = 'Ascaron Entertainment GmbH' RETURN count(t2.game_id)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many games did Electronic Arts publish?",
+    "gql": "MATCH (t1:publisher)<-[publisher_id:PUBLISHER_ID]-(t2:game_publisher) WHERE t1.publisher_name = 'Electronic Arts' RETURN count(DISTINCT t2.game_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many games were released on PS4 in 2014?",
+    "gql": "MATCH (t1:platform)<-[t2:game_platform]-(t3:game_publisher) WHERE (t1.platform_name = 'PS4' AND t2.release_year = 2014) RETURN count(DISTINCT t3.game_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which year has the most number of PC games releases?",
+    "gql": "MATCH (t1:platform)<-[t2:game_platform]-(t3:game_publisher) WHERE t1.platform_name = 'PC' RETURN t2.release_year, count(DISTINCT t3.game_id) ORDER BY count(DISTINCT t3.game_id) DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What are the names of the games that were published by 505 Games?",
+    "gql": "MATCH (t1:publisher)<-[t2:game_publisher]-(t3:game) WHERE t1.publisher_name = '505 Games' RETURN t3.game_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the genre ID of the game named 25 to Life?",
+    "gql": "MATCH (t:game) WHERE t.game_name = '25 to Life' RETURN t.genre_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List down the game ID of games with genre ID 2.",
+    "gql": "MATCH (t:game) WHERE t.genre_id = 2 RETURN t.id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Provide the release year of record ID 1 to 10.",
+    "gql": "MATCH (t:game_platform) WHERE (1 <= t.id AND t.id <= 10) RETURN t.release_year",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Give the game publisher ID of records with platform ID 15.",
+    "gql": "MATCH (t:game_platform) WHERE t.platform_id = 15 RETURN t.game_publisher_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List down the record ID of records released between 2000 to 2003.",
+    "gql": "MATCH (t:game_platform) WHERE (2000 <= t.release_year AND t.release_year <= 2003) RETURN t.id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the average number of sales in Japan?",
+    "gql": "MATCH (t1:region)<-[region_id:REGION_ID]-(t2:region_sales) WHERE t1.region_name = 'Japan' RETURN (avg(t2.num_sales) * 100000) AS avg_japan",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many role-playing games are there?",
+    "gql": "MATCH (t1:game)<-[id:ID]-(t2:genre) WHERE t2.genre_name = 'Role-Playing' RETURN count(t1.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the release year of the game that gained 350000 sales in North America?",
+    "gql": "MATCH (t1:region)<-[t2:region_sales]-(t3:game_platform) WHERE ((t2.num_sales * 100000) = 350000 AND t1.region_name = 'North America') RETURN t3.release_year",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many games were released in 1981?",
+    "gql": "MATCH (t:game_platform) WHERE t.release_year = 1981 RETURN count(t.id)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the genre ID of the '2Xtreme' game?",
+    "gql": "MATCH (t:game) WHERE t.game_name = '2Xtreme' RETURN t.genre_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Sum the total game sales in every region for platform ID 9658.",
+    "gql": "MATCH (t:region_sales) WHERE t.game_platform_id = 9658 RETURN (sum(t.num_sales) * 100000)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Provide the ID of 1C Company.",
+    "gql": "MATCH (t:publisher) WHERE t.publisher_name = '1C Company' RETURN t.id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Provide the genre name of the genre ID 3.",
+    "gql": "MATCH (t:genre) WHERE t.id = 3 RETURN t.genre_name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "List the game IDs that were released in 2017.",
+    "gql": "MATCH (t:game_platform) WHERE t.release_year = 2017 RETURN t.id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many games are puzzle genre?",
+    "gql": "MATCH (t1:game)<-[id:ID]-(t2:genre) WHERE t2.genre_name = 'Puzzle' RETURN count(t1.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many games were published by Acclaim Entertainment?",
+    "gql": "MATCH (t1:game_publisher)<-[id:ID]-(t2:publisher) WHERE t2.publisher_name = 'Acclaim Entertainment' RETURN count(DISTINCT t1.game_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Provide the number of games sold in North America on the PS4 platform.",
+    "gql": "MATCH (t1:region_sales)<-[id:ID]-(t2:region)<-[t3:game_platform]-(t4:platform) WHERE (t2.region_name = 'North America' AND t4.platform_name = 'PS4') RETURN sum((t1.num_sales * 100000))",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many games can be played on the Wii platform?",
+    "gql": "MATCH (t1:game_platform)<-[id:ID]-(t2:platform) WHERE t2.platform_name = 'Wii' RETURN count(t1.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate how many percent of sales in North America is higher than the average sale per region for platform ID 9577.",
+    "gql": "MATCH (t1:region_sales)<-[id:ID]-(t2:region) WHERE t1.game_platform_id = 9577 RETURN (((sum(CASE WHEN t2.region_name = 'North America' THEN t1.num_sales ELSE 0 END) - avg(t1.num_sales)) * 100.0) / avg(t1.num_sales))",
+    "difficulty": "hard"
+  },
+  {
+    "question": "Which game has the longest name?",
+    "gql": "MATCH (t:game) RETURN t.game_name ORDER BY size(t.game_name) DESC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many games were released in 2001?",
+    "gql": "MATCH (t:game_platform) WHERE t.release_year = 2001 RETURN count(t.id)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the total number of sales across all regions?",
+    "gql": "MATCH (t:region_sales) RETURN (sum(t.num_sales) * 100000)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the first year a game is released?",
+    "gql": "MATCH (t:game_platform) RETURN min(t.release_year)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the least common game genre?",
+    "gql": "MATCH (t1:genre)<-[genre_id:GENRE_ID]-(t2:game) RETURN t2.game_name, count(t2.id) ORDER BY count(t2.id) ASC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which is the publisher for the game \"Prism: Light the Way\"?",
+    "gql": "MATCH (t1:publisher)<-[t2:game_publisher]-(t3:game) WHERE t3.game_name = 'Prism: Light the Way' RETURN t1.publisher_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many games do not have any sales in Europe?",
+    "gql": "MATCH (t1:region_sales)<-[id:ID]-(t2:region) WHERE (t2.region_name = 'Europe' AND t1.num_sales = 0) RETURN count(*)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the genre of the game \"Mario vs. Donkey Kong\"?",
+    "gql": "MATCH (t1:genre)<-[genre_id:GENRE_ID]-(t2:game) WHERE t2.game_name = 'Mario vs. Donkey Kong' RETURN t1.genre_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List all the platform games.",
+    "gql": "MATCH (t1:genre)<-[genre_id:GENRE_ID]-(t2:game) WHERE t1.genre_name = 'Platform' RETURN t2.game_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the games from the publisher \"Activision\".",
+    "gql": "MATCH (t1:publisher)<-[t2:game_publisher]-(t3:game) WHERE t1.publisher_name = 'Activision' RETURN t3.game_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which year has the most number of video game releases?",
+    "gql": "MATCH (t:game_platform) RETURN t.release_year, count(t.id) ORDER BY count(t.id) DESC LIMIT 1",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many games did BMG Interactive Entertainment release in 2012?",
+    "gql": "MATCH (t1:publisher)<-[t2:game_publisher]-(t3:game_platform) WHERE t3.release_year = 2012 RETURN count(DISTINCT t2.game_id)",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many publishers published the Minecraft game?",
+    "gql": "MATCH (t1:game)<-[game_id:GAME_ID]-(t2:game_publisher) WHERE t1.game_name = 'Minecraft' RETURN count(t2.publisher_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What are the names of the games published by American Softworks?",
+    "gql": "MATCH (t1:publisher)<-[t2:game_publisher]-(t3:game) WHERE t1.publisher_name = 'American Softworks' RETURN t3.game_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many strategy games are there?",
+    "gql": "MATCH (t1:genre)<-[genre_id:GENRE_ID]-(t2:game) RETURN count(CASE WHEN t1.genre_name = 'Strategy' THEN t2.id ELSE NULL END)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many games were released in the year 2001?",
+    "gql": "MATCH (t:game_platform) WHERE t.release_year = 2001 RETURN count(t.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What are the three largest numbers of games sold?",
+    "gql": "MATCH (t:region_sales) RETURN t.game_platform_id, (sum(t.num_sales) * 100000) ORDER BY (sum(t.num_sales) * 100000) DESC LIMIT 3",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What year were the first game released?",
+    "gql": "MATCH (t:game_platform) RETURN t.release_year ORDER BY t.release_year ASC LIMIT 1",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Indicate the name of all adventure games.",
+    "gql": "MATCH (t1:genre)<-[genre_id:GENRE_ID]-(t2:game) WHERE t1.genre_name = 'Adventure' RETURN t2.game_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List the name of all games published by 'Pioneer LDC'.",
+    "gql": "MATCH (t1:publisher)<-[t2:game_publisher]-(t3:game) WHERE t1.publisher_name = 'Pioneer LDC' RETURN t3.game_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Which publisher has published the game 'Pachi-Slot Kanzen Kouryaku 3: Universal Koushiki Gaido Volume 3'?",
+    "gql": "MATCH (t1:publisher)<-[t2:game_publisher]-(t3:game) WHERE t3.game_name = 'Pachi-Slot Kanzen Kouryaku 3: Universal Koushiki Gaido Volume 3' RETURN t1.publisher_name",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the total number of games sold in region ID 1?",
+    "gql": "MATCH (t:region_sales) WHERE t.region_id = 1 RETURN sum((t.num_sales * 100000))",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many games were sold on PS3 platform in Japan?",
+    "gql": "MATCH (t1:region_sales)<-[id:ID]-(t2:region)<-[t3:game_platform]-(t4:platform) WHERE (t2.region_name = 'Japan' AND t4.platform_name = 'PS3') RETURN sum((t1.num_sales * 100000))",
+    "difficulty": "hard"
+  },
+  {
+    "question": "How many games were published by Activision?",
+    "gql": "MATCH (t1:game_publisher)<-[t2:publisher]-(t3:game) WHERE t2.publisher_name = 'Activision' RETURN count(DISTINCT t3.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Indicate the release year of the game with more than 200000 sales in Japan.",
+    "gql": "MATCH (t1:region)<-[t2:region_sales]-(t3:game_platform) WHERE ((t2.num_sales * 100000) > 200000 AND t1.region_name = 'Japan') RETURN DISTINCT t3.release_year",
+    "difficulty": "hard"
+  },
+  {
+    "question": "In 2010, how many PS3 games were released?",
+    "gql": "MATCH (t1:platform)<-[t2:game_platform]-(t3:game_publisher) WHERE (t1.platform_name = 'PS3' AND t2.release_year = 2010) RETURN count(t3.game_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many shooter games are there?",
+    "gql": "MATCH (t1:game)<-[id:ID]-(t2:genre) WHERE t2.genre_name = 'Shooter' RETURN count(t1.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How much are the sales of the games in region ID 4?",
+    "gql": "MATCH (t:region_sales) WHERE t.region_id = 4 RETURN (sum(t.num_sales) * 100000)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List down the game platform IDs of games with a region ID of 1.",
+    "gql": "MATCH (t:region_sales) WHERE t.region_id = 1 RETURN t.game_platform_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Calculate the difference between sales of games from region ID 2 and region ID 3.",
+    "gql": "MATCH (t:region_sales) RETURN (sum(CASE WHEN t.region_id = 2 THEN t.num_sales ELSE 0 END) - sum(CASE WHEN t.region_id = 3 THEN t.num_sales ELSE 0 END))",
+    "difficulty": "medium"
+  },
+  {
+    "question": "List down the platform IDs of the games released in 2007.",
+    "gql": "MATCH (t:game_platform) WHERE t.release_year = 2007 RETURN DISTINCT t.platform_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "State the game publisher IDs of the games with a platform ID of 16.",
+    "gql": "MATCH (t:game_platform) WHERE t.platform_id = 16 RETURN t.game_publisher_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Calculate the number of game publisher IDs for games released in 1984.",
+    "gql": "MATCH (t:game_platform) WHERE t.release_year = 1984 RETURN count(t.game_publisher_id)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "What are the sales made by the games in Japan region?",
+    "gql": "MATCH (t1:region_sales)<-[id:ID]-(t2:region) RETURN sum(CASE WHEN t2.region_name = 'Japan' THEN t1.num_sales ELSE 0 END) AS nums",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many game publisher IDs have published games on the X360 platform?",
+    "gql": "MATCH (t1:game_platform)<-[id:ID]-(t2:platform) WHERE t2.platform_name = 'X360' RETURN count(t1.game_publisher_id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Find out the difference between the number of publishers who released the games on the PS3 and X360.",
+    "gql": "MATCH (t1:game_platform)<-[id:ID]-(t2:platform) RETURN (count(CASE WHEN t2.platform_name = 'PS3' THEN t1.game_publisher_id ELSE NULL END) - count(CASE WHEN t2.platform_name = 'X360' THEN t1.game_publisher_id ELSE NULL END))",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the number of games in the fighting genre.",
+    "gql": "MATCH (t1:game)<-[id:ID]-(t2:genre) WHERE t2.genre_name = 'Fighting' RETURN count(t1.id)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the total sales made by the games released in 2000.",
+    "gql": "MATCH (t1:region_sales)<-[id:ID]-(t2:game_platform) WHERE t2.release_year = 2000 RETURN sum(t1.num_sales)",
+    "difficulty": "medium"
+  },
+  {
+    "question": "Calculate the difference in sales between the games released in 1990 and 2000.",
+    "gql": "MATCH (t1:region_sales)<-[id:ID]-(t2:game_platform) RETURN (sum(CASE WHEN t2.release_year = 2000 THEN t1.num_sales ELSE 0 END) - sum(CASE WHEN t2.release_year = 1990 THEN t1.num_sales ELSE 0 END))",
+    "difficulty": "medium"
+  },
+  {
+    "question": "What are the platform IDs of records released in 2006?",
+    "gql": "MATCH (t:game_platform) WHERE t.release_year = 2006 RETURN DISTINCT t.platform_id",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Compute the average number of sales in region ID 3.",
+    "gql": "MATCH (t:region_sales) WHERE t.region_id = 3 RETURN avg((t.num_sales * 100000))",
+    "difficulty": "easy"
+  },
+  {
+    "question": "In which year did the record ID 19 with game publisher ID 6657 released?",
+    "gql": "MATCH (t:game_platform) WHERE (t.game_publisher_id = 6657 AND t.id = 19) RETURN t.release_year",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Calculate the total sales in all regions with game platform ID 66.",
+    "gql": "MATCH (t:region_sales) WHERE t.game_platform_id = 66 RETURN (sum(t.num_sales) * 100000)",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Give the game name of the game ID 44.",
+    "gql": "MATCH (t:game) WHERE t.id = 44 RETURN t.game_name",
+    "difficulty": "easy"
+  },
+  {
+    "question": "Calculate the total number of sales in North America.",
+    "gql": "MATCH (t1:region)<-[region_id:REGION_ID]-(t2:region_sales) WHERE t1.region_name = 'North America' RETURN (sum(t2.num_sales) * 100000) AS nums",
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many games available on PSP were released in 2004?",
+    "gql": "MATCH (t1:platform)<-[t2:game_platform]-(t3:game_publisher) WHERE (t1.platform_name = 'PSP' AND t2.release_year = 2004) RETURN count(t3.game_id)",
+    "difficulty": "medium"
+  }
+]
