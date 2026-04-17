@@ -198,28 +198,61 @@ fn encode_props(props: &Props, st: &mut StringTable, pager: &mut Pager) -> io::R
     let mut result = Vec::new();
     for (k, v) in props {
         let name_sid = st.intern(k, pager)?;
-        let pv = match v {
-            Value::Int(n) => PropValue::Int(*n),
-            Value::Str(s) => PropValue::Str(st.intern(s, pager)?),
-            Value::Bool(b) => PropValue::Bool(*b),
-        };
+        let pv = value_to_prop(v, st, pager)?;
         result.push((name_sid, pv));
     }
     Ok(result)
+}
+
+fn value_to_prop(v: &Value, st: &mut StringTable, pager: &mut Pager) -> io::Result<PropValue> {
+    Ok(match v {
+        Value::Int(n) => PropValue::Int(*n),
+        Value::Float(x) => PropValue::Float(*x),
+        Value::Str(s) => PropValue::Str(st.intern(s, pager)?),
+        Value::Bool(b) => PropValue::Bool(*b),
+        Value::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items { out.push(value_to_prop(it, st, pager)?); }
+            PropValue::List(out)
+        }
+        Value::Record(fields) => {
+            let mut out = Vec::with_capacity(fields.len());
+            for (k, v) in fields {
+                let sid = st.intern(k, pager)?;
+                out.push((sid, value_to_prop(v, st, pager)?));
+            }
+            PropValue::Record(out)
+        }
+    })
 }
 
 fn decode_props(encoded: &[(u32, PropValue)], strings: &StringTable) -> Props {
     let mut props = HashMap::new();
     for (name_sid, pv) in encoded {
         let name = strings.resolve(*name_sid).unwrap().to_string();
-        let val = match pv {
-            PropValue::Int(n) => Value::Int(*n),
-            PropValue::Str(sid) => Value::Str(strings.resolve(*sid).unwrap().to_string()),
-            PropValue::Bool(b) => Value::Bool(*b),
-        };
-        props.insert(name, val);
+        props.insert(name, prop_to_value(pv, strings));
     }
     props
+}
+
+fn prop_to_value(pv: &PropValue, strings: &StringTable) -> Value {
+    match pv {
+        PropValue::Int(n) => Value::Int(*n),
+        PropValue::Float(x) => Value::Float(*x),
+        PropValue::Str(sid) => Value::Str(strings.resolve(*sid).unwrap().to_string()),
+        PropValue::Bool(b) => Value::Bool(*b),
+        PropValue::List(items) => {
+            Value::List(items.iter().map(|it| prop_to_value(it, strings)).collect())
+        }
+        PropValue::Record(fields) => {
+            let mut m = std::collections::BTreeMap::new();
+            for (sid, v) in fields {
+                let name = strings.resolve(*sid).unwrap().to_string();
+                m.insert(name, prop_to_value(v, strings));
+            }
+            Value::Record(m)
+        }
+    }
 }
 
 fn store_cell(pager: &mut Pager, page_type: PageType, cell: &[u8], pages: &mut Vec<u32>) -> io::Result<(u32, u16)> {

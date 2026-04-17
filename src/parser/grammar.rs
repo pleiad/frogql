@@ -37,6 +37,10 @@ impl Parser {
         &self.tokens[self.pos]
     }
 
+    fn peek_at(&self, offset: usize) -> Option<&Token> {
+        self.tokens.get(self.pos + offset)
+    }
+
     fn at_eof(&self) -> bool {
         matches!(self.peek(), Token::Eof)
     }
@@ -359,22 +363,18 @@ impl Parser {
     fn try_element_pattern_filler(&mut self) -> Result<(Descriptor, Option<Expr>), String> {
         let mut var: Option<String> = None;
         let mut dtype: Option<DescriptorType> = None;
+        let mut value_filters: Vec<(String, Expr)> = Vec::new();
         let mut where_expr: Option<Expr> = None;
 
         // Optional variable
         if let Token::Name(name) = self.peek().clone() {
-            // Check it's not followed by something that makes this a subpattern
             let saved = self.pos;
             self.advance();
-            // If next is ".", this is an attribute lookup, not a variable binding.
-            // If next is another path-start token, this might be a subpattern variable.
-            // For node patterns, after variable we expect : or WHERE or )
             match self.peek() {
                 Token::Colon | Token::Where | Token::RParen => {
                     var = Some(name);
                 }
                 _ => {
-                    // Not a valid element_pattern_filler
                     self.pos = saved;
                     return Err("not an element pattern filler".into());
                 }
@@ -383,7 +383,9 @@ impl Parser {
 
         // Optional ": type_schema"
         if self.eat(&Token::Colon) {
-            dtype = Some(self.type_schema()?);
+            let (dt, filters) = self.type_schema()?;
+            dtype = Some(dt);
+            value_filters = filters;
         }
 
         // Optional WHERE expr
@@ -392,7 +394,7 @@ impl Parser {
         }
 
         let dt = dtype.unwrap_or_else(DescriptorType::star);
-        Ok((Descriptor::new(var, dt), where_expr))
+        Ok((Descriptor::with_filters(var, dt, value_filters), where_expr))
     }
 
     // -[ filler ]-> or -[ filler ]-
@@ -478,47 +480,47 @@ impl Parser {
     fn edge_filler(&mut self) -> Result<(Descriptor, Option<Expr>), String> {
         let mut var: Option<String> = None;
         let mut dtype: Option<DescriptorType> = None;
+        let mut value_filters: Vec<(String, Expr)> = Vec::new();
         let mut where_expr: Option<Expr> = None;
 
-        // Optional variable
         if let Token::Name(name) = self.peek().clone() {
             self.advance();
             var = Some(name);
         }
 
-        // Optional ": type_schema"
         if self.eat(&Token::Colon) {
-            dtype = Some(self.type_schema()?);
+            let (dt, filters) = self.type_schema()?;
+            dtype = Some(dt);
+            value_filters = filters;
         }
 
-        // Optional WHERE expr
         if self.eat(&Token::Where) {
             where_expr = Some(self.expr()?);
         }
 
         let dt = dtype.unwrap_or_else(DescriptorType::star);
-        Ok((Descriptor::new(var, dt), where_expr))
+        Ok((Descriptor::with_filters(var, dt, value_filters), where_expr))
     }
 
     // ===== Type schema =====
 
     // type_schema = label_pattern record_type | label_pattern | record_type
-    fn type_schema(&mut self) -> Result<DescriptorType, String> {
+    fn type_schema(&mut self) -> Result<(DescriptorType, Vec<(String, Expr)>), String> {
         // Could start with label or record type
         match self.peek() {
-            Token::LBrace | Token::DLBrace => {
+            Token::LBrace => {
                 // Record type only (no label)
-                let rt = self.record_type()?;
-                Ok(DescriptorType::new(LabelType::Star, rt))
+                let (rt, filters) = self.record_type()?;
+                Ok((DescriptorType::new(LabelType::Star, rt), filters))
             }
             _ => {
                 // Label pattern, optionally followed by record type
                 let label = self.label_pattern()?;
-                if matches!(self.peek(), Token::LBrace | Token::DLBrace) {
-                    let rt = self.record_type()?;
-                    Ok(DescriptorType::new(label, rt))
+                if matches!(self.peek(), Token::LBrace) {
+                    let (rt, filters) = self.record_type()?;
+                    Ok((DescriptorType::new(label, rt), filters))
                 } else {
-                    Ok(DescriptorType::new(label, PropertyType::open_empty()))
+                    Ok((DescriptorType::new(label, PropertyType::open_empty()), Vec::new()))
                 }
             }
         }
@@ -575,56 +577,115 @@ impl Parser {
         }
     }
 
-    // record_type = open_record_type | closed_record_type
-    fn record_type(&mut self) -> Result<PropertyType, String> {
-        if self.check(&Token::DLBrace) {
-            self.advance();
-            if self.eat(&Token::DRBrace) {
-                return Ok(PropertyType::closed_empty());
-            }
-            let mut pt = PropertyType::closed_empty();
-            self.parse_record_elements(&mut pt)?;
-            self.expect(&Token::DRBrace)?;
-            Ok(pt)
-        } else {
-            self.expect(&Token::LBrace)?;
-            if self.eat(&Token::RBrace) {
-                return Ok(PropertyType::open_empty());
-            }
-            let mut pt = PropertyType::open_empty();
-            self.parse_record_elements(&mut pt)?;
-            self.expect(&Token::RBrace)?;
-            Ok(pt)
+    // record_type = open_record_type ({...}) | closed_record_type ({{...}})
+    // Closed records use two adjacent single braces; the lexer no longer coalesces
+    // `{{` / `}}` into special tokens so nested records like `{a is {b is int}}`
+    // parse correctly.
+    fn record_type(&mut self) -> Result<(PropertyType, Vec<(String, Expr)>), String> {
+        self.expect(&Token::LBrace)?;
+        let is_closed = self.eat(&Token::LBrace);
+        let mut pt = if is_closed { PropertyType::closed_empty() } else { PropertyType::open_empty() };
+        let mut filters = Vec::new();
+        if self.eat(&Token::RBrace) {
+            if is_closed { self.expect(&Token::RBrace)?; }
+            return Ok((pt, filters));
         }
+        self.parse_record_elements(&mut pt, &mut filters)?;
+        self.expect(&Token::RBrace)?;
+        if is_closed { self.expect(&Token::RBrace)?; }
+        Ok((pt, filters))
     }
 
-    fn parse_record_elements(&mut self, pt: &mut PropertyType) -> Result<(), String> {
-        let (name, ty) = self.record_element()?;
-        pt.extend(name, ty);
+    fn parse_record_elements(
+        &mut self,
+        pt: &mut PropertyType,
+        filters: &mut Vec<(String, Expr)>,
+    ) -> Result<(), String> {
+        self.record_element(pt, filters)?;
         while self.eat(&Token::Comma) {
-            let (name, ty) = self.record_element()?;
-            pt.extend(name, ty);
+            self.record_element(pt, filters)?;
         }
         Ok(())
     }
 
-    fn record_element(&mut self) -> Result<(String, SimpleType), String> {
+    /// Parse one record element, either:
+    ///   `name is T`  — type ascription (new canonical form)
+    ///   `name : T`   — type ascription (legacy; only when next token is a type keyword)
+    ///   `name : e`   — value-equality filter (elaborated to `name = e` in WHERE)
+    fn record_element(
+        &mut self,
+        pt: &mut PropertyType,
+        filters: &mut Vec<(String, Expr)>,
+    ) -> Result<(), String> {
         let name = match self.advance() {
             Token::Name(n) => n,
             t => return Err(format!("expected attribute name, got {t:?}")),
         };
-        self.expect(&Token::Colon)?;
-        let ty = self.simple_type()?;
-        Ok((name, ty))
+        match self.peek() {
+            Token::Is => {
+                self.advance();
+                let ty = self.simple_type()?;
+                pt.extend(name, ty);
+            }
+            Token::Colon => {
+                self.advance();
+                // Disambiguate by peeking: a lone type keyword followed by `,` or the
+                // closing brace is a type ascription (legacy); anything else is a value.
+                let is_type_head = matches!(
+                    self.peek(),
+                    Token::Int | Token::Float | Token::Bool | Token::Str | Token::Star
+                );
+                let followed_by_terminator = matches!(
+                    self.peek_at(1),
+                    Some(Token::Comma) | Some(Token::RBrace)
+                );
+                if is_type_head && followed_by_terminator {
+                    let ty = self.simple_type()?;
+                    pt.extend(name, ty);
+                } else {
+                    let e = self.expr()?;
+                    filters.push((name, e));
+                }
+            }
+            t => return Err(format!("expected 'is' or ':' after record key, got {t:?}")),
+        }
+        Ok(())
     }
 
     fn simple_type(&mut self) -> Result<SimpleType, String> {
         match self.advance() {
             Token::Int => Ok(SimpleType::Z),
+            Token::Float => Ok(SimpleType::F),
             Token::Bool => Ok(SimpleType::B),
             Token::Str => Ok(SimpleType::S),
             Token::Star => Ok(SimpleType::Star),
-            t => Err(format!("expected type (int/bool/str/*), got {t:?}")),
+            Token::LBracket => {
+                let inner = self.simple_type()?;
+                self.expect(&Token::RBracket)?;
+                Ok(SimpleType::List(Box::new(inner)))
+            }
+            Token::LBrace => {
+                // Record type `{k: T, k2: T2, ...}`. The `:` separator follows JSON
+                // and the rest of the type language; ambiguity with record value
+                // literals only arises in expression position and is resolved there
+                // via speculative parsing.
+                let mut fields = std::collections::BTreeMap::new();
+                if self.eat(&Token::RBrace) {
+                    return Ok(SimpleType::Record(fields));
+                }
+                loop {
+                    let k = match self.advance() {
+                        Token::Name(n) => n,
+                        t => return Err(format!("expected field name, got {t:?}")),
+                    };
+                    self.expect(&Token::Colon)?;
+                    fields.insert(k, self.simple_type()?);
+                    if !self.eat(&Token::Comma) { break; }
+                }
+                self.expect(&Token::RBrace)?;
+                Ok(SimpleType::Record(fields))
+            }
+            t => Err(format!("expected type (int/float/bool/str/*/[T]/{{k: T}}), got {t:?}")),
         }
     }
 
@@ -667,6 +728,7 @@ impl Parser {
                 Token::Ne => BinOp::Ne,
                 Token::Is => BinOp::Is,
                 Token::As => BinOp::As,
+                Token::In => BinOp::In,
                 _ => break,
             };
             self.advance();
@@ -713,16 +775,107 @@ impl Parser {
         self.primary_expr()
     }
 
-    // primary = constant | attr_lookup | simple_type | "(" expr ")"
+    // primary = constant | list_literal | attr_lookup | simple_type | "(" expr ")"
     fn primary_expr(&mut self) -> Result<Expr, String> {
         match self.peek().clone() {
             Token::Number(n) => {
                 self.advance();
                 Ok(Expr::Const(Value::Int(n)))
             }
+            Token::FloatLit(x) => {
+                self.advance();
+                Ok(Expr::Const(Value::Float(x)))
+            }
             Token::StringLit(s) => {
                 self.advance();
                 Ok(Expr::Const(Value::Str(s)))
+            }
+            Token::LBracket => {
+                // Two forms share the `[` token in expression position:
+                //   list type `[T]`     — right operand of `is`/`as` (becomes Expr::Type)
+                //   list value `[e, e]` — anywhere values go             (becomes Expr::Const)
+                // Try to parse as a type; if that fails cleanly, rewind and parse as a
+                // list value literal. This is how we support arbitrarily nested `[[T]]`
+                // without hand-rolled lookahead tables.
+                self.advance();
+                if self.eat(&Token::RBracket) {
+                    return Ok(Expr::Const(Value::List(Vec::new())));
+                }
+                let saved = self.pos;
+                if let Ok(inner) = self.simple_type() {
+                    if self.eat(&Token::RBracket) {
+                        return Ok(Expr::Type(SimpleType::List(Box::new(inner))));
+                    }
+                }
+                self.pos = saved;
+                let mut items: Vec<Expr> = vec![self.expr()?];
+                while self.eat(&Token::Comma) {
+                    items.push(self.expr()?);
+                }
+                self.expect(&Token::RBracket)?;
+                // Fold into Value::List when every element is a constant so equality
+                // and `in` work via PartialEq. Non-constant elements are rejected for
+                // now; a follow-up can add Expr::ListLit for dynamic lists.
+                let mut consts = Vec::with_capacity(items.len());
+                let mut all_const = true;
+                for e in &items {
+                    if let Expr::Const(v) = e { consts.push(v.clone()); }
+                    else { all_const = false; break; }
+                }
+                if all_const {
+                    Ok(Expr::Const(Value::List(consts)))
+                } else {
+                    Err("non-constant list literal elements are not supported yet".into())
+                }
+            }
+            Token::LBrace => {
+                // Records use `{k: T, ...}` for types and `{k: v, ...}` for values —
+                // same separator, different contexts. Here both syntaxes share a token
+                // stream, so speculate on the type parse first, fall back to value.
+                self.advance();
+                if self.eat(&Token::RBrace) {
+                    return Ok(Expr::Const(Value::Record(std::collections::BTreeMap::new())));
+                }
+                let saved = self.pos;
+                // Try record type: each entry `name : simple_type`.
+                let mut type_fields: std::collections::BTreeMap<String, SimpleType> =
+                    std::collections::BTreeMap::new();
+                let type_ok = (|| -> Result<bool, ()> {
+                    loop {
+                        let k = match self.advance() {
+                            Token::Name(n) => n,
+                            _ => return Err(()),
+                        };
+                        if !matches!(self.peek(), Token::Colon) { return Err(()); }
+                        self.advance();
+                        let ty = self.simple_type().map_err(|_| ())?;
+                        type_fields.insert(k, ty);
+                        if !self.eat(&Token::Comma) { break; }
+                    }
+                    if !self.eat(&Token::RBrace) { return Err(()); }
+                    Ok(true)
+                })();
+                if type_ok.is_ok() {
+                    return Ok(Expr::Type(SimpleType::Record(type_fields)));
+                }
+                // Fall back to record value: each entry `name : expr (constant)`.
+                self.pos = saved;
+                let mut value_fields: std::collections::BTreeMap<String, Value> =
+                    std::collections::BTreeMap::new();
+                loop {
+                    let k = match self.advance() {
+                        Token::Name(n) => n,
+                        t => return Err(format!("expected field name, got {t:?}")),
+                    };
+                    self.expect(&Token::Colon)?;
+                    match self.expr()? {
+                        Expr::Const(val) => { value_fields.insert(k, val); }
+                        _ => return Err("non-constant record literal values are not supported yet".into()),
+                    }
+                    if !self.eat(&Token::Comma) { break; }
+                }
+                self.expect(&Token::RBrace)?;
+                Ok(Expr::Const(Value::Record(value_fields)))
             }
             Token::True => {
                 self.advance();
@@ -735,6 +888,10 @@ impl Parser {
             Token::Int => {
                 self.advance();
                 Ok(Expr::Type(SimpleType::Z))
+            }
+            Token::Float => {
+                self.advance();
+                Ok(Expr::Type(SimpleType::F))
             }
             Token::Bool => {
                 self.advance();
@@ -750,16 +907,23 @@ impl Parser {
             }
             Token::Name(name) => {
                 self.advance();
-                // Could be attribute lookup: name.name
+                // First dot: variable-to-property. Subsequent dots: field access
+                // on the previous value (for nested records).
                 if self.eat(&Token::Dot) {
                     let attr = match self.advance() {
                         Token::Name(a) => a,
                         t => return Err(format!("expected attribute name after '.', got {t:?}")),
                     };
-                    Ok(Expr::AttrLookup { var: name, attr })
+                    let mut expr = Expr::AttrLookup { var: name, attr };
+                    while self.eat(&Token::Dot) {
+                        let field = match self.advance() {
+                            Token::Name(a) => a,
+                            t => return Err(format!("expected field name after '.', got {t:?}")),
+                        };
+                        expr = Expr::FieldAccess { base: Box::new(expr), field };
+                    }
+                    Ok(expr)
                 } else {
-                    // Bare variable — treat as a lookup? This shouldn't normally happen
-                    // in well-formed GQL but return it as a special case
                     Err(format!("unexpected bare variable '{name}' in expression"))
                 }
             }

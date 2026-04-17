@@ -1,19 +1,38 @@
 use std::fmt;
 
-/// A property value: int, string, or bool.
+/// A property value. Scalars (Int/Float/Str/Bool) plus the GQL constructed
+/// types List (ordered collection) and Record (named fields, can nest).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Int(i64),
+    Float(f64),
     Str(String),
     Bool(bool),
+    List(Vec<Value>),
+    Record(std::collections::BTreeMap<String, Value>),
 }
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Int(n) => write!(f, "{n}"),
+            Value::Float(x) => {
+                if x.is_finite() && x.fract() == 0.0 {
+                    write!(f, "{x:.1}")
+                } else {
+                    write!(f, "{x}")
+                }
+            }
             Value::Str(s) => write!(f, "\"{s}\""),
             Value::Bool(b) => write!(f, "{b}"),
+            Value::List(items) => {
+                let parts: Vec<String> = items.iter().map(|v| format!("{v}")).collect();
+                write!(f, "[{}]", parts.join(", "))
+            }
+            Value::Record(fields) => {
+                let parts: Vec<String> = fields.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+                write!(f, "{{{}}}", parts.join(", "))
+            }
         }
     }
 }
@@ -28,7 +47,9 @@ pub enum PathValue {
     EdgeDirectional(Id),
     EdgeUndirectional(Id),
     Nothing,
-    List(Vec<PathValue>),
+    /// Repetition grouping produced by `{n,m}` quantifiers. NOT a user-facing list;
+    /// user lists live in `Value::List` once phase-1 list-values land.
+    Group(Vec<PathValue>),
 }
 
 impl PathValue {
@@ -38,7 +59,7 @@ impl PathValue {
             PathValue::Node(id)
             | PathValue::EdgeDirectional(id)
             | PathValue::EdgeUndirectional(id) => Some(*id),
-            PathValue::Nothing | PathValue::List(_) => None,
+            PathValue::Nothing | PathValue::Group(_) => None,
         }
     }
 
@@ -61,7 +82,7 @@ impl fmt::Display for PathValue {
             PathValue::EdgeDirectional(id) => write!(f, "e{id}"),
             PathValue::EdgeUndirectional(id) => write!(f, "u{id}"),
             PathValue::Nothing => write!(f, "Nothing"),
-            PathValue::List(l) => {
+            PathValue::Group(l) => {
                 let items: Vec<String> = l.iter().map(|x| x.to_string()).collect();
                 write!(f, "[{}]", items.join(", "))
             }

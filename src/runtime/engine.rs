@@ -626,14 +626,34 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     fn check_record(props: &Props) -> PropertyType {
         let mut m = std::collections::BTreeMap::new();
         for (k, v) in props {
-            let t = match v {
-                Value::Int(_) => SimpleType::Z,
-                Value::Str(_) => SimpleType::S,
-                Value::Bool(_) => SimpleType::B,
-            };
-            m.insert(k.clone(), t);
+            m.insert(k.clone(), Self::value_type(v));
         }
         PropertyType::Closed(m)
+    }
+
+    /// Inferred SimpleType of a runtime Value. Empty lists widen to `List(Star)`
+    /// since the element type is unobservable.
+    fn value_type(v: &Value) -> SimpleType {
+        match v {
+            Value::Int(_) => SimpleType::Z,
+            Value::Float(_) => SimpleType::F,
+            Value::Str(_) => SimpleType::S,
+            Value::Bool(_) => SimpleType::B,
+            Value::List(items) => {
+                if items.is_empty() {
+                    SimpleType::List(Box::new(SimpleType::Star))
+                } else {
+                    let mut acc = SimpleType::Zero;
+                    for it in items { acc = SimpleType::union(&acc, &Self::value_type(it)); }
+                    SimpleType::List(Box::new(acc))
+                }
+            }
+            Value::Record(fields) => {
+                let mut m = std::collections::BTreeMap::new();
+                for (k, v) in fields { m.insert(k.clone(), Self::value_type(v)); }
+                SimpleType::Record(m)
+            }
+        }
     }
 
     fn run_expr(&self, mu: &Assignment, expr: &Expr) -> ExprResult {
@@ -659,6 +679,17 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     None => ExprResult::Failure(format!("attribute '{attr}' not found")),
                 }
             }
+
+            Expr::FieldAccess { base, field } => match self.run_expr(mu, base) {
+                ExprResult::Success(Value::Record(m)) => match m.get(field) {
+                    Some(v) => ExprResult::Success(v.clone()),
+                    None => ExprResult::Failure(format!("field '{field}' not found")),
+                },
+                ExprResult::Success(other) => {
+                    ExprResult::Failure(format!("field access on non-record value: {other}"))
+                }
+                e @ ExprResult::Failure(_) => e,
+            },
 
             Expr::Binop { op, left, right } => match op {
                 BinOp::Is => {
@@ -721,7 +752,8 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     ExprResult::Success(val) => match op {
                         UnOp::Neg => match val {
                             Value::Int(n) => ExprResult::Success(Value::Int(-n)),
-                            _ => ExprResult::Failure("neg requires int".into()),
+                            Value::Float(x) => ExprResult::Success(Value::Float(-x)),
+                            _ => ExprResult::Failure("neg requires int or float".into()),
                         },
                         UnOp::Not => match val {
                             Value::Bool(b) => ExprResult::Success(Value::Bool(!b)),
@@ -737,33 +769,54 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     }
 
     fn eval_binop(op: &BinOp, lv: &Value, rv: &Value) -> ExprResult {
+        // Return (a, b, true) if both numeric; a/b as f64 if either operand is Float.
+        // Returns None if either is non-numeric.
+        fn as_num_pair(lv: &Value, rv: &Value) -> Option<(Value, Value)> {
+            match (lv, rv) {
+                (Value::Int(_), Value::Int(_)) => Some((lv.clone(), rv.clone())),
+                (Value::Float(_), Value::Float(_)) => Some((lv.clone(), rv.clone())),
+                (Value::Int(a), Value::Float(_)) => Some((Value::Float(*a as f64), rv.clone())),
+                (Value::Float(_), Value::Int(b)) => Some((lv.clone(), Value::Float(*b as f64))),
+                _ => None,
+            }
+        }
         match op {
-            BinOp::Add => match (lv, rv) {
-                (Value::Int(a), Value::Int(b)) => ExprResult::Success(Value::Int(a + b)),
-                _ => ExprResult::Failure("+ requires ints".into()),
+            BinOp::Add => match as_num_pair(lv, rv) {
+                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Int(a + b)),
+                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Float(a + b)),
+                _ => ExprResult::Failure("+ requires numeric operands".into()),
             },
-            BinOp::Sub => match (lv, rv) {
-                (Value::Int(a), Value::Int(b)) => ExprResult::Success(Value::Int(a - b)),
-                _ => ExprResult::Failure("- requires ints".into()),
+            BinOp::Sub => match as_num_pair(lv, rv) {
+                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Int(a - b)),
+                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Float(a - b)),
+                _ => ExprResult::Failure("- requires numeric operands".into()),
             },
-            BinOp::Gt => match (lv, rv) {
-                (Value::Int(a), Value::Int(b)) => ExprResult::Success(Value::Bool(a > b)),
-                _ => ExprResult::Failure("> requires ints".into()),
+            BinOp::Gt => match as_num_pair(lv, rv) {
+                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a > b)),
+                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Bool(a > b)),
+                _ => ExprResult::Failure("> requires numeric operands".into()),
             },
-            BinOp::Lt => match (lv, rv) {
-                (Value::Int(a), Value::Int(b)) => ExprResult::Success(Value::Bool(a < b)),
-                _ => ExprResult::Failure("< requires ints".into()),
+            BinOp::Lt => match as_num_pair(lv, rv) {
+                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a < b)),
+                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Bool(a < b)),
+                _ => ExprResult::Failure("< requires numeric operands".into()),
             },
-            BinOp::Ge => match (lv, rv) {
-                (Value::Int(a), Value::Int(b)) => ExprResult::Success(Value::Bool(a >= b)),
-                _ => ExprResult::Failure(">= requires ints".into()),
+            BinOp::Ge => match as_num_pair(lv, rv) {
+                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a >= b)),
+                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Bool(a >= b)),
+                _ => ExprResult::Failure(">= requires numeric operands".into()),
             },
-            BinOp::Le => match (lv, rv) {
-                (Value::Int(a), Value::Int(b)) => ExprResult::Success(Value::Bool(a <= b)),
-                _ => ExprResult::Failure("<= requires ints".into()),
+            BinOp::Le => match as_num_pair(lv, rv) {
+                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a <= b)),
+                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Bool(a <= b)),
+                _ => ExprResult::Failure("<= requires numeric operands".into()),
             },
             BinOp::Eq => ExprResult::Success(Value::Bool(lv == rv)),
             BinOp::Ne => ExprResult::Success(Value::Bool(lv != rv)),
+            BinOp::In => match rv {
+                Value::List(items) => ExprResult::Success(Value::Bool(items.iter().any(|x| x == lv))),
+                _ => ExprResult::Failure("'in' requires a list on the right".into()),
+            },
             BinOp::And => match (lv, rv) {
                 (Value::Bool(a), Value::Bool(b)) => ExprResult::Success(Value::Bool(*a && *b)),
                 _ => ExprResult::Failure("and requires bools".into()),

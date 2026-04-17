@@ -21,13 +21,35 @@ cargo build --release
 # Interactive REPL
 ./target/release/gqlite movies.gdb --import-csv path/to/csv_dir/   # create + open
 ./target/release/gqlite movies.gdb                                  # open existing
+
+# Python bindings (builds cdylib, installs `gqlite` into the active venv)
+cd python && source ../../pygql/.venv/bin/activate && maturin develop --release
 ```
+
+## Workspace layout
+
+`gqlrust/` is a Cargo workspace with two members:
+- `.` (root) — the `gqlrust` library crate + CLI binaries (`gqlite`, `bench_queries`, `convert_edgelist`)
+- `python/` — the `gqlite-py` crate: a `cdylib` exposing a PyO3 extension module named `gqlite`. Depends on `gqlrust` via path. Built and installed with maturin (`maturin develop` for local dev, `maturin build --release` for wheels). Maturin installs into whichever venv is active; defaults to `.venv` in the package dir if present.
+
+Python API surface (`python/src/lib.rs`): `gqlite.open(path)`, `gqlite.import_json(db, json)`, `gqlite.import_csv(db, dir)`, and a `Connection` class with `execute(query, limit)`, `schema()`, `node_count`, `edge_count`. `execute` returns a list of dicts: RETURN clauses produce `{alias: value}` rows; queries without RETURN produce raw `{var: {kind, id, labels, props}}` dicts. `Connection` is `unsendable` (not thread-safe across Python threads).
 
 ## Architecture
 
+### Compiler pipeline
+
+`parse → elaborate → optimize → run`. Elaboration (`src/elaborate/`) performs
+ISO-mandated semantic lowering: `(x:L {k: v})` becomes `(x:L) WHERE x.k = v`.
+The `:` vs `is` split inside descriptors distinguishes value filters from type
+ascriptions — `{name is str}` stays in the descriptor's `PropertyType`, while
+`{name: 'Alice'}` is hoisted. Descriptors carry a `value_filters` field that
+the parser populates and elaboration drains; after elaboration it is always
+empty. The optimizer is reserved for performance-preserving transforms
+(predicate pushdown, label-index selection, LTJ join rewriting).
+
 ### Entry points
 
-- `compile(query) → PathPattern` — parse + optimize a path pattern string
+- `compile(query) → PathPattern` — parse + elaborate + optimize a path pattern string
 - `compile_query(input) → Query` — parse a full `MATCH ... WHERE ... RETURN` query
 - `Runtime::new(graph).run(&pattern)` — execute against any `GraphAccess` backend
 - `Runtime::run_query(&query, limit)` — execute with RETURN projection

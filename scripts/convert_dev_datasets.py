@@ -74,6 +74,13 @@ def db_name_from_folder(name: str) -> str:
     return name.lower().replace("(", "").replace(")", "").replace(" ", "_")
 
 
+def is_dropped_column(name: str) -> bool:
+    """Columns we strip before importing: anything whose name looks like an embedding.
+    Dense float vectors (768/1024-dim) exceed gqlite's 4KB page-cell limit and aren't
+    useful for the kind of path queries these datasets benchmark."""
+    return "embedding" in name.lower()
+
+
 # ---------------------------------------------------------------------------
 # TuGraph -> Spanner conversion (for dev/ datasets)
 # ---------------------------------------------------------------------------
@@ -93,8 +100,10 @@ def build_type_map(schema: list) -> dict:
 def convert_tugraph_type(tugraph_type: str) -> str:
     """Map TuGraph types to spanner config types."""
     t = tugraph_type.upper()
-    if t in ("INT64", "INT32", "INT16", "INTEGER", "DOUBLE", "FLOAT"):
+    if t in ("INT64", "INT32", "INT16", "INTEGER"):
         return "INT64"
+    if t in ("DOUBLE", "FLOAT", "REAL"):
+        return "FLOAT64"
     if t in ("BOOL", "BOOLEAN"):
         return "BOOL"
     return "STRING"
@@ -120,6 +129,8 @@ def generate_spanner_config(tugraph_config: dict) -> dict:
             if col in ("SRC_ID", "DST_ID"):
                 columns_dict[col] = "STRING"
                 continue
+            if is_dropped_column(col):
+                continue
             col_type = schema_types.get(col, "STRING")
             columns_dict[col] = convert_tugraph_type(col_type)
 
@@ -136,24 +147,20 @@ def generate_spanner_config(tugraph_config: dict) -> dict:
 
 
 def transform_node_csv(src_path: Path, dst_path: Path):
-    """Copy a node CSV, renaming _id column to vid in the header."""
-    with open(src_path, "r", encoding="utf-8", errors="replace") as f:
-        header = f.readline()
-        rest = f.read()
-
-    parts = header.split(",")
-    new_parts = []
-    for p in parts:
-        stripped = p.strip()
-        if stripped == "_id":
-            new_parts.append(p.replace("_id", "vid"))
-        else:
-            new_parts.append(p)
-    new_header = ",".join(new_parts)
-
-    with open(dst_path, "w", encoding="utf-8") as f:
-        f.write(new_header)
-        f.write(rest)
+    """Copy a node CSV, renaming _id → vid in the header and dropping embedding columns."""
+    import csv as csv_mod
+    with open(src_path, "r", encoding="utf-8", errors="replace") as fin:
+        header_line = fin.readline().rstrip("\n").rstrip("\r")
+        cols = [c.strip() for c in header_line.split(",")]
+        keep_mask = [not is_dropped_column(c) for c in cols]
+        new_cols = [("vid" if c == "_id" else c) for c, keep in zip(cols, keep_mask) if keep]
+        with open(dst_path, "w", encoding="utf-8") as fout:
+            fout.write(",".join(new_cols))
+            fout.write("\n")
+            reader = csv_mod.reader(fin)
+            writer = csv_mod.writer(fout)
+            for row in reader:
+                writer.writerow([v for v, keep in zip(row, keep_mask) if keep])
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +204,13 @@ def import_tugraph(dataset_dir: Path, db_name: str, verbose: bool) -> bool:
             src = tugraph_dir / csv_name
             dst = staging_path / csv_name
             if src.exists():
-                shutil.copy2(src, dst)
+                # Reuse the same header-aware filter as the spanner path so edge
+                # CSVs also drop embedding columns if any are declared.
+                with open(src, "r", encoding="utf-8", errors="replace") as fin:
+                    header = fin.readline().rstrip("\n").rstrip("\r")
+                    cols = [c.strip() for c in header.split(",")]
+                drop_cols = [c for c in cols if is_dropped_column(c)]
+                filter_csv_columns(src, dst, drop_cols)
             else:
                 print(f"    WARNING: {csv_name} not found")
 
@@ -205,11 +218,62 @@ def import_tugraph(dataset_dir: Path, db_name: str, verbose: bool) -> bool:
 
 
 def import_spanner(dataset_dir: Path, db_name: str, verbose: bool) -> bool:
-    """Import a Spanner_Instance dataset directly via gqlite."""
+    """Import a Spanner_Instance dataset directly via gqlite.
+    Stages the config and CSVs through a temp dir, dropping any columns whose
+    names match `is_dropped_column` (e.g. dense embedding vectors that exceed
+    the 4KB page-cell limit).
+    """
     spanner_dir = find_spanner_dir(dataset_dir)
     if spanner_dir is None:
         return False
-    return run_gqlite_import(spanner_dir, db_name, verbose)
+
+    with open(spanner_dir / "spanner_import_config.json") as f:
+        config = json.load(f)
+
+    with tempfile.TemporaryDirectory(prefix=f"gqlite_{db_name}_") as staging:
+        staging_path = Path(staging)
+        new_files = []
+        for file_entry in config.get("files", []):
+            csv_name = file_entry["path"]
+            src_csv = spanner_dir / csv_name
+            dst_csv = staging_path / csv_name
+            cols = file_entry.get("columns", {})
+            drop_cols = [c for c in cols if is_dropped_column(c)]
+            if drop_cols and verbose:
+                print(f"    dropping columns from {csv_name}: {drop_cols}")
+            new_cols = {c: t for c, t in cols.items() if c not in drop_cols}
+            new_entry = dict(file_entry)
+            new_entry["columns"] = new_cols
+            new_files.append(new_entry)
+            if src_csv.exists():
+                filter_csv_columns(src_csv, dst_csv, drop_cols)
+            else:
+                print(f"    WARNING: {csv_name} not found")
+
+        with open(staging_path / "spanner_import_config.json", "w") as f:
+            json.dump({"files": new_files}, f, indent=2)
+
+        return run_gqlite_import(staging_path, db_name, verbose)
+
+
+def filter_csv_columns(src: Path, dst: Path, drop_cols: list):
+    """Copy a CSV while dropping the listed columns (case-insensitive match on header)."""
+    if not drop_cols:
+        shutil.copy2(src, dst)
+        return
+    drop_lower = {c.lower() for c in drop_cols}
+    with open(src, "r", encoding="utf-8", errors="replace") as fin:
+        header = fin.readline().rstrip("\n").rstrip("\r")
+        cols = [c.strip() for c in header.split(",")]
+        keep_mask = [c.lower() not in drop_lower for c in cols]
+        with open(dst, "w", encoding="utf-8") as fout:
+            fout.write(",".join(c for c, keep in zip(cols, keep_mask) if keep))
+            fout.write("\n")
+            import csv as csv_mod
+            reader = csv_mod.reader(fin)
+            writer = csv_mod.writer(fout)
+            for row in reader:
+                writer.writerow([v for v, keep in zip(row, keep_mask) if keep])
 
 
 def run_gqlite_import(csv_dir: Path, db_name: str, verbose: bool) -> bool:

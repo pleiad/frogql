@@ -4,6 +4,7 @@ pub enum Token {
     // Literals
     Name(String),
     Number(i64),
+    FloatLit(f64),
     StringLit(String),
 
     // Keywords
@@ -15,7 +16,9 @@ pub enum Token {
     Not,
     Is,
     As,
+    In,
     Int,
+    Float,
     Bool,
     Str,
     Match,
@@ -29,8 +32,6 @@ pub enum Token {
     RBracket,  // ]
     LBrace,    // {
     RBrace,    // }
-    DLBrace,   // {{
-    DRBrace,   // }}
     Colon,     // :
     Comma,     // ,
     Dot,       // .
@@ -141,21 +142,11 @@ impl Lexer {
                 }
                 '{' => {
                     self.advance();
-                    if self.peek() == Some('{') {
-                        self.advance();
-                        self.tokens.push(Token::DLBrace); // {{
-                    } else {
-                        self.tokens.push(Token::LBrace);
-                    }
+                    self.tokens.push(Token::LBrace);
                 }
                 '}' => {
                     self.advance();
-                    if self.peek() == Some('}') {
-                        self.advance();
-                        self.tokens.push(Token::DRBrace); // }}
-                    } else {
-                        self.tokens.push(Token::RBrace);
-                    }
+                    self.tokens.push(Token::RBrace);
                 }
                 ':' => {
                     self.advance();
@@ -276,7 +267,38 @@ impl Lexer {
                             break;
                         }
                     }
-                    self.tokens.push(Token::Number(n.parse().unwrap()));
+                    // Float fraction: only consume `.` if followed by a digit
+                    // (so `x.foo` still tokenizes as Name, Dot, Name).
+                    let mut is_float = false;
+                    if self.peek() == Some('.') {
+                        let next = self.input.get(self.pos + 1).copied();
+                        if matches!(next, Some(ch) if ch.is_ascii_digit()) {
+                            is_float = true;
+                            n.push('.');
+                            self.advance();
+                            while let Some(ch) = self.peek() {
+                                if ch.is_ascii_digit() { n.push(ch); self.advance(); } else { break; }
+                            }
+                        }
+                    }
+                    // Exponent
+                    if matches!(self.peek(), Some('e') | Some('E')) {
+                        is_float = true;
+                        n.push(self.peek().unwrap());
+                        self.advance();
+                        if matches!(self.peek(), Some('+') | Some('-')) {
+                            n.push(self.peek().unwrap());
+                            self.advance();
+                        }
+                        while let Some(ch) = self.peek() {
+                            if ch.is_ascii_digit() { n.push(ch); self.advance(); } else { break; }
+                        }
+                    }
+                    if is_float {
+                        self.tokens.push(Token::FloatLit(n.parse().unwrap()));
+                    } else {
+                        self.tokens.push(Token::Number(n.parse().unwrap()));
+                    }
                 }
                 _ if c.is_ascii_alphabetic() || c == '_' => {
                     let mut name = String::new();
@@ -297,10 +319,12 @@ impl Lexer {
                         "not" | "NOT" => Token::Not,
                         "is" | "IS" => Token::Is,
                         "as" | "AS" => Token::As,
+                        "in" | "IN" => Token::In,
                         "MATCH" | "match" => Token::Match,
                         "RETURN" | "return" => Token::Return,
                         "DISTINCT" | "distinct" => Token::Distinct,
                         "int" => Token::Int,
+                        "float" => Token::Float,
                         "bool" => Token::Bool,
                         "str" => Token::Str,
                         _ => Token::Name(name),

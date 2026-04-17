@@ -84,7 +84,7 @@ impl DiskGraphStore {
 
         let (node_locs, edge_locs, edge_src, edge_tgt, edge_directed);
 
-        let has_fast_index = node_locs_root != 0 && edge_topo_root != 0;
+        let has_fast_index = string_table_root != 0 && node_locs_root != 0 && edge_topo_root != 0;
 
         if has_fast_index {
             // Fast path: read pre-built indexes
@@ -214,14 +214,29 @@ impl DiskGraphStore {
         let mut props = HashMap::new();
         for (name_sid, pv) in encoded {
             let name = self.strings.resolve(*name_sid).unwrap().to_string();
-            let val = match pv {
-                PropValue::Int(n) => Value::Int(*n),
-                PropValue::Str(sid) => Value::Str(self.strings.resolve(*sid).unwrap().to_string()),
-                PropValue::Bool(b) => Value::Bool(*b),
-            };
-            props.insert(name, val);
+            props.insert(name, self.prop_to_value(pv));
         }
         props
+    }
+
+    fn prop_to_value(&self, pv: &PropValue) -> Value {
+        match pv {
+            PropValue::Int(n) => Value::Int(*n),
+            PropValue::Float(x) => Value::Float(*x),
+            PropValue::Str(sid) => Value::Str(self.strings.resolve(*sid).unwrap().to_string()),
+            PropValue::Bool(b) => Value::Bool(*b),
+            PropValue::List(items) => {
+                Value::List(items.iter().map(|it| self.prop_to_value(it)).collect())
+            }
+            PropValue::Record(fields) => {
+                let mut m = std::collections::BTreeMap::new();
+                for (sid, v) in fields {
+                    let name = self.strings.resolve(*sid).unwrap().to_string();
+                    m.insert(name, self.prop_to_value(v));
+                }
+                Value::Record(m)
+            }
+        }
     }
 
     fn get_adj_entries(&self, node_iid: u32, kind: u8) -> Vec<u32> {

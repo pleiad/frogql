@@ -624,7 +624,7 @@ fn test_repetition_groups_as_list() {
     assert!(!result.rows.is_empty());
     for row in &result.rows {
         let x = row.assignment.get("x").expect("x should be bound");
-        assert!(matches!(x, gqlrust::model::value::PathValue::List(_)),
+        assert!(matches!(x, gqlrust::model::value::PathValue::Group(_)),
             "x should be a List, got {:?}", x);
     }
 }
@@ -639,7 +639,7 @@ fn test_repetition_list_length() {
     assert!(!result.rows.is_empty());
     for row in &result.rows {
         match row.assignment.get("x").unwrap() {
-            gqlrust::model::value::PathValue::List(l) => assert_eq!(l.len(), 2),
+            gqlrust::model::value::PathValue::Group(l) => assert_eq!(l.len(), 2),
             other => panic!("expected List of len 2, got {:?}", other),
         }
     }
@@ -655,9 +655,9 @@ fn test_repetition_nested_list() {
     assert!(!result.rows.is_empty());
     for row in &result.rows {
         match row.assignment.get("x").unwrap() {
-            gqlrust::model::value::PathValue::List(outer) => {
+            gqlrust::model::value::PathValue::Group(outer) => {
                 for item in outer {
-                    assert!(matches!(item, gqlrust::model::value::PathValue::List(_)),
+                    assert!(matches!(item, gqlrust::model::value::PathValue::Group(_)),
                         "inner items should be Lists, got {:?}", item);
                 }
             }
@@ -675,7 +675,7 @@ fn test_repetition_zero_gives_empty_list() {
     let result = r.run(&p);
     // Some rows should have x = [] (the 0-repetition case)
     let empty_list_rows: Vec<_> = result.rows.iter()
-        .filter(|row| matches!(row.assignment.get("x"), Some(gqlrust::model::value::PathValue::List(l)) if l.is_empty()))
+        .filter(|row| matches!(row.assignment.get("x"), Some(gqlrust::model::value::PathValue::Group(l)) if l.is_empty()))
         .collect();
     assert!(!empty_list_rows.is_empty(), "should have rows with x = []");
 }

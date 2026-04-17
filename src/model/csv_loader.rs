@@ -203,6 +203,44 @@ fn strip_node_types(raw: &str, node_types: &[String]) -> String {
     if name.is_empty() { raw.to_string() } else { name }
 }
 
+/// Parse a STRING-column value, detecting JSON-encoded lists and records.
+/// Falls back to `Value::Str` on any parse failure.
+fn parse_string_value(raw: &str) -> Value {
+    let trimmed = raw.trim_start();
+    let first = trimmed.chars().next();
+    if matches!(first, Some('[') | Some('{')) {
+        if let Ok(j) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(v) = json_to_value(&j) { return v; }
+        }
+    }
+    Value::Str(raw.to_string())
+}
+
+/// Recursive JSON→Value converter used by the CSV loader for list/record strings.
+/// Returns None when the JSON contains unsupported constructs (null, non-finite numbers).
+fn json_to_value(j: &serde_json::Value) -> Option<Value> {
+    match j {
+        serde_json::Value::String(s) => Some(Value::Str(s.clone())),
+        serde_json::Value::Bool(b) => Some(Value::Bool(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() { Some(Value::Int(i)) }
+            else if let Some(x) = n.as_f64() { Some(Value::Float(x)) }
+            else { None }
+        }
+        serde_json::Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items { out.push(json_to_value(it)?); }
+            Some(Value::List(out))
+        }
+        serde_json::Value::Object(m) => {
+            let mut out = std::collections::BTreeMap::new();
+            for (k, v) in m { out.insert(k.clone(), json_to_value(v)?); }
+            Some(Value::Record(out))
+        }
+        serde_json::Value::Null => None,
+    }
+}
+
 fn extract_props(row: &HashMap<String, String>, prop_cols: &[(&str, &str)]) -> Props {
     let mut props = HashMap::new();
     for &(col_name, col_type) in prop_cols {
@@ -211,8 +249,13 @@ fn extract_props(row: &HashMap<String, String>, prop_cols: &[(&str, &str)]) -> P
             if val.is_empty() { continue; }
             let converted = match col_type {
                 "INT64" => val.parse::<i64>().ok().map(Value::Int),
+                "FLOAT64" | "DOUBLE" | "FLOAT" => val.parse::<f64>().ok().map(Value::Float),
                 "BOOL" => Some(Value::Bool(val.eq_ignore_ascii_case("true") || val == "1")),
-                _ => Some(Value::Str(val.clone())),
+                // Fallback: STRING or unknown. Many upstream dumps (e.g. Neo4j movies
+                // `roles`) encode lists/records as JSON strings in STRING columns.
+                // Attempt JSON decode when the value looks like one, so list/record
+                // values round-trip to `Value::List` / `Value::Record` rather than `Str`.
+                _ => Some(parse_string_value(val)),
             };
             if let Some(v) = converted {
                 props.insert(col_name.to_string(), v);

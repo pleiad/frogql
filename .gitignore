@@ -1,6 +1,11 @@
 /target
 *.gdb
 !examples/*.gdb
+__pycache__/
+/bench/data/
+/python/.venv/
+/python/foo.py
+*.swp
 # Large generated databases (re-create with scripts/convert_dev_datasets.py)
 examples/neoflix.gdb
 examples/olympics.gdb

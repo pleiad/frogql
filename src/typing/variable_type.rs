@@ -18,7 +18,7 @@ pub enum VariableType {
         right: Box<VariableType>,
     },
     Union(Box<VariableType>, Box<VariableType>),
-    List(Box<VariableType>),
+    Group(Box<VariableType>),
     Zero,
 }
 
@@ -62,7 +62,7 @@ impl VariableType {
             VariableType::Union(t1, t2) => {
                 SimpleType::union(&t1.get_attribute(attr), &t2.get_attribute(attr))
             }
-            VariableType::List(t) => SimpleType::List(Box::new(t.get_attribute(attr))),
+            VariableType::Group(t) => SimpleType::Group(Box::new(t.get_attribute(attr))),
             VariableType::Zero => SimpleType::Zero,
         }
     }
@@ -99,8 +99,8 @@ impl VariableType {
 
     pub fn meet(a: &VariableType, b: &VariableType) -> VariableType {
         match (a, b) {
-            (VariableType::List(ta), VariableType::List(tb)) => {
-                VariableType::List(Box::new(VariableType::meet(ta, tb)))
+            (VariableType::Group(ta), VariableType::Group(tb)) => {
+                VariableType::Group(Box::new(VariableType::meet(ta, tb)))
             }
             (VariableType::Node(da), VariableType::Node(db)) => Self::meet_node(da, db),
             (
@@ -236,8 +236,8 @@ impl VariableType {
                 &VariableType::refine(schema, t1),
                 &VariableType::refine(schema, t2),
             ),
-            VariableType::List(t) => {
-                VariableType::List(Box::new(VariableType::refine(schema, t)))
+            VariableType::Group(t) => {
+                VariableType::Group(Box::new(VariableType::refine(schema, t)))
             }
             VariableType::Zero => VariableType::Zero,
         }
@@ -254,7 +254,7 @@ impl VariableType {
                 desc.is_empty() || left.is_empty() || right.is_empty()
             }
             VariableType::Union(t1, t2) => t1.is_empty() && t2.is_empty(),
-            VariableType::List(t) => t.is_empty(),
+            VariableType::Group(t) => t.is_empty(),
         }
     }
 }
@@ -270,7 +270,7 @@ impl fmt::Display for VariableType {
                 write!(f, "{left}-[{desc}]-{right}")
             }
             VariableType::Union(t1, t2) => write!(f, "{t1} + {t2}"),
-            VariableType::List(t) => write!(f, "[{t}]"),
+            VariableType::Group(t) => write!(f, "group<{t}>"),
             VariableType::Zero => write!(f, "⊥"),
         }
     }

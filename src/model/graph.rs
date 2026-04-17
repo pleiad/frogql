@@ -267,23 +267,42 @@ impl Graph {
         };
         let mut props = HashMap::new();
         for (k, v) in map {
-            let val = match v {
-                serde_json::Value::String(s) => Value::Str(s.clone()),
-                serde_json::Value::Bool(b) => Value::Bool(*b),
-                serde_json::Value::Number(n) => {
-                    Value::Int(n.as_i64().ok_or_else(|| {
-                        GraphError::Parse(format!("property '{k}' is not an integer"))
-                    })?)
-                }
-                _ => {
-                    return Err(GraphError::Parse(format!(
-                        "unsupported property value type for '{k}'"
-                    )));
-                }
-            };
+            let val = Self::json_to_value(v)
+                .map_err(|e| GraphError::Parse(format!("property '{k}': {e}")))?;
             props.insert(k.clone(), val);
         }
         Ok(props)
+    }
+
+    fn json_to_value(v: &serde_json::Value) -> Result<Value, String> {
+        match v {
+            serde_json::Value::String(s) => Ok(Value::Str(s.clone())),
+            serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Ok(Value::Int(i))
+                } else if let Some(x) = n.as_f64() {
+                    Ok(Value::Float(x))
+                } else {
+                    Err("number is not representable".into())
+                }
+            }
+            serde_json::Value::Array(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for it in items {
+                    out.push(Self::json_to_value(it)?);
+                }
+                Ok(Value::List(out))
+            }
+            serde_json::Value::Null => Err("null not supported".into()),
+            serde_json::Value::Object(map) => {
+                let mut fields = std::collections::BTreeMap::new();
+                for (k, v) in map {
+                    fields.insert(k.clone(), Self::json_to_value(v)?);
+                }
+                Ok(Value::Record(fields))
+            }
+        }
     }
 
     /// Lookup node internal ID by user-facing name.

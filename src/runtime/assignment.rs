@@ -71,7 +71,7 @@ impl Assignment {
     pub fn fill_empty_list(&mut self, dom: &HashSet<String>) {
         for x in dom {
             if !self.m.contains_key(x) {
-                self.m.insert(x.clone(), PathValue::List(vec![]));
+                self.m.insert(x.clone(), PathValue::Group(vec![]));
             }
         }
     }
@@ -79,7 +79,7 @@ impl Assignment {
     /// Wrap all values in singleton lists (for repetition grouping).
     pub fn to_group(&mut self) {
         for val in self.m.values_mut() {
-            *val = PathValue::List(vec![val.clone()]);
+            *val = PathValue::Group(vec![val.clone()]);
         }
     }
 
@@ -88,10 +88,10 @@ impl Assignment {
         let mut result = Assignment::new();
         for (k, v) in &self.m {
             match (v, other.m.get(k)) {
-                (PathValue::List(a), Some(PathValue::List(b))) => {
+                (PathValue::Group(a), Some(PathValue::Group(b))) => {
                     let mut combined = a.clone();
                     combined.extend_from_slice(b);
-                    result.m.insert(k.clone(), PathValue::List(combined));
+                    result.m.insert(k.clone(), PathValue::Group(combined));
                 }
                 _ => {
                     result.m.insert(k.clone(), v.clone());

@@ -80,7 +80,10 @@ impl LazyGraphStore {
         };
         let strings = StringTable::load(&st_pages, &mut pager)?;
 
-        let has_fast_index = node_locs_root != 0 && edge_topo_root != 0;
+        // All three roots must be set for a valid fast index.
+        // Files upgraded by an intermediate version may have node_locs/edge_topo
+        // but not string_table_root — treat those as legacy.
+        let has_fast_index = string_table_root != 0 && node_locs_root != 0 && edge_topo_root != 0;
 
         let mut store = LazyGraphStore {
             pager: RefCell::new(pager),
@@ -314,14 +317,29 @@ impl LazyGraphStore {
         let mut props = HashMap::new();
         for (name_sid, pv) in encoded {
             let name = self.strings.resolve(*name_sid).unwrap().to_string();
-            let val = match pv {
-                PropValue::Int(n) => Value::Int(*n),
-                PropValue::Str(sid) => Value::Str(self.strings.resolve(*sid).unwrap().to_string()),
-                PropValue::Bool(b) => Value::Bool(*b),
-            };
-            props.insert(name, val);
+            props.insert(name, self.prop_to_value(pv));
         }
         props
+    }
+
+    fn prop_to_value(&self, pv: &PropValue) -> Value {
+        match pv {
+            PropValue::Int(n) => Value::Int(*n),
+            PropValue::Float(x) => Value::Float(*x),
+            PropValue::Str(sid) => Value::Str(self.strings.resolve(*sid).unwrap().to_string()),
+            PropValue::Bool(b) => Value::Bool(*b),
+            PropValue::List(items) => {
+                Value::List(items.iter().map(|it| self.prop_to_value(it)).collect())
+            }
+            PropValue::Record(fields) => {
+                let mut m = std::collections::BTreeMap::new();
+                for (sid, v) in fields {
+                    let name = self.strings.resolve(*sid).unwrap().to_string();
+                    m.insert(name, self.prop_to_value(v));
+                }
+                Value::Record(m)
+            }
+        }
     }
 
     pub fn node_count(&self) -> u32 { self.node_count }

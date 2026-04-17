@@ -8,9 +8,12 @@
 /// [prop_count: u16 LE]
 /// [properties...]
 ///   each: [name_str_id: u32 LE][value_type: u8][value_data: variable]
-///     value_type 0 = Int:  [i64 LE, 8 bytes]
-///     value_type 1 = Str:  [str_id: u32 LE]
-///     value_type 2 = Bool: [u8: 0 or 1]
+///     value_type 0 = Int:   [i64 LE, 8 bytes]
+///     value_type 1 = Str:   [str_id: u32 LE]
+///     value_type 2 = Bool:  [u8: 0 or 1]
+///     value_type 3 = Float: [f64 LE, 8 bytes]
+///     value_type 4 = List:   [length: u32 LE][element] × length
+///     value_type 5 = Record: [field_count: u32 LE][name_str_id: u32 LE, value] × field_count
 /// ```
 ///
 /// Edge cell format = Node cell format + :
@@ -23,6 +26,9 @@
 pub const VALUE_TYPE_INT: u8 = 0;
 pub const VALUE_TYPE_STR: u8 = 1;
 pub const VALUE_TYPE_BOOL: u8 = 2;
+pub const VALUE_TYPE_FLOAT: u8 = 3;
+pub const VALUE_TYPE_LIST: u8 = 4;
+pub const VALUE_TYPE_RECORD: u8 = 5;
 
 pub const DIR_DIRECTED: u8 = 0;
 pub const DIR_UNDIRECTED: u8 = 1;
@@ -73,6 +79,9 @@ pub enum PropValue {
     Int(i64),
     Str(u32), // string table ID
     Bool(bool),
+    Float(f64),
+    List(Vec<PropValue>),
+    Record(Vec<(u32, PropValue)>), // (name_str_id, value); sorted by key for deterministic encoding
 }
 
 fn encode_prop_value(buf: &mut Vec<u8>, val: &PropValue) {
@@ -88,6 +97,25 @@ fn encode_prop_value(buf: &mut Vec<u8>, val: &PropValue) {
         PropValue::Bool(b) => {
             buf.push(VALUE_TYPE_BOOL);
             buf.push(if *b { 1 } else { 0 });
+        }
+        PropValue::Float(x) => {
+            buf.push(VALUE_TYPE_FLOAT);
+            buf.extend_from_slice(&x.to_le_bytes());
+        }
+        PropValue::List(items) => {
+            buf.push(VALUE_TYPE_LIST);
+            buf.extend_from_slice(&(items.len() as u32).to_le_bytes());
+            for it in items {
+                encode_prop_value(buf, it);
+            }
+        }
+        PropValue::Record(fields) => {
+            buf.push(VALUE_TYPE_RECORD);
+            buf.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+            for (name_sid, val) in fields {
+                buf.extend_from_slice(&name_sid.to_le_bytes());
+                encode_prop_value(buf, val);
+            }
         }
     }
 }
@@ -171,6 +199,29 @@ fn decode_prop_value(data: &[u8], pos: &mut usize) -> PropValue {
             let b = data[*pos] != 0;
             *pos += 1;
             PropValue::Bool(b)
+        }
+        VALUE_TYPE_FLOAT => {
+            let x = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            *pos += 8;
+            PropValue::Float(x)
+        }
+        VALUE_TYPE_LIST => {
+            let len = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as usize;
+            *pos += 4;
+            let mut items = Vec::with_capacity(len);
+            for _ in 0..len { items.push(decode_prop_value(data, pos)); }
+            PropValue::List(items)
+        }
+        VALUE_TYPE_RECORD => {
+            let len = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as usize;
+            *pos += 4;
+            let mut fields = Vec::with_capacity(len);
+            for _ in 0..len {
+                let name_sid = read_u32(data, pos);
+                let v = decode_prop_value(data, pos);
+                fields.push((name_sid, v));
+            }
+            PropValue::Record(fields)
         }
         _ => panic!("unknown property value type: {vtype}"),
     }

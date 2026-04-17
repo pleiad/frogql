@@ -290,7 +290,7 @@ fn format_pathvalue_rich(store: &LazyGraphStore, pv: &PathValue) -> String {
             }
         }
         PathValue::Nothing => "-".to_string(),
-        PathValue::List(items) => {
+        PathValue::Group(items) => {
             let parts: Vec<String> = items.iter().map(|v| format_pathvalue_rich(store, v)).collect();
             format!("[{}]", parts.join(", "))
         }
@@ -383,8 +383,11 @@ impl NodeType {
         for (k, v) in &raw_props {
             let t = match v {
                 gqlrust::model::value::Value::Int(_) => "int",
+                gqlrust::model::value::Value::Float(_) => "float",
                 gqlrust::model::value::Value::Str(_) => "str",
                 gqlrust::model::value::Value::Bool(_) => "bool",
+                gqlrust::model::value::Value::List(_) => "list",
+                gqlrust::model::value::Value::Record(_) => "record",
             };
             props.insert(k.clone(), t);
         }
@@ -440,8 +443,11 @@ fn print_schema(store: &LazyGraphStore) {
         for (k, v) in &raw_props {
             let t = match v {
                 gqlrust::model::value::Value::Int(_) => "int",
+                gqlrust::model::value::Value::Float(_) => "float",
                 gqlrust::model::value::Value::Str(_) => "str",
                 gqlrust::model::value::Value::Bool(_) => "bool",
+                gqlrust::model::value::Value::List(_) => "list",
+                gqlrust::model::value::Value::Record(_) => "record",
             };
             props.insert(k.clone(), t);
         }
@@ -521,8 +527,11 @@ fn print_schema_simple(store: &LazyGraphStore) {
         for (k, v) in &raw_props {
             let t = match v {
                 gqlrust::model::value::Value::Int(_) => "int",
+                gqlrust::model::value::Value::Float(_) => "float",
                 gqlrust::model::value::Value::Str(_) => "str",
                 gqlrust::model::value::Value::Bool(_) => "bool",
+                gqlrust::model::value::Value::List(_) => "list",
+                gqlrust::model::value::Value::Record(_) => "record",
             };
             prop_types.insert(k.clone(), t);
         }
@@ -584,8 +593,11 @@ fn print_schema_simple(store: &LazyGraphStore) {
         for (k, v) in &raw_props {
             let t = match v {
                 gqlrust::model::value::Value::Int(_) => "int",
+                gqlrust::model::value::Value::Float(_) => "float",
                 gqlrust::model::value::Value::Str(_) => "str",
                 gqlrust::model::value::Value::Bool(_) => "bool",
+                gqlrust::model::value::Value::List(_) => "list",
+                gqlrust::model::value::Value::Record(_) => "record",
             };
             prop_types.insert(k.clone(), t);
         }
