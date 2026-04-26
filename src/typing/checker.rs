@@ -94,8 +94,102 @@ impl Typechecker {
     // Path pattern checking
     // -----------------------------------------------
 
-    fn check_path_pattern(&mut self, _node: &PathPattern) -> TypecheckResult {
-        todo!("check_path_pattern: Step 6")
+    fn check_path_pattern(&mut self, node: &PathPattern) -> TypecheckResult {
+        match node {
+            PathPattern::Node(desc) => {
+                let t = self.refine_pattern_node(desc);
+                let p = PathType::from_variable(&t, EdgeDir::Any);
+                let env = create_context(desc, t);
+                TypecheckResult::new(p, env)
+            }
+
+            PathPattern::EdgeRight(desc) => self.check_edge(EdgeDir::Right, desc),
+            PathPattern::EdgeLeft(desc) => self.check_edge(EdgeDir::Left, desc),
+            PathPattern::EdgeUndirected(desc) => self.check_edge(EdgeDir::None, desc),
+            PathPattern::EdgeAnyDirection(desc) => self.check_edge(EdgeDir::Any, desc),
+
+            PathPattern::Concat(p1, p2) | PathPattern::Join(p1, p2) => {
+                // Concat composes two patterns over a shared endpoint variable.
+                // Join is gqlite's comma-join — patterns sharing variables but
+                // not endpoint-glued. For typing both reduce to: meet the
+                // environments under the schema and meet the path shapes.
+                // The shape distinction matters at runtime, not for types.
+                let r1 = self.check_path_pattern(p1);
+                let r2 = self.check_path_pattern(p2);
+
+                let cm = match TypeEnvironment::meet(&self.schema, &r1.env, &r2.env) {
+                    Ok(env) => env,
+                    Err(e) => {
+                        self.errors.push(format!(
+                            "Concatenation of contexts failed: {}",
+                            e
+                        ));
+                        r1.env.clone()
+                    }
+                };
+
+                let p = PathType::meet(&self.schema, &r1.path, &r2.path);
+                TypecheckResult::new(p, cm)
+            }
+
+            PathPattern::Filter(pattern, expr) => {
+                let r = self.check_path_pattern(pattern);
+                let t = self.check_expr(expr, &r.env);
+
+                if SimpleType::meet(&t, &SimpleType::B).is_empty() {
+                    self.warnings.push(format!(
+                        "Filter expression has type {}, which is not a boolean",
+                        t
+                    ));
+                    TypecheckResult::new(PathType::Zero, r.env)
+                } else {
+                    r
+                }
+            }
+
+            PathPattern::Union(p1, p2) => {
+                let r1 = self.check_path_pattern(p1);
+                let r2 = self.check_path_pattern(p2);
+                TypecheckResult::new(
+                    PathType::union(r1.path, r2.path),
+                    TypeEnvironment::union(&r1.env, &r2.env),
+                )
+            }
+
+            PathPattern::Repeat { pattern, lb, ub: _ub } => {
+                let r = self.check_path_pattern(pattern);
+                let raw_lb = *lb as u64;
+
+                let effective_lb = if !r.path.is_empty() {
+                    raw_lb.min(3)
+                } else {
+                    self.warnings
+                        .push("Repeat expression must have length > 0".to_string());
+                    raw_lb
+                };
+
+                TypecheckResult::new(
+                    self.pow_path_type(&r.path, effective_lb),
+                    r.env.to_group(),
+                )
+            }
+
+            PathPattern::Questioned(p) => {
+                let r = self.check_path_pattern(p);
+                if r.path.is_empty() {
+                    self.warnings
+                        .push("Repeat expression must have length > 0".to_string());
+                }
+                TypecheckResult::new(self.pow_path_type(&r.path, 0), r.env.to_group())
+            }
+        }
+    }
+
+    fn check_edge(&mut self, dir: EdgeDir, desc: &Option<Descriptor>) -> TypecheckResult {
+        let t = self.refine_pattern_edge(dir, desc);
+        let p = PathType::from_variable(&t, dir);
+        let env = create_context(desc, t);
+        TypecheckResult::new(p, env)
     }
 
     // -----------------------------------------------
@@ -261,6 +355,15 @@ fn descriptor_type_of(desc: &Option<Descriptor>) -> DescriptorType {
     match desc {
         Some(d) => d.dtype.clone(),
         None => DescriptorType::star(),
+    }
+}
+
+/// Build the binding environment for a pattern position. Anonymous patterns
+/// contribute no bindings.
+fn create_context(desc: &Option<Descriptor>, t: VariableType) -> TypeEnvironment {
+    match desc {
+        Some(d) => TypeEnvironment::create_context(d, t),
+        None => TypeEnvironment::new(),
     }
 }
 
