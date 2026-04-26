@@ -67,15 +67,12 @@ impl Typechecker {
         Typechecker::new(Schema::star())
     }
 
-    /// Type-check a full `Query`. The `WHERE` clause is applied as a final
-    /// filter against the pattern's environment; the `RETURN` clause is not
-    /// type-checked in this phase (out-of-scope: result-row typing).
+    /// Type-check a full `Query`. Elaboration has already folded any
+    /// `WHERE` clause into `PathPattern::Filter` nodes inside `q.pattern`,
+    /// so this just checks the pattern. `RETURN` is not type-checked in
+    /// this phase (out-of-scope: result-row typing).
     pub fn check_query(&mut self, q: &Query) -> TypecheckResult {
-        let _ = q;
-        let _ = &self.schema;
-        let _ = &mut self.errors;
-        let _ = &mut self.warnings;
-        todo!("check_query: Step 7")
+        self.check_pattern(&q.pattern)
     }
 
     /// Type-check a `PathPattern`.
@@ -384,14 +381,3 @@ fn simple_type_of_value(v: &Value) -> SimpleType {
     }
 }
 
-// Compile-time keep-alive: silences unused-method warnings for stubs that
-// will be wired up in later steps. Removed in Step 7 when `check_query`
-// becomes public-facing.
-#[allow(dead_code)]
-fn _force_use(tc: &mut Typechecker, p: &PathPattern, e: &Expr, env: &TypeEnvironment) {
-    let _ = tc.check_path_pattern(p);
-    let _ = tc.check_expr(e, env);
-    let _ = tc.refine_pattern_node(&None);
-    let _ = tc.refine_pattern_edge(EdgeDir::Any, &None);
-    let _ = tc.pow_path_type(&PathType::Zero, 0);
-}
