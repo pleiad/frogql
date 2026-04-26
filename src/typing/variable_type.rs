@@ -136,11 +136,7 @@ impl VariableType {
             (VariableType::Union(t1, t2), _) => {
                 let r1 = VariableType::meet(t1, b);
                 let r2 = VariableType::meet(t2, b);
-                match (&r1, &r2) {
-                    (VariableType::Zero, _) => r2,
-                    (_, VariableType::Zero) => r1,
-                    _ => VariableType::Union(Box::new(r1), Box::new(r2)),
-                }
+                VariableType::join(&r1, &r2)
             }
             (_, VariableType::Union(_, _)) => VariableType::meet(b, a),
             (VariableType::Zero, _) | (_, VariableType::Zero) => VariableType::Zero,
@@ -174,6 +170,7 @@ impl VariableType {
 
     pub fn is_subtype(t1: &VariableType, t2: &VariableType) -> bool {
         match (t1, t2) {
+            (VariableType::Zero, _) => true,
             (VariableType::Node(a), VariableType::Node(b)) => DescriptorType::is_subtype(a, b),
             (
                 VariableType::EdgeDirectional { desc: d1, left: l1, right: r1 },
@@ -206,8 +203,34 @@ impl VariableType {
                 VariableType::is_subtype(&as_dir1, &as_dir2a)
                     || VariableType::is_subtype(&as_dir1, &as_dir2b)
             }
+            (VariableType::Group(a), VariableType::Group(b)) => VariableType::is_subtype(a, b),
+            (VariableType::Union(a, b), _) => {
+                VariableType::is_subtype(a, t2) || VariableType::is_subtype(b, t2)
+            }
+            (_, VariableType::Union(a, b)) => {
+                VariableType::is_subtype(t1, a) || VariableType::is_subtype(t1, b)
+            }
             _ => false,
         }
+    }
+
+    /// Refine a variable type against the schema and flatten the result into
+    /// the concrete `Node` variants reachable. Mirrors fppc's
+    /// `VariableType::refine_to_nodes` and is consumed by `PathType::meet`.
+    pub fn refine_to_nodes(schema: &Schema, t: &VariableType) -> Vec<VariableType> {
+        let mut out = Vec::new();
+        let mut stack = vec![VariableType::refine(schema, t)];
+        while let Some(curr) = stack.pop() {
+            match curr {
+                VariableType::Node(_) => out.push(curr),
+                VariableType::Union(t1, t2) => {
+                    stack.push(*t2);
+                    stack.push(*t1);
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     // --- Refine ---
@@ -277,6 +300,7 @@ impl fmt::Display for VariableType {
 }
 
 /// Schema: a set of allowed node and edge types.
+#[derive(Debug, Clone)]
 pub struct Schema {
     pub nodes: Vec<VariableType>,
     pub edges: Vec<VariableType>,

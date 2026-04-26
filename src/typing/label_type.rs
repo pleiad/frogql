@@ -62,6 +62,9 @@ impl LabelType {
             (_, LabelType::Or(a, b)) => {
                 LabelType::is_subtype(l1, a) || LabelType::is_subtype(l1, b)
             }
+            (LabelType::Or(a, b), _) => {
+                LabelType::is_subtype(a, l2) || LabelType::is_subtype(b, l2)
+            }
             (_, LabelType::Neg(inner)) => !LabelType::is_subtype(l1, inner),
             (LabelType::Empty, _) => true,
             _ => false,
