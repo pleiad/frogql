@@ -309,3 +309,206 @@ is a later phase.
 - Per-segment clones at `Concat` / `Union` (fppc's data movement profile).
 
 These costs are accepted for phase 1 and not addressed here.
+
+---
+
+# Final report
+
+This section is appended at the end of phase 1 and reflects what the
+migration actually shipped, vs. what the spec and the Step 0 plan
+called for. Each entry is a deviation, a punt, or a finding — anything
+that should be visible to whoever reads this next.
+
+## Commits on `typing/checker`
+
+```
+082d17e  Add typechecker migration mapping doc          (Step 0)
+7a50284  Reconcile lattice ops with fppc                (Step 1)
+02a648d  Port TypeEnvironment from fppc                 (Step 2)
+674a8c5  Port PathType and stub checker module          (Step 3)
+be16449  Implement check_expr                           (Step 4)
+681a0ed  Implement refine_pattern_node and refine_pattern_edge (Step 5)
+76ef1bd  Implement check_path_pattern                   (Step 6)
+26de14a  Wire typechecker into compile and compile_query (Step 7)
+a1f47f3  Add typechecker smoke tests                    (Step 8)
+```
+
+The branch is intended as the long-lived integration branch for typecheck
+work; phase-2 changes land here too.
+
+## Outcome vs. acceptance criteria
+
+| Criterion (from the source spec) | Status |
+|---|---|
+| `docs/typechecker_migration.md` complete and accurate | done — this file |
+| `src/typing/checker.rs` and `src/typing/type_environment.rs` exist, compile, expose entry points | done; also `path_type.rs` per option 1 |
+| `src/lib.rs` wires the checker between elaborate and optimize, surfacing errors as `String`. On by default | done — `Typechecker::untyped()` (Schema::star) is the default |
+| Opt-out path exists | done — `compile_unchecked` / `compile_query_unchecked` |
+| `cargo build` clean (no new warnings beyond baseline) | done — 4 pre-existing warnings in `bin/gqlite` only |
+| Smoke queries exercise the checked and opt-out paths | done — `tests/typecheck_smoke.rs`, 4 tests pass |
+| Final report covers deviations, punts, and gqlite-side findings | this section |
+
+Test totals on `typing/checker`:
+- `cargo test --lib`: 62 passing (same as `main`)
+- `cargo test --test parser_test --test runtime_test --test store_runtime_test --test text2gql_test`: 18 passing
+- `cargo test --test float_test --test list_test --test record_test --test elaborate_test --test parse_and_run_test`: 11 passing
+- `cargo test --test typecheck_smoke`: 4 passing (new)
+
+## Lattice reconciliation outcomes
+
+Step 1 applied the changes the Step-0 reconciliation table called out, no
+more and no less. For each touched op, the citation is `fppc/<file>:<line>`;
+the gqlite location is `src/typing/<file>:<line>`.
+
+### `SimpleType::is_subtype`
+
+- **fppc:** `src/ast/types.rs:46–58`. The bottom arm is
+  `(SimpleType::Zero, _) => true`.
+- **gqlite before:** `src/typing/simple_type.rs:66`,
+  `(_, SimpleType::Zero) => true` — wrong direction (every type was a
+  subtype of bottom).
+- **gqlite after:** `(SimpleType::Zero, _) => true` matching fppc.
+- Verdict: gqlite bug B2 fixed by porting fppc's behavior.
+
+### `LabelType::is_subtype`
+
+- **fppc:** `src/ast/label.rs:43–60`. Has both `(And(l,r), _)` and
+  `(Or(l,r), _)` arms, both using `||` (gradual). The `Or-LHS` `||` is a
+  fppc-preserved-by-design behavior.
+- **gqlite before:** `src/typing/label_type.rs:51–69`. Had `(And(l,r), _)`
+  but **no `(Or(l,r), _)` arm**, so subtyping with an `Or` on the left
+  fell through to `_ => false`.
+- **gqlite after:** added `(LabelType::Or(a, b), _) => is_subtype(a, l2) || is_subtype(b, l2)`
+  immediately after the `(And, _)` arm. Uses `||` per fppc.
+
+### `VariableType::is_subtype`
+
+- **fppc:** `src/typechecker/variable_type.rs:264–298`. Has `(Zero, _) => true`,
+  `(List, List) => recurse`, `(Union(a,b), _) => || `, `(_, Union(a,b)) => ||`.
+- **gqlite before:** missing all four. Fell through to `_ => false`.
+- **gqlite after:** added each arm. `(List, List)` is mapped to
+  `(Group, Group)` since gqlite uses `Group` for the same role.
+
+### `VariableType::meet` (Union-LHS)
+
+- **fppc:** `src/typechecker/variable_type.rs:227–235`. Combines per-side
+  meets via `VariableType::join(v1, v2)` so equal sides dedupe and Zero is
+  absorbed (Err handling absorbs failed sides into the surviving one).
+- **gqlite before:** built a raw `VariableType::Union(r1, r2)` with manual
+  Zero-handling; equal sides did *not* dedupe.
+- **gqlite after:** replaced with `VariableType::join(&r1, &r2)`.
+
+### Helpers added in Step 1
+
+- `VariableType::refine_to_nodes(schema, &t) -> Vec<VariableType>` — used by
+  `PathType::meet`. Mirrors fppc's `refine_to_nodes`. Returns the
+  `Node(_)` variants reachable after schema refinement.
+- `Schema` now derives `Debug, Clone` so the typechecker can own a schema
+  by value, matching fppc's `Typechecker { schema: Schema, ... }`.
+
+### What stayed gqlite-only (not touched)
+
+- `LabelType::{Top, Empty, Neg}` and the arms that handle them.
+- `PropertyType::{Open, Zero}` and the Open/Closed cross-arms.
+- `SimpleType::{F, Group, Record}` and their dedicated variants
+  (`is_subtype` covariance for `Group` was *added* in Step 1 because it
+  mirrors fppc's `List` behavior; the variant itself is gqlite-only).
+- `VariableType::{Group, EdgeNonDirectional, EdgeAnyDirection}` semantics.
+
+## Deviations from the Step-0 plan
+
+### 1. Renamed `to_list` → `to_group` in `TypeEnvironment`
+
+fppc has `TypeEnvironment::to_list`. gqlite uses `VariableType::Group` for
+repetition grouping (it reserves `List` for user-facing list values), so
+the moral equivalent in gqlite is `to_group`. Behavior is identical;
+only the name follows gqlite's vocabulary. Recorded in the
+`type_environment.rs` doc comment.
+
+### 2. `TypeEnvironment::meet` returns `Result<_, String>` despite gqlite's
+`VariableType::meet` being infallible
+
+fppc's `VariableType::meet` returns `Result<_, String>` and `TypeEnvironment::meet`
+propagates the error. gqlite's `VariableType::meet` returns `VariableType`
+(no `Result`). To preserve the *check-level* observable behavior (so the
+checker can report "Concatenation of contexts failed" the way fppc does),
+`TypeEnvironment::meet` synthesizes an `Err` when the per-variable meet
+collapses to `Zero` for a variable whose inputs were not already empty.
+This matches fppc's behavior at the only call site that consumes the
+`Err` (the `Concat` branch of `check_path_pattern`).
+
+### 3. `EdgeDir` lives in `path_type.rs`, not in the AST
+
+The source spec's mapping table contemplated a `From<(&VariableType, EdgeDirection)>`
+conversion. gqlite has no `EdgeDirection` enum at the AST layer (direction
+is encoded in the `PathPattern` variant). I introduced `EdgeDir` as a
+typechecker-local enum in `path_type.rs`, and the conversion is named
+`PathType::from_variable(t, dir)` rather than implemented as `From<(...)>`.
+The dispatch from `PathPattern::EdgeRight/Left/Undirected/AnyDirection` to
+`EdgeDir::Right/Left/None/Any` happens in `Typechecker::check_edge`.
+
+### 4. `Join` is treated as `Concat` for typing
+
+Per the source spec, `PathPattern::Join` (gqlite's comma-join) has no fppc
+counterpart. The migration doc said "treat as `Concat` for typing,
+verify before merge." Verified: comma-join shares variables across
+patterns the same way `Concat` does, and the type-level operation in
+both cases is "meet the environments under the schema and meet the path
+shapes." The runtime distinction (LTJ-decomposable vs. not) is
+orthogonal. Both arms share the body in `check_path_pattern`.
+
+If a future test surfaces a case where `Join` and `Concat` should yield
+different types, this is the place to revisit.
+
+### 5. `Schema` did not need a `new` constructor
+
+Step-0 plan flagged that fppc's `Schema::new(nodes, edges)` might need a
+gqlite analog. gqlite's `Schema` has public fields, so `Schema { nodes,
+edges }` literal construction is sufficient. No constructor was added.
+
+## Punts (deliberately incomplete; carry over to phase 2)
+
+| Punt | Where | Notes |
+|---|---|---|
+| `Expr::FieldAccess` on non-record receivers | `check_expr`, the `_` arm of the Record match | Returns `Zero` and warns. Star/Zero pass through gradually. The user-facing case (a record literal accessed by field) works. |
+| `Value::List` and `Value::Record` literal typing | `simple_type_of_value` | Both get loose types (`List(Star)` / `Star`). Recursive value typing wasn't in fppc, and the elaborator hasn't been observed emitting nested literal expressions through to typecheck. |
+| Result-row (`RETURN`) typing | `check_query` | The function delegates to `check_pattern`. Aggregates / ORDER BY / LIMIT in RETURN are not typechecked. fppc has no RETURN. |
+| Real schema sourcing | `compile_query` | Default is `Schema::star()`; there is no facility yet to load a schema from disk or query metadata. Phase 2 candidate. |
+| `NodeId → Type` side-table for the optimizer | n/a | Out of scope per the source spec. |
+
+## Architectural follow-ups still owed (option 1 cost)
+
+- **Parallel typing modules.** `path_type.rs` and `variable_type.rs` carry
+  duplicate node info per edge position. fppc has the same shape. The
+  refactor (option 2 — demote path-shape to a private struct in
+  `checker.rs`) is unblocked once the checker is stable.
+- **Per-segment clones at `Concat` / `Union`.** `PathType::meet` /
+  `PathType::union` clone subtree boxes. `VariableType::meet` clones
+  endpoints and descriptors. Profiled in
+  `docs/gqlite_migration_notes.md` as a hot path; phase 1 accepts the
+  cost.
+
+Both are *refactorable* on top of the working checker — option 1 sequences
+them rather than foreclosing them.
+
+## Findings to flag (no action this phase)
+
+- **`Schema::star()` overload**: gqlite's `Schema::star()` has only
+  `EdgeDirectional` + `EdgeNonDirectional` star edges. fppc's
+  `Schema::star()` has both directional and undirected star edges (same
+  thing under different names). Equivalent. Just noting, in case future
+  schema-construction utilities want a richer permissive default.
+- **`LabelType::is_empty` always returns `false`** in gqlite. fppc's
+  typechecker doesn't use `LabelType::is_empty` at all — the emptiness
+  check goes through `DescriptorType::is_empty` → `LabelType::is_empty`,
+  but the result is always false. Functionally equivalent to fppc's
+  setup. If proper `LabelType` emptiness ever becomes a bottleneck (e.g.
+  detecting `A & !A` statically), this is the spot.
+- **`gradual_eq` confirmed absent** on both sides; the source spec's
+  warning ("must not reappear") was checked at every `SimpleType::meet`
+  / `is_subtype` call site in `check_expr`.
+- **fppc's preserved-by-design `Or-LHS` `||`** — ported verbatim into
+  gqlite's `LabelType::is_subtype`. If fppc ever decides to fix this
+  (changing to `&&`), the gqlite-side change is a one-line edit at the
+  arm we added in Step 1.
+
