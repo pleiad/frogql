@@ -10,6 +10,7 @@ use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::Query;
 
+use super::descriptor_type::DescriptorType;
 use super::path_type::{EdgeDir, PathType};
 use super::simple_type::SimpleType;
 use super::type_environment::TypeEnvironment;
@@ -203,16 +204,45 @@ impl Typechecker {
     // Refinement helpers
     // -----------------------------------------------
 
-    fn refine_pattern_node(&self, _desc: &Option<Descriptor>) -> VariableType {
-        todo!("refine_pattern_node: Step 5")
+    fn refine_pattern_node(&mut self, desc: &Option<Descriptor>) -> VariableType {
+        let dtype = descriptor_type_of(desc);
+        if let Some(d) = desc {
+            self.assert_filters_drained(d);
+        }
+        let vt = VariableType::Node(dtype);
+        VariableType::refine(&self.schema, &vt)
     }
 
     fn refine_pattern_edge(
-        &self,
-        _dir: EdgeDir,
-        _desc: &Option<Descriptor>,
+        &mut self,
+        dir: EdgeDir,
+        desc: &Option<Descriptor>,
     ) -> VariableType {
-        todo!("refine_pattern_edge: Step 5")
+        let dtype = descriptor_type_of(desc);
+        if let Some(d) = desc {
+            self.assert_filters_drained(d);
+        }
+        let vt = match dir {
+            EdgeDir::Right | EdgeDir::Left | EdgeDir::Any => {
+                VariableType::edge_directional(dtype)
+            }
+            EdgeDir::None => VariableType::edge_non_directional(dtype),
+        };
+        VariableType::refine(&self.schema, &vt)
+    }
+
+    /// Elaboration must drain `Descriptor::value_filters` into `Filter`
+    /// nodes before the typechecker runs. If we see leftovers it's a bug
+    /// in elaboration; surface as an error so we don't silently ignore
+    /// constraints.
+    fn assert_filters_drained(&mut self, d: &Descriptor) {
+        if !d.value_filters.is_empty() {
+            self.errors.push(format!(
+                "Descriptor for {:?} still carries value_filters at typecheck time \
+                 (elaboration bug)",
+                d.var
+            ));
+        }
     }
 
     /// p^0 = identity (default node path), p^1 = p, p^n = meet(p, p^(n-1)).
@@ -222,6 +252,15 @@ impl Typechecker {
             1 => p.clone(),
             _ => PathType::meet(&self.schema, p, &self.pow_path_type(p, n - 1)),
         }
+    }
+}
+
+/// Pull the `DescriptorType` out of an optional `Descriptor`. Anonymous
+/// patterns like `()` or `-[]->` use the star descriptor.
+fn descriptor_type_of(desc: &Option<Descriptor>) -> DescriptorType {
+    match desc {
+        Some(d) => d.dtype.clone(),
+        None => DescriptorType::star(),
     }
 }
 
