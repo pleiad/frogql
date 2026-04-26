@@ -4,8 +4,9 @@
 //! fppc's `Typechecker` / `TypecheckResult`; the differences are documented
 //! in `docs/typechecker_migration.md`.
 
+use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
-use crate::syntax::expr::Expr;
+use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::Query;
 
@@ -100,8 +101,102 @@ impl Typechecker {
     // Expression checking
     // -----------------------------------------------
 
-    fn check_expr(&mut self, _e: &Expr, _env: &TypeEnvironment) -> SimpleType {
-        todo!("check_expr: Step 4")
+    fn check_expr(&mut self, e: &Expr, env: &TypeEnvironment) -> SimpleType {
+        match e {
+            Expr::Const(v) => simple_type_of_value(v),
+
+            Expr::Type(t) => t.clone(),
+
+            Expr::AttrLookup { var, attr } => match env.get(var) {
+                Some(t) => {
+                    if matches!(t, VariableType::Zero) {
+                        self.warnings
+                            .push(format!("Variable {} is bound to empty type", var));
+                        return SimpleType::Zero;
+                    }
+                    let at = t.get_attribute(attr);
+                    if at.is_empty() {
+                        self.warnings
+                            .push(format!("Attribute {} not found in {}", attr, t));
+                    }
+                    at
+                }
+                None => {
+                    self.errors
+                        .push(format!("Variable {} not found in context", var));
+                    SimpleType::Zero
+                }
+            },
+
+            Expr::FieldAccess { base, field } => {
+                let base_t = self.check_expr(base, env);
+                match &base_t {
+                    SimpleType::Record(fields) => match fields.get(field) {
+                        Some(t) => t.clone(),
+                        None => {
+                            self.warnings
+                                .push(format!("Field {} not found in record {}", field, base_t));
+                            SimpleType::Zero
+                        }
+                    },
+                    SimpleType::Star | SimpleType::Zero => base_t,
+                    _ => {
+                        self.warnings.push(format!(
+                            "Field access {}.{} on non-record type {}",
+                            "<expr>", field, base_t
+                        ));
+                        SimpleType::Zero
+                    }
+                }
+            }
+
+            Expr::Binop { op, left, right } => {
+                let t1 = self.check_expr(left, env);
+
+                // Type operations: rhs must be a Type literal in the well-formed case.
+                match op {
+                    BinOp::Is => {
+                        if let Expr::Type(_) = right.as_ref() {
+                            return SimpleType::B;
+                        }
+                    }
+                    BinOp::As => {
+                        if let Expr::Type(t) = right.as_ref() {
+                            return t.clone();
+                        }
+                    }
+                    _ => {}
+                }
+
+                let t2 = self.check_expr(right, env);
+                let (expected_t1, expected_t2, result_t) = op.delta(&t1, &t2);
+
+                if SimpleType::meet(&t1, &expected_t1) != SimpleType::Zero
+                    && SimpleType::meet(&t2, &expected_t2) != SimpleType::Zero
+                {
+                    result_t
+                } else {
+                    self.warnings.push(format!(
+                        "Binop {:?} between types {} and {} is not defined",
+                        op, t1, t2
+                    ));
+                    SimpleType::Zero
+                }
+            }
+
+            Expr::Unop { op, operand } => {
+                let t = self.check_expr(operand, env);
+                let (expected_t, result_t) = op.delta();
+
+                if SimpleType::meet(&t, &expected_t) != SimpleType::Zero {
+                    result_t
+                } else {
+                    self.warnings
+                        .push(format!("Unop {:?} on type {} is not defined", op, t));
+                    SimpleType::Zero
+                }
+            }
+        }
     }
 
     // -----------------------------------------------
@@ -127,6 +222,23 @@ impl Typechecker {
             1 => p.clone(),
             _ => PathType::meet(&self.schema, p, &self.pow_path_type(p, n - 1)),
         }
+    }
+}
+
+/// Map a literal `Value` to its `SimpleType`.
+///
+/// List and Record values get a deliberately loose type — the precise
+/// element/field types would require recursive typing of values, which
+/// fppc doesn't do (it has no list literals). Documented in
+/// `docs/typechecker_migration.md` as a phase-1 punt.
+fn simple_type_of_value(v: &Value) -> SimpleType {
+    match v {
+        Value::Int(_) => SimpleType::Z,
+        Value::Float(_) => SimpleType::F,
+        Value::Str(_) => SimpleType::S,
+        Value::Bool(_) => SimpleType::B,
+        Value::List(_) => SimpleType::List(Box::new(SimpleType::Star)),
+        Value::Record(_) => SimpleType::Star,
     }
 }
 
