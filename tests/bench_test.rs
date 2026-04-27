@@ -57,10 +57,14 @@ fn allocated_bytes() -> usize {
     ALLOCATED.load(Ordering::Relaxed)
 }
 
+// Memory-measurement helpers. Currently unused — wired in only through
+// the (excluded-from-CI) memory-scaling benches.
+#[allow(dead_code)]
 fn reset_peak() {
     PEAK.store(ALLOCATED.load(Ordering::Relaxed), Ordering::Relaxed);
 }
 
+#[allow(dead_code)]
 fn peak_bytes() -> usize {
     PEAK.load(Ordering::Relaxed)
 }
@@ -277,6 +281,8 @@ fn bench_query<G: GraphAccess>(graph: &G, query: &str, label: &str) -> (usize, f
     (total_rows, ms)
 }
 
+// Currently unused — utility for cross-backend comparison benches.
+#[allow(dead_code)]
 fn bench_compare<G1: GraphAccess, G2: GraphAccess>(
     g1: &G1,
     g1_name: &str,

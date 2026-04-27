@@ -47,23 +47,27 @@ impl BinOp {
             ),
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<BinOp> {
+impl std::str::FromStr for BinOp {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<BinOp, ()> {
         match s {
-            "+" => Some(BinOp::Add),
-            "-" => Some(BinOp::Sub),
-            "<" => Some(BinOp::Lt),
-            ">" => Some(BinOp::Gt),
-            "<=" => Some(BinOp::Le),
-            ">=" => Some(BinOp::Ge),
-            "=" => Some(BinOp::Eq),
-            "!=" => Some(BinOp::Ne),
-            "and" => Some(BinOp::And),
-            "or" => Some(BinOp::Or),
-            "TYPED" | "typed" => Some(BinOp::Is),
-            "as" => Some(BinOp::As),
-            "in" => Some(BinOp::In),
-            _ => None,
+            "+" => Ok(BinOp::Add),
+            "-" => Ok(BinOp::Sub),
+            "<" => Ok(BinOp::Lt),
+            ">" => Ok(BinOp::Gt),
+            "<=" => Ok(BinOp::Le),
+            ">=" => Ok(BinOp::Ge),
+            "=" => Ok(BinOp::Eq),
+            "!=" => Ok(BinOp::Ne),
+            "and" => Ok(BinOp::And),
+            "or" => Ok(BinOp::Or),
+            "TYPED" | "typed" => Ok(BinOp::Is),
+            "as" => Ok(BinOp::As),
+            "in" => Ok(BinOp::In),
+            _ => Err(()),
         }
     }
 }
@@ -157,11 +161,9 @@ impl Expr {
             }
             (Value::Record(v_fields), SimpleType::Record(t_fields)) => {
                 v_fields.len() == t_fields.len()
-                    && v_fields.iter().all(|(k, v)| {
-                        t_fields
-                            .get(k)
-                            .map_or(false, |ty| Expr::value_is_type(v, ty))
-                    })
+                    && v_fields
+                        .iter()
+                        .all(|(k, v)| t_fields.get(k).is_some_and(|ty| Expr::value_is_type(v, ty)))
             }
             (_, SimpleType::Star) => true,
             (_, SimpleType::Union(a, b)) => {

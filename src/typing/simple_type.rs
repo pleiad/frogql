@@ -101,7 +101,7 @@ impl SimpleType {
             (SimpleType::Record(a), SimpleType::Record(b)) => {
                 a.len() == b.len()
                     && a.iter()
-                        .all(|(k, v)| b.get(k).map_or(false, |bv| SimpleType::is_subtype(v, bv)))
+                        .all(|(k, v)| b.get(k).is_some_and(|bv| SimpleType::is_subtype(v, bv)))
             }
             _ => t1 == t2,
         }

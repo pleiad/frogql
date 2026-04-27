@@ -55,9 +55,8 @@ pub struct StringTable {
     current_offset: usize,
 }
 
-impl StringTable {
-    /// Create a new empty string table. Call `init` to allocate its first page.
-    pub fn new() -> Self {
+impl Default for StringTable {
+    fn default() -> Self {
         StringTable {
             str_to_id: HashMap::new(),
             id_to_str: Vec::new(),
@@ -65,6 +64,13 @@ impl StringTable {
             current_page_idx: 0,
             current_offset: PAGE_HEADER + 2, // skip page header + entry_count
         }
+    }
+}
+
+impl StringTable {
+    /// Create a new empty string table. Call `init` to allocate its first page.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Allocate the first page for a fresh string table.
@@ -315,6 +321,11 @@ impl StringTable {
     /// Number of interned strings.
     pub fn len(&self) -> usize {
         self.id_to_str.len()
+    }
+
+    /// True when no strings have been interned.
+    pub fn is_empty(&self) -> bool {
+        self.id_to_str.is_empty()
     }
 
     /// Allocate a new string table page and switch to it.

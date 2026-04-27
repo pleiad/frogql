@@ -94,6 +94,8 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
             adj.entry(tgt).or_default().push((eid32, src, 2));
         }
     }
+    // Matches disk_index::write_adjacency_index's parameter shape (file format).
+    #[allow(clippy::type_complexity)]
     let adj_entries: Vec<(u32, Vec<(u32, u32, u8)>)> = adj.into_iter().collect();
     let adj_root = disk_index::write_adjacency_index(&mut pager, &adj_entries)?;
 
@@ -312,7 +314,7 @@ fn store_cell(
     let mut page = Page::new(page_type);
     let cell_idx = page
         .insert_cell(cell)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "cell too large for page"))?;
+        .ok_or_else(|| io::Error::other("cell too large for page"))?;
     pager.write_page(pg, &page)?;
     pages.push(pg);
     Ok((pg, cell_idx))

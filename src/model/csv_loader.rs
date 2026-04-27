@@ -208,7 +208,7 @@ fn strip_node_types(raw: &str, node_types: &[String]) -> String {
     let mut name = raw.to_string();
     // Strip ONE node type from start and ONE from end (longest match first).
     let mut sorted_types: Vec<&String> = node_types.iter().collect();
-    sorted_types.sort_by(|a, b| b.len().cmp(&a.len()));
+    sorted_types.sort_by_key(|s| std::cmp::Reverse(s.len()));
     // Strip prefix (one pass only)
     for t in &sorted_types {
         if name.starts_with(t.as_str()) {
@@ -256,10 +256,8 @@ fn json_to_value(j: &serde_json::Value) -> Option<Value> {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Some(Value::Int(i))
-            } else if let Some(x) = n.as_f64() {
-                Some(Value::Float(x))
             } else {
-                None
+                n.as_f64().map(Value::Float)
             }
         }
         serde_json::Value::Array(items) => {

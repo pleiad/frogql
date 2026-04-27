@@ -145,7 +145,7 @@ impl PathType {
                     nodes
                         .into_iter()
                         .filter_map(node_descriptor)
-                        .map(|d| PathType::node(d))
+                        .map(PathType::node)
                         .collect(),
                 )
             }
