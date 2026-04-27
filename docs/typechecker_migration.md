@@ -351,7 +351,7 @@ work; phase-2 changes land here too.
 Test totals on `typing/checker`:
 - `cargo test --lib`: 62 passing (same as `main`)
 - `cargo test --test typecheck_smoke`: 4 passing (new — wire-level smoke)
-- `cargo test --test typecheck_fppc_parity`: 45 passing (new — direct
+- `cargo test --test typecheck_test`: 45 passing (new — direct
   translation of fppc's typechecker test suite; see below)
 - All other integration tests still pass with no modification — 254 total
 - `cargo test --test bench_test`: 2 of 4 failing with `attempt to subtract
@@ -364,10 +364,10 @@ Test totals on `typing/checker`:
   five pass; the runtime returns expected row counts (38 movies, 133
   people, etc.)
 
-## fppc parity: 45/46 tests translated
+## Equivalence with fppc: 45/46 tests translated
 
-`tests/typecheck_fppc_parity.rs` translates fppc's typechecker test suite
-in `fppc/src/typechecker/checker.rs::tests` line-for-line into gqlite. Each
+`tests/typecheck_test.rs` translates fppc's typechecker test suite in
+`fppc/src/typechecker/checker.rs::tests` line-for-line into gqlite. Each
 test mirrors a fppc test with the same name and asserts the same `ok` /
 `empty` / warning predicates. Surface-syntax differences (`{a: int}` →
 `{a is int}`, bare `->` → `()-[]->()` for parser anchoring) are adapted

@@ -1,14 +1,17 @@
-//! Behavioral parity tests against fppc's typechecker test suite.
+//! Typechecker tests.
 //!
-//! Each test mirrors a test in `fppc/src/typechecker/checker.rs::tests`.
-//! Comments give the fppc test name. Where fppc and gqlite diverge on
-//! surface syntax — fppc uses `{a: int}` for property type ascription,
-//! gqlite uses `{a is int}` — we adapt the query.
+//! Originally translated line-for-line from `fppc/src/typechecker/checker.rs`'s
+//! inline `#[cfg(test)] mod tests` (the typechecker reference test suite).
+//! Surface-syntax differences are adapted: gqlite uses `{a is int}` for
+//! property type ascription where fppc uses `{a: int}`; gqlite's parser
+//! requires node anchors (`()-[]->()` not bare `->`); fppc's
+//! `test_incompatible_records` uses double-brace nested record syntax that
+//! gqlite's parser doesn't accept and is omitted (the underlying lattice
+//! case is covered by the closed-schema tests below).
 //!
-//! Strategy: assert the same `ok` / `empty` / warning predicates as fppc.
-//! Where a fppc test exercises a feature gqlite's parser doesn't accept
-//! (bare-edge starts like `->` or `-{1,2}`), the test is annotated and
-//! skipped with a comment rather than removed; phase 2 can revisit.
+//! These assert the same `ok` / `empty` / warning predicates the fppc
+//! suite asserts. The file name reflects gqlite-local convention
+//! (`*_test.rs`), not fppc dependency.
 
 use std::collections::BTreeMap;
 
