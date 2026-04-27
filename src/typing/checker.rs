@@ -69,7 +69,7 @@ impl Typechecker {
         self.errors.clear();
         self.warnings.clear();
 
-        let mut r = self.check_path_pattern(&q.pattern);
+        let mut r = self.check_path_pattern(&q.collapsed_pattern());
         r.empty = r.path.is_unsatisfiable() || r.env.is_empty();
 
         if let Some(group_by) = &q.group_by {

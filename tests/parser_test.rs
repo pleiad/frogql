@@ -633,7 +633,7 @@ fn test_join_shared_var() {
 #[test]
 fn test_match_simple() {
     let q = gqlrust::compile_query("MATCH (x)").unwrap();
-    assert!(matches!(q.pattern, PathPattern::Node(_)));
+    assert!(matches!(q.collapsed_pattern(), PathPattern::Node(_)));
     assert!(q.returns.is_none());
 }
 
@@ -643,7 +643,7 @@ fn test_match_where_return() {
         "MATCH (x) -[:Transfer]-> (y) WHERE x.amount > 100 RETURN x.name, y.name",
     )
     .unwrap();
-    assert!(matches!(q.pattern, PathPattern::Filter(_, _)));
+    assert!(matches!(q.collapsed_pattern(), PathPattern::Filter(_, _)));
     assert_eq!(q.returns.as_ref().unwrap().len(), 2);
     assert!(!q.distinct);
 }
@@ -668,7 +668,7 @@ fn test_match_return_alias() {
 #[test]
 fn test_no_match_keyword_still_works() {
     let q = gqlrust::compile_query("(x) -[]-> (y)").unwrap();
-    assert!(matches!(q.pattern, PathPattern::Concat(_, _)));
+    assert!(matches!(q.collapsed_pattern(), PathPattern::Concat(_, _)));
     assert!(q.returns.is_none());
 }
 

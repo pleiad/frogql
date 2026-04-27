@@ -2,7 +2,9 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::{Aggregator, GeneralSetKind, Query, ReturnItem, SetQuantifier};
+use crate::syntax::query::{
+    Aggregator, GeneralSetKind, MatchStatement, Query, ReturnItem, SetQuantifier,
+};
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
 use crate::typing::property_type::PropertyType;
@@ -13,7 +15,7 @@ use super::lexer::{Lexer, Token};
 /// Parse a GQL path pattern string into a PathPattern (backwards compatible).
 pub fn parse(input: &str) -> Result<PathPattern, String> {
     let q = parse_query(input)?;
-    Ok(q.pattern)
+    Ok(q.collapsed_pattern())
 }
 
 /// Parse a full GQL query: optional MATCH, path pattern, optional WHERE, optional RETURN.
@@ -105,19 +107,21 @@ impl Parser {
             None
         };
 
+        let matches = vec![MatchStatement::Simple { pattern }];
+
         // Optional RETURN clause
         if self.eat(&Token::Return) {
             let distinct = self.eat(&Token::Distinct);
             let returns = self.return_list()?;
             Ok(Query {
-                pattern,
+                matches,
                 group_by,
                 returns: Some(returns),
                 distinct,
             })
         } else {
             Ok(Query {
-                pattern,
+                matches,
                 group_by,
                 returns: None,
                 distinct: false,

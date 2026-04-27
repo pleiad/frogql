@@ -9,8 +9,20 @@ pub mod syntax;
 pub mod typing;
 
 use syntax::path_pattern::PathPattern;
-use syntax::query::Query;
+use syntax::query::{MatchStatement, Query};
 use typing::checker::Typechecker;
+
+/// Optimize each match statement's pattern in place.
+fn optimize_matches(matches: Vec<MatchStatement>) -> Vec<MatchStatement> {
+    matches
+        .into_iter()
+        .map(|m| match m {
+            MatchStatement::Simple { pattern } => MatchStatement::Simple {
+                pattern: optimizer::compile(pattern),
+            },
+        })
+        .collect()
+}
 
 /// Phase-tagged compile failure.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,12 +63,9 @@ pub fn compile_query_with_diagnostics(input: &str) -> Result<CompileResult, Comp
         return Err(CompileError::Type(tc.errors));
     }
     let warnings = tc.warnings;
-    let optimized_pattern = optimizer::compile(q.pattern);
+    let matches = optimize_matches(q.matches);
     Ok(CompileResult {
-        query: Query {
-            pattern: optimized_pattern,
-            ..q
-        },
+        query: Query { matches, ..q },
         warnings,
     })
 }
@@ -76,7 +85,8 @@ pub fn compile(query: &str) -> Result<PathPattern, String> {
     if !r.ok {
         return Err(tc.errors.join("; "));
     }
-    Ok(optimizer::compile(q.pattern))
+    let matches = optimize_matches(q.matches);
+    Ok(Query { matches, ..q }.collapsed_pattern())
 }
 
 /// Compile a full GQL query: parse → elaborate → typecheck → optimize.
@@ -94,7 +104,8 @@ pub fn compile_unchecked(query: &str) -> Result<PathPattern, String> {
     let ast = parser::parse(query)?;
     let q = Query::pattern_only(ast);
     let q = elaborate::elaborate_query(q);
-    Ok(optimizer::compile(q.pattern))
+    let matches = optimize_matches(q.matches);
+    Ok(Query { matches, ..q }.collapsed_pattern())
 }
 
 /// Compile a full GQL query without typechecking. Same plan as
@@ -102,9 +113,6 @@ pub fn compile_unchecked(query: &str) -> Result<PathPattern, String> {
 pub fn compile_query_unchecked(input: &str) -> Result<Query, String> {
     let q = parser::parse_query(input)?;
     let q = elaborate::elaborate_query(q);
-    let optimized_pattern = optimizer::compile(q.pattern);
-    Ok(Query {
-        pattern: optimized_pattern,
-        ..q
-    })
+    let matches = optimize_matches(q.matches);
+    Ok(Query { matches, ..q })
 }

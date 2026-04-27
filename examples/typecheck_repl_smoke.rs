@@ -79,7 +79,9 @@ impl<'a> Suite<'a> {
                 return;
             }
         };
-        if format!("{:?}", checked.pattern) != format!("{:?}", unchecked.pattern) {
+        if format!("{:?}", checked.collapsed_pattern())
+            != format!("{:?}", unchecked.collapsed_pattern())
+        {
             println!("  ✗ plan mismatch between checked and unchecked");
             self.fail += 1;
             return;
