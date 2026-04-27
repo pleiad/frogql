@@ -75,14 +75,42 @@ impl Typechecker {
         }
         if let Some(returns) = &q.returns {
             self.check_returns(returns, &r.env);
-            if let Some(group_by) = &q.group_by {
-                self.check_returns_match_group_by(returns, group_by);
+            match &q.group_by {
+                Some(group_by) => self.check_returns_match_group_by(returns, group_by),
+                None => self.check_no_implicit_group_by(returns),
             }
         }
         if !self.errors.is_empty() {
             r.ok = false;
         }
         r
+    }
+
+    /// Reject the Cypher-style implicit grouping: a RETURN that mixes
+    /// aggregate and non-aggregate items without a GROUP BY clause.
+    /// ISO §16.15 requires the grouping keys to be explicit.
+    ///
+    /// Why this is enforced: implicit grouping silently produced wrong
+    /// results in common patterns like `RETURN x.name, COUNT(*)` —
+    /// every name is unique, so every group has size 1, so the count
+    /// is always 1, which is almost never what the user wants. Per
+    /// @mtoro on 2026-04-27 we drop implicit grouping from the checked
+    /// pipeline.
+    ///
+    /// Pure-aggregate queries (`RETURN COUNT(*)`) and pure-projection
+    /// queries (`RETURN x.a, x.b`) remain valid without GROUP BY.
+    /// `compile_query_unchecked` still bypasses this check for users
+    /// who want the implicit Cypher behavior.
+    fn check_no_implicit_group_by(&mut self, items: &[ReturnItem]) {
+        let has_agg = items.iter().any(|i| i.is_aggregate());
+        let has_expr = items.iter().any(|i| !i.is_aggregate());
+        if has_agg && has_expr {
+            self.errors.push(
+                "RETURN mixes aggregate and non-aggregate items but no GROUP BY \
+                 clause is present. Add `GROUP BY <expr>...` before the RETURN."
+                    .to_string(),
+            );
+        }
     }
 
     /// Type-check each expression in an explicit GROUP BY clause against

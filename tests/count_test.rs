@@ -177,11 +177,14 @@ fn test_count_expr_zero_match_emits_zero_row() {
 }
 
 #[test]
-fn test_count_star_groupby_implicit() {
-    // Two non-aggregate groups (Boston: 2, Seattle: 1) + COUNT(*) per group.
+fn test_count_star_groupby_basic() {
+    // Two groups by city (Boston: 2, Seattle: 1) + COUNT(*) per group.
     // The output order is the order the runtime first sees each group key.
     let g = graph_three_users();
-    let rs = run(&g, "MATCH (x: User) RETURN x.city, COUNT(*)");
+    let rs = run(
+        &g,
+        "MATCH (x: User) GROUP BY x.city RETURN x.city, COUNT(*)",
+    );
     assert_eq!(rs.len(), 2);
 
     // Sort by city for deterministic comparison (insertion order depends
@@ -377,7 +380,10 @@ fn sort_by_first_two(mut rs: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
 fn test_groupby_with_sum() {
     // Boston: Alice (30) + Bob (25) = 55. Seattle: Carol (40) = 40.
     let g = graph_three_users();
-    let rs = sort_by_first_two(run(&g, "MATCH (x: User) RETURN x.city, SUM(x.age)"));
+    let rs = sort_by_first_two(run(
+        &g,
+        "MATCH (x: User) GROUP BY x.city RETURN x.city, SUM(x.age)",
+    ));
     assert_eq!(
         rs,
         vec![
@@ -391,7 +397,10 @@ fn test_groupby_with_sum() {
 fn test_groupby_with_avg() {
     // Boston: avg(30, 25) = 27.5. Seattle: avg(40) = 40.0.
     let g = graph_three_users();
-    let rs = sort_by_first_two(run(&g, "MATCH (x: User) RETURN x.city, AVG(x.age)"));
+    let rs = sort_by_first_two(run(
+        &g,
+        "MATCH (x: User) GROUP BY x.city RETURN x.city, AVG(x.age)",
+    ));
     assert_eq!(rs.len(), 2);
     match &rs[0][1] {
         Value::Float(f) => assert!((f - 27.5).abs() < 1e-9, "Boston avg: {f}"),
@@ -408,7 +417,7 @@ fn test_groupby_with_min_max_per_group() {
     let g = graph_three_users();
     let rs = sort_by_first_two(run(
         &g,
-        "MATCH (x: User) RETURN x.city, MIN(x.age), MAX(x.age)",
+        "MATCH (x: User) GROUP BY x.city RETURN x.city, MIN(x.age), MAX(x.age)",
     ));
     assert_eq!(
         rs,
@@ -436,7 +445,10 @@ fn test_groupby_two_columns() {
       "edges": []
     }"#;
     let g = Graph::from_json_str(json).unwrap();
-    let rs = sort_by_first_two(run(&g, "MATCH (x: U) RETURN x.country, x.city, COUNT(*)"));
+    let rs = sort_by_first_two(run(
+        &g,
+        "MATCH (x: U) GROUP BY x.country, x.city RETURN x.country, x.city, COUNT(*)",
+    ));
     // Three groups: (AR, BuenosAires) → 1, (CL, Santiago) → 2, (CL, Valparaiso) → 1.
     assert_eq!(rs.len(), 3);
     assert_eq!(rs[0][2], Value::Int(1)); // AR/BuenosAires
@@ -451,7 +463,7 @@ fn test_groupby_count_distinct_per_group() {
     let g = graph_three_users();
     let rs = sort_by_first_two(run(
         &g,
-        "MATCH (x: User) RETURN x.city, COUNT(DISTINCT x.age)",
+        "MATCH (x: User) GROUP BY x.city RETURN x.city, COUNT(DISTINCT x.age)",
     ));
     assert_eq!(
         rs,
@@ -501,7 +513,7 @@ fn test_aggregate_groupby_respects_output_limit() {
     // The limit is applied to OUTPUT rows (groups), not input rows.
     // Two cities → two groups; limit=1 truncates to one group.
     let g = graph_three_users();
-    let query = compile_query("MATCH (x: User) RETURN x.city, COUNT(*)").unwrap();
+    let query = compile_query("MATCH (x: User) GROUP BY x.city RETURN x.city, COUNT(*)").unwrap();
     let rt = Runtime::new(&g);
     match rt.run_query(&query, 1) {
         QueryResult::Projected(rs) => assert_eq!(rs.len(), 1),
@@ -513,7 +525,7 @@ fn test_aggregate_groupby_respects_output_limit() {
 fn test_aggregate_no_limit_returns_all_groups() {
     // limit=0 means unlimited: both groups emitted.
     let g = graph_three_users();
-    let query = compile_query("MATCH (x: User) RETURN x.city, COUNT(*)").unwrap();
+    let query = compile_query("MATCH (x: User) GROUP BY x.city RETURN x.city, COUNT(*)").unwrap();
     let rt = Runtime::new(&g);
     match rt.run_query(&query, 0) {
         QueryResult::Projected(rs) => assert_eq!(rs.len(), 2),
@@ -597,16 +609,49 @@ fn test_groupby_explicit_lowercase() {
 }
 
 #[test]
-fn test_groupby_explicit_matches_implicit_when_aligned() {
-    // The two forms produce the same output when the GROUP BY list
-    // exactly matches the non-aggregate RETURN items.
+fn test_implicit_groupby_now_rejected() {
+    // Regression: RETURN that mixes a non-aggregate item with an aggregate
+    // used to silently use Cypher-style implicit grouping. As of
+    // 2026-04-27 (per @mtoro) the checked pipeline rejects this — users
+    // must write the GROUP BY clause explicitly.
+    let result = compile_query("MATCH (x: User) RETURN x.city, COUNT(*)");
+    assert!(result.is_err(), "expected error, got {result:?}");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("GROUP BY"),
+        "expected error mentioning GROUP BY, got: {err}"
+    );
+}
+
+#[test]
+fn test_implicit_groupby_unchecked_still_works() {
+    // Escape hatch: compile_query_unchecked bypasses the typechecker
+    // and runs the implicit grouping path for users who want it.
     let g = graph_three_users();
-    let implicit = sort_by_first_two(run(&g, "MATCH (x: User) RETURN x.city, COUNT(*)"));
-    let explicit = sort_by_first_two(run(
-        &g,
-        "MATCH (x: User) GROUP BY x.city RETURN x.city, COUNT(*)",
-    ));
-    assert_eq!(implicit, explicit);
+    let q = gqlrust::compile_query_unchecked("MATCH (x: User) RETURN x.city, COUNT(*)").unwrap();
+    let rt = Runtime::new(&g);
+    match rt.run_query(&q, 0) {
+        QueryResult::Projected(rs) => assert_eq!(rs.len(), 2), // 2 cities
+        _ => panic!("expected projected"),
+    }
+}
+
+#[test]
+fn test_pure_aggregate_no_groupby_still_ok() {
+    // A RETURN of only aggregates needs no GROUP BY (no items to group by).
+    let g = graph_three_users();
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN COUNT(*)"),
+        vec![vec![Value::Int(3)]]
+    );
+}
+
+#[test]
+fn test_pure_projection_no_groupby_still_ok() {
+    // A RETURN with no aggregates needs no GROUP BY (nothing to group).
+    let g = graph_three_users();
+    let rs = run(&g, "MATCH (x: User) RETURN x.name");
+    assert_eq!(rs.len(), 3);
 }
 
 #[test]

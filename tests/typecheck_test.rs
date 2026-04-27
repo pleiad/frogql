@@ -563,11 +563,19 @@ fn test_check_sum_unbound_var() {
 }
 
 #[test]
-fn test_check_mixed_aggregate_and_expr() {
-    // Mixes a plain expression on a bound var with COUNT(*); both items
-    // type-check independently and the query is OK.
-    let (r, errs, _) = check_full_query("MATCH (x) RETURN x.foo, COUNT(*)");
-    assert!(r.ok, "expected ok, errors={errs:?}");
+fn test_check_mixed_aggregate_and_expr_requires_explicit_groupby() {
+    // As of 2026-04-27 the checker rejects mixing aggregate and
+    // non-aggregate items without GROUP BY (was implicit before;
+    // dropped per @mtoro). The valid form spells out GROUP BY.
+    let (r_no_gb, errs_no_gb, _) = check_full_query("MATCH (x) RETURN x.foo, COUNT(*)");
+    assert!(!r_no_gb.ok, "expected error without GROUP BY");
+    assert!(
+        errs_no_gb.iter().any(|e| e.contains("GROUP BY")),
+        "expected GROUP BY error, got: {errs_no_gb:?}"
+    );
+
+    let (r_gb, errs_gb, _) = check_full_query("MATCH (x) GROUP BY x.foo RETURN x.foo, COUNT(*)");
+    assert!(r_gb.ok, "expected ok with GROUP BY, errs={errs_gb:?}");
 }
 
 #[test]

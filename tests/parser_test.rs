@@ -709,10 +709,12 @@ fn test_parse_aggregate_with_alias() {
 
 #[test]
 fn test_parse_mixed_aggregate_and_expr() {
-    // RETURN that mixes a plain expr and an aggregate — implicit group-by
-    // semantics will live in the runtime, but the parser just produces a
-    // heterogeneous Vec<ReturnItem>.
-    let parsed = gqlrust::compile_query("MATCH (x) RETURN x.country, COUNT(*)").unwrap();
+    // RETURN that mixes a plain expr and an aggregate — the parser
+    // produces a heterogeneous Vec<ReturnItem>. The full pipeline
+    // (compile_query) requires explicit GROUP BY for this to typecheck,
+    // but the parser stage doesn't enforce that — use compile_query_unchecked
+    // to verify the AST shape without typechecker rejection.
+    let parsed = gqlrust::compile_query_unchecked("MATCH (x) RETURN x.country, COUNT(*)").unwrap();
     let returns = parsed.returns.unwrap();
     assert_eq!(returns.len(), 2);
     assert!(matches!(returns[0], ReturnItem::Expr { .. }));
