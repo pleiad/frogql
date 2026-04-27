@@ -25,6 +25,9 @@ pub enum Token {
     Return,
     Distinct,
     All,
+    /// `GROUP BY` — emitted as a single token to avoid making `group` and `by`
+    /// each their own keyword (both are common as property/field names).
+    GroupBy,
     // Aggregate function names (ISO §20.9, core kinds)
     Count,
     Sum,
@@ -123,6 +126,38 @@ impl Lexer {
             }
         }
         None
+    }
+
+    /// Peek the next identifier-shaped word starting from the current
+    /// position, skipping whitespace. Returns the lowercased word and the
+    /// position just past its last char, or None if no identifier follows.
+    /// Used to detect compound keywords like `GROUP BY` without making
+    /// `group` and `by` each their own keyword.
+    fn peek_next_word(&self) -> Option<(String, usize)> {
+        let mut i = self.pos;
+        while let Some(&c) = self.input.get(i) {
+            if c.is_whitespace() {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        let start = i;
+        while let Some(&c) = self.input.get(i) {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if i == start {
+            return None;
+        }
+        let word: String = self.input[start..i]
+            .iter()
+            .collect::<String>()
+            .to_lowercase();
+        Some((word, i))
     }
 
     fn run(&mut self) -> Result<(), String> {
@@ -358,6 +393,23 @@ impl Lexer {
                         "RETURN" | "return" => Token::Return,
                         "DISTINCT" | "distinct" => Token::Distinct,
                         "ALL" | "all" => Token::All,
+                        // GROUP BY is a compound keyword: only emitted as
+                        // Token::GroupBy when `group` is followed by `by`
+                        // across whitespace. Otherwise `group` stays a Name
+                        // (so `{group: 1}` keeps working). Same logic
+                        // protects bare `by`.
+                        "GROUP" | "group"
+                            if matches!(
+                                self.peek_next_word().as_ref().map(|(w, _)| w.as_str()),
+                                Some("by")
+                            ) =>
+                        {
+                            // Consume the trailing `by` we just peeked.
+                            if let Some((_, end)) = self.peek_next_word() {
+                                self.pos = end;
+                            }
+                            Token::GroupBy
+                        }
                         // Aggregate function names are SOFT keywords: only
                         // tokenized as the keyword when immediately followed
                         // (across whitespace) by `(`. This preserves backward

@@ -79,7 +79,9 @@ impl Parser {
 
     // ===== Full query (MATCH ... WHERE ... RETURN) =====
 
-    // full_query = ("MATCH")? query ("WHERE" expr)? ("RETURN" ("DISTINCT")? return_list)?
+    // full_query = ("MATCH")? query ("WHERE" expr)?
+    //              ("GROUP BY" expr (, expr)*)?
+    //              ("RETURN" ("DISTINCT")? return_list)?
     fn full_query(&mut self) -> Result<Query, String> {
         // Optional MATCH keyword
         self.eat(&Token::Match);
@@ -93,17 +95,37 @@ impl Parser {
             pattern = PathPattern::Filter(Box::new(pattern), expr);
         }
 
+        // Optional explicit GROUP BY (before RETURN, mirroring the order
+        // ISO §16.15 / SQL use). The `<grouping element>` per ISO is a
+        // <binding variable reference> only; gqlite extends to arbitrary
+        // expressions — see the doc on `Query::group_by`.
+        let group_by = if self.eat(&Token::GroupBy) {
+            let mut exprs = vec![self.expr()?];
+            while self.eat(&Token::Comma) {
+                exprs.push(self.expr()?);
+            }
+            Some(exprs)
+        } else {
+            None
+        };
+
         // Optional RETURN clause
         if self.eat(&Token::Return) {
             let distinct = self.eat(&Token::Distinct);
             let returns = self.return_list()?;
             Ok(Query {
                 pattern,
+                group_by,
                 returns: Some(returns),
                 distinct,
             })
         } else {
-            Ok(Query::pattern_only(pattern))
+            Ok(Query {
+                pattern,
+                group_by,
+                returns: None,
+                distinct: false,
+            })
         }
     }
 

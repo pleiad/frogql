@@ -562,3 +562,113 @@ fn test_compile_query_unchecked_supports_aggregates() {
         _ => panic!("expected projected"),
     }
 }
+
+// =======================================================================
+// Explicit GROUP BY (ISO §16.15 / Feature GQ15)
+//
+// gqlite extends the strict standard by accepting arbitrary <expr>s
+// (not only <binding variable reference>s) as <grouping element>s; see
+// the doc on `Query::group_by` for rationale.
+// =======================================================================
+
+#[test]
+fn test_groupby_explicit_basic() {
+    // Same query as the implicit groupby test, written explicitly.
+    let g = graph_three_users();
+    let rs = sort_by_first_two(run(
+        &g,
+        "MATCH (x: User) GROUP BY x.city RETURN x.city, COUNT(*)",
+    ));
+    assert_eq!(
+        rs,
+        vec![
+            vec![Value::Str("Boston".into()), Value::Int(2)],
+            vec![Value::Str("Seattle".into()), Value::Int(1)],
+        ]
+    );
+}
+
+#[test]
+fn test_groupby_explicit_lowercase() {
+    // Soft-keyword: lowercase `group by` (with whitespace) is also accepted.
+    let g = graph_three_users();
+    let rs = run(&g, "MATCH (x: User) group by x.city RETURN COUNT(*)");
+    assert_eq!(rs.len(), 2); // two cities = two groups
+}
+
+#[test]
+fn test_groupby_explicit_matches_implicit_when_aligned() {
+    // The two forms produce the same output when the GROUP BY list
+    // exactly matches the non-aggregate RETURN items.
+    let g = graph_three_users();
+    let implicit = sort_by_first_two(run(&g, "MATCH (x: User) RETURN x.city, COUNT(*)"));
+    let explicit = sort_by_first_two(run(
+        &g,
+        "MATCH (x: User) GROUP BY x.city RETURN x.city, COUNT(*)",
+    ));
+    assert_eq!(implicit, explicit);
+}
+
+#[test]
+fn test_groupby_explicit_two_keys() {
+    let json = r#"{
+      "nodes": [
+        {"id": "u1", "labels": ["U"], "props": {"country": "CL", "city": "Santiago"}},
+        {"id": "u2", "labels": ["U"], "props": {"country": "CL", "city": "Santiago"}},
+        {"id": "u3", "labels": ["U"], "props": {"country": "CL", "city": "Valparaiso"}},
+        {"id": "u4", "labels": ["U"], "props": {"country": "AR", "city": "BuenosAires"}}
+      ],
+      "edges": []
+    }"#;
+    let g = Graph::from_json_str(json).unwrap();
+    let rs = sort_by_first_two(run(
+        &g,
+        "MATCH (x: U) GROUP BY x.country, x.city RETURN x.country, x.city, COUNT(*)",
+    ));
+    assert_eq!(rs.len(), 3);
+    assert_eq!(rs[0][2], Value::Int(1)); // AR/BuenosAires
+    assert_eq!(rs[1][2], Value::Int(2)); // CL/Santiago
+    assert_eq!(rs[2][2], Value::Int(1)); // CL/Valparaiso
+}
+
+#[test]
+fn test_groupby_explicit_rejects_unkeyed_return_item() {
+    // ISO/SQL: any non-aggregate RETURN item must appear in GROUP BY.
+    // `x.name` is not a grouping key here → typechecker rejects.
+    let result = compile_query("MATCH (x: User) GROUP BY x.city RETURN x.name, COUNT(*)");
+    assert!(result.is_err(), "expected typecheck error, got {result:?}");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("GROUP BY") || err.contains("grouping"),
+        "expected error message about GROUP BY, got: {err}"
+    );
+}
+
+#[test]
+fn test_groupby_explicit_unchecked_path_still_runs() {
+    // The unchecked compile path skips the GROUP-BY-coverage check.
+    // Useful for users who know what they're doing or for debugging.
+    let g = graph_three_users();
+    let q =
+        gqlrust::compile_query_unchecked("MATCH (x: User) GROUP BY x.city RETURN x.name, COUNT(*)")
+            .unwrap();
+    let rt = Runtime::new(&g);
+    // Result is implementation-defined when RETURN has unkeyed items
+    // (we resolve `x.name` against the first row of each group), but
+    // the runtime must not panic.
+    match rt.run_query(&q, 0) {
+        QueryResult::Projected(rs) => assert_eq!(rs.len(), 2), // 2 cities
+        _ => panic!("expected projected"),
+    }
+}
+
+#[test]
+fn test_groupby_explicit_pure_aggregate() {
+    // Empty GROUP BY effectively means "single group of all rows", same
+    // semantics as a pure-aggregate query. Currently we don't support
+    // the `GROUP BY ()` empty-grouping-set ISO syntax, but a query with
+    // no GROUP BY and only aggregates produces this single group.
+    let g = graph_three_users();
+    let rs = run(&g, "MATCH (x: User) RETURN SUM(x.age)");
+    assert_eq!(rs, vec![vec![Value::Int(95)]]);
+}

@@ -78,11 +78,22 @@ impl ReturnItem {
     }
 }
 
-/// A full GQL query: MATCH pattern WHERE condition RETURN projections.
+/// A full GQL query: MATCH pattern WHERE condition GROUP BY ... RETURN projections.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     /// The pattern to match (includes WHERE as Filter if present).
     pub pattern: PathPattern,
+    /// Optional explicit GROUP BY (ISO §16.15 + Feature GQ15).
+    /// `None` → implicit Cypher-style grouping (non-aggregate RETURN items
+    ///         become the group key automatically).
+    /// `Some(vec)` → use these expressions as grouping keys; non-aggregate
+    ///              RETURN items must structurally appear in this list.
+    ///
+    /// **Deviation from ISO**: the standard's `<grouping element>` is a
+    /// `<binding variable reference>` only (requires LET to lift expressions
+    /// into named bindings). gqlite accepts arbitrary `Expr`s here for
+    /// usability, matching SQL / Cypher conventions.
+    pub group_by: Option<Vec<Expr>>,
     /// Optional RETURN clause. None means return all bindings.
     pub returns: Option<Vec<ReturnItem>>,
     /// Whether RETURN DISTINCT was specified.
@@ -93,6 +104,7 @@ impl Query {
     pub fn pattern_only(pattern: PathPattern) -> Self {
         Query {
             pattern,
+            group_by: None,
             returns: None,
             distinct: false,
         }
@@ -153,6 +165,10 @@ impl fmt::Display for ReturnItem {
 impl fmt::Display for Query {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "MATCH {}", self.pattern)?;
+        if let Some(gb) = &self.group_by {
+            let exprs: Vec<String> = gb.iter().map(|e| e.to_string()).collect();
+            write!(f, " GROUP BY {}", exprs.join(", "))?;
+        }
         if let Some(returns) = &self.returns {
             write!(f, " RETURN ")?;
             if self.distinct {

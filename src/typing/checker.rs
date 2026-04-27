@@ -63,17 +63,54 @@ impl Typechecker {
     /// so the pattern is checked first. RETURN-clause items are then
     /// walked for unbound-variable / type-mismatch detection: each
     /// expression (including aggregate sub-expressions) is type-checked
-    /// against the pattern's environment. Result-row typing (deciding
-    /// the type of each output column) is still out of scope.
+    /// against the pattern's environment. If an explicit GROUP BY clause
+    /// is present, also: type-check each grouping expression and verify
+    /// every non-aggregate RETURN item appears (structurally) in it.
+    /// Result-row typing (deciding the type of each output column) is
+    /// still out of scope.
     pub fn check_query(&mut self, q: &Query) -> TypecheckResult {
         let mut r = self.check_pattern(&q.pattern);
+        if let Some(group_by) = &q.group_by {
+            self.check_group_by(group_by, &r.env);
+        }
         if let Some(returns) = &q.returns {
             self.check_returns(returns, &r.env);
+            if let Some(group_by) = &q.group_by {
+                self.check_returns_match_group_by(returns, group_by);
+            }
         }
         if !self.errors.is_empty() {
             r.ok = false;
         }
         r
+    }
+
+    /// Type-check each expression in an explicit GROUP BY clause against
+    /// the pattern's environment. The result types are discarded — only
+    /// errors / warnings (e.g. unbound variables) are collected.
+    fn check_group_by(&mut self, exprs: &[Expr], env: &TypeEnvironment) {
+        for e in exprs {
+            let _ = self.check_expr(e, env);
+        }
+    }
+
+    /// SQL/ISO §16.15 requirement: when an explicit GROUP BY clause is
+    /// present, every non-aggregate RETURN item must appear in the GROUP
+    /// BY list. Equality is structural (`Expr::eq`) — `RETURN x.a` with
+    /// `GROUP BY x.a` is OK, but `RETURN x.a + 1` with `GROUP BY x.a` is
+    /// rejected because the projected expression isn't itself a grouping
+    /// key.
+    fn check_returns_match_group_by(&mut self, items: &[ReturnItem], group_by: &[Expr]) {
+        for item in items {
+            if let ReturnItem::Expr { expr, .. } = item {
+                if !group_by.iter().any(|g| g == expr) {
+                    self.errors.push(format!(
+                        "RETURN item `{expr}` is not in the GROUP BY clause; \
+                         non-aggregate projections must match a grouping key."
+                    ));
+                }
+            }
+        }
     }
 
     /// Type-check the items of a RETURN clause against the environment

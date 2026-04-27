@@ -75,7 +75,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let ir = self.run_path_pattern(&query.pattern, input_limit);
 
         let projected = if has_aggs {
-            let mut p = self.run_aggregated(return_items, &ir.rows);
+            let mut p = self.run_aggregated(return_items, query.group_by.as_deref(), &ir.rows);
             if query.distinct {
                 p = dedup_preserving_order(p);
             }
@@ -130,65 +130,95 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
     }
 
-    /// Group-and-aggregate projection (ISO §20.9 + Cypher-style implicit
-    /// GROUP BY).
+    /// Group-and-aggregate projection.
     ///
-    /// 1. The "group key" of a row is the tuple of values produced by the
-    ///    *non-aggregate* return items in their declaration order.
-    /// 2. Rows are partitioned by group key.
-    /// 3. Each group emits one output row: non-aggregate items take the
-    ///    group's value (all rows in the group share it by construction),
-    ///    aggregate items are reduced over the group's row set.
+    /// The grouping keys come from one of two sources:
+    /// - **Explicit GROUP BY** (`explicit_group_by = Some(exprs)`, ISO
+    ///   §16.15 / Feature GQ15): the listed expressions are evaluated
+    ///   per row to build the key. RETURN may project any aggregate plus
+    ///   any non-aggregate Expr that is structurally equal to a group-by
+    ///   expression.
+    /// - **Implicit (Cypher-style)** (`explicit_group_by = None`): every
+    ///   non-aggregate item in RETURN forms part of the key. Convenient
+    ///   but a divergence from strict ISO; used as the default fallback.
     ///
-    /// Edge case (ISO §20.9 GR 7a-i): a query with only aggregates and
-    /// zero input rows still emits one output row — `RETURN COUNT(*)` over
-    /// an empty match yields `[[0]]`, not `[]`. A mixed RETURN with zero
-    /// input rows yields no rows because there are no group keys to emit.
+    /// Either way:
+    /// 1. Rows are partitioned by their key tuple.
+    /// 2. Each group emits one output row: aggregate items are reduced
+    ///    over the group's row set; non-aggregate items resolve from the
+    ///    group's first row (they're invariant within the group).
+    ///
+    /// Edge case (ISO §20.9 GR 7a-i): a query with no key items and zero
+    /// input rows still emits one output row — `RETURN COUNT(*)` over an
+    /// empty match yields `[[0]]`, not `[]`.
     ///
     /// Performance: groups are stored as `Vec<(GroupKey, Vec<usize>)>` and
     /// looked up by linear scan. `Value` lacks `Hash`/`Ord` (because of
     /// `f64`), so a `HashMap` would require a manual `Hash` impl. For now
     /// linear search is fine; revisit if profiling shows it matters.
-    fn run_aggregated(&self, items: &[ReturnItem], rows: &[ResultRow]) -> Vec<Vec<Value>> {
-        // Indices into `items` of the non-aggregate items, in order.
-        // These form the GROUP BY key of each row.
-        let key_positions: Vec<usize> = items
-            .iter()
-            .enumerate()
-            .filter_map(|(i, it)| (!it.is_aggregate()).then_some(i))
-            .collect();
-
+    fn run_aggregated(
+        &self,
+        items: &[ReturnItem],
+        explicit_group_by: Option<&[Expr]>,
+        rows: &[ResultRow],
+    ) -> Vec<Vec<Value>> {
         // groups[i] = (group_key_values, row_indices_in_input).
         let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
 
+        // Compute key for each row. Source depends on explicit vs implicit.
         for (row_idx, row) in rows.iter().enumerate() {
-            let key: Vec<Value> = key_positions
-                .iter()
-                .map(|&p| self.eval_expr_item(&items[p], &row.assignment))
-                .collect();
+            let key: Vec<Value> = match explicit_group_by {
+                Some(exprs) => exprs
+                    .iter()
+                    .map(|e| match self.run_expr(&row.assignment, e) {
+                        ExprResult::Success(v) => v,
+                        ExprResult::Failure(_) => Value::Str("NULL".into()),
+                    })
+                    .collect(),
+                None => items
+                    .iter()
+                    .filter(|it| !it.is_aggregate())
+                    .map(|it| self.eval_expr_item(it, &row.assignment))
+                    .collect(),
+            };
             match groups.iter_mut().find(|(k, _)| k == &key) {
                 Some((_, idxs)) => idxs.push(row_idx),
                 None => groups.push((key, vec![row_idx])),
             }
         }
 
-        // ISO §20.9 GR 7a-i: pure-aggregate query with zero rows emits
-        // one row of "empty-group" aggregate values (e.g. COUNT(*) → 0).
-        if key_positions.is_empty() && groups.is_empty() {
+        // Pure-aggregate edge case: zero rows + no group key → emit one
+        // empty-group output row (so `COUNT(*)` over no matches = 0).
+        let key_arity = explicit_group_by
+            .map(|e| e.len())
+            .unwrap_or_else(|| items.iter().filter(|it| !it.is_aggregate()).count());
+        if key_arity == 0 && groups.is_empty() {
             groups.push((Vec::new(), Vec::new()));
         }
 
         // Project each group to one output row.
         let mut out: Vec<Vec<Value>> = Vec::with_capacity(groups.len());
-        for (key, row_idxs) in &groups {
-            let mut key_iter = key.iter();
+        for (_key, row_idxs) in &groups {
             let row_vals: Vec<Value> = items
                 .iter()
                 .map(|item| match item {
-                    ReturnItem::Expr { .. } => key_iter
-                        .next()
-                        .expect("key_positions and Expr items align by construction")
-                        .clone(),
+                    ReturnItem::Expr { expr, .. } => {
+                        // Non-aggregate item: resolve against the first row
+                        // of the group. Invariant within the group either
+                        // because (a) implicit GROUP BY made `expr` part of
+                        // the key, or (b) explicit GROUP BY listed it (the
+                        // typechecker / caller is responsible for verifying
+                        // this; a violation produces a possibly-arbitrary
+                        // value rather than panicking).
+                        let mu = match row_idxs.first() {
+                            Some(&i) => &rows[i].assignment,
+                            None => return Value::Str("NULL".into()),
+                        };
+                        match self.run_expr(mu, expr) {
+                            ExprResult::Success(v) => v,
+                            ExprResult::Failure(_) => Value::Str("NULL".into()),
+                        }
+                    }
                     ReturnItem::Aggregate { agg, .. } => self.apply_aggregator(agg, row_idxs, rows),
                 })
                 .collect();
