@@ -170,9 +170,9 @@ impl Parser {
         // ISO §20.9 syntax rule 2: ALL is implicit when omitted.
         let quantifier = if self.eat(&Token::Distinct) {
             SetQuantifier::Distinct
-        } else if self.eat(&Token::All) {
-            SetQuantifier::All
         } else {
+            // Consume optional ALL keyword (no behavior change either way).
+            self.eat(&Token::All);
             SetQuantifier::All
         };
         let expr = self.expr()?;

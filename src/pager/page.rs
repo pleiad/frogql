@@ -128,11 +128,7 @@ impl Page {
     pub fn free_space(&self) -> usize {
         let ptr_end = self.ptr_array_end();
         let cell_start = self.cell_area_start() as usize;
-        if cell_start > ptr_end {
-            cell_start - ptr_end
-        } else {
-            0
-        }
+        cell_start.saturating_sub(ptr_end)
     }
 
     /// Insert a cell (variable-length byte slice) into this page.

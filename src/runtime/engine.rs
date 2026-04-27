@@ -1248,7 +1248,7 @@ fn eq_value(a: &Value, b: &Value) -> bool {
         (Value::Record(x), Value::Record(y)) => {
             x.len() == y.len()
                 && x.iter()
-                    .all(|(k, vx)| y.get(k).map_or(false, |vy| eq_value(vx, vy)))
+                    .all(|(k, vx)| y.get(k).is_some_and(|vy| eq_value(vx, vy)))
         }
         _ => false,
     }

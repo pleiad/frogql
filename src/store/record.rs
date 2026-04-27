@@ -22,7 +22,6 @@
 /// [tgt_internal_id: u32 LE]    — internal sequential ID of target node
 /// [directionality: u8]         — 0 = directed (->), 1 = undirected (~~)
 /// ```
-
 pub const VALUE_TYPE_INT: u8 = 0;
 pub const VALUE_TYPE_STR: u8 = 1;
 pub const VALUE_TYPE_BOOL: u8 = 2;

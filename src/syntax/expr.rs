@@ -160,7 +160,7 @@ impl Expr {
                     && v_fields.iter().all(|(k, v)| {
                         t_fields
                             .get(k)
-                            .map_or(false, |ty| Expr::value_is_type(v, ty))
+                            .is_some_and(|ty| Expr::value_is_type(v, ty))
                     })
             }
             (_, SimpleType::Star) => true,

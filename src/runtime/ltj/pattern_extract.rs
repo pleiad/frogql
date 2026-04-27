@@ -577,10 +577,9 @@ fn convert_results<G: GraphAccess>(
 }
 
 fn find_edge<G: GraphAccess>(graph: &G, src: Id, tgt: Id) -> Option<Id> {
-    for &eid in &graph.outgoing_edges(src) {
-        if graph.tgt(eid) == tgt {
-            return Some(eid);
-        }
-    }
-    None
+    graph
+        .outgoing_edges(src)
+        .iter()
+        .find(|&&eid| graph.tgt(eid) == tgt)
+        .copied()
 }

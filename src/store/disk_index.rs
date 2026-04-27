@@ -324,7 +324,7 @@ pub fn write_edge_topo(
     }
 
     // Build entries in order, then chunk
-    let total_chunks = (n + MAX_EDGE_TOPO_PER_PAGE - 1) / MAX_EDGE_TOPO_PER_PAGE;
+    let total_chunks = n.div_ceil(MAX_EDGE_TOPO_PER_PAGE);
     let mut page_nums = Vec::with_capacity(total_chunks);
     for _ in 0..total_chunks {
         page_nums.push(pager.allocate_page()?);
