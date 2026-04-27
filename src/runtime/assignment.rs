@@ -9,9 +9,15 @@ pub struct Assignment {
     pub m: HashMap<String, PathValue>,
 }
 
+impl Default for Assignment {
+    fn default() -> Self {
+        Self { m: HashMap::new() }
+    }
+}
+
 impl Assignment {
     pub fn new() -> Self {
-        Self { m: HashMap::new() }
+        Self::default()
     }
 
     /// Create with a single binding (if var is Some).

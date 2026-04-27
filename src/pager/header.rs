@@ -49,9 +49,8 @@ pub struct FileHeader {
     pub edge_topo_root: u32,
 }
 
-impl FileHeader {
-    /// Create a fresh header for a new database.
-    pub fn new() -> Self {
+impl Default for FileHeader {
+    fn default() -> Self {
         FileHeader {
             format_version: FORMAT_VERSION,
             page_size: PAGE_SIZE as u32,
@@ -68,6 +67,13 @@ impl FileHeader {
             node_locs_root: 0,
             edge_topo_root: 0,
         }
+    }
+}
+
+impl FileHeader {
+    /// Create a fresh header for a new database.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Serialize the header into page 0.

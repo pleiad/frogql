@@ -48,22 +48,27 @@ impl BinOp {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<BinOp> {
+}
+
+impl std::str::FromStr for BinOp {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<BinOp, ()> {
         match s {
-            "+" => Some(BinOp::Add),
-            "-" => Some(BinOp::Sub),
-            "<" => Some(BinOp::Lt),
-            ">" => Some(BinOp::Gt),
-            "<=" => Some(BinOp::Le),
-            ">=" => Some(BinOp::Ge),
-            "=" => Some(BinOp::Eq),
-            "!=" => Some(BinOp::Ne),
-            "and" => Some(BinOp::And),
-            "or" => Some(BinOp::Or),
-            "TYPED" | "typed" => Some(BinOp::Is),
-            "as" => Some(BinOp::As),
-            "in" => Some(BinOp::In),
-            _ => None,
+            "+" => Ok(BinOp::Add),
+            "-" => Ok(BinOp::Sub),
+            "<" => Ok(BinOp::Lt),
+            ">" => Ok(BinOp::Gt),
+            "<=" => Ok(BinOp::Le),
+            ">=" => Ok(BinOp::Ge),
+            "=" => Ok(BinOp::Eq),
+            "!=" => Ok(BinOp::Ne),
+            "and" => Ok(BinOp::And),
+            "or" => Ok(BinOp::Or),
+            "TYPED" | "typed" => Ok(BinOp::Is),
+            "as" => Ok(BinOp::As),
+            "in" => Ok(BinOp::In),
+            _ => Err(()),
         }
     }
 }
