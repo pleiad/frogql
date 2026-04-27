@@ -75,7 +75,7 @@ impl LabelType {
 
     /// Whether a label type is inconsistent (e.g., A & !A).
     /// Currently unimplemented — always returns false (matches Python).
-    pub fn is_empty(_l: &LabelType) -> bool {
+    pub fn is_empty(&self) -> bool {
         false
     }
 

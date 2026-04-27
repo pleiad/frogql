@@ -39,7 +39,7 @@ impl DescriptorType {
     }
 
     pub fn is_empty(&self) -> bool {
-        LabelType::is_empty(&self.label) || self.props.is_empty()
+        self.label.is_empty() || self.props.is_empty()
     }
 }
 
