@@ -45,8 +45,12 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
         let label_sids = intern_strings(&labels, &mut strings, &mut pager)?;
         let encoded_props = encode_props(&graph.edge_props[eid], &mut strings, &mut pager)?;
         let cell = record::encode_edge(
-            user_id_sid, &label_sids, &encoded_props,
-            graph.edge_src[eid], graph.edge_tgt[eid], graph.edge_directed[eid],
+            user_id_sid,
+            &label_sids,
+            &encoded_props,
+            graph.edge_src[eid],
+            graph.edge_tgt[eid],
+            graph.edge_directed[eid],
         );
         let loc = store_cell(&mut pager, PageType::EdgeData, &cell, &mut edge_pages)?;
         edge_locs.push(loc);
@@ -100,7 +104,11 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
     // --- Write fast-open indexes (node locs + edge topology) ---
     let node_locs_root = disk_index::write_node_locs(&mut pager, &node_locs)?;
     let edge_topo_root = disk_index::write_edge_topo(
-        &mut pager, &edge_locs, &graph.edge_src, &graph.edge_tgt, &graph.edge_directed,
+        &mut pager,
+        &edge_locs,
+        &graph.edge_src,
+        &graph.edge_tgt,
+        &graph.edge_directed,
     )?;
 
     // Update header
@@ -149,10 +157,16 @@ pub fn load_graph(db_path: &Path) -> io::Result<Graph> {
                     let (offset, end) = cell_bounds(&page, i);
                     let (decoded, _) = record::decode_node(&page.data[offset..end]);
                     let name = strings.resolve(decoded.user_id_str_id).unwrap().to_string();
-                    let labs: Vec<String> = decoded.label_str_ids.iter()
+                    let labs: Vec<String> = decoded
+                        .label_str_ids
+                        .iter()
                         .map(|&sid| strings.resolve(sid).unwrap().to_string())
                         .collect();
-                    let lt = if labs.is_empty() { LabelType::Star } else { LabelType::from_list(&labs) };
+                    let lt = if labs.is_empty() {
+                        LabelType::Star
+                    } else {
+                        LabelType::from_list(&labs)
+                    };
                     node_names.push(name);
                     node_labels.push(lt);
                     node_props.push(decode_props(&decoded.props, &strings));
@@ -162,11 +176,21 @@ pub fn load_graph(db_path: &Path) -> io::Result<Graph> {
                 for i in 0..page.cell_count() {
                     let (offset, end) = cell_bounds(&page, i);
                     let decoded = record::decode_edge(&page.data[offset..end]);
-                    let name = strings.resolve(decoded.node.user_id_str_id).unwrap().to_string();
-                    let labs: Vec<String> = decoded.node.label_str_ids.iter()
+                    let name = strings
+                        .resolve(decoded.node.user_id_str_id)
+                        .unwrap()
+                        .to_string();
+                    let labs: Vec<String> = decoded
+                        .node
+                        .label_str_ids
+                        .iter()
                         .map(|&sid| strings.resolve(sid).unwrap().to_string())
                         .collect();
-                    let lt = if labs.is_empty() { LabelType::Star } else { LabelType::from_list(&labs) };
+                    let lt = if labs.is_empty() {
+                        LabelType::Star
+                    } else {
+                        LabelType::from_list(&labs)
+                    };
                     edge_names.push(name);
                     edge_labels_vec.push(lt);
                     edge_props_vec.push(decode_props(&decoded.node.props, &strings));
@@ -180,9 +204,15 @@ pub fn load_graph(db_path: &Path) -> io::Result<Graph> {
     }
 
     let graph = Graph::from_raw(
-        node_names, node_labels, node_props,
-        edge_names, edge_labels_vec, edge_props_vec,
-        edge_src, edge_tgt, edge_directed,
+        node_names,
+        node_labels,
+        node_props,
+        edge_names,
+        edge_labels_vec,
+        edge_props_vec,
+        edge_src,
+        edge_tgt,
+        edge_directed,
     );
 
     Ok(graph)
@@ -190,11 +220,19 @@ pub fn load_graph(db_path: &Path) -> io::Result<Graph> {
 
 // --- Helpers ---
 
-fn intern_strings(strings_list: &[String], st: &mut StringTable, pager: &mut Pager) -> io::Result<Vec<u32>> {
+fn intern_strings(
+    strings_list: &[String],
+    st: &mut StringTable,
+    pager: &mut Pager,
+) -> io::Result<Vec<u32>> {
     strings_list.iter().map(|s| st.intern(s, pager)).collect()
 }
 
-fn encode_props(props: &Props, st: &mut StringTable, pager: &mut Pager) -> io::Result<Vec<(u32, PropValue)>> {
+fn encode_props(
+    props: &Props,
+    st: &mut StringTable,
+    pager: &mut Pager,
+) -> io::Result<Vec<(u32, PropValue)>> {
     let mut result = Vec::new();
     for (k, v) in props {
         let name_sid = st.intern(k, pager)?;
@@ -212,7 +250,9 @@ fn value_to_prop(v: &Value, st: &mut StringTable, pager: &mut Pager) -> io::Resu
         Value::Bool(b) => PropValue::Bool(*b),
         Value::List(items) => {
             let mut out = Vec::with_capacity(items.len());
-            for it in items { out.push(value_to_prop(it, st, pager)?); }
+            for it in items {
+                out.push(value_to_prop(it, st, pager)?);
+            }
             PropValue::List(out)
         }
         Value::Record(fields) => {
@@ -255,7 +295,12 @@ fn prop_to_value(pv: &PropValue, strings: &StringTable) -> Value {
     }
 }
 
-fn store_cell(pager: &mut Pager, page_type: PageType, cell: &[u8], pages: &mut Vec<u32>) -> io::Result<(u32, u16)> {
+fn store_cell(
+    pager: &mut Pager,
+    page_type: PageType,
+    cell: &[u8],
+    pages: &mut Vec<u32>,
+) -> io::Result<(u32, u16)> {
     if let Some(&last_pg) = pages.last() {
         let mut page = pager.read_page(last_pg)?;
         if let Some(cell_idx) = page.insert_cell(cell) {
@@ -265,7 +310,8 @@ fn store_cell(pager: &mut Pager, page_type: PageType, cell: &[u8], pages: &mut V
     }
     let pg = pager.allocate_page()?;
     let mut page = Page::new(page_type);
-    let cell_idx = page.insert_cell(cell)
+    let cell_idx = page
+        .insert_cell(cell)
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "cell too large for page"))?;
     pager.write_page(pg, &page)?;
     pages.push(pg);
@@ -274,7 +320,11 @@ fn store_cell(pager: &mut Pager, page_type: PageType, cell: &[u8], pages: &mut V
 
 fn cell_bounds(page: &Page, index: u16) -> (usize, usize) {
     let offset = page.cell_offset(index).unwrap() as usize;
-    let end = if index == 0 { PAGE_SIZE } else { page.cell_offset(index - 1).unwrap() as usize };
+    let end = if index == 0 {
+        PAGE_SIZE
+    } else {
+        page.cell_offset(index - 1).unwrap() as usize
+    };
     (offset, end)
 }
 
@@ -283,7 +333,9 @@ fn collect_pages_by_type(pager: &mut Pager, pt: PageType) -> io::Result<Vec<u32>
     let count = pager.header.page_count;
     for pg in 1..count {
         let page = pager.read_page(pg)?;
-        if page.page_type() == pt { pages.push(pg); }
+        if page.page_type() == pt {
+            pages.push(pg);
+        }
     }
     Ok(pages)
 }

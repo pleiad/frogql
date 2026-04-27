@@ -1,4 +1,4 @@
-use super::triple_index::{TrieOrder, TripleIndex, IndexEntry};
+use super::triple_index::{IndexEntry, TrieOrder, TripleIndex};
 
 /// A term in a triple pattern: either a variable or a constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +127,11 @@ impl<'a> LtjIterator<'a> {
         // Descend for each item in the effective stack (constants + variables)
         for (i, &(pos, val)) in eff.iter().enumerate() {
             let depth = Self::spo_to_depth(order, pos);
-            debug_assert_eq!(depth, i, "stack position {:?} should be at depth {} but is at {}", pos, i, depth);
+            debug_assert_eq!(
+                depth, i,
+                "stack position {:?} should be at depth {} but is at {}",
+                pos, i, depth
+            );
             let (lo, hi) = TripleIndex::range_for_key(slice, begin, end, depth, val);
             begin = lo;
             end = hi;

@@ -13,8 +13,8 @@ use crate::typing::property_type::PropertyType;
 use crate::typing::simple_type::SimpleType;
 
 use super::assignment::Assignment;
-use super::ltj::triple_index::TripleIndex;
 use super::ltj::pattern_extract;
+use super::ltj::triple_index::TripleIndex;
 use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
 
 /// Runtime engine for evaluating GQL path patterns on a graph.
@@ -52,12 +52,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             Some(return_items) => {
                 let mut projected: Vec<Vec<Value>> = Vec::new();
                 for row in &ir.rows {
-                    let vals: Vec<Value> = return_items.iter().map(|item| {
-                        match self.run_expr(&row.assignment, &item.expr) {
+                    let vals: Vec<Value> = return_items
+                        .iter()
+                        .map(|item| match self.run_expr(&row.assignment, &item.expr) {
                             ExprResult::Success(v) => v,
                             ExprResult::Failure(_) => Value::Str("NULL".into()),
-                        }
-                    }).collect();
+                        })
+                        .collect();
                     if query.distinct {
                         if !projected.contains(&vals) {
                             projected.push(vals);
@@ -85,14 +86,20 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             PathPattern::Concat(p1, p2) => self.run_concat_pattern(p1, p2, limit),
             PathPattern::Union(p1, p2) => {
                 let ir1 = self.run_path_pattern(p1, limit);
-                let remaining = if limit > 0 { limit.saturating_sub(ir1.rows.len()) } else { 0 };
+                let remaining = if limit > 0 {
+                    limit.saturating_sub(ir1.rows.len())
+                } else {
+                    0
+                };
                 let ir2 = self.run_path_pattern(p2, remaining);
                 let dom = p.freevars();
                 let mut rows = Vec::new();
                 for mut r in ir1.rows.into_iter().chain(ir2.rows) {
                     r.assignment.fill_nones(&dom);
                     rows.push(r);
-                    if self.limit_reached(&rows, limit) { break; }
+                    if self.limit_reached(&rows, limit) {
+                        break;
+                    }
                 }
                 IntermediateResult::new(rows)
             }
@@ -104,7 +111,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 for r in ir.rows {
                     if self.run_expr(&r.assignment, expr).get_bool() {
                         rows.push(r);
-                        if self.limit_reached(&rows, limit) { break; }
+                        if self.limit_reached(&rows, limit) {
+                            break;
+                        }
                     }
                 }
                 IntermediateResult::new(rows)
@@ -123,7 +132,11 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
             PathPattern::Questioned(inner) => {
                 let ir_empty = self.run_path_pattern(&PathPattern::Node(None), limit);
-                let remaining = if limit > 0 { limit.saturating_sub(ir_empty.rows.len()) } else { 0 };
+                let remaining = if limit > 0 {
+                    limit.saturating_sub(ir_empty.rows.len())
+                } else {
+                    0
+                };
                 let ir_inner = self.run_path_pattern(inner, remaining);
                 ir_empty.union(ir_inner)
             }
@@ -143,10 +156,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             .filter(|id| self.filter_node(**id, desc))
             .map(|&id| {
                 let pv = PathValue::Node(id);
-                ResultRow::new(
-                    Path(vec![pv.clone()]),
-                    Assignment::from_optional(var, pv),
-                )
+                ResultRow::new(Path(vec![pv.clone()]), Assignment::from_optional(var, pv))
             })
             .collect();
         IntermediateResult::new(rows)
@@ -155,7 +165,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// Get candidate node IDs — uses label index to pick the smallest set.
     fn get_candidate_nodes(&self, desc: Option<&Descriptor>) -> Vec<Id> {
         if let Some(desc) = desc {
-            if let Some(best) = self.smallest_label_set(&desc.dtype.label, |l| self.graph.nodes_with_label(l)) {
+            if let Some(best) =
+                self.smallest_label_set(&desc.dtype.label, |l| self.graph.nodes_with_label(l))
+            {
                 return best;
             }
         }
@@ -206,16 +218,27 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 let var = desc.as_ref().and_then(|d| d.var.as_deref());
 
                 let mut rows = Vec::new();
-                for &eid in candidates.iter().filter(|id| self.filter_edge(**id, desc.as_ref())) {
+                for &eid in candidates
+                    .iter()
+                    .filter(|id| self.filter_edge(**id, desc.as_ref()))
+                {
                     let edge_pv = PathValue::EdgeUndirectional(eid);
                     let ep0 = self.graph.src(eid);
                     let ep1 = self.graph.tgt(eid);
                     rows.push(ResultRow::new(
-                        Path(vec![PathValue::Node(ep0), edge_pv.clone(), PathValue::Node(ep1)]),
+                        Path(vec![
+                            PathValue::Node(ep0),
+                            edge_pv.clone(),
+                            PathValue::Node(ep1),
+                        ]),
                         Assignment::from_optional(var, edge_pv.clone()),
                     ));
                     rows.push(ResultRow::new(
-                        Path(vec![PathValue::Node(ep1), edge_pv.clone(), PathValue::Node(ep0)]),
+                        Path(vec![
+                            PathValue::Node(ep1),
+                            edge_pv.clone(),
+                            PathValue::Node(ep0),
+                        ]),
                         Assignment::from_optional(var, edge_pv),
                     ));
                 }
@@ -227,7 +250,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     fn get_candidate_directed_edges(&self, desc: Option<&Descriptor>) -> Vec<Id> {
         if let Some(desc) = desc {
-            if let Some(best) = self.smallest_label_set(&desc.dtype.label, |l| self.graph.directed_edges_with_label(l)) {
+            if let Some(best) = self.smallest_label_set(&desc.dtype.label, |l| {
+                self.graph.directed_edges_with_label(l)
+            }) {
                 return best;
             }
         }
@@ -236,7 +261,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     fn get_candidate_undirected_edges(&self, desc: Option<&Descriptor>) -> Vec<Id> {
         if let Some(desc) = desc {
-            if let Some(best) = self.smallest_label_set(&desc.dtype.label, |l| self.graph.undirected_edges_with_label(l)) {
+            if let Some(best) = self.smallest_label_set(&desc.dtype.label, |l| {
+                self.graph.undirected_edges_with_label(l)
+            }) {
                 return best;
             }
         }
@@ -280,10 +307,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                             let r2 = &ir2.rows[idx];
                             if r1.assignment.can_unify(&r2.assignment) {
                                 rows.push(ResultRow::join(
-                                    r1, r2,
+                                    r1,
+                                    r2,
                                     r1.assignment.unify(&r2.assignment),
                                 ));
-                                if self.limit_reached(&rows, limit) { break 'outer; }
+                                if self.limit_reached(&rows, limit) {
+                                    break 'outer;
+                                }
                             }
                         }
                     }
@@ -296,11 +326,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let mut rows = Vec::new();
         'outer2: for r1 in &ir1.rows {
             for r2 in &ir2.rows {
-                rows.push(ResultRow::join(
-                    r1, r2,
-                    r1.assignment.unify(&r2.assignment),
-                ));
-                if self.limit_reached(&rows, limit) { break 'outer2; }
+                rows.push(ResultRow::join(r1, r2, r1.assignment.unify(&r2.assignment)));
+                if self.limit_reached(&rows, limit) {
+                    break 'outer2;
+                }
             }
         }
         IntermediateResult::new(rows)
@@ -308,7 +337,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     // --- Optimized concatenation: uses adjacency when right side is edge/node ---
 
-    fn run_concat_pattern(&self, p1: &PathPattern, p2: &PathPattern, limit: usize) -> IntermediateResult {
+    fn run_concat_pattern(
+        &self,
+        p1: &PathPattern,
+        p2: &PathPattern,
+        limit: usize,
+    ) -> IntermediateResult {
         // Try LTJ for chains of directed edges
         let concat_pattern = PathPattern::Concat(Box::new(p1.clone()), Box::new(p2.clone()));
         let index = TripleIndex::from_graph(self.graph);
@@ -331,12 +365,24 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
             PathPattern::EdgeAnyDirection(desc) => {
                 let right = self.concat_with_directed_edge(&ir1, desc.as_ref(), true, limit);
-                if self.limit_reached(&right.rows, limit) { return right; }
-                let remaining = if limit > 0 { limit - right.rows.len() } else { 0 };
+                if self.limit_reached(&right.rows, limit) {
+                    return right;
+                }
+                let remaining = if limit > 0 {
+                    limit - right.rows.len()
+                } else {
+                    0
+                };
                 let left = self.concat_with_directed_edge(&ir1, desc.as_ref(), false, remaining);
                 let combined = right.union(left);
-                if self.limit_reached(&combined.rows, limit) { return combined; }
-                let remaining = if limit > 0 { limit - combined.rows.len() } else { 0 };
+                if self.limit_reached(&combined.rows, limit) {
+                    return combined;
+                }
+                let remaining = if limit > 0 {
+                    limit - combined.rows.len()
+                } else {
+                    0
+                };
                 let und = self.concat_with_undirected_edge(&ir1, desc.as_ref(), remaining);
                 return combined.union(und);
             }
@@ -345,7 +391,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
             // For Filter wrapping an edge pattern, we can still optimize the edge part
             PathPattern::Filter(inner, expr) => {
-                if let Some(optimized) = self.try_concat_with_filtered_edge(&ir1, inner, expr, limit) {
+                if let Some(optimized) =
+                    self.try_concat_with_filtered_edge(&ir1, inner, expr, limit)
+                {
                     return optimized;
                 }
             }
@@ -359,13 +407,19 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     /// Adjacency-driven concat: left results → outgoing/incoming edges → target nodes.
     fn concat_with_directed_edge(
-        &self, ir1: &IntermediateResult, desc: Option<&Descriptor>, is_right: bool, limit: usize,
+        &self,
+        ir1: &IntermediateResult,
+        desc: Option<&Descriptor>,
+        is_right: bool,
+        limit: usize,
     ) -> IntermediateResult {
         let var = desc.and_then(|d| d.var.as_deref());
         let mut rows = Vec::new();
 
         'outer: for r1 in &ir1.rows {
-            let Some(last_node) = r1.path().last_node_id() else { continue };
+            let Some(last_node) = r1.path().last_node_id() else {
+                continue;
+            };
 
             let edge_ids = if is_right {
                 self.graph.outgoing_edges(last_node)
@@ -395,20 +449,27 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     ]),
                     r1.assignment.unify(&edge_mu),
                 ));
-                if self.limit_reached(&rows, limit) { break 'outer; }
+                if self.limit_reached(&rows, limit) {
+                    break 'outer;
+                }
             }
         }
         IntermediateResult::new(rows)
     }
 
     fn concat_with_undirected_edge(
-        &self, ir1: &IntermediateResult, desc: Option<&Descriptor>, limit: usize,
+        &self,
+        ir1: &IntermediateResult,
+        desc: Option<&Descriptor>,
+        limit: usize,
     ) -> IntermediateResult {
         let var = desc.and_then(|d| d.var.as_deref());
         let mut rows = Vec::new();
 
         'outer: for r1 in &ir1.rows {
-            let Some(last_node) = r1.path().last_node_id() else { continue };
+            let Some(last_node) = r1.path().last_node_id() else {
+                continue;
+            };
 
             for &eid in &self.graph.undirected_edges_of(last_node) {
                 if !self.filter_edge(eid, desc) {
@@ -444,7 +505,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 // For the case where both endpoints are relevant, undirected_edges_of
                 // returns the edge for BOTH endpoints, so if a path can reach either
                 // endpoint, both are handled.
-                if self.limit_reached(&rows, limit) { break 'outer; }
+                if self.limit_reached(&rows, limit) {
+                    break 'outer;
+                }
             }
         }
         IntermediateResult::new(rows)
@@ -452,13 +515,18 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     /// Adjacency-driven concat with a node pattern: just check if the last node matches.
     fn concat_with_node(
-        &self, ir1: &IntermediateResult, desc: Option<&Descriptor>, limit: usize,
+        &self,
+        ir1: &IntermediateResult,
+        desc: Option<&Descriptor>,
+        limit: usize,
     ) -> IntermediateResult {
         let var = desc.and_then(|d| d.var.as_deref());
         let mut rows = Vec::new();
 
         for r1 in &ir1.rows {
-            let Some(last_node) = r1.path().last_node_id() else { continue };
+            let Some(last_node) = r1.path().last_node_id() else {
+                continue;
+            };
             if !self.filter_node(last_node, desc) {
                 continue;
             }
@@ -468,17 +536,21 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 continue;
             }
             // Node concat: the last node already IS the node, so path doesn't grow
-            rows.push(r1.with_same_paths(
-                r1.assignment.unify(&node_mu),
-            ));
-            if self.limit_reached(&rows, limit) { break; }
+            rows.push(r1.with_same_paths(r1.assignment.unify(&node_mu)));
+            if self.limit_reached(&rows, limit) {
+                break;
+            }
         }
         IntermediateResult::new(rows)
     }
 
     /// Try to optimize concat with Filter(edge_pattern, expr).
     fn try_concat_with_filtered_edge(
-        &self, ir1: &IntermediateResult, inner: &PathPattern, expr: &Expr, limit: usize,
+        &self,
+        ir1: &IntermediateResult,
+        inner: &PathPattern,
+        expr: &Expr,
+        limit: usize,
     ) -> Option<IntermediateResult> {
         match inner {
             PathPattern::EdgeRight(desc) => {
@@ -503,12 +575,19 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
     }
 
-    fn apply_filter(&self, ir: IntermediateResult, expr: &Expr, limit: usize) -> IntermediateResult {
+    fn apply_filter(
+        &self,
+        ir: IntermediateResult,
+        expr: &Expr,
+        limit: usize,
+    ) -> IntermediateResult {
         let mut rows = Vec::new();
         for r in ir.rows {
             if self.run_expr(&r.assignment, expr).get_bool() {
                 rows.push(r);
-                if self.limit_reached(&rows, limit) { break; }
+                if self.limit_reached(&rows, limit) {
+                    break;
+                }
             }
         }
         IntermediateResult::new(rows)
@@ -516,7 +595,11 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     /// Hash-join on the concatenation key (last node of ir1 = first node of ir2).
     /// O(n + m) expected instead of O(n × m) cross-product.
-    fn hash_join(ir1: &IntermediateResult, ir2: &IntermediateResult, limit: usize) -> IntermediateResult {
+    fn hash_join(
+        ir1: &IntermediateResult,
+        ir2: &IntermediateResult,
+        limit: usize,
+    ) -> IntermediateResult {
         // Build hash map: first_node_id → Vec<index into ir2.rows>
         let mut ir2_by_first: HashMap<Id, Vec<usize>> = HashMap::new();
         for (i, r2) in ir2.rows.iter().enumerate() {
@@ -527,16 +610,19 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
         let mut rows = Vec::new();
         'outer: for r1 in &ir1.rows {
-            let Some(last) = r1.path().last_node_id() else { continue };
-            let Some(matches) = ir2_by_first.get(&last) else { continue };
+            let Some(last) = r1.path().last_node_id() else {
+                continue;
+            };
+            let Some(matches) = ir2_by_first.get(&last) else {
+                continue;
+            };
             for &idx in matches {
                 let r2 = &ir2.rows[idx];
                 if r1.assignment.can_unify(&r2.assignment) {
-                    rows.push(r1.extend_path(
-                        r2.path(),
-                        r1.assignment.unify(&r2.assignment),
-                    ));
-                    if limit > 0 && rows.len() >= limit { break 'outer; }
+                    rows.push(r1.extend_path(r2.path(), r1.assignment.unify(&r2.assignment)));
+                    if limit > 0 && rows.len() >= limit {
+                        break 'outer;
+                    }
                 }
             }
         }
@@ -574,8 +660,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         for _ in 1..n {
             let mut new_rows = Vec::new();
             for r in &res.rows {
-                let Some(last) = r.path().last_node_id() else { continue };
-                let Some(matches) = grouped_by_first.get(&last) else { continue };
+                let Some(last) = r.path().last_node_id() else {
+                    continue;
+                };
+                let Some(matches) = grouped_by_first.get(&last) else {
+                    continue;
+                };
                 for &idx in matches {
                     new_rows.push(r.concat_group(&grouped.rows[idx]));
                 }
@@ -589,12 +679,17 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     /// From all required labels in a label type, find the one with the smallest
     /// indexed set. Returns None if no label has an index entry.
-    fn smallest_label_set(&self, label: &LabelType, lookup: impl Fn(&str) -> Option<Vec<Id>>) -> Option<Vec<Id>> {
+    fn smallest_label_set(
+        &self,
+        label: &LabelType,
+        lookup: impl Fn(&str) -> Option<Vec<Id>>,
+    ) -> Option<Vec<Id>> {
         let required = label.required_labels();
         if required.is_empty() {
             return None;
         }
-        required.iter()
+        required
+            .iter()
             .filter_map(|l| lookup(l))
             .min_by_key(|v| v.len())
     }
@@ -644,13 +739,17 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     SimpleType::List(Box::new(SimpleType::Star))
                 } else {
                     let mut acc = SimpleType::Zero;
-                    for it in items { acc = SimpleType::union(&acc, &Self::value_type(it)); }
+                    for it in items {
+                        acc = SimpleType::union(&acc, &Self::value_type(it));
+                    }
                     SimpleType::List(Box::new(acc))
                 }
             }
             Value::Record(fields) => {
                 let mut m = std::collections::BTreeMap::new();
-                for (k, v) in fields { m.insert(k.clone(), Self::value_type(v)); }
+                for (k, v) in fields {
+                    m.insert(k.clone(), Self::value_type(v));
+                }
                 SimpleType::Record(m)
             }
         }
@@ -783,12 +882,16 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         match op {
             BinOp::Add => match as_num_pair(lv, rv) {
                 Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Int(a + b)),
-                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Float(a + b)),
+                Some((Value::Float(a), Value::Float(b))) => {
+                    ExprResult::Success(Value::Float(a + b))
+                }
                 _ => ExprResult::Failure("+ requires numeric operands".into()),
             },
             BinOp::Sub => match as_num_pair(lv, rv) {
                 Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Int(a - b)),
-                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Float(a - b)),
+                Some((Value::Float(a), Value::Float(b))) => {
+                    ExprResult::Success(Value::Float(a - b))
+                }
                 _ => ExprResult::Failure("- requires numeric operands".into()),
             },
             BinOp::Gt => match as_num_pair(lv, rv) {
@@ -803,18 +906,24 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             },
             BinOp::Ge => match as_num_pair(lv, rv) {
                 Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a >= b)),
-                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Bool(a >= b)),
+                Some((Value::Float(a), Value::Float(b))) => {
+                    ExprResult::Success(Value::Bool(a >= b))
+                }
                 _ => ExprResult::Failure(">= requires numeric operands".into()),
             },
             BinOp::Le => match as_num_pair(lv, rv) {
                 Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a <= b)),
-                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Bool(a <= b)),
+                Some((Value::Float(a), Value::Float(b))) => {
+                    ExprResult::Success(Value::Bool(a <= b))
+                }
                 _ => ExprResult::Failure("<= requires numeric operands".into()),
             },
             BinOp::Eq => ExprResult::Success(Value::Bool(lv == rv)),
             BinOp::Ne => ExprResult::Success(Value::Bool(lv != rv)),
             BinOp::In => match rv {
-                Value::List(items) => ExprResult::Success(Value::Bool(items.iter().any(|x| x == lv))),
+                Value::List(items) => {
+                    ExprResult::Success(Value::Bool(items.iter().any(|x| x == lv)))
+                }
                 _ => ExprResult::Failure("'in' requires a list on the right".into()),
             },
             BinOp::And => match (lv, rv) {

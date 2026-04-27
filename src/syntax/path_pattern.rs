@@ -31,20 +31,17 @@ impl PathPattern {
     /// Collect all free variable names in this pattern.
     pub fn freevars(&self) -> HashSet<String> {
         match self {
-            PathPattern::Node(Some(d)) => {
-                d.var.iter().cloned().collect()
-            }
+            PathPattern::Node(Some(d)) => d.var.iter().cloned().collect(),
             PathPattern::Node(None) => HashSet::new(),
             PathPattern::EdgeRight(d)
             | PathPattern::EdgeLeft(d)
             | PathPattern::EdgeUndirected(d)
             | PathPattern::EdgeAnyDirection(d) => {
-                d.as_ref()
-                    .and_then(|d| d.var.clone())
-                    .into_iter()
-                    .collect()
+                d.as_ref().and_then(|d| d.var.clone()).into_iter().collect()
             }
-            PathPattern::Concat(p1, p2) | PathPattern::Union(p1, p2) | PathPattern::Join(p1, p2) => {
+            PathPattern::Concat(p1, p2)
+            | PathPattern::Union(p1, p2)
+            | PathPattern::Join(p1, p2) => {
                 let mut s = p1.freevars();
                 s.extend(p2.freevars());
                 s
@@ -84,10 +81,18 @@ impl fmt::Display for PathPattern {
             PathPattern::Concat(p1, p2) => write!(f, "{p1} {p2}"),
             PathPattern::Union(p1, p2) => write!(f, "({p1} | {p2})"),
             PathPattern::Filter(p, e) => write!(f, "{p} WHERE {e}"),
-            PathPattern::Repeat { pattern, lb, ub: Some(ub) } => {
+            PathPattern::Repeat {
+                pattern,
+                lb,
+                ub: Some(ub),
+            } => {
                 write!(f, "({pattern}){{{lb},{ub}}}")
             }
-            PathPattern::Repeat { pattern, lb, ub: None } => {
+            PathPattern::Repeat {
+                pattern,
+                lb,
+                ub: None,
+            } => {
                 write!(f, "({pattern}){{{lb},}}")
             }
             PathPattern::Questioned(p) => write!(f, "({p})?"),

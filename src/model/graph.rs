@@ -20,9 +20,9 @@ pub struct Graph {
     pub edge_names: Vec<String>,
 
     // --- Topology ---
-    pub edge_src: Vec<Id>,         // edge internal ID → src node internal ID
-    pub edge_tgt: Vec<Id>,         // edge internal ID → tgt node internal ID
-    pub edge_directed: Vec<bool>,  // edge internal ID → is directed?
+    pub edge_src: Vec<Id>,        // edge internal ID → src node internal ID
+    pub edge_tgt: Vec<Id>,        // edge internal ID → tgt node internal ID
+    pub edge_directed: Vec<bool>, // edge internal ID → is directed?
 
     // --- Data (indexed by internal ID) ---
     pub node_labels: Vec<LabelType>,
@@ -34,8 +34,8 @@ pub struct Graph {
     label_to_nodes: HashMap<String, Vec<Id>>,
     label_to_edges_d: HashMap<String, Vec<Id>>,
     label_to_edges_u: HashMap<String, Vec<Id>>,
-    outgoing: Vec<Vec<Id>>,    // node internal ID → outgoing edge internal IDs
-    incoming: Vec<Vec<Id>>,    // node internal ID → incoming edge internal IDs
+    outgoing: Vec<Vec<Id>>, // node internal ID → outgoing edge internal IDs
+    incoming: Vec<Vec<Id>>, // node internal ID → incoming edge internal IDs
     undirected_adj: Vec<Vec<Id>>, // node internal ID → undirected edge internal IDs
 
     // --- Reverse lookup (user name → internal ID) ---
@@ -43,13 +43,16 @@ pub struct Graph {
 }
 
 impl Graph {
-    pub fn node_count(&self) -> usize { self.node_names.len() }
-    pub fn edge_count(&self) -> usize { self.edge_names.len() }
+    pub fn node_count(&self) -> usize {
+        self.node_names.len()
+    }
+    pub fn edge_count(&self) -> usize {
+        self.edge_names.len()
+    }
 
     /// Load a graph from a JSON file path.
     pub fn from_file(path: &Path) -> Result<Self, GraphError> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| GraphError::Io(e.to_string()))?;
+        let content = fs::read_to_string(path).map_err(|e| GraphError::Io(e.to_string()))?;
         Self::from_json_str(&content)
     }
 
@@ -138,24 +141,32 @@ impl Graph {
             let ep0 = node_name_to_id[ep0_name];
             let ep1 = node_name_to_id[ep1_name];
 
-            let dir = e["directionality"]
-                .as_str()
-                .ok_or_else(|| GraphError::Parse(format!("edge {name} missing 'directionality'")))?;
+            let dir = e["directionality"].as_str().ok_or_else(|| {
+                GraphError::Parse(format!("edge {name} missing 'directionality'"))
+            })?;
 
             let is_dir = match dir {
                 "->" => {
-                    for l in &labs { label_to_edges_d.entry(l.clone()).or_default().push(eid); }
+                    for l in &labs {
+                        label_to_edges_d.entry(l.clone()).or_default().push(eid);
+                    }
                     outgoing[ep0 as usize].push(eid);
                     incoming[ep1 as usize].push(eid);
                     true
                 }
                 "~~" => {
-                    for l in &labs { label_to_edges_u.entry(l.clone()).or_default().push(eid); }
+                    for l in &labs {
+                        label_to_edges_u.entry(l.clone()).or_default().push(eid);
+                    }
                     undirected_adj[ep0 as usize].push(eid);
                     undirected_adj[ep1 as usize].push(eid);
                     false
                 }
-                other => return Err(GraphError::Parse(format!("unknown directionality '{other}'"))),
+                other => {
+                    return Err(GraphError::Parse(format!(
+                        "unknown directionality '{other}'"
+                    )))
+                }
             };
 
             edge_labels_vec.push(LabelType::from_list(&labs));
@@ -167,12 +178,21 @@ impl Graph {
         }
 
         Ok(Graph {
-            node_names, edge_names,
-            edge_src, edge_tgt, edge_directed,
-            node_labels: node_labels_vec, edge_labels: edge_labels_vec,
-            node_props: node_props_vec, edge_props: edge_props_vec,
-            label_to_nodes, label_to_edges_d, label_to_edges_u,
-            outgoing, incoming, undirected_adj,
+            node_names,
+            edge_names,
+            edge_src,
+            edge_tgt,
+            edge_directed,
+            node_labels: node_labels_vec,
+            edge_labels: edge_labels_vec,
+            node_props: node_props_vec,
+            edge_props: edge_props_vec,
+            label_to_nodes,
+            label_to_edges_d,
+            label_to_edges_u,
+            outgoing,
+            incoming,
+            undirected_adj,
             node_name_to_id,
         })
     }
@@ -225,26 +245,33 @@ impl Graph {
         }
 
         Graph {
-            node_names, edge_names,
-            edge_src, edge_tgt, edge_directed,
-            node_labels, edge_labels,
-            node_props, edge_props,
-            label_to_nodes, label_to_edges_d, label_to_edges_u,
-            outgoing, incoming, undirected_adj,
+            node_names,
+            edge_names,
+            edge_src,
+            edge_tgt,
+            edge_directed,
+            node_labels,
+            edge_labels,
+            node_props,
+            edge_props,
+            label_to_nodes,
+            label_to_edges_d,
+            label_to_edges_u,
+            outgoing,
+            incoming,
+            undirected_adj,
             node_name_to_id,
         }
     }
 
     /// Save this graph to a .gql database file.
     pub fn save(&self, path: &Path) -> Result<(), GraphError> {
-        crate::store::io::save_graph(self, path)
-            .map_err(|e| GraphError::Io(e.to_string()))
+        crate::store::io::save_graph(self, path).map_err(|e| GraphError::Io(e.to_string()))
     }
 
     /// Open a graph from a .gql database file (loads everything into memory).
     pub fn open(path: &Path) -> Result<Self, GraphError> {
-        crate::store::io::load_graph(path)
-            .map_err(|e| GraphError::Io(e.to_string()))
+        crate::store::io::load_graph(path).map_err(|e| GraphError::Io(e.to_string()))
     }
 
     /// Extract label strings from a LabelType (for index building).

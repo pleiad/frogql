@@ -21,7 +21,11 @@ pub struct Descriptor {
 
 impl Descriptor {
     pub fn new(var: Option<String>, dtype: DescriptorType) -> Self {
-        Self { var, dtype, value_filters: Vec::new() }
+        Self {
+            var,
+            dtype,
+            value_filters: Vec::new(),
+        }
     }
 
     pub fn with_filters(
@@ -29,7 +33,11 @@ impl Descriptor {
         dtype: DescriptorType,
         value_filters: Vec<(String, Expr)>,
     ) -> Self {
-        Self { var, dtype, value_filters }
+        Self {
+            var,
+            dtype,
+            value_filters,
+        }
     }
 
     pub fn var_only(name: &str) -> Self {
@@ -41,7 +49,11 @@ impl Descriptor {
     }
 
     pub fn type_only(dtype: DescriptorType) -> Self {
-        Self { var: None, dtype, value_filters: Vec::new() }
+        Self {
+            var: None,
+            dtype,
+            value_filters: Vec::new(),
+        }
     }
 }
 

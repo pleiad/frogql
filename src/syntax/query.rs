@@ -23,7 +23,11 @@ pub struct Query {
 
 impl Query {
     pub fn pattern_only(pattern: PathPattern) -> Self {
-        Query { pattern, returns: None, distinct: false }
+        Query {
+            pattern,
+            returns: None,
+            distinct: false,
+        }
     }
 }
 

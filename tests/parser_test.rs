@@ -39,10 +39,7 @@ fn test_node_variable() {
 fn test_descriptor() {
     assert_eq!(
         parse("(x:Person)").unwrap(),
-        PathPattern::Node(Some(Descriptor::new(
-            Some("x".into()),
-            label_dt("Person"),
-        )))
+        PathPattern::Node(Some(Descriptor::new(Some("x".into()), label_dt("Person"),)))
     );
 }
 
@@ -50,10 +47,7 @@ fn test_descriptor() {
 fn test_descriptor_empty_record() {
     assert_eq!(
         parse("(x:Person {})").unwrap(),
-        PathPattern::Node(Some(Descriptor::new(
-            Some("x".into()),
-            label_dt("Person"),
-        )))
+        PathPattern::Node(Some(Descriptor::new(Some("x".into()), label_dt("Person"),)))
     );
 }
 
@@ -579,8 +573,9 @@ fn test_match_simple() {
 #[test]
 fn test_match_where_return() {
     let q = gqlrust::compile_query(
-        "MATCH (x) -[:Transfer]-> (y) WHERE x.amount > 100 RETURN x.name, y.name"
-    ).unwrap();
+        "MATCH (x) -[:Transfer]-> (y) WHERE x.amount > 100 RETURN x.name, y.name",
+    )
+    .unwrap();
     assert!(matches!(q.pattern, PathPattern::Filter(_, _)));
     assert_eq!(q.returns.as_ref().unwrap().len(), 2);
     assert!(!q.distinct);
@@ -588,18 +583,15 @@ fn test_match_where_return() {
 
 #[test]
 fn test_match_return_distinct() {
-    let q = gqlrust::compile_query(
-        "MATCH (x) -[]-> (y) RETURN DISTINCT x.name"
-    ).unwrap();
+    let q = gqlrust::compile_query("MATCH (x) -[]-> (y) RETURN DISTINCT x.name").unwrap();
     assert!(q.distinct);
     assert_eq!(q.returns.as_ref().unwrap().len(), 1);
 }
 
 #[test]
 fn test_match_return_alias() {
-    let q = gqlrust::compile_query(
-        "MATCH (m: Movie) RETURN m.title AS title, m.votes AS votes"
-    ).unwrap();
+    let q = gqlrust::compile_query("MATCH (m: Movie) RETURN m.title AS title, m.votes AS votes")
+        .unwrap();
     let returns = q.returns.as_ref().unwrap();
     assert_eq!(returns.len(), 2);
     assert_eq!(returns[0].alias.as_deref(), Some("title"));

@@ -1,12 +1,12 @@
-pub mod model;
-pub mod typing;
-pub mod syntax;
-pub mod runtime;
-pub mod parser;
-pub mod pager;
-pub mod store;
-pub mod optimizer;
 pub mod elaborate;
+pub mod model;
+pub mod optimizer;
+pub mod pager;
+pub mod parser;
+pub mod runtime;
+pub mod store;
+pub mod syntax;
+pub mod typing;
 
 use syntax::path_pattern::PathPattern;
 use syntax::query::Query;
@@ -62,5 +62,8 @@ pub fn compile_query_unchecked(input: &str) -> Result<Query, String> {
     let q = parser::parse_query(input)?;
     let q = elaborate::elaborate_query(q);
     let optimized_pattern = optimizer::compile(q.pattern);
-    Ok(Query { pattern: optimized_pattern, ..q })
+    Ok(Query {
+        pattern: optimized_pattern,
+        ..q
+    })
 }

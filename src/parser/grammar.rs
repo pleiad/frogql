@@ -22,7 +22,11 @@ pub fn parse_query(input: &str) -> Result<Query, String> {
     let mut p = Parser { tokens, pos: 0 };
     let result = p.full_query()?;
     if !p.at_eof() {
-        return Err(format!("unexpected token {:?} at position {}", p.peek(), p.pos));
+        return Err(format!(
+            "unexpected token {:?} at position {}",
+            p.peek(),
+            p.pos
+        ));
     }
     Ok(result)
 }
@@ -93,7 +97,11 @@ impl Parser {
         if self.eat(&Token::Return) {
             let distinct = self.eat(&Token::Distinct);
             let returns = self.return_list()?;
-            Ok(Query { pattern, returns: Some(returns), distinct })
+            Ok(Query {
+                pattern,
+                returns: Some(returns),
+                distinct,
+            })
         } else {
             Ok(Query::pattern_only(pattern))
         }
@@ -119,7 +127,10 @@ impl Parser {
             self.advance(); // consume AS
             if let Token::Name(n) = self.peek().clone() {
                 self.advance();
-                return Ok(ReturnItem { expr, alias: Some(n) });
+                return Ok(ReturnItem {
+                    expr,
+                    alias: Some(n),
+                });
             }
             // Not a name after AS — backtrack, it wasn't an alias
             self.pos = saved;
@@ -142,7 +153,11 @@ impl Parser {
             };
             self.advance();
             let right = self.return_comparison()?;
-            left = Expr::Binop { op, left: Box::new(left), right: Box::new(right) };
+            left = Expr::Binop {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -164,7 +179,11 @@ impl Parser {
             };
             self.advance();
             let right = self.term()?;
-            left = Expr::Binop { op, left: Box::new(left), right: Box::new(right) };
+            left = Expr::Binop {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -520,7 +539,10 @@ impl Parser {
                     let (rt, filters) = self.record_type()?;
                     Ok((DescriptorType::new(label, rt), filters))
                 } else {
-                    Ok((DescriptorType::new(label, PropertyType::open_empty()), Vec::new()))
+                    Ok((
+                        DescriptorType::new(label, PropertyType::open_empty()),
+                        Vec::new(),
+                    ))
                 }
             }
         }
@@ -584,15 +606,23 @@ impl Parser {
     fn record_type(&mut self) -> Result<(PropertyType, Vec<(String, Expr)>), String> {
         self.expect(&Token::LBrace)?;
         let is_closed = self.eat(&Token::LBrace);
-        let mut pt = if is_closed { PropertyType::closed_empty() } else { PropertyType::open_empty() };
+        let mut pt = if is_closed {
+            PropertyType::closed_empty()
+        } else {
+            PropertyType::open_empty()
+        };
         let mut filters = Vec::new();
         if self.eat(&Token::RBrace) {
-            if is_closed { self.expect(&Token::RBrace)?; }
+            if is_closed {
+                self.expect(&Token::RBrace)?;
+            }
             return Ok((pt, filters));
         }
         self.parse_record_elements(&mut pt, &mut filters)?;
         self.expect(&Token::RBrace)?;
-        if is_closed { self.expect(&Token::RBrace)?; }
+        if is_closed {
+            self.expect(&Token::RBrace)?;
+        }
         Ok((pt, filters))
     }
 
@@ -635,10 +665,8 @@ impl Parser {
                     self.peek(),
                     Token::Int | Token::Float | Token::Bool | Token::Str | Token::Star
                 );
-                let followed_by_terminator = matches!(
-                    self.peek_at(1),
-                    Some(Token::Comma) | Some(Token::RBrace)
-                );
+                let followed_by_terminator =
+                    matches!(self.peek_at(1), Some(Token::Comma) | Some(Token::RBrace));
                 if is_type_head && followed_by_terminator {
                     let ty = self.simple_type()?;
                     pt.extend(name, ty);
@@ -680,12 +708,16 @@ impl Parser {
                     };
                     self.expect(&Token::Colon)?;
                     fields.insert(k, self.simple_type()?);
-                    if !self.eat(&Token::Comma) { break; }
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
                 }
                 self.expect(&Token::RBrace)?;
                 Ok(SimpleType::Record(fields))
             }
-            t => Err(format!("expected type (int/float/bool/str/*/[T]/{{k: T}}), got {t:?}")),
+            t => Err(format!(
+                "expected type (int/float/bool/str/*/[T]/{{k: T}}), got {t:?}"
+            )),
         }
     }
 
@@ -819,8 +851,12 @@ impl Parser {
                 let mut consts = Vec::with_capacity(items.len());
                 let mut all_const = true;
                 for e in &items {
-                    if let Expr::Const(v) = e { consts.push(v.clone()); }
-                    else { all_const = false; break; }
+                    if let Expr::Const(v) = e {
+                        consts.push(v.clone());
+                    } else {
+                        all_const = false;
+                        break;
+                    }
                 }
                 if all_const {
                     Ok(Expr::Const(Value::List(consts)))
@@ -834,7 +870,9 @@ impl Parser {
                 // stream, so speculate on the type parse first, fall back to value.
                 self.advance();
                 if self.eat(&Token::RBrace) {
-                    return Ok(Expr::Const(Value::Record(std::collections::BTreeMap::new())));
+                    return Ok(Expr::Const(
+                        Value::Record(std::collections::BTreeMap::new()),
+                    ));
                 }
                 let saved = self.pos;
                 // Try record type: each entry `name : simple_type`.
@@ -846,13 +884,19 @@ impl Parser {
                             Token::Name(n) => n,
                             _ => return Err(()),
                         };
-                        if !matches!(self.peek(), Token::Colon) { return Err(()); }
+                        if !matches!(self.peek(), Token::Colon) {
+                            return Err(());
+                        }
                         self.advance();
                         let ty = self.simple_type().map_err(|_| ())?;
                         type_fields.insert(k, ty);
-                        if !self.eat(&Token::Comma) { break; }
+                        if !self.eat(&Token::Comma) {
+                            break;
+                        }
                     }
-                    if !self.eat(&Token::RBrace) { return Err(()); }
+                    if !self.eat(&Token::RBrace) {
+                        return Err(());
+                    }
                     Ok(true)
                 })();
                 if type_ok.is_ok() {
@@ -869,10 +913,18 @@ impl Parser {
                     };
                     self.expect(&Token::Colon)?;
                     match self.expr()? {
-                        Expr::Const(val) => { value_fields.insert(k, val); }
-                        _ => return Err("non-constant record literal values are not supported yet".into()),
+                        Expr::Const(val) => {
+                            value_fields.insert(k, val);
+                        }
+                        _ => {
+                            return Err(
+                                "non-constant record literal values are not supported yet".into()
+                            )
+                        }
                     }
-                    if !self.eat(&Token::Comma) { break; }
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
                 }
                 self.expect(&Token::RBrace)?;
                 Ok(Expr::Const(Value::Record(value_fields)))
@@ -920,7 +972,10 @@ impl Parser {
                             Token::Name(a) => a,
                             t => return Err(format!("expected field name after '.', got {t:?}")),
                         };
-                        expr = Expr::FieldAccess { base: Box::new(expr), field };
+                        expr = Expr::FieldAccess {
+                            base: Box::new(expr),
+                            field,
+                        };
                     }
                     Ok(expr)
                 } else {

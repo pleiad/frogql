@@ -140,8 +140,14 @@ mod tests {
 
     #[test]
     fn test_subtype_star() {
-        assert!(LabelType::is_subtype(&LabelType::Star, &LabelType::Label("X".into())));
-        assert!(LabelType::is_subtype(&LabelType::Label("X".into()), &LabelType::Star));
+        assert!(LabelType::is_subtype(
+            &LabelType::Star,
+            &LabelType::Label("X".into())
+        ));
+        assert!(LabelType::is_subtype(
+            &LabelType::Label("X".into()),
+            &LabelType::Star
+        ));
     }
 
     #[test]

@@ -95,7 +95,10 @@ impl Pager {
         if page_num >= self.header.page_count {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("page {page_num} out of range (total: {})", self.header.page_count),
+                format!(
+                    "page {page_num} out of range (total: {})",
+                    self.header.page_count
+                ),
             ));
         }
 
@@ -233,16 +236,18 @@ impl Pager {
         if self.cache.len() >= self.cache_size {
             self.evict_lru();
         }
-        self.cache.insert(page_num, CacheEntry {
-            page,
-            last_access: self.tick,
-            dirty,
-        });
+        self.cache.insert(
+            page_num,
+            CacheEntry {
+                page,
+                last_access: self.tick,
+                dirty,
+            },
+        );
     }
 
     fn evict_lru(&mut self) {
-        if let Some((&evict_key, _)) = self.cache.iter()
-            .min_by_key(|(_, entry)| entry.last_access)
+        if let Some((&evict_key, _)) = self.cache.iter().min_by_key(|(_, entry)| entry.last_access)
         {
             // If dirty, flush to disk (not used currently — write-through)
             // but included for future write-back cache mode

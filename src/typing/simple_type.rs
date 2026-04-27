@@ -77,7 +77,8 @@ impl SimpleType {
             // Records: same field set, each field covariant.
             (SimpleType::Record(a), SimpleType::Record(b)) => {
                 a.len() == b.len()
-                    && a.iter().all(|(k, v)| b.get(k).map_or(false, |bv| SimpleType::is_subtype(v, bv)))
+                    && a.iter()
+                        .all(|(k, v)| b.get(k).map_or(false, |bv| SimpleType::is_subtype(v, bv)))
             }
             _ => t1 == t2,
         }
@@ -109,7 +110,8 @@ impl fmt::Display for SimpleType {
             SimpleType::Group(t) => write!(f, "group<{t}>"),
             SimpleType::List(t) => write!(f, "[{t}]"),
             SimpleType::Record(fields) => {
-                let parts: Vec<String> = fields.iter().map(|(k, v)| format!("{k} is {v}")).collect();
+                let parts: Vec<String> =
+                    fields.iter().map(|(k, v)| format!("{k} is {v}")).collect();
                 write!(f, "{{{}}}", parts.join(", "))
             }
         }
@@ -122,18 +124,30 @@ mod tests {
 
     #[test]
     fn test_meet_same() {
-        assert_eq!(SimpleType::meet(&SimpleType::Z, &SimpleType::Z), SimpleType::Z);
+        assert_eq!(
+            SimpleType::meet(&SimpleType::Z, &SimpleType::Z),
+            SimpleType::Z
+        );
     }
 
     #[test]
     fn test_meet_different() {
-        assert_eq!(SimpleType::meet(&SimpleType::Z, &SimpleType::S), SimpleType::Zero);
+        assert_eq!(
+            SimpleType::meet(&SimpleType::Z, &SimpleType::S),
+            SimpleType::Zero
+        );
     }
 
     #[test]
     fn test_meet_star() {
-        assert_eq!(SimpleType::meet(&SimpleType::Star, &SimpleType::Z), SimpleType::Z);
-        assert_eq!(SimpleType::meet(&SimpleType::Z, &SimpleType::Star), SimpleType::Z);
+        assert_eq!(
+            SimpleType::meet(&SimpleType::Star, &SimpleType::Z),
+            SimpleType::Z
+        );
+        assert_eq!(
+            SimpleType::meet(&SimpleType::Z, &SimpleType::Star),
+            SimpleType::Z
+        );
     }
 
     #[test]
@@ -150,8 +164,14 @@ mod tests {
 
     #[test]
     fn test_union_with_zero() {
-        assert_eq!(SimpleType::union(&SimpleType::Zero, &SimpleType::Z), SimpleType::Z);
-        assert_eq!(SimpleType::union(&SimpleType::Z, &SimpleType::Zero), SimpleType::Z);
+        assert_eq!(
+            SimpleType::union(&SimpleType::Zero, &SimpleType::Z),
+            SimpleType::Z
+        );
+        assert_eq!(
+            SimpleType::union(&SimpleType::Z, &SimpleType::Zero),
+            SimpleType::Z
+        );
     }
 
     #[test]

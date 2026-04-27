@@ -1,7 +1,7 @@
 use std::fmt;
 
-use crate::model::value::{Path, Value};
 use super::assignment::Assignment;
+use crate::model::value::{Path, Value};
 
 /// A single result row: a tuple of matched paths + variable bindings.
 ///
@@ -16,7 +16,10 @@ pub struct ResultRow {
 
 impl ResultRow {
     pub fn new(path: Path, assignment: Assignment) -> Self {
-        Self { paths: vec![path], assignment }
+        Self {
+            paths: vec![path],
+            assignment,
+        }
     }
 
     pub fn with_paths(paths: Vec<Path>, assignment: Assignment) -> Self {
@@ -53,7 +56,10 @@ impl ResultRow {
 
     /// Like extend_path but replaces the last path entirely (for node concat where path doesn't grow).
     pub fn with_same_paths(&self, assignment: Assignment) -> ResultRow {
-        ResultRow { paths: self.paths.clone(), assignment }
+        ResultRow {
+            paths: self.paths.clone(),
+            assignment,
+        }
     }
 
     /// Join two result rows: concatenate path tuples.

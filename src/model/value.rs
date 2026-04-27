@@ -150,9 +150,21 @@ mod tests {
 
     #[test]
     fn test_path_can_concat() {
-        let p1 = Path(vec![PathValue::Node(1), PathValue::EdgeDirectional(10), PathValue::Node(2)]);
-        let p2 = Path(vec![PathValue::Node(2), PathValue::EdgeDirectional(20), PathValue::Node(3)]);
-        let p3 = Path(vec![PathValue::Node(3), PathValue::EdgeDirectional(30), PathValue::Node(4)]);
+        let p1 = Path(vec![
+            PathValue::Node(1),
+            PathValue::EdgeDirectional(10),
+            PathValue::Node(2),
+        ]);
+        let p2 = Path(vec![
+            PathValue::Node(2),
+            PathValue::EdgeDirectional(20),
+            PathValue::Node(3),
+        ]);
+        let p3 = Path(vec![
+            PathValue::Node(3),
+            PathValue::EdgeDirectional(30),
+            PathValue::Node(4),
+        ]);
 
         assert!(p1.can_concat(&p2));
         assert!(!p1.can_concat(&p3));
@@ -160,11 +172,22 @@ mod tests {
 
     #[test]
     fn test_path_concat() {
-        let p1 = Path(vec![PathValue::Node(1), PathValue::EdgeDirectional(10), PathValue::Node(2)]);
-        let p2 = Path(vec![PathValue::Node(2), PathValue::EdgeDirectional(20), PathValue::Node(3)]);
+        let p1 = Path(vec![
+            PathValue::Node(1),
+            PathValue::EdgeDirectional(10),
+            PathValue::Node(2),
+        ]);
+        let p2 = Path(vec![
+            PathValue::Node(2),
+            PathValue::EdgeDirectional(20),
+            PathValue::Node(3),
+        ]);
         let expected = Path(vec![
-            PathValue::Node(1), PathValue::EdgeDirectional(10), PathValue::Node(2),
-            PathValue::EdgeDirectional(20), PathValue::Node(3),
+            PathValue::Node(1),
+            PathValue::EdgeDirectional(10),
+            PathValue::Node(2),
+            PathValue::EdgeDirectional(20),
+            PathValue::Node(3),
         ]);
         assert_eq!(p1.concat(&p2), expected);
     }

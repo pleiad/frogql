@@ -23,9 +23,18 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage:");
-        eprintln!("  {} <database.gdb>                        # open existing", args[0]);
-        eprintln!("  {} <database.gdb> --import-csv <dir>     # create from CSV", args[0]);
-        eprintln!("  {} <database.gdb> --import-json <file>   # create from JSON", args[0]);
+        eprintln!(
+            "  {} <database.gdb>                        # open existing",
+            args[0]
+        );
+        eprintln!(
+            "  {} <database.gdb> --import-csv <dir>     # create from CSV",
+            args[0]
+        );
+        eprintln!(
+            "  {} <database.gdb> --import-json <file>   # create from JSON",
+            args[0]
+        );
         std::process::exit(1);
     }
 
@@ -37,7 +46,10 @@ fn main() {
         let source = &args[3];
         import(db_path, mode, source);
     } else if !db_path.exists() {
-        eprintln!("Error: {} does not exist. Use --import-csv or --import-json to create it.", db_path.display());
+        eprintln!(
+            "Error: {} does not exist. Use --import-csv or --import-json to create it.",
+            db_path.display()
+        );
         std::process::exit(1);
     }
 
@@ -45,8 +57,12 @@ fn main() {
     eprintln!("Opening {}...", db_path.display());
     let t0 = Instant::now();
     let store = LazyGraphStore::open(db_path).expect("failed to open database");
-    eprintln!("Loaded {} nodes, {} edges in {:.2}s",
-        store.node_count(), store.edge_count(), t0.elapsed().as_secs_f64());
+    eprintln!(
+        "Loaded {} nodes, {} edges in {:.2}s",
+        store.node_count(),
+        store.edge_count(),
+        t0.elapsed().as_secs_f64()
+    );
     eprintln!("Type a GQL query or 'quit'. Try 'schema' to see labels.");
     eprintln!();
 
@@ -58,14 +74,21 @@ fn main() {
             Ok(l) => l,
             Err(rustyline::error::ReadlineError::Interrupted) => continue,
             Err(rustyline::error::ReadlineError::Eof) => break,
-            Err(e) => { eprintln!("Error: {e}"); break; }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                break;
+            }
         };
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         rl.add_history_entry(line).ok();
 
-        if line == "quit" || line == "exit" { break; }
+        if line == "quit" || line == "exit" {
+            break;
+        }
 
         if line.starts_with("schema") {
             let arg = line["schema".len()..].trim();
@@ -79,7 +102,10 @@ fn main() {
 
         let query = match gqlrust::compile_query(line) {
             Ok(q) => q,
-            Err(e) => { eprintln!("Parse error: {e}"); continue; }
+            Err(e) => {
+                eprintln!("Parse error: {e}");
+                continue;
+            }
         };
 
         let start = Instant::now();
@@ -89,12 +115,14 @@ fn main() {
         match result {
             QueryResult::Projected(rows) => {
                 if let Some(returns) = &query.returns {
-                    let headers: Vec<String> = returns.iter().map(|r| {
-                        r.alias.clone().unwrap_or_else(|| format!("{}", r.expr))
-                    }).collect();
+                    let headers: Vec<String> = returns
+                        .iter()
+                        .map(|r| r.alias.clone().unwrap_or_else(|| format!("{}", r.expr)))
+                        .collect();
 
                     // Format all cell values
-                    let str_rows: Vec<Vec<String>> = rows.iter()
+                    let str_rows: Vec<Vec<String>> = rows
+                        .iter()
                         .map(|row| row.iter().map(|v| format!("{v}")).collect())
                         .collect();
 
@@ -109,22 +137,36 @@ fn main() {
                     }
 
                     // Print header
-                    let header_line: String = headers.iter().enumerate()
+                    let header_line: String = headers
+                        .iter()
+                        .enumerate()
                         .map(|(i, h)| format!("{:width$}", h, width = widths[i]))
-                        .collect::<Vec<_>>().join(" | ");
+                        .collect::<Vec<_>>()
+                        .join(" | ");
                     println!("{header_line}");
 
                     // Print separator
-                    let sep: String = widths.iter()
+                    let sep: String = widths
+                        .iter()
                         .map(|w| "-".repeat(*w))
-                        .collect::<Vec<_>>().join("-+-");
+                        .collect::<Vec<_>>()
+                        .join("-+-");
                     println!("{sep}");
 
                     // Print rows
                     for row in &str_rows {
-                        let line: String = row.iter().enumerate()
-                            .map(|(i, cell)| format!("{:width$}", cell, width = widths.get(i).copied().unwrap_or(0)))
-                            .collect::<Vec<_>>().join(" | ");
+                        let line: String = row
+                            .iter()
+                            .enumerate()
+                            .map(|(i, cell)| {
+                                format!(
+                                    "{:width$}",
+                                    cell,
+                                    width = widths.get(i).copied().unwrap_or(0)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" | ");
                         println!("{line}");
                     }
                 }
@@ -141,7 +183,10 @@ fn main() {
 
 fn import(db_path: &Path, mode: &str, source: &str) {
     if db_path.exists() {
-        eprintln!("{} already exists. Delete it first to reimport.", db_path.display());
+        eprintln!(
+            "{} already exists. Delete it first to reimport.",
+            db_path.display()
+        );
         std::process::exit(1);
     }
 
@@ -150,21 +195,21 @@ fn import(db_path: &Path, mode: &str, source: &str) {
 
     let graph = match mode {
         "--import-csv" => {
-            csv_loader::load_from_csv_dir(Path::new(source))
-                .expect("failed to load CSV")
+            csv_loader::load_from_csv_dir(Path::new(source)).expect("failed to load CSV")
         }
-        "--import-json" => {
-            Graph::from_file(Path::new(source))
-                .expect("failed to load JSON")
-        }
+        "--import-json" => Graph::from_file(Path::new(source)).expect("failed to load JSON"),
         _ => {
             eprintln!("Unknown import mode: {mode}. Use --import-csv or --import-json");
             std::process::exit(1);
         }
     };
 
-    eprintln!("Loaded {} nodes, {} edges in {:.2}s",
-        graph.node_count(), graph.edge_count(), t0.elapsed().as_secs_f64());
+    eprintln!(
+        "Loaded {} nodes, {} edges in {:.2}s",
+        graph.node_count(),
+        graph.edge_count(),
+        t0.elapsed().as_secs_f64()
+    );
 
     eprintln!("Saving to {}...", db_path.display());
     graph.save(db_path).expect("failed to save database");
@@ -195,26 +240,36 @@ fn print_raw_table(store: &LazyGraphStore, ir: &IntermediateResult, max_rows: us
     headers.extend(var_names.iter().cloned());
 
     // Build cell values for each row
-    let display_rows: Vec<Vec<String>> = ir.rows.iter().take(max_rows).map(|row| {
-        let mut cells = Vec::new();
+    let display_rows: Vec<Vec<String>> = ir
+        .rows
+        .iter()
+        .take(max_rows)
+        .map(|row| {
+            let mut cells = Vec::new();
 
-        // Path column: tuple of paths, separated by " | "
-        let path_str = row.paths.iter()
-            .map(|p| format!("{}", p))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        cells.push(path_str);
+            // Path column: tuple of paths, separated by " | "
+            let path_str = row
+                .paths
+                .iter()
+                .map(|p| format!("{}", p))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            cells.push(path_str);
 
-        // Variable columns: labels + properties
-        for var in &var_names {
-            let val = row.assignment.m.get(var)
-                .map(|pv| format_pathvalue_rich(store, pv))
-                .unwrap_or_else(|| "-".to_string());
-            cells.push(val);
-        }
+            // Variable columns: labels + properties
+            for var in &var_names {
+                let val = row
+                    .assignment
+                    .m
+                    .get(var)
+                    .map(|pv| format_pathvalue_rich(store, pv))
+                    .unwrap_or_else(|| "-".to_string());
+                cells.push(val);
+            }
 
-        cells
-    }).collect();
+            cells
+        })
+        .collect();
 
     // Compute column widths
     let num_cols = headers.len();
@@ -228,7 +283,9 @@ fn print_raw_table(store: &LazyGraphStore, ir: &IntermediateResult, max_rows: us
     }
 
     // Print header
-    let header_line: Vec<String> = headers.iter().enumerate()
+    let header_line: Vec<String> = headers
+        .iter()
+        .enumerate()
         .map(|(i, h)| format!("{:width$}", h, width = widths[i]))
         .collect();
     println!("{}", header_line.join(" | "));
@@ -239,8 +296,16 @@ fn print_raw_table(store: &LazyGraphStore, ir: &IntermediateResult, max_rows: us
 
     // Print rows
     for row in &display_rows {
-        let line: Vec<String> = row.iter().enumerate()
-            .map(|(i, cell)| format!("{:width$}", cell, width = widths.get(i).copied().unwrap_or(0)))
+        let line: Vec<String> = row
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| {
+                format!(
+                    "{:width$}",
+                    cell,
+                    width = widths.get(i).copied().unwrap_or(0)
+                )
+            })
             .collect();
         println!("{}", line.join(" | "));
     }
@@ -265,9 +330,8 @@ fn format_pathvalue_rich(store: &LazyGraphStore, pv: &PathValue) -> String {
             if props.is_empty() {
                 label_part
             } else {
-                let prop_parts: Vec<String> = props.iter()
-                    .map(|(k, v)| format!("{k}: {v}"))
-                    .collect();
+                let prop_parts: Vec<String> =
+                    props.iter().map(|(k, v)| format!("{k}: {v}")).collect();
                 format!("{label_part} {{{}}}", prop_parts.join(", "))
             }
         }
@@ -283,15 +347,17 @@ fn format_pathvalue_rich(store: &LazyGraphStore, pv: &PathValue) -> String {
             if props.is_empty() {
                 label_part
             } else {
-                let prop_parts: Vec<String> = props.iter()
-                    .map(|(k, v)| format!("{k}: {v}"))
-                    .collect();
+                let prop_parts: Vec<String> =
+                    props.iter().map(|(k, v)| format!("{k}: {v}")).collect();
                 format!("{label_part} {{{}}}", prop_parts.join(", "))
             }
         }
         PathValue::Nothing => "-".to_string(),
         PathValue::Group(items) => {
-            let parts: Vec<String> = items.iter().map(|v| format_pathvalue_rich(store, v)).collect();
+            let parts: Vec<String> = items
+                .iter()
+                .map(|v| format_pathvalue_rich(store, v))
+                .collect();
             format!("[{}]", parts.join(", "))
         }
     }
@@ -319,17 +385,22 @@ fn color_props(props: &std::collections::BTreeMap<String, &str>) -> String {
     if props.is_empty() {
         return String::new();
     }
-    let parts: Vec<String> = props.iter()
+    let parts: Vec<String> = props
+        .iter()
         .map(|(k, t)| format!("{k}: {C_GREEN}{t}{C_RESET}"))
         .collect();
     format!(" {{{}}}", parts.join(", "))
 }
 
-fn color_props_with_star(props: &std::collections::BTreeMap<String, &str>, has_opt: bool) -> String {
+fn color_props_with_star(
+    props: &std::collections::BTreeMap<String, &str>,
+    has_opt: bool,
+) -> String {
     if props.is_empty() && !has_opt {
         return String::new();
     }
-    let mut parts: Vec<String> = props.iter()
+    let mut parts: Vec<String> = props
+        .iter()
         .map(|(k, t)| format!("{k}: {C_GREEN}{t}{C_RESET}"))
         .collect();
     if has_opt {
@@ -358,7 +429,7 @@ fn color_count(count: usize, kind: &str) -> String {
 /// A node type: label combination + property name→type map.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct NodeType {
-    labels: Vec<String>,               // sorted
+    labels: Vec<String>,                                     // sorted
     props: std::collections::BTreeMap<String, &'static str>, // prop_name → "str"|"int"|"bool"
 }
 
@@ -374,11 +445,19 @@ struct EdgeType {
 
 impl NodeType {
     fn from_graph_element(store: &LazyGraphStore, id: u32, is_node: bool) -> Self {
-        let lt = if is_node { store.node_labels(id) } else { store.edge_labels(id) };
+        let lt = if is_node {
+            store.node_labels(id)
+        } else {
+            store.edge_labels(id)
+        };
         let mut labels = Graph::label_strings(&lt);
         labels.sort();
 
-        let raw_props = if is_node { store.node_props(id) } else { store.edge_props(id) };
+        let raw_props = if is_node {
+            store.node_props(id)
+        } else {
+            store.edge_props(id)
+        };
         let mut props = std::collections::BTreeMap::new();
         for (k, v) in &raw_props {
             let t = match v {
@@ -405,7 +484,9 @@ impl NodeType {
         if self.props.is_empty() {
             format!("({label_part})")
         } else {
-            let prop_parts: Vec<String> = self.props.iter()
+            let prop_parts: Vec<String> = self
+                .props
+                .iter()
                 .map(|(k, t)| format!("{k}: {t}"))
                 .collect();
             format!("({label_part} {{{}}})", prop_parts.join(", "))
@@ -414,7 +495,7 @@ impl NodeType {
 }
 
 fn print_schema(store: &LazyGraphStore) {
-    use std::collections::{HashMap, BTreeSet};
+    use std::collections::{BTreeSet, HashMap};
 
     // 1. Infer node types: group by (labels, prop_types)
     let mut node_type_counts: HashMap<NodeType, usize> = HashMap::new();
@@ -470,7 +551,8 @@ fn print_schema(store: &LazyGraphStore) {
     }
 
     // 4. Print node types NOT already visible as edge endpoints
-    let mut standalone_nodes: Vec<(&NodeType, &usize)> = node_type_counts.iter()
+    let mut standalone_nodes: Vec<(&NodeType, &usize)> = node_type_counts
+        .iter()
         .filter(|(nt, _)| !endpoint_types.contains(nt))
         .collect();
     standalone_nodes.sort_by_key(|(nt, _)| (*nt).clone());
@@ -502,9 +584,13 @@ fn print_schema(store: &LazyGraphStore) {
 
     // 6. Print summary
     println!();
-    println!("{C_DIM}{} node types, {} edge types ({} nodes, {} edges){C_RESET}",
-        node_type_counts.len(), edge_type_counts.len(),
-        store.node_count(), store.edge_count());
+    println!(
+        "{C_DIM}{} node types, {} edge types ({} nodes, {} edges){C_RESET}",
+        node_type_counts.len(),
+        edge_type_counts.len(),
+        store.node_count(),
+        store.edge_count()
+    );
 }
 
 /// Simplified schema: group by labels, intersect properties across all instances.
@@ -515,7 +601,8 @@ fn print_schema_simple(store: &LazyGraphStore) {
     // --- Node types: group by labels, intersect props ---
 
     // For each label combo: collect (intersection of prop names with consistent types, total count)
-    let mut node_groups: HashMap<Vec<String>, (Option<BTreeMap<String, &'static str>>, usize)> = HashMap::new();
+    let mut node_groups: HashMap<Vec<String>, (Option<BTreeMap<String, &'static str>>, usize)> =
+        HashMap::new();
     let mut node_label_to_simple: HashMap<Vec<String>, Vec<String>> = HashMap::new(); // for display
 
     for nid in 0..store.node_count() {
@@ -546,7 +633,9 @@ fn print_schema_simple(store: &LazyGraphStore) {
                 for k in keys {
                     match prop_types.get(&k) {
                         Some(t) if *t == common[&k] => {} // same type, keep
-                        _ => { common.remove(&k); }       // missing or different type, drop
+                        _ => {
+                            common.remove(&k);
+                        } // missing or different type, drop
                     }
                 }
             }
@@ -576,7 +665,8 @@ fn print_schema_simple(store: &LazyGraphStore) {
         directed: bool,
     }
 
-    let mut edge_groups: HashMap<SimpleEdgeKey, (Option<BTreeMap<String, &'static str>>, usize)> = HashMap::new();
+    let mut edge_groups: HashMap<SimpleEdgeKey, (Option<BTreeMap<String, &'static str>>, usize)> =
+        HashMap::new();
     let mut edge_has_optional: HashMap<SimpleEdgeKey, bool> = HashMap::new();
 
     for eid in 0..store.edge_count() {
@@ -602,7 +692,12 @@ fn print_schema_simple(store: &LazyGraphStore) {
             prop_types.insert(k.clone(), t);
         }
 
-        let key = SimpleEdgeKey { edge_labels, src_labels, tgt_labels, directed };
+        let key = SimpleEdgeKey {
+            edge_labels,
+            src_labels,
+            tgt_labels,
+            directed,
+        };
         let entry = edge_groups.entry(key.clone()).or_insert((None, 0));
         entry.1 += 1;
         match &mut entry.0 {
@@ -612,7 +707,9 @@ fn print_schema_simple(store: &LazyGraphStore) {
                 for k in keys {
                     match prop_types.get(&k) {
                         Some(t) if *t == common[&k] => {}
-                        _ => { common.remove(&k); }
+                        _ => {
+                            common.remove(&k);
+                        }
                     }
                 }
             }
@@ -627,7 +724,12 @@ fn print_schema_simple(store: &LazyGraphStore) {
         let mut tgt_labels = Graph::label_strings(&store.node_labels(store.tgt(eid)));
         tgt_labels.sort();
         let directed = store.is_directed(eid);
-        let key = SimpleEdgeKey { edge_labels, src_labels, tgt_labels, directed };
+        let key = SimpleEdgeKey {
+            edge_labels,
+            src_labels,
+            tgt_labels,
+            directed,
+        };
         let raw_props = store.edge_props(eid);
         let common = edge_groups[&key].0.as_ref().unwrap();
         if raw_props.len() > common.len() {
@@ -637,9 +739,10 @@ fn print_schema_simple(store: &LazyGraphStore) {
 
     // --- Format helpers ---
 
-    let format_simple_node = |labels: &[String], common: &BTreeMap<String, &str>, has_opt: bool| -> String {
-        color_node(labels, &color_props_with_star(common, has_opt))
-    };
+    let format_simple_node =
+        |labels: &[String], common: &BTreeMap<String, &str>, has_opt: bool| -> String {
+            color_node(labels, &color_props_with_star(common, has_opt))
+        };
 
     // --- Collect endpoint label combos that appear in edges ---
 
@@ -652,7 +755,8 @@ fn print_schema_simple(store: &LazyGraphStore) {
     // --- Print ---
 
     // Standalone node types (not in any edge)
-    let mut standalone: Vec<_> = node_groups.iter()
+    let mut standalone: Vec<_> = node_groups
+        .iter()
         .filter(|(labels, _)| !endpoint_label_combos.contains(*labels))
         .collect();
     standalone.sort_by_key(|(labels, _)| (*labels).clone());
@@ -661,39 +765,70 @@ fn print_schema_simple(store: &LazyGraphStore) {
         println!("{C_BOLD}Node types:{C_RESET}");
         for (labels, (common, count)) in &standalone {
             let has_opt = node_has_optional.get(*labels).copied().unwrap_or(false);
-            println!("  {} {}", format_simple_node(labels, common.as_ref().unwrap(), has_opt), color_count(*count, "nodes"));
+            println!(
+                "  {} {}",
+                format_simple_node(labels, common.as_ref().unwrap(), has_opt),
+                color_count(*count, "nodes")
+            );
         }
     }
 
     // Edge types
     if !edge_groups.is_empty() {
-        if !standalone.is_empty() { println!(); }
+        if !standalone.is_empty() {
+            println!();
+        }
         println!("{C_BOLD}Edge types:{C_RESET}");
 
         let mut edges: Vec<_> = edge_groups.iter().collect();
         edges.sort_by_key(|(k, _)| (*k).clone());
 
         for (key, (common, count)) in &edges {
-            let src_common = node_groups.get(&key.src_labels).and_then(|(c, _)| c.as_ref()).cloned().unwrap_or_default();
-            let src_opt = node_has_optional.get(&key.src_labels).copied().unwrap_or(false);
-            let tgt_common = node_groups.get(&key.tgt_labels).and_then(|(c, _)| c.as_ref()).cloned().unwrap_or_default();
-            let tgt_opt = node_has_optional.get(&key.tgt_labels).copied().unwrap_or(false);
+            let src_common = node_groups
+                .get(&key.src_labels)
+                .and_then(|(c, _)| c.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            let src_opt = node_has_optional
+                .get(&key.src_labels)
+                .copied()
+                .unwrap_or(false);
+            let tgt_common = node_groups
+                .get(&key.tgt_labels)
+                .and_then(|(c, _)| c.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            let tgt_opt = node_has_optional
+                .get(&key.tgt_labels)
+                .copied()
+                .unwrap_or(false);
 
             let src_str = format_simple_node(&key.src_labels, &src_common, src_opt);
             let tgt_str = format_simple_node(&key.tgt_labels, &tgt_common, tgt_opt);
 
             let edge_common = common.as_ref().unwrap();
             let e_has_opt = edge_has_optional.get(key).copied().unwrap_or(false);
-            let arrow = color_arrow(&key.edge_labels, &color_props_with_star(edge_common, e_has_opt), key.directed);
+            let arrow = color_arrow(
+                &key.edge_labels,
+                &color_props_with_star(edge_common, e_has_opt),
+                key.directed,
+            );
 
-            println!("  {src_str} {arrow} {tgt_str} {}", color_count(*count, "edges"));
+            println!(
+                "  {src_str} {arrow} {tgt_str} {}",
+                color_count(*count, "edges")
+            );
         }
     }
 
     let node_type_count = node_groups.len();
     let edge_type_count = edge_groups.len();
     println!();
-    println!("{C_DIM}{} node types, {} edge types ({} nodes, {} edges){C_RESET}",
-        node_type_count, edge_type_count,
-        store.node_count(), store.edge_count());
+    println!(
+        "{C_DIM}{} node types, {} edge types ({} nodes, {} edges){C_RESET}",
+        node_type_count,
+        edge_type_count,
+        store.node_count(),
+        store.edge_count()
+    );
 }

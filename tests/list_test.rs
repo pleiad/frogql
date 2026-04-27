@@ -35,7 +35,10 @@ fn test_json_loads_list_property() {
     let r = run(&g, "MATCH (x: Actor) WHERE x.name = 'Keanu' RETURN x.roles");
     assert_eq!(
         r,
-        vec![vec![Value::List(vec![Value::Str("Neo".into()), Value::Str("Agent".into())])]]
+        vec![vec![Value::List(vec![
+            Value::Str("Neo".into()),
+            Value::Str("Agent".into())
+        ])]]
     );
 }
 
@@ -74,17 +77,27 @@ fn test_in_operator_literal_list() {
 #[test]
 fn test_list_literal_in_return() {
     let g = graph_with_lists();
-    let r = run(&g, "MATCH (x: Actor) WHERE x.name = 'Keanu' RETURN [1, 2, 3]");
+    let r = run(
+        &g,
+        "MATCH (x: Actor) WHERE x.name = 'Keanu' RETURN [1, 2, 3]",
+    );
     assert_eq!(
         r,
-        vec![vec![Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])]]
+        vec![vec![Value::List(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3)
+        ])]]
     );
 }
 
 #[test]
 fn test_empty_list_literal() {
     let g = graph_with_lists();
-    let r = run(&g, "MATCH (x: Actor) WHERE x.name = 'Laurence' RETURN x.roles");
+    let r = run(
+        &g,
+        "MATCH (x: Actor) WHERE x.name = 'Laurence' RETURN x.roles",
+    );
     assert_eq!(r, vec![vec![Value::List(vec![])]]);
 }
 
