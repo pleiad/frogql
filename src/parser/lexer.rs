@@ -24,6 +24,13 @@ pub enum Token {
     Match,
     Return,
     Distinct,
+    All,
+    // Aggregate function names (ISO §20.9, core kinds)
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
 
     // Symbols
     LParen,   // (
@@ -99,6 +106,23 @@ impl Lexer {
                 break;
             }
         }
+    }
+
+    /// Peek the next non-whitespace character without advancing the position.
+    /// Used by aggregate-name soft-keyword detection: `count` is `Token::Count`
+    /// only when followed (across whitespace) by `(`; otherwise it stays a
+    /// regular `Name` so existing code using `count` as a property/field
+    /// keeps working.
+    fn peek_non_space(&self) -> Option<char> {
+        let mut i = self.pos;
+        while let Some(&c) = self.input.get(i) {
+            if c.is_whitespace() {
+                i += 1;
+            } else {
+                return Some(c);
+            }
+        }
+        None
     }
 
     fn run(&mut self) -> Result<(), String> {
@@ -333,6 +357,16 @@ impl Lexer {
                         "MATCH" | "match" => Token::Match,
                         "RETURN" | "return" => Token::Return,
                         "DISTINCT" | "distinct" => Token::Distinct,
+                        "ALL" | "all" => Token::All,
+                        // Aggregate function names are SOFT keywords: only
+                        // tokenized as the keyword when immediately followed
+                        // (across whitespace) by `(`. This preserves backward
+                        // compat with property/field names like `{count: 1}`.
+                        "COUNT" | "count" if self.peek_non_space() == Some('(') => Token::Count,
+                        "SUM" | "sum" if self.peek_non_space() == Some('(') => Token::Sum,
+                        "AVG" | "avg" if self.peek_non_space() == Some('(') => Token::Avg,
+                        "MIN" | "min" if self.peek_non_space() == Some('(') => Token::Min,
+                        "MAX" | "max" if self.peek_non_space() == Some('(') => Token::Max,
                         "int" => Token::Int,
                         "float" => Token::Float,
                         "bool" => Token::Bool,

@@ -2,7 +2,7 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::{Query, ReturnItem};
+use crate::syntax::query::{Aggregator, GeneralSetKind, Query, ReturnItem, SetQuantifier};
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
 use crate::typing::property_type::PropertyType;
@@ -116,26 +116,90 @@ impl Parser {
         Ok(items)
     }
 
-    // return_item = expr ("AS" NAME)?
-    // Tricky: AS is also a type-cast operator in expressions (x.val as int).
-    // We disambiguate: if AS is followed by a Name (not a type keyword), it's an alias.
+    // return_item = aggregate_function alias? | expr alias?
+    //
+    // Aggregates have priority: a peek at COUNT/SUM/AVG/MIN/MAX followed by
+    // `(` is unambiguously an aggregate. Plain expressions can't start with
+    // these keywords (they're not valid identifiers), so no backtracking.
     fn return_item(&mut self) -> Result<ReturnItem, String> {
+        if self.peek_aggregate_kind().is_some() {
+            let agg = self.aggregate_function()?;
+            let alias = self.maybe_alias();
+            return Ok(ReturnItem::Aggregate { agg, alias });
+        }
         let expr = self.return_expr()?;
-        // Check for "AS <name>" alias
+        let alias = self.maybe_alias();
+        Ok(ReturnItem::Expr { expr, alias })
+    }
+
+    /// If the next two tokens are `<aggregate-keyword> (`, return the kind.
+    /// `None` if not an aggregate (the keyword without `(` is not an aggregate
+    /// — e.g. a stray `COUNT` would just be a parse error downstream).
+    /// `COUNT` is special: returns `None` here and is detected separately
+    /// because `COUNT(*)` doesn't fit the GeneralSet shape.
+    fn peek_aggregate_kind(&self) -> Option<()> {
+        let lparen_next = matches!(self.peek_at(1), Some(Token::LParen));
+        if !lparen_next {
+            return None;
+        }
+        match self.peek() {
+            Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => Some(()),
+            _ => None,
+        }
+    }
+
+    /// Parse an `<aggregate function>` per ISO §20.9. The leading
+    /// keyword token has been peeked but not consumed.
+    fn aggregate_function(&mut self) -> Result<Aggregator, String> {
+        let kind_tok = self.advance();
+        self.expect(&Token::LParen)?;
+
+        // COUNT(*) is the only kind that can take `*` as its argument.
+        if matches!(kind_tok, Token::Count) && self.eat(&Token::Star) {
+            self.expect(&Token::RParen)?;
+            return Ok(Aggregator::CountStar);
+        }
+
+        // <general set function>: kind ( [DISTINCT | ALL] expr )
+        let quantifier = if self.eat(&Token::Distinct) {
+            SetQuantifier::Distinct
+        } else if self.eat(&Token::All) {
+            SetQuantifier::All
+        } else {
+            SetQuantifier::All // ALL is implicit per ISO §20.9 syntax rule 2
+        };
+        let expr = self.expr()?;
+        self.expect(&Token::RParen)?;
+
+        let kind = match kind_tok {
+            Token::Count => GeneralSetKind::Count,
+            Token::Sum => GeneralSetKind::Sum,
+            Token::Avg => GeneralSetKind::Avg,
+            Token::Min => GeneralSetKind::Min,
+            Token::Max => GeneralSetKind::Max,
+            _ => unreachable!("peek_aggregate_kind already filtered the keyword"),
+        };
+        Ok(Aggregator::GeneralSet {
+            kind,
+            quantifier,
+            expr,
+        })
+    }
+
+    /// Optional `AS <name>` alias. Tricky: AS is also a type-cast operator
+    /// in expressions (x.val as int), but at this position any AS followed
+    /// by a plain Name is unambiguously an alias.
+    fn maybe_alias(&mut self) -> Option<String> {
         if self.check(&Token::As) {
             let saved = self.pos;
             self.advance(); // consume AS
             if let Token::Name(n) = self.peek().clone() {
                 self.advance();
-                return Ok(ReturnItem::Expr {
-                    expr,
-                    alias: Some(n),
-                });
+                return Some(n);
             }
-            // Not a name after AS — backtrack, it wasn't an alias
             self.pos = saved;
         }
-        Ok(ReturnItem::Expr { expr, alias: None })
+        None
     }
 
     // Like expr but excludes AS from comparison operators (reserved for alias).
