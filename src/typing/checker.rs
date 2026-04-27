@@ -58,16 +58,10 @@ impl Typechecker {
         Typechecker::new(Schema::star())
     }
 
-    /// Type-check a full `Query`. Elaboration has already folded any
-    /// `WHERE` clause into `PathPattern::Filter` nodes inside `q.pattern`,
-    /// so the pattern is checked first. RETURN-clause items are then
-    /// walked for unbound-variable / type-mismatch detection: each
-    /// expression (including aggregate sub-expressions) is type-checked
-    /// against the pattern's environment. If an explicit GROUP BY clause
-    /// is present, also: type-check each grouping expression and verify
-    /// every non-aggregate RETURN item appears (structurally) in it.
-    /// Result-row typing (deciding the type of each output column) is
-    /// still out of scope.
+    /// Type-check a full Query. Pattern first; then walk RETURN items
+    /// for unbound-var / type-mismatch detection; if GROUP BY is
+    /// present, also verify each non-aggregate RETURN item appears in
+    /// it. Result-row typing is still out of scope.
     pub fn check_query(&mut self, q: &Query) -> TypecheckResult {
         let mut r = self.check_pattern(&q.pattern);
         if let Some(group_by) = &q.group_by {
@@ -86,21 +80,10 @@ impl Typechecker {
         r
     }
 
-    /// Reject the Cypher-style implicit grouping: a RETURN that mixes
-    /// aggregate and non-aggregate items without a GROUP BY clause.
-    /// ISO §16.15 requires the grouping keys to be explicit.
-    ///
-    /// Why this is enforced: implicit grouping silently produced wrong
-    /// results in common patterns like `RETURN x.name, COUNT(*)` —
-    /// every name is unique, so every group has size 1, so the count
-    /// is always 1, which is almost never what the user wants. Per
-    /// @mtoro on 2026-04-27 we drop implicit grouping from the checked
-    /// pipeline.
-    ///
-    /// Pure-aggregate queries (`RETURN COUNT(*)`) and pure-projection
-    /// queries (`RETURN x.a, x.b`) remain valid without GROUP BY.
-    /// `compile_query_unchecked` still bypasses this check for users
-    /// who want the implicit Cypher behavior.
+    /// ISO §16.15: mixing aggregates with non-aggregate items requires
+    /// an explicit GROUP BY. Implicit Cypher-style grouping was dropped
+    /// because patterns like `RETURN x.name, COUNT(*)` silently gave
+    /// useless per-row counts. `compile_query_unchecked` bypasses.
     fn check_no_implicit_group_by(&mut self, items: &[ReturnItem]) {
         let has_agg = items.iter().any(|i| i.is_aggregate());
         let has_expr = items.iter().any(|i| !i.is_aggregate());
@@ -113,21 +96,15 @@ impl Typechecker {
         }
     }
 
-    /// Type-check each expression in an explicit GROUP BY clause against
-    /// the pattern's environment. The result types are discarded — only
-    /// errors / warnings (e.g. unbound variables) are collected.
     fn check_group_by(&mut self, exprs: &[Expr], env: &TypeEnvironment) {
         for e in exprs {
             let _ = self.check_expr(e, env);
         }
     }
 
-    /// SQL/ISO §16.15 requirement: when an explicit GROUP BY clause is
-    /// present, every non-aggregate RETURN item must appear in the GROUP
-    /// BY list. Equality is structural (`Expr::eq`) — `RETURN x.a` with
-    /// `GROUP BY x.a` is OK, but `RETURN x.a + 1` with `GROUP BY x.a` is
-    /// rejected because the projected expression isn't itself a grouping
-    /// key.
+    /// ISO §16.15: every non-aggregate RETURN item must structurally
+    /// match a grouping expression. `Expr::eq` is structural — `x.a + 1`
+    /// in RETURN with `x.a` in GROUP BY is rejected.
     fn check_returns_match_group_by(&mut self, items: &[ReturnItem], group_by: &[Expr]) {
         for item in items {
             if let ReturnItem::Expr { expr, .. } = item {
@@ -141,13 +118,8 @@ impl Typechecker {
         }
     }
 
-    /// Type-check the items of a RETURN clause against the environment
-    /// produced by the pattern. The returned types are discarded — this
-    /// phase only collects errors and warnings as a side effect (e.g.
-    /// "Variable z not found in context"). `CountStar` has no inner
-    /// expression so it is a no-op; `GeneralSet` items type-check their
-    /// inner `expr`. The `quantifier` and `kind` don't affect typing in
-    /// this phase.
+    /// Walks each item's inner expr against the env; result types are
+    /// discarded — only errors/warnings (e.g. unbound vars) are collected.
     fn check_returns(&mut self, items: &[ReturnItem], env: &TypeEnvironment) {
         for item in items {
             match item {

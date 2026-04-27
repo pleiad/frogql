@@ -95,10 +95,6 @@ impl Parser {
             pattern = PathPattern::Filter(Box::new(pattern), expr);
         }
 
-        // Optional explicit GROUP BY (before RETURN, mirroring the order
-        // ISO §16.15 / SQL use). The `<grouping element>` per ISO is a
-        // <binding variable reference> only; gqlite extends to arbitrary
-        // expressions — see the doc on `Query::group_by`.
         let group_by = if self.eat(&Token::GroupBy) {
             let mut exprs = vec![self.expr()?];
             while self.eat(&Token::Comma) {
@@ -139,10 +135,6 @@ impl Parser {
     }
 
     // return_item = aggregate_function alias? | expr alias?
-    //
-    // Aggregates have priority: a peek at COUNT/SUM/AVG/MIN/MAX followed by
-    // `(` is unambiguously an aggregate. Plain expressions can't start with
-    // these keywords (they're not valid identifiers), so no backtracking.
     fn return_item(&mut self) -> Result<ReturnItem, String> {
         if self.peek_aggregate_kind().is_some() {
             let agg = self.aggregate_function()?;
@@ -154,11 +146,6 @@ impl Parser {
         Ok(ReturnItem::Expr { expr, alias })
     }
 
-    /// If the next two tokens are `<aggregate-keyword> (`, return the kind.
-    /// `None` if not an aggregate (the keyword without `(` is not an aggregate
-    /// — e.g. a stray `COUNT` would just be a parse error downstream).
-    /// `COUNT` is special: returns `None` here and is detected separately
-    /// because `COUNT(*)` doesn't fit the GeneralSet shape.
     fn peek_aggregate_kind(&self) -> Option<()> {
         let lparen_next = matches!(self.peek_at(1), Some(Token::LParen));
         if !lparen_next {
@@ -170,25 +157,23 @@ impl Parser {
         }
     }
 
-    /// Parse an `<aggregate function>` per ISO §20.9. The leading
-    /// keyword token has been peeked but not consumed.
     fn aggregate_function(&mut self) -> Result<Aggregator, String> {
         let kind_tok = self.advance();
         self.expect(&Token::LParen)?;
 
-        // COUNT(*) is the only kind that can take `*` as its argument.
+        // COUNT(*) is the only ISO §20.9 form that takes `*`.
         if matches!(kind_tok, Token::Count) && self.eat(&Token::Star) {
             self.expect(&Token::RParen)?;
             return Ok(Aggregator::CountStar);
         }
 
-        // <general set function>: kind ( [DISTINCT | ALL] expr )
+        // ISO §20.9 syntax rule 2: ALL is implicit when omitted.
         let quantifier = if self.eat(&Token::Distinct) {
             SetQuantifier::Distinct
         } else if self.eat(&Token::All) {
             SetQuantifier::All
         } else {
-            SetQuantifier::All // ALL is implicit per ISO §20.9 syntax rule 2
+            SetQuantifier::All
         };
         let expr = self.expr()?;
         self.expect(&Token::RParen)?;
@@ -208,9 +193,8 @@ impl Parser {
         })
     }
 
-    /// Optional `AS <name>` alias. Tricky: AS is also a type-cast operator
-    /// in expressions (x.val as int), but at this position any AS followed
-    /// by a plain Name is unambiguously an alias.
+    /// AS is also a type-cast operator in exprs; here it's unambiguously
+    /// an alias when followed by a Name.
     fn maybe_alias(&mut self) -> Option<String> {
         if self.check(&Token::As) {
             let saved = self.pos;

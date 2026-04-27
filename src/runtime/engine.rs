@@ -43,22 +43,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     }
 
     /// Run a full Query (MATCH ... WHERE ... RETURN).
-    /// Returns projected rows as Vec<Vec<Value>> if RETURN is specified,
-    /// or the raw IntermediateResult if no RETURN clause.
     ///
-    /// Two projection paths:
-    /// - **Row-by-row** (no aggregates in RETURN): each input row produces
-    ///   one output row, optionally deduplicated by `DISTINCT`. The
-    ///   `limit` cuts input rows directly (early termination).
-    /// - **Group-and-aggregate** (any aggregate in RETURN): rows are grouped
-    ///   by the values of the non-aggregate items, and each aggregate is
-    ///   reduced over its group. The `limit` cuts the OUTPUT row count
-    ///   (number of groups), not the input — truncating input would
-    ///   corrupt aggregate values (e.g. COUNT(*) would only count the
-    ///   first `limit` matched rows). `RETURN DISTINCT` paired with
-    ///   aggregates dedupes the projected output rows; with implicit
-    ///   GROUP BY this is rarely observable (group keys are already
-    ///   unique) but the SQL-style semantics are preserved.
+    /// `limit` semantics differ between the two paths: with no aggregates
+    /// it caps input rows (early termination); with aggregates it caps
+    /// output rows after grouping (truncating input would corrupt counts).
     pub fn run_query(&self, query: &Query, limit: usize) -> QueryResult {
         let return_items = match &query.returns {
             None => {
@@ -69,9 +57,6 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         };
 
         let has_aggs = return_items.iter().any(|i| i.is_aggregate());
-
-        // Aggregates must see every matched row, so the input scan runs
-        // unlimited and `limit` is applied to the post-aggregation output.
         let input_limit = if has_aggs { 0 } else { limit };
         let ir = self.run_path_pattern(&query.pattern, input_limit);
 
@@ -91,8 +76,6 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         QueryResult::Projected(projected)
     }
 
-    /// Row-by-row projection: one output row per input row. The behavior
-    /// is unchanged from before aggregates landed.
     fn run_row_by_row(
         &self,
         items: &[ReturnItem],
@@ -116,9 +99,8 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         projected
     }
 
-    /// Evaluate an `Expr`-shaped return item against one row's assignment.
-    /// Aggregates can't be projected per-row — calling this on an aggregate
-    /// is a runtime bug (caller forgot to take the aggregated path).
+    /// Evaluate an `Expr`-shaped return item; aggregates require the
+    /// group-and-aggregate path and would be a runtime bug here.
     fn eval_expr_item(&self, item: &ReturnItem, mu: &Assignment) -> Value {
         match item {
             ReturnItem::Expr { expr, .. } => match self.run_expr(mu, expr) {
@@ -131,45 +113,19 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
     }
 
-    /// Group-and-aggregate projection.
-    ///
-    /// The grouping keys come from one of two sources:
-    /// - **Explicit GROUP BY** (`explicit_group_by = Some(exprs)`, ISO
-    ///   §16.15 / Feature GQ15): the listed expressions are evaluated
-    ///   per row to build the key. RETURN may project any aggregate plus
-    ///   any non-aggregate Expr that is structurally equal to a group-by
-    ///   expression.
-    /// - **Implicit (Cypher-style)** (`explicit_group_by = None`): every
-    ///   non-aggregate item in RETURN forms part of the key. Convenient
-    ///   but a divergence from strict ISO; used as the default fallback.
-    ///
-    /// Either way:
-    /// 1. Rows are partitioned by their key tuple.
-    /// 2. Each group emits one output row: aggregate items are reduced
-    ///    over the group's row set; non-aggregate items resolve from the
-    ///    group's first row (they're invariant within the group).
-    ///
-    /// Edge case (ISO §20.9 GR 7a-i): a query with no key items and zero
-    /// input rows still emits one output row — `RETURN COUNT(*)` over an
-    /// empty match yields `[[0]]`, not `[]`.
-    ///
-    /// Performance: O(n) total. `Value` lacks `Hash`/`Ord` (because of
-    /// `f64`), so we use a private `GroupKey` wrapper with manual
-    /// `Hash + Eq` (NaN normalized, +0/-0 collapsed) as the HashMap key.
-    /// Insertion order is preserved by tracking groups in a parallel Vec.
+    /// Group-and-aggregate projection. Keys come from explicit GROUP BY
+    /// (ISO §16.15) when present, otherwise from the non-aggregate RETURN
+    /// items. ISO §20.9 GR 7a-i: a query with no key items and zero rows
+    /// still emits one output row.
     fn run_aggregated(
         &self,
         items: &[ReturnItem],
         explicit_group_by: Option<&[Expr]>,
         rows: &[ResultRow],
     ) -> Vec<Vec<Value>> {
-        // group_indices[i] = row indices for the i-th group (insertion order
-        // preserved so output is deterministic). key_to_index gives O(1)
-        // lookup of "which group has this key?" using GroupKey's Hash impl.
         let mut group_indices: Vec<Vec<usize>> = Vec::new();
         let mut key_to_index: HashMap<GroupKey, usize> = HashMap::new();
 
-        // Compute key for each row. Source depends on explicit vs implicit.
         for (row_idx, row) in rows.iter().enumerate() {
             let key_values: Vec<Value> = match explicit_group_by {
                 Some(exprs) => exprs
@@ -195,8 +151,6 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
         }
 
-        // Pure-aggregate edge case: zero rows + no group key → emit one
-        // empty-group output row (so `COUNT(*)` over no matches = 0).
         let key_arity = explicit_group_by
             .map(|e| e.len())
             .unwrap_or_else(|| items.iter().filter(|it| !it.is_aggregate()).count());
@@ -204,20 +158,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             group_indices.push(Vec::new());
         }
 
-        // Project each group to one output row.
         let mut out: Vec<Vec<Value>> = Vec::with_capacity(group_indices.len());
         for row_idxs in &group_indices {
             let row_vals: Vec<Value> = items
                 .iter()
                 .map(|item| match item {
                     ReturnItem::Expr { expr, .. } => {
-                        // Non-aggregate item: resolve against the first row
-                        // of the group. Invariant within the group either
-                        // because (a) implicit GROUP BY made `expr` part of
-                        // the key, or (b) explicit GROUP BY listed it (the
-                        // typechecker / caller is responsible for verifying
-                        // this; a violation produces a possibly-arbitrary
-                        // value rather than panicking).
                         let mu = match row_idxs.first() {
                             Some(&i) => &rows[i].assignment,
                             None => return Value::Str("NULL".into()),
@@ -235,20 +181,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         out
     }
 
-    /// Reduce an aggregator over a group of rows. The runtime evaluates
-    /// the inner expression once per row, applies ISO null-elimination
-    /// (Failure → drop), and reduces according to the kind.
-    ///
-    /// All five core kinds (Count/Sum/Avg/Min/Max) plus `CountStar` are
-    /// wired up. Each general-set kind shares the same prefix of work
-    /// via `collect_aggregate_values` (eval + null-elim + optional
-    /// distinct dedup) and differs only in the reduction step.
     fn apply_aggregator(&self, agg: &Aggregator, row_idxs: &[usize], rows: &[ResultRow]) -> Value {
         match agg {
-            // ISO §20.9 GR 2: COUNT(*) is the cardinality of the group's row set.
-            // No null-elimination, no DISTINCT — every row counts.
+            // ISO §20.9 GR 2: COUNT(*) is cardinality, no null-elim, no DISTINCT.
             Aggregator::CountStar => Value::Int(row_idxs.len() as i64),
-
             Aggregator::GeneralSet {
                 kind,
                 quantifier,
@@ -266,10 +202,8 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
     }
 
-    /// Evaluate an aggregate's inner expression once per row, applying
-    /// ISO null-elimination (Failure → drop) and, when the quantifier is
-    /// DISTINCT, deduping the surviving values via a `HashSet<GroupKey>`
-    /// (O(n) total, vs O(n²) for the previous Vec::contains scan).
+    /// Evaluate inner expr per row, drop ISO nulls (Failure), optionally
+    /// dedup via HashSet when quantifier is DISTINCT.
     fn collect_aggregate_values(
         &self,
         expr: &Expr,
@@ -1162,30 +1096,17 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     }
 }
 
-// =======================================================================
-// Aggregate reducers (ISO §20.9 General Rules 7a-iii through 7a-vi)
-//
-// These run on the values that survived ISO null-elimination + optional
-// DISTINCT (see Runtime::collect_aggregate_values). Each returns the
-// per-group aggregate value.
-//
-// Empty input handling: per ISO §20.9 GR 7a-ii, SUM/AVG/MIN/MAX over an
-// empty value collection yield null. gqlite represents the runtime "null"
-// as `Value::Str("NULL")` to stay consistent with how `run_expr` reports
-// missing attributes today; introducing a proper `Value::Null` is a
-// follow-up that touches multiple subsystems.
-// =======================================================================
-
-const NULL_SENTINEL: &str = "NULL";
+// Aggregate reducers (ISO §20.9 GR 7a-iii..vi). Inputs already passed
+// null-elimination and optional DISTINCT in collect_aggregate_values.
+// Empty input → null sentinel (`Value::Str("NULL")` until a real
+// `Value::Null` lands; deferred — touches ~30 sites).
 
 fn null_value() -> Value {
-    Value::Str(NULL_SENTINEL.into())
+    Value::Str("NULL".into())
 }
 
-/// SUM: integer-preserving when all inputs are Int, promotes to Float
-/// when any input is Float. Non-numeric values are skipped (gradual
-/// typing tolerance — strict checking is a typechecker concern, not
-/// runtime). Empty input → null.
+/// Int-preserving when all inputs are Int; promotes to Float on any
+/// Float input. Non-numeric skipped (gradual tolerance). Empty → null.
 fn sum_values(values: &[Value]) -> Value {
     let mut int_acc: i64 = 0;
     let mut float_acc: f64 = 0.0;
@@ -1221,8 +1142,7 @@ fn sum_values(values: &[Value]) -> Value {
     }
 }
 
-/// AVG: always Float (averages of integers are usually not integers).
-/// Computed as sum/count over the numeric survivors. Empty → null.
+/// Always Float (averages of ints usually aren't ints). Empty → null.
 fn avg_values(values: &[Value]) -> Value {
     let mut sum: f64 = 0.0;
     let mut count: u64 = 0;
@@ -1242,8 +1162,7 @@ fn avg_values(values: &[Value]) -> Value {
     }
 }
 
-/// MIN: smallest value by `value_cmp`. Values incomparable with the
-/// running best are skipped (gradual tolerance). Empty → null.
+/// Smallest by `value_cmp`. Incomparable with running best → skipped.
 fn min_values(values: &[Value]) -> Value {
     let mut best: Option<&Value> = None;
     for v in values {
@@ -1259,7 +1178,6 @@ fn min_values(values: &[Value]) -> Value {
     best.cloned().unwrap_or_else(null_value)
 }
 
-/// MAX: symmetric to MIN.
 fn max_values(values: &[Value]) -> Value {
     let mut best: Option<&Value> = None;
     for v in values {
@@ -1275,17 +1193,11 @@ fn max_values(values: &[Value]) -> Value {
     best.cloned().unwrap_or_else(null_value)
 }
 
-/// Dedupe a result table preserving first-seen order. O(n) using a
-/// HashSet of GroupKeys for membership; the output Vec maintains
-/// insertion order. Replaces the older O(n²) `Vec::contains` scan.
+/// O(n) dedup preserving insertion order via HashSet membership.
 fn dedup_preserving_order(rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
     let mut seen: HashSet<GroupKey> = HashSet::with_capacity(rows.len());
     let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
     for row in rows {
-        // Build the key from a clone of the row so we can keep the row
-        // for the output. The clone is unavoidable here without
-        // restructuring the function signature; in practice rows are
-        // small (typically a handful of columns).
         let key = GroupKey::from_values(row.clone());
         if seen.insert(key) {
             out.push(row);
@@ -1294,30 +1206,13 @@ fn dedup_preserving_order(rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
     out
 }
 
-// =======================================================================
-// GroupKey: a Hash + Eq wrapper around `Vec<Value>` for grouping/dedup
-//
-// `Value` itself doesn't derive `Hash`/`Eq` because it contains `f64`,
-// which has neither (NaN != NaN per IEEE 754, and no Hash impl exists).
-// Modifying `Value` would touch ~30 sites repo-wide; instead this
-// wrapper is local to the runtime and only used as a HashMap key.
-//
-// Float normalization for hashing:
-//  - `NaN` → canonical NaN (any NaN payload hashes the same).
-//  - `-0.0` → `+0.0` (so `+0.0` and `-0.0` group together; matches `==`).
-//
-// Equality and hash are kept consistent: two GroupKeys with equal hashes
-// can be unequal (collisions are fine), but equal GroupKeys MUST hash
-// the same. The normalization above is what makes that hold for floats.
-// =======================================================================
+// `Value` lacks Hash/Eq because of `f64`. This wrapper is runtime-local;
+// modifying `Value` would touch ~30 call sites. Floats are normalized so
+// NaN==NaN and +0.0==-0.0 (consistent with our notion of "same group").
 
-/// Wrapper that gives `Vec<Value>` a `Hash + Eq` impl for use as a
-/// HashMap/HashSet key. Owns its data so it can outlive the rows it was
-/// built from.
 #[derive(Debug, Clone)]
 struct GroupKey(Vec<Value>);
 
-/// Hash one `Value` into the given hasher with float normalization.
 fn hash_value<H: Hasher>(v: &Value, state: &mut H) {
     std::mem::discriminant(v).hash(state);
     match v {
@@ -1341,8 +1236,6 @@ fn hash_value<H: Hasher>(v: &Value, state: &mut H) {
     }
 }
 
-/// Equality between two `Value`s using bit-equality for floats AFTER
-/// normalization. Matches `hash_value` so the Hash/Eq contract holds.
 fn eq_value(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x == y,
@@ -1361,15 +1254,12 @@ fn eq_value(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// Map a float to a hashable bit pattern. `NaN`s collapse to one
-/// canonical NaN; `-0.0` collapses to `+0.0`. The result preserves
-/// `==`-equivalence: two floats that compare equal under our scheme
-/// (NaN-equal-to-NaN, +0/-0 equal) hash to the same bits.
+/// NaN → canonical NaN bits; -0.0 → +0.0 bits. Keeps Hash/Eq consistent
+/// with our notion that NaN==NaN and +0.0==-0.0 for grouping.
 fn normalize_float_bits(f: f64) -> u64 {
     if f.is_nan() {
         f64::NAN.to_bits()
     } else if f == 0.0 {
-        // both +0.0 and -0.0 compare == to 0.0 under IEEE; collapse to +0.0.
         0
     } else {
         f.to_bits()
@@ -1404,9 +1294,7 @@ impl GroupKey {
     }
 }
 
-/// Total ordering between `Value`s for MIN/MAX. Mixes Int<->Float by
-/// promotion; comparisons across unrelated kinds (e.g. Int vs Str)
-/// return None and the caller skips them. List/Record never compare.
+/// MIN/MAX ordering. Int<->Float promote; cross-kind returns None.
 fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
     match (a, b) {

@@ -43,14 +43,9 @@ impl SimpleType {
         SimpleType::Union(Box::new(a.clone()), Box::new(b.clone()))
     }
 
-    /// Greatest lower bound (meet).
-    ///
-    /// For composite types the meet is applied **recursively** on the inner
-    /// type(s), as confirmed in chat with @mtoro on 2026-04-27. Examples:
-    ///   meet(List[int], List[int|str]) = List[int]
-    ///   meet({a:int}, {a:int|str})     = {a:int}
-    /// Records with different key sets fall through to `Zero` (they are
-    /// distinct types under closed-record semantics — no width subtyping).
+    /// Greatest lower bound. Composite types meet recursively on inner
+    /// types (e.g. `meet(List[int], List[int|str]) = List[int]`).
+    /// Records with different key sets are distinct types → Zero.
     pub fn meet(a: &SimpleType, b: &SimpleType) -> SimpleType {
         match (a, b) {
             (SimpleType::Star, _) => b.clone(),
@@ -61,7 +56,6 @@ impl SimpleType {
             (_, SimpleType::Union(t1, t2)) => {
                 SimpleType::union(&SimpleType::meet(a, t1), &SimpleType::meet(a, t2))
             }
-            // Composite types: meet applied recursively (covariant).
             (SimpleType::List(a), SimpleType::List(b)) => {
                 SimpleType::List(Box::new(SimpleType::meet(a, b)))
             }
@@ -69,9 +63,7 @@ impl SimpleType {
                 SimpleType::Group(Box::new(SimpleType::meet(a, b)))
             }
             (SimpleType::Record(a), SimpleType::Record(b)) => {
-                // Different key sets → distinct types → Zero. BTreeMap keys
-                // are ordered so direct iterator comparison is O(n) and
-                // doesn't need a HashSet.
+                // BTreeMap keys are ordered, so iterator comparison is O(n).
                 if a.len() != b.len() || !a.keys().zip(b.keys()).all(|(ka, kb)| ka == kb) {
                     SimpleType::Zero
                 } else {
@@ -213,9 +205,7 @@ mod tests {
         assert!(u.is_empty());
     }
 
-    // -------------------------------------------------------------------
-    // meet on composite types — covariant recursion (per @mtoro 2026-04-27)
-    // -------------------------------------------------------------------
+    // meet on composite types — covariant recursion.
 
     fn list(t: SimpleType) -> SimpleType {
         SimpleType::List(Box::new(t))
