@@ -1,9 +1,15 @@
 //! Interactive GQL REPL (like sqlite3 but for graphs).
 //!
 //! Usage:
-//!   gqlite <database.gdb>                        # open existing
-//!   gqlite <database.gdb> --import-csv <dir>     # create from CSV, then open
-//!   gqlite <database.gdb> --import-json <file>   # create from JSON, then open
+//!   gqlite <database.gdb> [--no-typecheck]                        # open existing
+//!   gqlite <database.gdb> --import-csv <dir> [--no-typecheck]     # create from CSV
+//!   gqlite <database.gdb> --import-json <file> [--no-typecheck]   # create from JSON
+//!
+//! Options:
+//!   --no-typecheck    Skip the typechecker for this session. Default is on:
+//!                     unbound variables and type-incompatible WHERE clauses
+//!                     are rejected before execution; warnings (e.g. typo'd
+//!                     attributes) are printed to stderr.
 
 use std::env;
 use std::path::Path;
@@ -20,21 +26,32 @@ use gqlrust::runtime::result::{IntermediateResult, QueryResult};
 use gqlrust::store::lazy::LazyGraphStore;
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let mut args: Vec<String> = env::args().collect();
+
+    // Extract --no-typecheck from anywhere in argv. After this, the
+    // remaining args have the same positional shape the rest of the
+    // CLI logic expects (db path, optional --import-csv/--import-json
+    // + source).
+    let typecheck = !args.iter().any(|a| a == "--no-typecheck");
+    args.retain(|a| a != "--no-typecheck");
+
     if args.len() < 2 {
         eprintln!("Usage:");
         eprintln!(
-            "  {} <database.gdb>                        # open existing",
+            "  {} <database.gdb> [--no-typecheck]                        # open existing",
             args[0]
         );
         eprintln!(
-            "  {} <database.gdb> --import-csv <dir>     # create from CSV",
+            "  {} <database.gdb> --import-csv <dir> [--no-typecheck]     # create from CSV",
             args[0]
         );
         eprintln!(
-            "  {} <database.gdb> --import-json <file>   # create from JSON",
+            "  {} <database.gdb> --import-json <file> [--no-typecheck]   # create from JSON",
             args[0]
         );
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  --no-typecheck    skip the typechecker for this session (default: on)");
         std::process::exit(1);
     }
 
@@ -63,6 +80,7 @@ fn main() {
         store.edge_count(),
         t0.elapsed().as_secs_f64()
     );
+    eprintln!("Typechecker: {}", if typecheck { "on" } else { "off" });
     eprintln!("Type a GQL query or 'quit'. Try 'schema' to see labels.");
     eprintln!();
 
@@ -100,11 +118,30 @@ fn main() {
             continue;
         }
 
-        let query = match gqlrust::compile_query(line) {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("Parse error: {e}");
-                continue;
+        let query = if typecheck {
+            match gqlrust::compile_query_with_diagnostics(line) {
+                Ok(r) => {
+                    for w in &r.warnings {
+                        eprintln!("warning: {w}");
+                    }
+                    r.query
+                }
+                Err(gqlrust::CompileError::Parse(e)) => {
+                    eprintln!("Parse error: {e}");
+                    continue;
+                }
+                Err(gqlrust::CompileError::Type(es)) => {
+                    eprintln!("Type error: {}", es.join("; "));
+                    continue;
+                }
+            }
+        } else {
+            match gqlrust::compile_query_unchecked(line) {
+                Ok(q) => q,
+                Err(e) => {
+                    eprintln!("Parse error: {e}");
+                    continue;
+                }
             }
         };
 
