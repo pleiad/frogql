@@ -8,7 +8,7 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::Query;
+use crate::syntax::query::{Aggregator, Query, ReturnItem};
 
 use super::descriptor_type::DescriptorType;
 use super::path_type::{EdgeDir, PathType};
@@ -60,10 +60,43 @@ impl Typechecker {
 
     /// Type-check a full `Query`. Elaboration has already folded any
     /// `WHERE` clause into `PathPattern::Filter` nodes inside `q.pattern`,
-    /// so this just checks the pattern. `RETURN` is not type-checked in
-    /// this phase (out-of-scope: result-row typing).
+    /// so the pattern is checked first. RETURN-clause items are then
+    /// walked for unbound-variable / type-mismatch detection: each
+    /// expression (including aggregate sub-expressions) is type-checked
+    /// against the pattern's environment. Result-row typing (deciding
+    /// the type of each output column) is still out of scope.
     pub fn check_query(&mut self, q: &Query) -> TypecheckResult {
-        self.check_pattern(&q.pattern)
+        let mut r = self.check_pattern(&q.pattern);
+        if let Some(returns) = &q.returns {
+            self.check_returns(returns, &r.env);
+        }
+        if !self.errors.is_empty() {
+            r.ok = false;
+        }
+        r
+    }
+
+    /// Type-check the items of a RETURN clause against the environment
+    /// produced by the pattern. The returned types are discarded — this
+    /// phase only collects errors and warnings as a side effect (e.g.
+    /// "Variable z not found in context"). `CountStar` has no inner
+    /// expression so it is a no-op; `GeneralSet` items type-check their
+    /// inner `expr`. The `quantifier` and `kind` don't affect typing in
+    /// this phase.
+    fn check_returns(&mut self, items: &[ReturnItem], env: &TypeEnvironment) {
+        for item in items {
+            match item {
+                ReturnItem::Expr { expr, .. } => {
+                    let _ = self.check_expr(expr, env);
+                }
+                ReturnItem::Aggregate { agg, .. } => match agg {
+                    Aggregator::CountStar => {}
+                    Aggregator::GeneralSet { expr, .. } => {
+                        let _ = self.check_expr(expr, env);
+                    }
+                },
+            }
+        }
     }
 
     /// Type-check a `PathPattern`.
@@ -108,10 +141,8 @@ impl Typechecker {
                 let cm = match TypeEnvironment::meet(&self.schema, &r1.env, &r2.env) {
                     Ok(env) => env,
                     Err(e) => {
-                        self.errors.push(format!(
-                            "Concatenation of contexts failed: {}",
-                            e
-                        ));
+                        self.errors
+                            .push(format!("Concatenation of contexts failed: {}", e));
                         r1.env.clone()
                     }
                 };
@@ -144,7 +175,11 @@ impl Typechecker {
                 )
             }
 
-            PathPattern::Repeat { pattern, lb, ub: _ub } => {
+            PathPattern::Repeat {
+                pattern,
+                lb,
+                ub: _ub,
+            } => {
                 let r = self.check_path_pattern(pattern);
                 let raw_lb = *lb as u64;
 
@@ -156,10 +191,7 @@ impl Typechecker {
                     raw_lb
                 };
 
-                TypecheckResult::new(
-                    self.pow_path_type(&r.path, effective_lb),
-                    r.env.to_group(),
-                )
+                TypecheckResult::new(self.pow_path_type(&r.path, effective_lb), r.env.to_group())
             }
 
             PathPattern::Questioned(p) => {
@@ -295,19 +327,13 @@ impl Typechecker {
         VariableType::refine(&self.schema, &vt)
     }
 
-    fn refine_pattern_edge(
-        &mut self,
-        dir: EdgeDir,
-        desc: &Option<Descriptor>,
-    ) -> VariableType {
+    fn refine_pattern_edge(&mut self, dir: EdgeDir, desc: &Option<Descriptor>) -> VariableType {
         let dtype = descriptor_type_of(desc);
         if let Some(d) = desc {
             self.assert_filters_drained(d);
         }
         let vt = match dir {
-            EdgeDir::Right | EdgeDir::Left | EdgeDir::Any => {
-                VariableType::edge_directional(dtype)
-            }
+            EdgeDir::Right | EdgeDir::Left | EdgeDir::Any => VariableType::edge_directional(dtype),
             EdgeDir::None => VariableType::edge_non_directional(dtype),
         };
         VariableType::refine(&self.schema, &vt)
@@ -371,4 +397,3 @@ fn simple_type_of_value(v: &Value) -> SimpleType {
         Value::Record(_) => SimpleType::Star,
     }
 }
-
