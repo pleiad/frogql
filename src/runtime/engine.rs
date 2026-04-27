@@ -47,27 +47,47 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     ///
     /// Two projection paths:
     /// - **Row-by-row** (no aggregates in RETURN): each input row produces
-    ///   one output row, optionally deduplicated by `DISTINCT`.
+    ///   one output row, optionally deduplicated by `DISTINCT`. The
+    ///   `limit` cuts input rows directly (early termination).
     /// - **Group-and-aggregate** (any aggregate in RETURN): rows are grouped
     ///   by the values of the non-aggregate items, and each aggregate is
-    ///   reduced over its group. See `run_aggregated`.
+    ///   reduced over its group. The `limit` cuts the OUTPUT row count
+    ///   (number of groups), not the input — truncating input would
+    ///   corrupt aggregate values (e.g. COUNT(*) would only count the
+    ///   first `limit` matched rows). `RETURN DISTINCT` paired with
+    ///   aggregates dedupes the projected output rows; with implicit
+    ///   GROUP BY this is rarely observable (group keys are already
+    ///   unique) but the SQL-style semantics are preserved.
     pub fn run_query(&self, query: &Query, limit: usize) -> QueryResult {
-        let ir = self.run_path_pattern(&query.pattern, limit);
-
-        match &query.returns {
-            None => QueryResult::Raw(ir),
-            Some(return_items) => {
-                if return_items.iter().any(|i| i.is_aggregate()) {
-                    QueryResult::Projected(self.run_aggregated(return_items, &ir.rows))
-                } else {
-                    QueryResult::Projected(self.run_row_by_row(
-                        return_items,
-                        &ir.rows,
-                        query.distinct,
-                    ))
-                }
+        let return_items = match &query.returns {
+            None => {
+                let ir = self.run_path_pattern(&query.pattern, limit);
+                return QueryResult::Raw(ir);
             }
-        }
+            Some(items) => items,
+        };
+
+        let has_aggs = return_items.iter().any(|i| i.is_aggregate());
+
+        // Aggregates must see every matched row, so the input scan runs
+        // unlimited and `limit` is applied to the post-aggregation output.
+        let input_limit = if has_aggs { 0 } else { limit };
+        let ir = self.run_path_pattern(&query.pattern, input_limit);
+
+        let projected = if has_aggs {
+            let mut p = self.run_aggregated(return_items, &ir.rows);
+            if query.distinct {
+                p = dedup_preserving_order(p);
+            }
+            if limit > 0 && p.len() > limit {
+                p.truncate(limit);
+            }
+            p
+        } else {
+            self.run_row_by_row(return_items, &ir.rows, query.distinct)
+        };
+
+        QueryResult::Projected(projected)
     }
 
     /// Row-by-row projection: one output row per input row. The behavior
@@ -1213,6 +1233,22 @@ fn max_values(values: &[Value]) -> Value {
         }
     }
     best.cloned().unwrap_or_else(null_value)
+}
+
+/// Dedupe a result table preserving first-seen order. Linear-scan
+/// equality (Vec<Value> uses `Value::eq`, which is `PartialEq` —
+/// fine in practice since the equality is structural and we only
+/// dedupe identical rows). O(n²) worst case; acceptable for the
+/// post-aggregation row count which is bounded by the number of
+/// distinct group keys.
+fn dedup_preserving_order(rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        if !out.contains(&row) {
+            out.push(row);
+        }
+    }
+    out
 }
 
 /// Total ordering between `Value`s for MIN/MAX. Mixes Int<->Float by

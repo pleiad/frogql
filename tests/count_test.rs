@@ -475,3 +475,90 @@ fn test_groupby_pure_aggregates_no_key() {
         other => panic!("expected Float, got {other:?}"),
     }
 }
+
+// =======================================================================
+// Bug-regression: limit and DISTINCT interaction with aggregates
+// =======================================================================
+
+#[test]
+fn test_count_star_ignores_input_limit() {
+    // Regression: passing limit > 0 to run_query used to make
+    // run_path_pattern truncate the input rows BEFORE aggregation,
+    // so COUNT(*) returned the count of `limit` matched rows instead
+    // of all of them. Now the input scan runs unlimited when
+    // aggregates are present.
+    let g = graph_three_users();
+    let query = compile_query("MATCH (x: User) RETURN COUNT(*)").unwrap();
+    let rt = Runtime::new(&g);
+    match rt.run_query(&query, 1) {
+        QueryResult::Projected(rs) => assert_eq!(rs, vec![vec![Value::Int(3)]]),
+        _ => panic!("expected projected"),
+    }
+}
+
+#[test]
+fn test_aggregate_groupby_respects_output_limit() {
+    // The limit is applied to OUTPUT rows (groups), not input rows.
+    // Two cities → two groups; limit=1 truncates to one group.
+    let g = graph_three_users();
+    let query = compile_query("MATCH (x: User) RETURN x.city, COUNT(*)").unwrap();
+    let rt = Runtime::new(&g);
+    match rt.run_query(&query, 1) {
+        QueryResult::Projected(rs) => assert_eq!(rs.len(), 1),
+        _ => panic!("expected projected"),
+    }
+}
+
+#[test]
+fn test_aggregate_no_limit_returns_all_groups() {
+    // limit=0 means unlimited: both groups emitted.
+    let g = graph_three_users();
+    let query = compile_query("MATCH (x: User) RETURN x.city, COUNT(*)").unwrap();
+    let rt = Runtime::new(&g);
+    match rt.run_query(&query, 0) {
+        QueryResult::Projected(rs) => assert_eq!(rs.len(), 2),
+        _ => panic!("expected projected"),
+    }
+}
+
+#[test]
+fn test_return_distinct_with_aggregate_dedupes_output() {
+    // Regression: RETURN DISTINCT used to be silently ignored when any
+    // aggregate appeared in the projection. Now it dedupes the
+    // post-aggregation rows.
+    //
+    // RETURN DISTINCT COUNT(*) over a 4-row graph: the pure-aggregate
+    // path produces a single output row [4]; DISTINCT runs over it as
+    // a no-op. The point is that the path no longer panics or skips
+    // the dedup step.
+    let json = r#"{
+      "nodes": [
+        {"id": "a", "labels": ["P"], "props": {"city": "X"}},
+        {"id": "b", "labels": ["P"], "props": {"city": "Y"}},
+        {"id": "c", "labels": ["P"], "props": {"city": "Z"}},
+        {"id": "d", "labels": ["P"], "props": {"city": "Z"}}
+      ],
+      "edges": []
+    }"#;
+    let g = Graph::from_json_str(json).unwrap();
+    let rt = Runtime::new(&g);
+
+    let q = compile_query("MATCH (x: P) RETURN DISTINCT COUNT(*)").unwrap();
+    match rt.run_query(&q, 0) {
+        QueryResult::Projected(rs) => assert_eq!(rs, vec![vec![Value::Int(4)]]),
+        _ => panic!("expected projected"),
+    }
+}
+
+#[test]
+fn test_compile_query_unchecked_supports_aggregates() {
+    // Smoke test: the bypass path used to skip type checking should
+    // still produce a runnable Query when aggregates are present.
+    let g = graph_three_users();
+    let query = gqlrust::compile_query_unchecked("MATCH (x: User) RETURN COUNT(*)").unwrap();
+    let rt = Runtime::new(&g);
+    match rt.run_query(&query, 0) {
+        QueryResult::Projected(rs) => assert_eq!(rs, vec![vec![Value::Int(3)]]),
+        _ => panic!("expected projected"),
+    }
+}
