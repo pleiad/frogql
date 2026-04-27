@@ -36,22 +36,13 @@ impl Connection {
         query: &str,
         limit: usize,
     ) -> PyResult<Bound<'py, PyList>> {
-        // Compile via the diagnostics-rich entry point so we can surface
-        // typechecker warnings to Python (typo'd attributes, non-boolean
-        // filters, etc.). `compile_query_with_diagnostics` returns
-        // phase-prefixed error strings ("Parse error: …" / "Type error: …"),
-        // so we propagate them to PyValueError verbatim.
         let result = gqlrust::compile_query_with_diagnostics(query)
             .map_err(|e| PyValueError::new_err(e.message()))?;
         let q = result.query;
 
-        // Emit each typechecker warning via Python's `warnings.warn`.
-        // Users can filter, suppress, or escalate via the standard
-        // `warnings` module (e.g. warnings.simplefilter('error') turns
-        // them into ValueError). Default category is UserWarning.
+        // Forward typechecker warnings through Python's `warnings` module.
         if !result.warnings.is_empty() {
-            let warnings_mod = py.import_bound("warnings")?;
-            let warn = warnings_mod.getattr("warn")?;
+            let warn = py.import_bound("warnings")?.getattr("warn")?;
             for w in &result.warnings {
                 warn.call1((w.as_str(),))?;
             }

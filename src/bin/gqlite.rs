@@ -4,12 +4,6 @@
 //!   gqlite <database.gdb> [--no-typecheck]                        # open existing
 //!   gqlite <database.gdb> --import-csv <dir> [--no-typecheck]     # create from CSV
 //!   gqlite <database.gdb> --import-json <file> [--no-typecheck]   # create from JSON
-//!
-//! Options:
-//!   --no-typecheck    Skip the typechecker for this session. Default is on:
-//!                     unbound variables and type-incompatible WHERE clauses
-//!                     are rejected before execution; warnings (e.g. typo'd
-//!                     attributes) are printed to stderr.
 
 use std::env;
 use std::path::Path;
@@ -28,10 +22,7 @@ use gqlrust::store::lazy::LazyGraphStore;
 fn main() {
     let mut args: Vec<String> = env::args().collect();
 
-    // Extract --no-typecheck from anywhere in argv. After this, the
-    // remaining args have the same positional shape the rest of the
-    // CLI logic expects (db path, optional --import-csv/--import-json
-    // + source).
+    // Strip --no-typecheck so positional dispatch below stays simple.
     let typecheck = !args.iter().any(|a| a == "--no-typecheck");
     args.retain(|a| a != "--no-typecheck");
 
