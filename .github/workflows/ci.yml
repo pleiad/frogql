@@ -12,7 +12,6 @@ concurrency:
 
 jobs:
   fmt:
-    name: rustfmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +21,6 @@ jobs:
       - run: cargo fmt --all -- --check
 
   check:
-    name: cargo check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +29,6 @@ jobs:
       - run: cargo check --workspace --all-targets
 
   clippy:
-    name: cargo clippy
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-D warnings"
@@ -44,7 +41,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D clippy::all
 
   test:
-    name: cargo test
     needs: check
     runs-on: ubuntu-latest
     steps:
