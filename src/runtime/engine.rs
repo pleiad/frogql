@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use crate::model::graph::Props;
 use crate::model::graph_access::GraphAccess;
@@ -152,22 +153,25 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// input rows still emits one output row — `RETURN COUNT(*)` over an
     /// empty match yields `[[0]]`, not `[]`.
     ///
-    /// Performance: groups are stored as `Vec<(GroupKey, Vec<usize>)>` and
-    /// looked up by linear scan. `Value` lacks `Hash`/`Ord` (because of
-    /// `f64`), so a `HashMap` would require a manual `Hash` impl. For now
-    /// linear search is fine; revisit if profiling shows it matters.
+    /// Performance: O(n) total. `Value` lacks `Hash`/`Ord` (because of
+    /// `f64`), so we use a private `GroupKey` wrapper with manual
+    /// `Hash + Eq` (NaN normalized, +0/-0 collapsed) as the HashMap key.
+    /// Insertion order is preserved by tracking groups in a parallel Vec.
     fn run_aggregated(
         &self,
         items: &[ReturnItem],
         explicit_group_by: Option<&[Expr]>,
         rows: &[ResultRow],
     ) -> Vec<Vec<Value>> {
-        // groups[i] = (group_key_values, row_indices_in_input).
-        let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
+        // group_indices[i] = row indices for the i-th group (insertion order
+        // preserved so output is deterministic). key_to_index gives O(1)
+        // lookup of "which group has this key?" using GroupKey's Hash impl.
+        let mut group_indices: Vec<Vec<usize>> = Vec::new();
+        let mut key_to_index: HashMap<GroupKey, usize> = HashMap::new();
 
         // Compute key for each row. Source depends on explicit vs implicit.
         for (row_idx, row) in rows.iter().enumerate() {
-            let key: Vec<Value> = match explicit_group_by {
+            let key_values: Vec<Value> = match explicit_group_by {
                 Some(exprs) => exprs
                     .iter()
                     .map(|e| match self.run_expr(&row.assignment, e) {
@@ -181,9 +185,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     .map(|it| self.eval_expr_item(it, &row.assignment))
                     .collect(),
             };
-            match groups.iter_mut().find(|(k, _)| k == &key) {
-                Some((_, idxs)) => idxs.push(row_idx),
-                None => groups.push((key, vec![row_idx])),
+            let key = GroupKey::from_values(key_values);
+            match key_to_index.get(&key) {
+                Some(&i) => group_indices[i].push(row_idx),
+                None => {
+                    key_to_index.insert(key, group_indices.len());
+                    group_indices.push(vec![row_idx]);
+                }
             }
         }
 
@@ -192,13 +200,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let key_arity = explicit_group_by
             .map(|e| e.len())
             .unwrap_or_else(|| items.iter().filter(|it| !it.is_aggregate()).count());
-        if key_arity == 0 && groups.is_empty() {
-            groups.push((Vec::new(), Vec::new()));
+        if key_arity == 0 && group_indices.is_empty() {
+            group_indices.push(Vec::new());
         }
 
         // Project each group to one output row.
-        let mut out: Vec<Vec<Value>> = Vec::with_capacity(groups.len());
-        for (_key, row_idxs) in &groups {
+        let mut out: Vec<Vec<Value>> = Vec::with_capacity(group_indices.len());
+        for row_idxs in &group_indices {
             let row_vals: Vec<Value> = items
                 .iter()
                 .map(|item| match item {
@@ -260,10 +268,8 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     /// Evaluate an aggregate's inner expression once per row, applying
     /// ISO null-elimination (Failure → drop) and, when the quantifier is
-    /// DISTINCT, deduping the surviving values.
-    ///
-    /// The dedup is a linear scan because `Value` lacks `Hash`/`Eq` (f64
-    /// inside). O(n*d) per group; fine at thesis scale, profile later.
+    /// DISTINCT, deduping the surviving values via a `HashSet<GroupKey>`
+    /// (O(n) total, vs O(n²) for the previous Vec::contains scan).
     fn collect_aggregate_values(
         &self,
         expr: &Expr,
@@ -272,13 +278,17 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         rows: &[ResultRow],
     ) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
+        let mut seen: HashSet<GroupKey> = HashSet::new();
         for &idx in row_idxs {
             let v = match self.run_expr(&rows[idx].assignment, expr) {
                 ExprResult::Success(v) => v,
                 ExprResult::Failure(_) => continue, // null-eliminated
             };
-            if matches!(quantifier, SetQuantifier::Distinct) && out.contains(&v) {
-                continue;
+            if matches!(quantifier, SetQuantifier::Distinct) {
+                let key = GroupKey::from_values(vec![v.clone()]);
+                if !seen.insert(key) {
+                    continue;
+                }
             }
             out.push(v);
         }
@@ -1265,20 +1275,133 @@ fn max_values(values: &[Value]) -> Value {
     best.cloned().unwrap_or_else(null_value)
 }
 
-/// Dedupe a result table preserving first-seen order. Linear-scan
-/// equality (Vec<Value> uses `Value::eq`, which is `PartialEq` —
-/// fine in practice since the equality is structural and we only
-/// dedupe identical rows). O(n²) worst case; acceptable for the
-/// post-aggregation row count which is bounded by the number of
-/// distinct group keys.
+/// Dedupe a result table preserving first-seen order. O(n) using a
+/// HashSet of GroupKeys for membership; the output Vec maintains
+/// insertion order. Replaces the older O(n²) `Vec::contains` scan.
 fn dedup_preserving_order(rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    let mut seen: HashSet<GroupKey> = HashSet::with_capacity(rows.len());
     let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
     for row in rows {
-        if !out.contains(&row) {
+        // Build the key from a clone of the row so we can keep the row
+        // for the output. The clone is unavoidable here without
+        // restructuring the function signature; in practice rows are
+        // small (typically a handful of columns).
+        let key = GroupKey::from_values(row.clone());
+        if seen.insert(key) {
             out.push(row);
         }
     }
     out
+}
+
+// =======================================================================
+// GroupKey: a Hash + Eq wrapper around `Vec<Value>` for grouping/dedup
+//
+// `Value` itself doesn't derive `Hash`/`Eq` because it contains `f64`,
+// which has neither (NaN != NaN per IEEE 754, and no Hash impl exists).
+// Modifying `Value` would touch ~30 sites repo-wide; instead this
+// wrapper is local to the runtime and only used as a HashMap key.
+//
+// Float normalization for hashing:
+//  - `NaN` → canonical NaN (any NaN payload hashes the same).
+//  - `-0.0` → `+0.0` (so `+0.0` and `-0.0` group together; matches `==`).
+//
+// Equality and hash are kept consistent: two GroupKeys with equal hashes
+// can be unequal (collisions are fine), but equal GroupKeys MUST hash
+// the same. The normalization above is what makes that hold for floats.
+// =======================================================================
+
+/// Wrapper that gives `Vec<Value>` a `Hash + Eq` impl for use as a
+/// HashMap/HashSet key. Owns its data so it can outlive the rows it was
+/// built from.
+#[derive(Debug, Clone)]
+struct GroupKey(Vec<Value>);
+
+/// Hash one `Value` into the given hasher with float normalization.
+fn hash_value<H: Hasher>(v: &Value, state: &mut H) {
+    std::mem::discriminant(v).hash(state);
+    match v {
+        Value::Int(n) => n.hash(state),
+        Value::Float(f) => normalize_float_bits(*f).hash(state),
+        Value::Str(s) => s.hash(state),
+        Value::Bool(b) => b.hash(state),
+        Value::List(items) => {
+            items.len().hash(state);
+            for item in items {
+                hash_value(item, state);
+            }
+        }
+        Value::Record(fields) => {
+            fields.len().hash(state);
+            for (k, v) in fields {
+                k.hash(state);
+                hash_value(v, state);
+            }
+        }
+    }
+}
+
+/// Equality between two `Value`s using bit-equality for floats AFTER
+/// normalization. Matches `hash_value` so the Hash/Eq contract holds.
+fn eq_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => normalize_float_bits(*x) == normalize_float_bits(*y),
+        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::List(x), Value::List(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| eq_value(a, b))
+        }
+        (Value::Record(x), Value::Record(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, vx)| y.get(k).map_or(false, |vy| eq_value(vx, vy)))
+        }
+        _ => false,
+    }
+}
+
+/// Map a float to a hashable bit pattern. `NaN`s collapse to one
+/// canonical NaN; `-0.0` collapses to `+0.0`. The result preserves
+/// `==`-equivalence: two floats that compare equal under our scheme
+/// (NaN-equal-to-NaN, +0/-0 equal) hash to the same bits.
+fn normalize_float_bits(f: f64) -> u64 {
+    if f.is_nan() {
+        f64::NAN.to_bits()
+    } else if f == 0.0 {
+        // both +0.0 and -0.0 compare == to 0.0 under IEEE; collapse to +0.0.
+        0
+    } else {
+        f.to_bits()
+    }
+}
+
+impl PartialEq for GroupKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self
+                .0
+                .iter()
+                .zip(other.0.iter())
+                .all(|(a, b)| eq_value(a, b))
+    }
+}
+
+impl Eq for GroupKey {}
+
+impl Hash for GroupKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.len().hash(state);
+        for v in &self.0 {
+            hash_value(v, state);
+        }
+    }
+}
+
+impl GroupKey {
+    fn from_values(vs: Vec<Value>) -> Self {
+        GroupKey(vs)
+    }
 }
 
 /// Total ordering between `Value`s for MIN/MAX. Mixes Int<->Float by
@@ -1298,5 +1421,121 @@ fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
             _ => Ordering::Equal,
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod group_key_tests {
+    //! Tests for `GroupKey` — the Hash + Eq wrapper used for grouping
+    //! and dedup. The key invariant: two GroupKeys that compare equal
+    //! must hash equal (Rust's Hash/Eq contract). Float normalization
+    //! is what makes this hold for NaN and -0.0.
+    use super::*;
+    use std::collections::HashMap;
+
+    fn key(vs: Vec<Value>) -> GroupKey {
+        GroupKey::from_values(vs)
+    }
+
+    fn hash_of(k: &GroupKey) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        let mut h = DefaultHasher::new();
+        k.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn equal_ints_are_equal_and_hash_same() {
+        let a = key(vec![Value::Int(42), Value::Str("x".into())]);
+        let b = key(vec![Value::Int(42), Value::Str("x".into())]);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn distinct_ints_are_unequal() {
+        let a = key(vec![Value::Int(1)]);
+        let b = key(vec![Value::Int(2)]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn nan_equals_nan_under_group_key() {
+        // IEEE 754 says NaN != NaN. For grouping we want them collapsed
+        // into the same group, so GroupKey treats NaN as self-equal.
+        let a = key(vec![Value::Float(f64::NAN)]);
+        let b = key(vec![Value::Float(f64::NAN)]);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn nan_payloads_are_normalized() {
+        // Two NaNs constructed with different bit patterns still group
+        // together — `normalize_float_bits` collapses them.
+        let nan1 = f64::from_bits(0x7ff8_0000_0000_0001);
+        let nan2 = f64::from_bits(0x7ff8_0000_0000_0002);
+        assert!(nan1.is_nan() && nan2.is_nan());
+        assert_ne!(nan1.to_bits(), nan2.to_bits()); // sanity: bit-distinct
+        let a = key(vec![Value::Float(nan1)]);
+        let b = key(vec![Value::Float(nan2)]);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn positive_and_negative_zero_are_equal() {
+        // IEEE: +0.0 == -0.0, but their bits differ. GroupKey must
+        // treat them as the same group to stay consistent with `==`.
+        let a = key(vec![Value::Float(0.0)]);
+        let b = key(vec![Value::Float(-0.0)]);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn distinct_floats_are_unequal() {
+        let a = key(vec![Value::Float(1.5)]);
+        let b = key(vec![Value::Float(1.6)]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn nested_list_equality_is_structural() {
+        let a = key(vec![Value::List(vec![Value::Int(1), Value::Int(2)])]);
+        let b = key(vec![Value::List(vec![Value::Int(1), Value::Int(2)])]);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn nested_record_equality_is_structural() {
+        let mut r1 = std::collections::BTreeMap::new();
+        r1.insert("k".into(), Value::Int(1));
+        let mut r2 = std::collections::BTreeMap::new();
+        r2.insert("k".into(), Value::Int(1));
+        let a = key(vec![Value::Record(r1)]);
+        let b = key(vec![Value::Record(r2)]);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn cross_kind_values_are_unequal() {
+        // Same numeric value, different kinds — not equal.
+        let a = key(vec![Value::Int(1)]);
+        let b = key(vec![Value::Float(1.0)]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn works_as_hashmap_key() {
+        // End-to-end smoke test of the actual use case.
+        let mut m: HashMap<GroupKey, usize> = HashMap::new();
+        m.insert(key(vec![Value::Int(1)]), 0);
+        m.insert(key(vec![Value::Int(2)]), 1);
+        assert_eq!(m.get(&key(vec![Value::Int(1)])), Some(&0));
+        assert_eq!(m.get(&key(vec![Value::Int(2)])), Some(&1));
+        assert_eq!(m.get(&key(vec![Value::Int(3)])), None);
     }
 }
