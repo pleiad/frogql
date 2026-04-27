@@ -1,17 +1,7 @@
-//! Property-based tests for aggregate functions (ISO 39075 §20.9).
+//! Property-based tests for aggregate functions (ISO §20.9).
 //!
-//! Complements the example-based tests in `count_test.rs` by checking
-//! algebraic invariants that must hold for *every* valid (pattern,
-//! attribute) combination — not just the handful written by hand.
-//!
-//! The invariants are non-trivial: `COUNT(*) ≥ COUNT(x.a)` would be wrong
-//! once we model NULL (currently equal because we have no NULL); but
-//! `COUNT(x.a) ≥ COUNT(DISTINCT x.a)` and `MIN ≤ MAX` are unconditional
-//! and good targets for property testing.
-//!
-//! Inputs are drawn from a curated set of (pattern, var.attr) pairs over
-//! the fraud-graph fixture so that every generated query is well-typed
-//! and produces a non-empty binding table.
+//! Algebraic invariants checked against random (pattern, var.attr) tuples
+//! drawn from a curated set over the fraud-graph fixture.
 
 use std::path::Path;
 
@@ -27,7 +17,6 @@ fn fraud_graph() -> Graph {
     Graph::from_file(&p).unwrap()
 }
 
-/// Compile + run a full query, return the projected rows.
 fn run_projected(g: &Graph, q: &str) -> Vec<Vec<Value>> {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap_or_else(|e| panic!("compile failed for {q:?}: {e}"));
@@ -37,9 +26,8 @@ fn run_projected(g: &Graph, q: &str) -> Vec<Vec<Value>> {
     }
 }
 
-/// Run a pattern (no RETURN clause) and count the resulting rows. Uses
-/// `QueryResult::Raw` because RETURN'ing a bare variable like `x` is a
-/// parse error in the current grammar.
+/// Bare-pattern row count via `QueryResult::Raw`. Can't `RETURN x` (bare
+/// variable is a parse error), so this skips the projection.
 fn match_row_count(g: &Graph, q: &str) -> usize {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap_or_else(|e| panic!("compile failed for {q:?}: {e}"));
@@ -49,19 +37,15 @@ fn match_row_count(g: &Graph, q: &str) -> usize {
     }
 }
 
-/// Extract a single integer from a one-row, one-column projection.
 fn one_int(rows: &[Vec<Value>]) -> i64 {
-    assert_eq!(rows.len(), 1, "expected one row, got {rows:?}");
-    assert_eq!(rows[0].len(), 1, "expected one column, got {rows:?}");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 1);
     match &rows[0][0] {
         Value::Int(n) => *n,
         v => panic!("expected Int, got {v:?}"),
     }
 }
 
-/// Compare two `Value`s as numerics. Returns `None` when either side is
-/// not numeric (the runtime can return `Value::Str("NULL")` as the null
-/// sentinel; tests should treat that as "no comparable value").
 fn cmp_numeric(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
@@ -72,49 +56,24 @@ fn cmp_numeric(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     }
 }
 
-/// Strategy: a pattern binding a variable, paired with the variable name
-/// and an attribute that exists on the matched elements. Every pair
-/// returns a non-empty binding table on `fraud.json`.
+fn triple(p: &str, v: &str, a: &str) -> (String, String, String) {
+    (p.to_string(), v.to_string(), a.to_string())
+}
+
+/// Curated (pattern, var, attr) tuples that bind on fraud.json.
 fn pattern_var_attr() -> impl Strategy<Value = (String, String, String)> {
     prop_oneof![
-        // Account nodes (4 of them) with string + bool attrs.
-        Just((
-            "MATCH (x: Account)".to_string(),
-            "x".to_string(),
-            "owner".to_string()
-        )),
-        Just((
-            "MATCH (x: Account)".to_string(),
-            "x".to_string(),
-            "isBlocked".to_string()
-        )),
-        // All nodes (5) — `owner` exists on every node in the fixture.
-        Just((
-            "MATCH (x)".to_string(),
-            "x".to_string(),
-            "owner".to_string()
-        )),
-        // Edges with numeric attribute.
-        Just((
-            "MATCH ()-[e:Transfer]->()".to_string(),
-            "e".to_string(),
-            "amount".to_string()
-        )),
+        Just(triple("MATCH (x: Account)", "x", "owner")),
+        Just(triple("MATCH (x: Account)", "x", "isBlocked")),
+        Just(triple("MATCH (x)", "x", "owner")),
+        Just(triple("MATCH ()-[e:Transfer]->()", "e", "amount")),
     ]
 }
 
-/// Strategy: pattern + numeric attribute only (subset of pattern_var_attr).
 fn pattern_var_numeric_attr() -> impl Strategy<Value = (String, String, String)> {
-    prop_oneof![Just((
-        "MATCH ()-[e:Transfer]->()".to_string(),
-        "e".to_string(),
-        "amount".to_string()
-    )),]
+    prop_oneof![Just(triple("MATCH ()-[e:Transfer]->()", "e", "amount"))]
 }
 
-/// Strategy: a pattern that produces a non-empty binding table on
-/// fraud.json. Used for COUNT(*) invariants where no attribute is
-/// referenced.
 fn nonempty_pattern() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("MATCH (x)".to_string()),
@@ -160,10 +119,7 @@ proptest! {
             Value::Int(n) => *n,
             v => panic!("expected Int, got {v:?}"),
         };
-        prop_assert!(
-            distinct <= total,
-            "COUNT(DISTINCT {var}.{attr}) = {distinct} > COUNT({var}.{attr}) = {total}"
-        );
+        prop_assert!(distinct <= total, "distinct={distinct} > total={total}");
     }
 
     /// **Invariant** (§22.14): `MIN(x.a) ≤ MAX(x.a)` for any non-empty
@@ -180,12 +136,10 @@ proptest! {
         prop_assert_eq!(rows[0].len(), 2);
         let min = &rows[0][0];
         let max = &rows[0][1];
-        let ord = cmp_numeric(min, max).unwrap_or_else(|| {
-            panic!("MIN/MAX results not numerically comparable: {min:?}, {max:?}")
-        });
+        let ord = cmp_numeric(min, max).expect("min/max numerically comparable");
         prop_assert!(
             ord != std::cmp::Ordering::Greater,
-            "MIN({var}.{attr}) = {min:?} > MAX({var}.{attr}) = {max:?}"
+            "min={min:?} > max={max:?}"
         );
     }
 
@@ -208,8 +162,8 @@ proptest! {
         let avg = &rows[0][1];
         let max = &rows[0][2];
 
-        let min_le_avg = cmp_numeric(min, avg).expect("MIN/AVG must be comparable");
-        let avg_le_max = cmp_numeric(avg, max).expect("AVG/MAX must be comparable");
+        let min_le_avg = cmp_numeric(min, avg).expect("comparable");
+        let avg_le_max = cmp_numeric(avg, max).expect("comparable");
         prop_assert!(min_le_avg != std::cmp::Ordering::Greater);
         prop_assert!(avg_le_max != std::cmp::Ordering::Greater);
     }

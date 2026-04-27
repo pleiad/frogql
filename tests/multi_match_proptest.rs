@@ -1,15 +1,6 @@
-//! Property-based tests for the multi-MATCH refactor (ISO §14.3-14.4).
-//!
-//! Complements the example-based suite in `multi_match_test.rs` by
-//! exploring the space of `Vec<MatchStatement>` inputs that the parser
-//! does not (yet) emit. Each property captures an invariant that must
-//! hold for *any* sequence of Simple match statements; if the invariant
-//! breaks for some sequence, the refactor's soundness claim is wrong.
-//!
-//! Strategies are restricted to a curated set of valid pattern strings
-//! so the parser doesn't dominate the search space — proptest is for
-//! exploring `collapsed_pattern()` and the runtime/optimizer pipeline,
-//! not the parser.
+//! Property-based tests for multi-MATCH (ISO §14.3-14.4). Strategies
+//! draw from a curated pattern alphabet so proptest explores the
+//! collapse + runtime + optimizer pipeline rather than the parser.
 
 use std::path::Path;
 
@@ -25,9 +16,6 @@ fn fraud_graph() -> Graph {
     Graph::from_file(&p).unwrap()
 }
 
-/// Strategy: a single-pattern string drawn from a curated set of valid
-/// patterns over the fraud graph schema. Mixing these in different
-/// sequences is what proptest will explore.
 fn pattern() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("(x)".to_string()),
@@ -41,7 +29,6 @@ fn pattern() -> impl Strategy<Value = String> {
     ]
 }
 
-/// Build a multi-MATCH Query from pattern strings, parsed and elaborated.
 fn multi_match_query(patterns: &[String]) -> Query {
     let matches: Vec<MatchStatement> = patterns
         .iter()
