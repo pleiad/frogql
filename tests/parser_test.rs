@@ -1,5 +1,5 @@
 use gqlrust::model::value::Value;
-use gqlrust::parser::parse;
+use gqlrust::parser::{parse, parse_query};
 use gqlrust::syntax::descriptor::Descriptor;
 use gqlrust::syntax::expr::{BinOp, Expr, UnOp};
 use gqlrust::syntax::path_pattern::PathPattern;
@@ -686,6 +686,82 @@ fn test_no_match_keyword_still_works() {
     let q = gqlrust::compile_query("(x) -[]-> (y)").unwrap();
     assert!(matches!(q.collapsed_pattern(), PathPattern::Concat(_, _)));
     assert!(q.returns.is_none());
+}
+
+// =======================================================================
+// Multi-MATCH parser support (ISO §14.3-14.4)
+//
+// These tests use `parser::parse_query` directly (bypassing elaborate
+// and optimize) because `compile_query_unchecked` runs `optimize_query`
+// which collapses the match chain to one Simple. To verify what the
+// *parser* produces, we have to inspect the AST before optimization.
+// =======================================================================
+
+/// Parser produces one match statement per MATCH keyword. Two MATCH
+/// clauses → two Simple match statements.
+#[test]
+fn test_multi_match_two_clauses() {
+    let q = parse_query("MATCH (x: Account) MATCH (y: Account)").unwrap();
+    assert_eq!(q.matches.len(), 2);
+    for m in &q.matches {
+        assert!(matches!(m, MatchStatement::Simple { .. }));
+    }
+}
+
+/// Three MATCH clauses produce three match statements.
+#[test]
+fn test_multi_match_three_clauses() {
+    let q = parse_query("MATCH (x) MATCH (y) MATCH (z)").unwrap();
+    assert_eq!(q.matches.len(), 3);
+}
+
+/// Per-MATCH WHERE: each clause carries its own scoped filter. The
+/// parser wraps each pattern in `PathPattern::Filter` independently.
+#[test]
+fn test_multi_match_per_clause_where() {
+    let q = parse_query(
+        "MATCH (x: Account) WHERE x.isBlocked = false \
+         MATCH (y: Account) WHERE y.isBlocked = true",
+    )
+    .unwrap();
+    assert_eq!(q.matches.len(), 2);
+    for m in &q.matches {
+        let MatchStatement::Simple { pattern } = m;
+        assert!(
+            matches!(pattern, PathPattern::Filter(_, _)),
+            "each match's pattern should be Filter-wrapped, got {pattern:?}"
+        );
+    }
+}
+
+/// Multi-MATCH followed by RETURN. The RETURN binds to variables from
+/// any of the matches; no special handling needed because the runtime
+/// works on the collapsed pattern.
+#[test]
+fn test_multi_match_with_return() {
+    let q = parse_query("MATCH (x: Account) MATCH (y: Account) RETURN x.owner, y.owner").unwrap();
+    assert_eq!(q.matches.len(), 2);
+    let returns = q.returns.as_ref().expect("RETURN clause expected");
+    assert_eq!(returns.len(), 2);
+}
+
+/// Backwards compat: a query with one MATCH still parses to exactly one
+/// match statement. Pin the invariant that the multi-MATCH parser
+/// extension didn't accidentally produce extra clauses for old syntax.
+#[test]
+fn test_single_match_still_one_clause() {
+    let q = parse_query("MATCH (x) -[]-> (y)").unwrap();
+    assert_eq!(q.matches.len(), 1);
+}
+
+/// End-to-end: multi-MATCH compiles via `compile_query` (full pipeline:
+/// parse → elaborate → typecheck → optimize) and produces the same
+/// Query as the equivalent comma-join. After optimization both have
+/// `matches.len() == 1`.
+#[test]
+fn test_multi_match_compiles_end_to_end() {
+    let q = gqlrust::compile_query("MATCH (x: Account) MATCH (y) RETURN x.owner").unwrap();
+    assert_eq!(q.matches.len(), 1, "post-optimization invariant");
 }
 
 // =======================================================================

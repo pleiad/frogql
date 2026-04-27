@@ -144,4 +144,31 @@ proptest! {
         let is_simple = matches!(&optimized.matches[0], MatchStatement::Simple { .. });
         prop_assert!(is_simple);
     }
+
+    /// **Invariant**: parser-emitted multi-MATCH (via `MATCH p1 MATCH p2`
+    /// surface syntax) produces the same row count as the equivalent
+    /// comma-join. Same property as `multi_match_runtime_matches_comma_join`
+    /// but exercising the user-facing parser path instead of the manual
+    /// `Vec<MatchStatement>` construction. Closes the loop end-to-end.
+    #[test]
+    fn parser_multi_match_matches_comma_join(
+        patterns in proptest::collection::vec(pattern(), 1..=4)
+    ) {
+        let g = fraud_graph();
+        let runtime = Runtime::new(&g);
+
+        // Surface multi-MATCH form: MATCH p1 MATCH p2 ...
+        let multi_input = format!("MATCH {}", patterns.join(" MATCH "));
+        let multi_q = gqlrust::compile_query_unchecked(&multi_input)
+            .expect("parser must accept multi-MATCH");
+        let multi_rows = runtime.run(&multi_q.collapsed_pattern()).rows.len();
+
+        // Comma-join form: MATCH p1, p2, ...
+        let comma_input = format!("MATCH {}", patterns.join(", "));
+        let comma_q = gqlrust::compile_query_unchecked(&comma_input)
+            .expect("parser must accept comma-join");
+        let comma_rows = runtime.run(&comma_q.collapsed_pattern()).rows.len();
+
+        prop_assert_eq!(multi_rows, comma_rows);
+    }
 }

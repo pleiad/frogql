@@ -79,22 +79,29 @@ impl Parser {
         }
     }
 
-    // ===== Full query (MATCH ... WHERE ... RETURN) =====
+    // ===== Full query (MATCH ... [MATCH ...]* [GROUP BY ...] [RETURN ...]) =====
 
-    // full_query = ("MATCH")? query ("WHERE" expr)?
-    //              ("GROUP BY" expr (, expr)*)?
+    // full_query = match_clause+ ("GROUP BY" expr (, expr)*)?
     //              ("RETURN" ("DISTINCT")? return_list)?
+    // match_clause = "MATCH"? query ("WHERE" expr)?
+    //
+    // The MATCH keyword on the first clause is optional (bare patterns
+    // like `(x)-[]->(y)` still parse), but every subsequent clause must
+    // start with MATCH. ISO §14.4 calls each clause a `<simple match
+    // statement>`; chaining them is §14.3 `<simple linear query
+    // statement>`.
     fn full_query(&mut self) -> Result<Query, String> {
-        // Optional MATCH keyword
+        // First clause: MATCH keyword optional (back-compat for bare patterns).
         self.eat(&Token::Match);
+        let first = self.match_clause_body()?;
+        let mut matches = vec![MatchStatement::Simple { pattern: first }];
 
-        // Parse the pattern (path_pattern with comma-joins)
-        let mut pattern = self.query()?;
-
-        // Optional WHERE clause (wraps pattern in Filter)
-        if self.eat(&Token::Where) {
-            let expr = self.expr()?;
-            pattern = PathPattern::Filter(Box::new(pattern), expr);
+        // Additional clauses require the MATCH keyword. The `eat` here
+        // is what gates the loop — anything else terminates the chain
+        // and falls through to GROUP BY / RETURN.
+        while self.eat(&Token::Match) {
+            let pattern = self.match_clause_body()?;
+            matches.push(MatchStatement::Simple { pattern });
         }
 
         let group_by = if self.eat(&Token::GroupBy) {
@@ -106,8 +113,6 @@ impl Parser {
         } else {
             None
         };
-
-        let matches = vec![MatchStatement::Simple { pattern }];
 
         // Optional RETURN clause
         if self.eat(&Token::Return) {
@@ -127,6 +132,19 @@ impl Parser {
                 distinct: false,
             })
         }
+    }
+
+    /// Parse a single match clause's body: the path pattern plus an
+    /// optional WHERE that wraps it in `Filter`. Each MATCH clause has
+    /// its own scoped WHERE — `MATCH (x) WHERE x.foo MATCH (y) WHERE y.bar`
+    /// produces two `Filter`-wrapped patterns.
+    fn match_clause_body(&mut self) -> Result<PathPattern, String> {
+        let mut pattern = self.query()?;
+        if self.eat(&Token::Where) {
+            let expr = self.expr()?;
+            pattern = PathPattern::Filter(Box::new(pattern), expr);
+        }
+        Ok(pattern)
     }
 
     // return_list = return_item ("," return_item)*
