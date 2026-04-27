@@ -3,7 +3,9 @@ use gqlrust::parser::parse;
 use gqlrust::syntax::descriptor::Descriptor;
 use gqlrust::syntax::expr::{BinOp, Expr, UnOp};
 use gqlrust::syntax::path_pattern::PathPattern;
-use gqlrust::syntax::query::{Aggregator, GeneralSetKind, ReturnItem, SetQuantifier};
+use gqlrust::syntax::query::{
+    Aggregator, GeneralSetKind, MatchStatement, ReturnItem, SetQuantifier,
+};
 use gqlrust::typing::descriptor_type::DescriptorType;
 use gqlrust::typing::label_type::LabelType;
 use gqlrust::typing::property_type::PropertyType;
@@ -635,6 +637,20 @@ fn test_match_simple() {
     let q = gqlrust::compile_query("MATCH (x)").unwrap();
     assert!(matches!(q.collapsed_pattern(), PathPattern::Node(_)));
     assert!(q.returns.is_none());
+}
+
+/// Pin the structural invariant of the multi-MATCH refactor (ISO §14.3-14.4):
+/// every parsed Query has exactly one match statement, and it is a `Simple`
+/// holding the parsed pattern. Without this, `Query::collapsed_pattern()`
+/// would silently panic on `vec![]` instead of failing in tests.
+#[test]
+fn test_query_has_one_simple_match_statement() {
+    let q = gqlrust::compile_query("MATCH (x)-[:Knows]->(y) RETURN x.name").unwrap();
+    assert_eq!(q.matches.len(), 1, "parser must produce exactly one match");
+    assert!(
+        matches!(&q.matches[0], MatchStatement::Simple { .. }),
+        "current parser only emits Simple match statements (Optional comes in a later PR)"
+    );
 }
 
 #[test]

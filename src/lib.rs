@@ -12,16 +12,21 @@ use syntax::path_pattern::PathPattern;
 use syntax::query::{MatchStatement, Query};
 use typing::checker::Typechecker;
 
-/// Optimize each match statement's pattern in place.
-fn optimize_matches(matches: Vec<MatchStatement>) -> Vec<MatchStatement> {
-    matches
-        .into_iter()
-        .map(|m| match m {
-            MatchStatement::Simple { pattern } => MatchStatement::Simple {
-                pattern: optimizer::compile(pattern),
-            },
-        })
-        .collect()
+/// Optimize a Query: collapse the match chain into a single PathPattern,
+/// run the optimizer over that, and rebuild the Query with the result
+/// stored as one `MatchStatement::Simple`.
+///
+/// Consistent with the typechecker and runtime, both of which also call
+/// `Query::collapsed_pattern()` before processing. Sound while every
+/// match is `Simple` (§14.4 GR 1 = natural join, which is what
+/// `PathPattern::Join` already encodes). When `OPTIONAL MATCH` lands all
+/// three phases will switch to walking `q.matches` per element together.
+fn optimize_query(q: Query) -> Query {
+    let pattern = optimizer::compile(q.collapsed_pattern());
+    Query {
+        matches: vec![MatchStatement::Simple { pattern }],
+        ..q
+    }
 }
 
 /// Phase-tagged compile failure.
@@ -63,9 +68,8 @@ pub fn compile_query_with_diagnostics(input: &str) -> Result<CompileResult, Comp
         return Err(CompileError::Type(tc.errors));
     }
     let warnings = tc.warnings;
-    let matches = optimize_matches(q.matches);
     Ok(CompileResult {
-        query: Query { matches, ..q },
+        query: optimize_query(q),
         warnings,
     })
 }
@@ -85,8 +89,7 @@ pub fn compile(query: &str) -> Result<PathPattern, String> {
     if !r.ok {
         return Err(tc.errors.join("; "));
     }
-    let matches = optimize_matches(q.matches);
-    Ok(Query { matches, ..q }.collapsed_pattern())
+    Ok(optimize_query(q).collapsed_pattern())
 }
 
 /// Compile a full GQL query: parse → elaborate → typecheck → optimize.
@@ -104,8 +107,7 @@ pub fn compile_unchecked(query: &str) -> Result<PathPattern, String> {
     let ast = parser::parse(query)?;
     let q = Query::pattern_only(ast);
     let q = elaborate::elaborate_query(q);
-    let matches = optimize_matches(q.matches);
-    Ok(Query { matches, ..q }.collapsed_pattern())
+    Ok(optimize_query(q).collapsed_pattern())
 }
 
 /// Compile a full GQL query without typechecking. Same plan as
@@ -113,6 +115,5 @@ pub fn compile_unchecked(query: &str) -> Result<PathPattern, String> {
 pub fn compile_query_unchecked(input: &str) -> Result<Query, String> {
     let q = parser::parse_query(input)?;
     let q = elaborate::elaborate_query(q);
-    let matches = optimize_matches(q.matches);
-    Ok(Query { matches, ..q })
+    Ok(optimize_query(q))
 }
