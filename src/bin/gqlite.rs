@@ -99,8 +99,8 @@ fn main() {
             break;
         }
 
-        if line.starts_with("schema") {
-            let arg = line["schema".len()..].trim();
+        if let Some(rest) = line.strip_prefix("schema") {
+            let arg = rest.trim();
             match arg {
                 "" => print_schema(&store),
                 "simple" => print_schema_simple(&store),
@@ -257,7 +257,7 @@ fn print_raw_table(store: &LazyGraphStore, ir: &IntermediateResult, max_rows: us
     }
 
     // Collect variable names (sorted, consistent across rows)
-    let mut var_names: Vec<String> = {
+    let var_names: Vec<String> = {
         let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for row in &ir.rows {
             for k in row.assignment.m.keys() {
@@ -506,6 +506,7 @@ impl NodeType {
         NodeType { labels, props }
     }
 
+    #[allow(dead_code)]
     fn format(&self) -> String {
         let label_part = if self.labels.is_empty() {
             String::new()
@@ -633,9 +634,9 @@ fn print_schema_simple(store: &LazyGraphStore) {
     // --- Node types: group by labels, intersect props ---
 
     // For each label combo: collect (intersection of prop names with consistent types, total count)
+    #[allow(clippy::type_complexity)]
     let mut node_groups: HashMap<Vec<String>, (Option<BTreeMap<String, &'static str>>, usize)> =
         HashMap::new();
-    let mut node_label_to_simple: HashMap<Vec<String>, Vec<String>> = HashMap::new(); // for display
 
     for nid in 0..store.node_count() {
         let mut labels = Graph::label_strings(&store.node_labels(nid));
@@ -697,8 +698,12 @@ fn print_schema_simple(store: &LazyGraphStore) {
         directed: bool,
     }
 
-    let mut edge_groups: HashMap<SimpleEdgeKey, (Option<BTreeMap<String, &'static str>>, usize)> =
-        HashMap::new();
+    // edge_key -> (intersection of prop name+types across instances, total count)
+    #[allow(clippy::type_complexity)]
+    let mut edge_groups: HashMap<
+        SimpleEdgeKey,
+        (Option<BTreeMap<String, &'static str>>, usize),
+    > = HashMap::new();
     let mut edge_has_optional: HashMap<SimpleEdgeKey, bool> = HashMap::new();
 
     for eid in 0..store.edge_count() {

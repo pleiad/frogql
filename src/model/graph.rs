@@ -198,6 +198,9 @@ impl Graph {
     }
 
     /// Build a Graph from pre-parsed components (used by store::io::load_graph).
+    // 9 parallel Vecs — one per columnar field. Bundling into a struct is
+    // a refactor for another day.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_raw(
         node_names: Vec<String>,
         node_labels: Vec<LabelType>,

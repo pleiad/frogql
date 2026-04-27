@@ -192,6 +192,9 @@ fn decompose(pattern: &PathPattern, index: &TripleIndex) -> Option<Decomposition
 }
 
 /// Top-level decomposition that tracks join boundaries.
+// LTJ decomposition state — bundle of mutable accumulators that have to
+// thread through the recursive walk. Refactor candidate, not a bug.
+#[allow(clippy::too_many_arguments)]
 fn decompose_pattern_top(
     pattern: &PathPattern,
     index: &TripleIndex,
@@ -258,6 +261,8 @@ fn decompose_pattern_top(
     }
 }
 
+// Same accumulator bundle as decompose_pattern_top.
+#[allow(clippy::too_many_arguments)]
 fn decompose_pattern(
     pattern: &PathPattern,
     index: &TripleIndex,
@@ -344,6 +349,8 @@ fn decompose_pattern(
 }
 
 /// Decompose a flat chain [Node, Edge, Node, Edge, Node] into triples.
+// Same accumulator bundle as decompose_pattern_top.
+#[allow(clippy::too_many_arguments)]
 fn decompose_flat_chain(
     elems: &[FlatElement],
     index: &TripleIndex,
@@ -577,10 +584,9 @@ fn convert_results<G: GraphAccess>(
 }
 
 fn find_edge<G: GraphAccess>(graph: &G, src: Id, tgt: Id) -> Option<Id> {
-    for &eid in &graph.outgoing_edges(src) {
-        if graph.tgt(eid) == tgt {
-            return Some(eid);
-        }
-    }
-    None
+    graph
+        .outgoing_edges(src)
+        .iter()
+        .find(|&&eid| graph.tgt(eid) == tgt)
+        .copied()
 }

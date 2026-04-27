@@ -4,14 +4,14 @@ use std::fmt;
 use crate::model::value::PathValue;
 
 /// Maps pattern variables to matched runtime values.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Assignment {
     pub m: HashMap<String, PathValue>,
 }
 
 impl Assignment {
     pub fn new() -> Self {
-        Self { m: HashMap::new() }
+        Self::default()
     }
 
     /// Create with a single binding (if var is Some).
