@@ -3,7 +3,9 @@ use gqlrust::parser;
 use gqlrust::typing::checker::Typechecker;
 
 fn main() {
-    let q = std::env::args().nth(1).expect("usage: typecheck_demo \"<query>\"");
+    let q = std::env::args()
+        .nth(1)
+        .expect("usage: typecheck_demo \"<query>\"");
     let parsed = parser::parse_query(&q).expect("parse failed");
     let elaborated = elaborate::elaborate_query(parsed);
     let mut tc = Typechecker::untyped();

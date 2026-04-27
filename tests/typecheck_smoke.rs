@@ -11,8 +11,8 @@ use gqlrust::{compile_query, compile_query_unchecked};
 /// Each query: must typecheck successfully, and must produce the same
 /// optimized plan via the checked and unchecked entry points.
 fn assert_smoke_query(q: &str) {
-    let checked = compile_query(q)
-        .unwrap_or_else(|e| panic!("compile_query failed for {:?}: {}", q, e));
+    let checked =
+        compile_query(q).unwrap_or_else(|e| panic!("compile_query failed for {:?}: {}", q, e));
     let unchecked = compile_query_unchecked(q)
         .unwrap_or_else(|e| panic!("compile_query_unchecked failed for {:?}: {}", q, e));
 
