@@ -504,3 +504,80 @@ fn test_unop_2() {
     let (r, _, _) = check_with(fraud_schema(), "()-[x WHERE -x.amount < 0]->()");
     assert!(!r.empty);
 }
+
+// =======================================================================
+// RETURN-clause checking (aggregates and plain expressions)
+// =======================================================================
+
+/// Parse, elaborate, and typecheck a full MATCH ... RETURN query under
+/// the permissive star schema. Used by aggregate-clause tests.
+fn check_full_query(query: &str) -> (TypecheckResult, Vec<String>, Vec<String>) {
+    let q = parser::parse_query(query).expect("parse failed");
+    let q = elaborate::elaborate_query(q);
+    let mut tc = Typechecker::untyped();
+    let r = tc.check_query(&q);
+    (r, tc.errors.clone(), tc.warnings.clone())
+}
+
+#[test]
+fn test_check_count_star() {
+    let (r, errs, _) = check_full_query("MATCH (x) RETURN COUNT(*)");
+    assert!(r.ok, "expected ok, errors={errs:?}");
+}
+
+#[test]
+fn test_check_count_star_with_alias() {
+    let (r, errs, _) = check_full_query("MATCH (x) RETURN COUNT(*) AS total");
+    assert!(r.ok, "expected ok, errors={errs:?}");
+}
+
+#[test]
+fn test_check_aggregate_unbound_var() {
+    let (r, errs, _) = check_full_query("MATCH (x) RETURN COUNT(z.foo)");
+    assert!(!r.ok, "expected !ok for unbound z");
+    assert!(
+        errs.iter().any(|e| e.contains("z")),
+        "expected an error mentioning z, got: {errs:?}"
+    );
+}
+
+#[test]
+fn test_check_sum_unbound_var() {
+    let (r, errs, _) = check_full_query("MATCH (x) RETURN SUM(z.amount)");
+    assert!(!r.ok, "expected !ok for unbound z in SUM");
+    assert!(
+        errs.iter().any(|e| e.contains("z")),
+        "expected an error mentioning z, got: {errs:?}"
+    );
+}
+
+#[test]
+fn test_check_mixed_aggregate_and_expr_requires_explicit_groupby() {
+    let (r_no_gb, errs_no_gb, _) = check_full_query("MATCH (x) RETURN x.foo, COUNT(*)");
+    assert!(!r_no_gb.ok, "expected error without GROUP BY");
+    assert!(
+        errs_no_gb.iter().any(|e| e.contains("GROUP BY")),
+        "expected GROUP BY error, got: {errs_no_gb:?}"
+    );
+
+    let (r_gb, errs_gb, _) = check_full_query("MATCH (x) GROUP BY x.foo RETURN x.foo, COUNT(*)");
+    assert!(r_gb.ok, "expected ok with GROUP BY, errs={errs_gb:?}");
+}
+
+#[test]
+fn test_check_aggregate_distinct_inner_typed() {
+    let (r, errs, _) = check_full_query("MATCH (x) RETURN COUNT(DISTINCT x.city)");
+    assert!(r.ok, "expected ok, errors={errs:?}");
+}
+
+#[test]
+fn test_check_plain_return_unbound_var_now_caught() {
+    // Regression: RETURN was not type-checked at all before; unbound
+    // vars in plain RETURN exprs slipped through. Now they're caught.
+    let (r, errs, _) = check_full_query("MATCH (x) RETURN z.name");
+    assert!(!r.ok, "expected !ok for unbound z in plain RETURN");
+    assert!(
+        errs.iter().any(|e| e.contains("z")),
+        "expected an error mentioning z, got: {errs:?}"
+    );
+}

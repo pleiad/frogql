@@ -43,7 +43,9 @@ impl SimpleType {
         SimpleType::Union(Box::new(a.clone()), Box::new(b.clone()))
     }
 
-    /// Greatest lower bound (meet).
+    /// Greatest lower bound. Composite types meet recursively on inner
+    /// types (e.g. `meet(List[int], List[int|str]) = List[int]`).
+    /// Records with different key sets are distinct types → Zero.
     pub fn meet(a: &SimpleType, b: &SimpleType) -> SimpleType {
         match (a, b) {
             (SimpleType::Star, _) => b.clone(),
@@ -53,6 +55,27 @@ impl SimpleType {
             }
             (_, SimpleType::Union(t1, t2)) => {
                 SimpleType::union(&SimpleType::meet(a, t1), &SimpleType::meet(a, t2))
+            }
+            (SimpleType::List(a), SimpleType::List(b)) => {
+                SimpleType::List(Box::new(SimpleType::meet(a, b)))
+            }
+            (SimpleType::Group(a), SimpleType::Group(b)) => {
+                SimpleType::Group(Box::new(SimpleType::meet(a, b)))
+            }
+            (SimpleType::Record(a), SimpleType::Record(b)) => {
+                // BTreeMap keys are ordered, so iterator comparison is O(n).
+                if a.len() != b.len() || !a.keys().zip(b.keys()).all(|(ka, kb)| ka == kb) {
+                    SimpleType::Zero
+                } else {
+                    let met: std::collections::BTreeMap<String, SimpleType> = a
+                        .iter()
+                        .map(|(k, va)| {
+                            let vb = b.get(k).expect("keys verified equal above");
+                            (k.clone(), SimpleType::meet(va, vb))
+                        })
+                        .collect();
+                    SimpleType::Record(met)
+                }
             }
             _ if a == b => a.clone(),
             _ => SimpleType::Zero,
@@ -179,5 +202,109 @@ mod tests {
         assert!(!SimpleType::Z.is_empty());
         let u = SimpleType::Union(Box::new(SimpleType::Zero), Box::new(SimpleType::Zero));
         assert!(u.is_empty());
+    }
+
+    // meet on composite types — covariant recursion.
+
+    fn list(t: SimpleType) -> SimpleType {
+        SimpleType::List(Box::new(t))
+    }
+    fn group(t: SimpleType) -> SimpleType {
+        SimpleType::Group(Box::new(t))
+    }
+    fn record(fields: &[(&str, SimpleType)]) -> SimpleType {
+        let m: std::collections::BTreeMap<String, SimpleType> = fields
+            .iter()
+            .map(|(k, v)| ((*k).into(), v.clone()))
+            .collect();
+        SimpleType::Record(m)
+    }
+    fn union(a: SimpleType, b: SimpleType) -> SimpleType {
+        SimpleType::Union(Box::new(a), Box::new(b))
+    }
+
+    #[test]
+    fn test_meet_list_same_inner() {
+        assert_eq!(
+            SimpleType::meet(&list(SimpleType::Z), &list(SimpleType::Z)),
+            list(SimpleType::Z)
+        );
+    }
+
+    #[test]
+    fn test_meet_list_covariant_with_union() {
+        // meet(List[int], List[int|str]) = List[meet(int, int|str)] = List[int]
+        let lhs = list(SimpleType::Z);
+        let rhs = list(union(SimpleType::Z, SimpleType::S));
+        assert_eq!(SimpleType::meet(&lhs, &rhs), list(SimpleType::Z));
+    }
+
+    #[test]
+    fn test_meet_list_incompatible_inner_propagates_zero() {
+        // meet(List[int], List[str]) = List[Zero]. The List wrapper survives;
+        // is_empty on the result is true (a list whose element type is
+        // impossible is itself impossible).
+        let result = SimpleType::meet(&list(SimpleType::Z), &list(SimpleType::S));
+        assert_eq!(result, list(SimpleType::Zero));
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_meet_record_same_keys_recursive() {
+        let lhs = record(&[("name", SimpleType::S), ("age", SimpleType::Z)]);
+        let rhs = record(&[("name", SimpleType::S), ("age", SimpleType::Z)]);
+        let expected = record(&[("name", SimpleType::S), ("age", SimpleType::Z)]);
+        assert_eq!(SimpleType::meet(&lhs, &rhs), expected);
+    }
+
+    #[test]
+    fn test_meet_record_covariant_field() {
+        // meet({age: int}, {age: int|str}) = {age: int}
+        let lhs = record(&[("age", SimpleType::Z)]);
+        let rhs = record(&[("age", union(SimpleType::Z, SimpleType::S))]);
+        let expected = record(&[("age", SimpleType::Z)]);
+        assert_eq!(SimpleType::meet(&lhs, &rhs), expected);
+    }
+
+    #[test]
+    fn test_meet_record_distinct_keys_is_zero() {
+        let lhs = record(&[("a", SimpleType::Z)]);
+        let rhs = record(&[("b", SimpleType::Z)]);
+        assert_eq!(SimpleType::meet(&lhs, &rhs), SimpleType::Zero);
+    }
+
+    #[test]
+    fn test_meet_record_different_arity_is_zero() {
+        let lhs = record(&[("a", SimpleType::Z)]);
+        let rhs = record(&[("a", SimpleType::Z), ("b", SimpleType::Z)]);
+        assert_eq!(SimpleType::meet(&lhs, &rhs), SimpleType::Zero);
+    }
+
+    #[test]
+    fn test_meet_record_incompatible_field_propagates() {
+        // meet({a: int}, {a: str}) = {a: Zero}. Record survives, is_empty true.
+        let lhs = record(&[("a", SimpleType::Z)]);
+        let rhs = record(&[("a", SimpleType::S)]);
+        let result = SimpleType::meet(&lhs, &rhs);
+        assert_eq!(result, record(&[("a", SimpleType::Zero)]));
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_meet_group_covariant() {
+        // Group is the moral equivalent of List for repetition grouping;
+        // same recursive treatment.
+        let lhs = group(SimpleType::Z);
+        let rhs = group(union(SimpleType::Z, SimpleType::S));
+        assert_eq!(SimpleType::meet(&lhs, &rhs), group(SimpleType::Z));
+    }
+
+    #[test]
+    fn test_meet_nested_list_of_records() {
+        // meet(List[{a: int}], List[{a: int|str}]) = List[{a: int}]
+        let lhs = list(record(&[("a", SimpleType::Z)]));
+        let rhs = list(record(&[("a", union(SimpleType::Z, SimpleType::S))]));
+        let expected = list(record(&[("a", SimpleType::Z)]));
+        assert_eq!(SimpleType::meet(&lhs, &rhs), expected);
     }
 }

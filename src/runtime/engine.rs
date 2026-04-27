@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use crate::model::graph::Props;
 use crate::model::graph_access::GraphAccess;
@@ -6,7 +7,7 @@ use crate::model::value::{Id, Path, PathValue, Value};
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::Query;
+use crate::syntax::query::{Aggregator, GeneralSetKind, Query, ReturnItem, SetQuantifier};
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
 use crate::typing::property_type::PropertyType;
@@ -42,34 +43,190 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     }
 
     /// Run a full Query (MATCH ... WHERE ... RETURN).
-    /// Returns projected rows as Vec<Vec<Value>> if RETURN is specified,
-    /// or the raw IntermediateResult if no RETURN clause.
+    ///
+    /// `limit` semantics differ between the two paths: with no aggregates
+    /// it caps input rows (early termination); with aggregates it caps
+    /// output rows after grouping (truncating input would corrupt counts).
     pub fn run_query(&self, query: &Query, limit: usize) -> QueryResult {
-        let ir = self.run_path_pattern(&query.pattern, limit);
+        let return_items = match &query.returns {
+            None => {
+                let ir = self.run_path_pattern(&query.pattern, limit);
+                return QueryResult::Raw(ir);
+            }
+            Some(items) => items,
+        };
 
-        match &query.returns {
-            None => QueryResult::Raw(ir),
-            Some(return_items) => {
-                let mut projected: Vec<Vec<Value>> = Vec::new();
-                for row in &ir.rows {
-                    let vals: Vec<Value> = return_items
-                        .iter()
-                        .map(|item| match self.run_expr(&row.assignment, &item.expr) {
-                            ExprResult::Success(v) => v,
-                            ExprResult::Failure(_) => Value::Str("NULL".into()),
-                        })
-                        .collect();
-                    if query.distinct {
-                        if !projected.contains(&vals) {
-                            projected.push(vals);
-                        }
-                    } else {
-                        projected.push(vals);
-                    }
+        let has_aggs = return_items.iter().any(|i| i.is_aggregate());
+        let input_limit = if has_aggs { 0 } else { limit };
+        let ir = self.run_path_pattern(&query.pattern, input_limit);
+
+        let projected = if has_aggs {
+            let mut p = self.run_aggregated(return_items, query.group_by.as_deref(), &ir.rows);
+            if query.distinct {
+                p = dedup_preserving_order(p);
+            }
+            if limit > 0 && p.len() > limit {
+                p.truncate(limit);
+            }
+            p
+        } else {
+            self.run_row_by_row(return_items, &ir.rows, query.distinct)
+        };
+
+        QueryResult::Projected(projected)
+    }
+
+    fn run_row_by_row(
+        &self,
+        items: &[ReturnItem],
+        rows: &[ResultRow],
+        distinct: bool,
+    ) -> Vec<Vec<Value>> {
+        let mut projected: Vec<Vec<Value>> = Vec::new();
+        for row in rows {
+            let vals: Vec<Value> = items
+                .iter()
+                .map(|item| self.eval_expr_item(item, &row.assignment))
+                .collect();
+            if distinct {
+                if !projected.contains(&vals) {
+                    projected.push(vals);
                 }
-                QueryResult::Projected(projected)
+            } else {
+                projected.push(vals);
             }
         }
+        projected
+    }
+
+    /// Evaluate an `Expr`-shaped return item; aggregates require the
+    /// group-and-aggregate path and would be a runtime bug here.
+    fn eval_expr_item(&self, item: &ReturnItem, mu: &Assignment) -> Value {
+        match item {
+            ReturnItem::Expr { expr, .. } => match self.run_expr(mu, expr) {
+                ExprResult::Success(v) => v,
+                ExprResult::Failure(_) => Value::Str("NULL".into()),
+            },
+            ReturnItem::Aggregate { .. } => {
+                unreachable!("aggregate items must be projected via run_aggregated")
+            }
+        }
+    }
+
+    /// Group-and-aggregate projection. Keys come from explicit GROUP BY
+    /// (ISO §16.15) when present, otherwise from the non-aggregate RETURN
+    /// items. ISO §20.9 GR 7a-i: a query with no key items and zero rows
+    /// still emits one output row.
+    fn run_aggregated(
+        &self,
+        items: &[ReturnItem],
+        explicit_group_by: Option<&[Expr]>,
+        rows: &[ResultRow],
+    ) -> Vec<Vec<Value>> {
+        let mut group_indices: Vec<Vec<usize>> = Vec::new();
+        let mut key_to_index: HashMap<GroupKey, usize> = HashMap::new();
+
+        for (row_idx, row) in rows.iter().enumerate() {
+            let key_values: Vec<Value> = match explicit_group_by {
+                Some(exprs) => exprs
+                    .iter()
+                    .map(|e| match self.run_expr(&row.assignment, e) {
+                        ExprResult::Success(v) => v,
+                        ExprResult::Failure(_) => Value::Str("NULL".into()),
+                    })
+                    .collect(),
+                None => items
+                    .iter()
+                    .filter(|it| !it.is_aggregate())
+                    .map(|it| self.eval_expr_item(it, &row.assignment))
+                    .collect(),
+            };
+            let key = GroupKey::from_values(key_values);
+            match key_to_index.get(&key) {
+                Some(&i) => group_indices[i].push(row_idx),
+                None => {
+                    key_to_index.insert(key, group_indices.len());
+                    group_indices.push(vec![row_idx]);
+                }
+            }
+        }
+
+        let key_arity = explicit_group_by
+            .map(|e| e.len())
+            .unwrap_or_else(|| items.iter().filter(|it| !it.is_aggregate()).count());
+        if key_arity == 0 && group_indices.is_empty() {
+            group_indices.push(Vec::new());
+        }
+
+        let mut out: Vec<Vec<Value>> = Vec::with_capacity(group_indices.len());
+        for row_idxs in &group_indices {
+            let row_vals: Vec<Value> = items
+                .iter()
+                .map(|item| match item {
+                    ReturnItem::Expr { expr, .. } => {
+                        let mu = match row_idxs.first() {
+                            Some(&i) => &rows[i].assignment,
+                            None => return Value::Str("NULL".into()),
+                        };
+                        match self.run_expr(mu, expr) {
+                            ExprResult::Success(v) => v,
+                            ExprResult::Failure(_) => Value::Str("NULL".into()),
+                        }
+                    }
+                    ReturnItem::Aggregate { agg, .. } => self.apply_aggregator(agg, row_idxs, rows),
+                })
+                .collect();
+            out.push(row_vals);
+        }
+        out
+    }
+
+    fn apply_aggregator(&self, agg: &Aggregator, row_idxs: &[usize], rows: &[ResultRow]) -> Value {
+        match agg {
+            // ISO §20.9 GR 2: COUNT(*) is cardinality, no null-elim, no DISTINCT.
+            Aggregator::CountStar => Value::Int(row_idxs.len() as i64),
+            Aggregator::GeneralSet {
+                kind,
+                quantifier,
+                expr,
+            } => {
+                let values = self.collect_aggregate_values(expr, *quantifier, row_idxs, rows);
+                match kind {
+                    GeneralSetKind::Count => Value::Int(values.len() as i64),
+                    GeneralSetKind::Sum => sum_values(&values),
+                    GeneralSetKind::Avg => avg_values(&values),
+                    GeneralSetKind::Min => min_values(&values),
+                    GeneralSetKind::Max => max_values(&values),
+                }
+            }
+        }
+    }
+
+    /// Evaluate inner expr per row, drop ISO nulls (Failure), optionally
+    /// dedup via HashSet when quantifier is DISTINCT.
+    fn collect_aggregate_values(
+        &self,
+        expr: &Expr,
+        quantifier: SetQuantifier,
+        row_idxs: &[usize],
+        rows: &[ResultRow],
+    ) -> Vec<Value> {
+        let mut out: Vec<Value> = Vec::new();
+        let mut seen: HashSet<GroupKey> = HashSet::new();
+        for &idx in row_idxs {
+            let v = match self.run_expr(&rows[idx].assignment, expr) {
+                ExprResult::Success(v) => v,
+                ExprResult::Failure(_) => continue, // null-eliminated
+            };
+            if matches!(quantifier, SetQuantifier::Distinct) {
+                let key = GroupKey::from_values(vec![v.clone()]);
+                if !seen.insert(key) {
+                    continue;
+                }
+            }
+            out.push(v);
+        }
+        out
     }
 
     fn limit_reached(&self, rows: &[ResultRow], limit: usize) -> bool {
@@ -936,5 +1093,337 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             },
             _ => ExprResult::Failure(format!("unexpected op {op} in eval_binop")),
         }
+    }
+}
+
+// Aggregate reducers (ISO §20.9 GR 7a-iii..vi). Inputs already passed
+// null-elimination and optional DISTINCT in collect_aggregate_values.
+// Empty input → null sentinel (`Value::Str("NULL")` until a real
+// `Value::Null` lands; deferred — touches ~30 sites).
+
+fn null_value() -> Value {
+    Value::Str("NULL".into())
+}
+
+/// Int-preserving when all inputs are Int; promotes to Float on any
+/// Float input. Non-numeric skipped (gradual tolerance). Empty → null.
+fn sum_values(values: &[Value]) -> Value {
+    let mut int_acc: i64 = 0;
+    let mut float_acc: f64 = 0.0;
+    let mut had_float = false;
+    let mut had_value = false;
+    for v in values {
+        match v {
+            Value::Int(n) => {
+                if had_float {
+                    float_acc += *n as f64;
+                } else {
+                    int_acc = int_acc.wrapping_add(*n);
+                }
+                had_value = true;
+            }
+            Value::Float(f) => {
+                if !had_float {
+                    float_acc = int_acc as f64;
+                    had_float = true;
+                }
+                float_acc += f;
+                had_value = true;
+            }
+            _ => {} // skip non-numeric
+        }
+    }
+    if !had_value {
+        null_value()
+    } else if had_float {
+        Value::Float(float_acc)
+    } else {
+        Value::Int(int_acc)
+    }
+}
+
+/// Always Float (averages of ints usually aren't ints). Empty → null.
+fn avg_values(values: &[Value]) -> Value {
+    let mut sum: f64 = 0.0;
+    let mut count: u64 = 0;
+    for v in values {
+        let n = match v {
+            Value::Int(n) => *n as f64,
+            Value::Float(f) => *f,
+            _ => continue, // skip non-numeric
+        };
+        sum += n;
+        count += 1;
+    }
+    if count == 0 {
+        null_value()
+    } else {
+        Value::Float(sum / count as f64)
+    }
+}
+
+/// Smallest by `value_cmp`. Incomparable with running best → skipped.
+fn min_values(values: &[Value]) -> Value {
+    let mut best: Option<&Value> = None;
+    for v in values {
+        match best {
+            None => best = Some(v),
+            Some(current) => {
+                if let Some(std::cmp::Ordering::Less) = value_cmp(v, current) {
+                    best = Some(v);
+                }
+            }
+        }
+    }
+    best.cloned().unwrap_or_else(null_value)
+}
+
+fn max_values(values: &[Value]) -> Value {
+    let mut best: Option<&Value> = None;
+    for v in values {
+        match best {
+            None => best = Some(v),
+            Some(current) => {
+                if let Some(std::cmp::Ordering::Greater) = value_cmp(v, current) {
+                    best = Some(v);
+                }
+            }
+        }
+    }
+    best.cloned().unwrap_or_else(null_value)
+}
+
+/// O(n) dedup preserving insertion order via HashSet membership.
+fn dedup_preserving_order(rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    let mut seen: HashSet<GroupKey> = HashSet::with_capacity(rows.len());
+    let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let key = GroupKey::from_values(row.clone());
+        if seen.insert(key) {
+            out.push(row);
+        }
+    }
+    out
+}
+
+// `Value` lacks Hash/Eq because of `f64`. This wrapper is runtime-local;
+// modifying `Value` would touch ~30 call sites. Floats are normalized so
+// NaN==NaN and +0.0==-0.0 (consistent with our notion of "same group").
+
+#[derive(Debug, Clone)]
+struct GroupKey(Vec<Value>);
+
+fn hash_value<H: Hasher>(v: &Value, state: &mut H) {
+    std::mem::discriminant(v).hash(state);
+    match v {
+        Value::Int(n) => n.hash(state),
+        Value::Float(f) => normalize_float_bits(*f).hash(state),
+        Value::Str(s) => s.hash(state),
+        Value::Bool(b) => b.hash(state),
+        Value::List(items) => {
+            items.len().hash(state);
+            for item in items {
+                hash_value(item, state);
+            }
+        }
+        Value::Record(fields) => {
+            fields.len().hash(state);
+            for (k, v) in fields {
+                k.hash(state);
+                hash_value(v, state);
+            }
+        }
+    }
+}
+
+fn eq_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => normalize_float_bits(*x) == normalize_float_bits(*y),
+        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::List(x), Value::List(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| eq_value(a, b))
+        }
+        (Value::Record(x), Value::Record(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, vx)| y.get(k).map_or(false, |vy| eq_value(vx, vy)))
+        }
+        _ => false,
+    }
+}
+
+/// NaN → canonical NaN bits; -0.0 → +0.0 bits. Keeps Hash/Eq consistent
+/// with our notion that NaN==NaN and +0.0==-0.0 for grouping.
+fn normalize_float_bits(f: f64) -> u64 {
+    if f.is_nan() {
+        f64::NAN.to_bits()
+    } else if f == 0.0 {
+        0
+    } else {
+        f.to_bits()
+    }
+}
+
+impl PartialEq for GroupKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self
+                .0
+                .iter()
+                .zip(other.0.iter())
+                .all(|(a, b)| eq_value(a, b))
+    }
+}
+
+impl Eq for GroupKey {}
+
+impl Hash for GroupKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.len().hash(state);
+        for v in &self.0 {
+            hash_value(v, state);
+        }
+    }
+}
+
+impl GroupKey {
+    fn from_values(vs: Vec<Value>) -> Self {
+        GroupKey(vs)
+    }
+}
+
+/// MIN/MAX ordering. Int<->Float promote; cross-kind returns None.
+fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y),
+        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y),
+        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)),
+        (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
+        (Value::Bool(x), Value::Bool(y)) => Some(match (x, y) {
+            (false, true) => Ordering::Less,
+            (true, false) => Ordering::Greater,
+            _ => Ordering::Equal,
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod group_key_tests {
+    //! Tests for `GroupKey` — the Hash + Eq wrapper used for grouping
+    //! and dedup. The key invariant: two GroupKeys that compare equal
+    //! must hash equal (Rust's Hash/Eq contract). Float normalization
+    //! is what makes this hold for NaN and -0.0.
+    use super::*;
+    use std::collections::HashMap;
+
+    fn key(vs: Vec<Value>) -> GroupKey {
+        GroupKey::from_values(vs)
+    }
+
+    fn hash_of(k: &GroupKey) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        let mut h = DefaultHasher::new();
+        k.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn equal_ints_are_equal_and_hash_same() {
+        let a = key(vec![Value::Int(42), Value::Str("x".into())]);
+        let b = key(vec![Value::Int(42), Value::Str("x".into())]);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn distinct_ints_are_unequal() {
+        let a = key(vec![Value::Int(1)]);
+        let b = key(vec![Value::Int(2)]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn nan_equals_nan_under_group_key() {
+        // IEEE 754 says NaN != NaN. For grouping we want them collapsed
+        // into the same group, so GroupKey treats NaN as self-equal.
+        let a = key(vec![Value::Float(f64::NAN)]);
+        let b = key(vec![Value::Float(f64::NAN)]);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn nan_payloads_are_normalized() {
+        // Two NaNs constructed with different bit patterns still group
+        // together — `normalize_float_bits` collapses them.
+        let nan1 = f64::from_bits(0x7ff8_0000_0000_0001);
+        let nan2 = f64::from_bits(0x7ff8_0000_0000_0002);
+        assert!(nan1.is_nan() && nan2.is_nan());
+        assert_ne!(nan1.to_bits(), nan2.to_bits()); // sanity: bit-distinct
+        let a = key(vec![Value::Float(nan1)]);
+        let b = key(vec![Value::Float(nan2)]);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn positive_and_negative_zero_are_equal() {
+        // IEEE: +0.0 == -0.0, but their bits differ. GroupKey must
+        // treat them as the same group to stay consistent with `==`.
+        let a = key(vec![Value::Float(0.0)]);
+        let b = key(vec![Value::Float(-0.0)]);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn distinct_floats_are_unequal() {
+        let a = key(vec![Value::Float(1.5)]);
+        let b = key(vec![Value::Float(1.6)]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn nested_list_equality_is_structural() {
+        let a = key(vec![Value::List(vec![Value::Int(1), Value::Int(2)])]);
+        let b = key(vec![Value::List(vec![Value::Int(1), Value::Int(2)])]);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn nested_record_equality_is_structural() {
+        let mut r1 = std::collections::BTreeMap::new();
+        r1.insert("k".into(), Value::Int(1));
+        let mut r2 = std::collections::BTreeMap::new();
+        r2.insert("k".into(), Value::Int(1));
+        let a = key(vec![Value::Record(r1)]);
+        let b = key(vec![Value::Record(r2)]);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn cross_kind_values_are_unequal() {
+        // Same numeric value, different kinds — not equal.
+        let a = key(vec![Value::Int(1)]);
+        let b = key(vec![Value::Float(1.0)]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn works_as_hashmap_key() {
+        // End-to-end smoke test of the actual use case.
+        let mut m: HashMap<GroupKey, usize> = HashMap::new();
+        m.insert(key(vec![Value::Int(1)]), 0);
+        m.insert(key(vec![Value::Int(2)]), 1);
+        assert_eq!(m.get(&key(vec![Value::Int(1)])), Some(&0));
+        assert_eq!(m.get(&key(vec![Value::Int(2)])), Some(&1));
+        assert_eq!(m.get(&key(vec![Value::Int(3)])), None);
     }
 }

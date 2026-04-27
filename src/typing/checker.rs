@@ -8,7 +8,7 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::Query;
+use crate::syntax::query::{Aggregator, Query, ReturnItem};
 
 use super::descriptor_type::DescriptorType;
 use super::path_type::{EdgeDir, PathType};
@@ -58,12 +58,82 @@ impl Typechecker {
         Typechecker::new(Schema::star())
     }
 
-    /// Type-check a full `Query`. Elaboration has already folded any
-    /// `WHERE` clause into `PathPattern::Filter` nodes inside `q.pattern`,
-    /// so this just checks the pattern. `RETURN` is not type-checked in
-    /// this phase (out-of-scope: result-row typing).
+    /// Type-check a full Query. Pattern first; then walk RETURN items
+    /// for unbound-var / type-mismatch detection; if GROUP BY is
+    /// present, also verify each non-aggregate RETURN item appears in
+    /// it. Result-row typing is still out of scope.
     pub fn check_query(&mut self, q: &Query) -> TypecheckResult {
-        self.check_pattern(&q.pattern)
+        let mut r = self.check_pattern(&q.pattern);
+        if let Some(group_by) = &q.group_by {
+            self.check_group_by(group_by, &r.env);
+        }
+        if let Some(returns) = &q.returns {
+            self.check_returns(returns, &r.env);
+            match &q.group_by {
+                Some(group_by) => self.check_returns_match_group_by(returns, group_by),
+                None => self.check_no_implicit_group_by(returns),
+            }
+        }
+        if !self.errors.is_empty() {
+            r.ok = false;
+        }
+        r
+    }
+
+    /// ISO §16.15: mixing aggregates with non-aggregate items requires
+    /// an explicit GROUP BY. Implicit Cypher-style grouping was dropped
+    /// because patterns like `RETURN x.name, COUNT(*)` silently gave
+    /// useless per-row counts. `compile_query_unchecked` bypasses.
+    fn check_no_implicit_group_by(&mut self, items: &[ReturnItem]) {
+        let has_agg = items.iter().any(|i| i.is_aggregate());
+        let has_expr = items.iter().any(|i| !i.is_aggregate());
+        if has_agg && has_expr {
+            self.errors.push(
+                "RETURN mixes aggregate and non-aggregate items but no GROUP BY \
+                 clause is present. Add `GROUP BY <expr>...` before the RETURN."
+                    .to_string(),
+            );
+        }
+    }
+
+    fn check_group_by(&mut self, exprs: &[Expr], env: &TypeEnvironment) {
+        for e in exprs {
+            let _ = self.check_expr(e, env);
+        }
+    }
+
+    /// ISO §16.15: every non-aggregate RETURN item must structurally
+    /// match a grouping expression. `Expr::eq` is structural — `x.a + 1`
+    /// in RETURN with `x.a` in GROUP BY is rejected.
+    fn check_returns_match_group_by(&mut self, items: &[ReturnItem], group_by: &[Expr]) {
+        for item in items {
+            if let ReturnItem::Expr { expr, .. } = item {
+                if !group_by.iter().any(|g| g == expr) {
+                    self.errors.push(format!(
+                        "RETURN item `{expr}` is not in the GROUP BY clause; \
+                         non-aggregate projections must match a grouping key."
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Walks each item's inner expr against the env; result types are
+    /// discarded — only errors/warnings (e.g. unbound vars) are collected.
+    fn check_returns(&mut self, items: &[ReturnItem], env: &TypeEnvironment) {
+        for item in items {
+            match item {
+                ReturnItem::Expr { expr, .. } => {
+                    let _ = self.check_expr(expr, env);
+                }
+                ReturnItem::Aggregate { agg, .. } => match agg {
+                    Aggregator::CountStar => {}
+                    Aggregator::GeneralSet { expr, .. } => {
+                        let _ = self.check_expr(expr, env);
+                    }
+                },
+            }
+        }
     }
 
     /// Type-check a `PathPattern`.

@@ -145,7 +145,11 @@ fn main() {
                 if let Some(returns) = &query.returns {
                     let headers: Vec<String> = returns
                         .iter()
-                        .map(|r| r.alias.clone().unwrap_or_else(|| format!("{}", r.expr)))
+                        .map(|r| {
+                            r.alias()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| format!("{r}"))
+                        })
                         .collect();
 
                     // Format all cell values

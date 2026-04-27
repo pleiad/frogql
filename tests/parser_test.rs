@@ -3,6 +3,7 @@ use gqlrust::parser::parse;
 use gqlrust::syntax::descriptor::Descriptor;
 use gqlrust::syntax::expr::{BinOp, Expr, UnOp};
 use gqlrust::syntax::path_pattern::PathPattern;
+use gqlrust::syntax::query::{Aggregator, GeneralSetKind, ReturnItem, SetQuantifier};
 use gqlrust::typing::descriptor_type::DescriptorType;
 use gqlrust::typing::label_type::LabelType;
 use gqlrust::typing::property_type::PropertyType;
@@ -660,8 +661,8 @@ fn test_match_return_alias() {
         .unwrap();
     let returns = q.returns.as_ref().unwrap();
     assert_eq!(returns.len(), 2);
-    assert_eq!(returns[0].alias.as_deref(), Some("title"));
-    assert_eq!(returns[1].alias.as_deref(), Some("votes"));
+    assert_eq!(returns[0].alias(), Some("title"));
+    assert_eq!(returns[1].alias(), Some("votes"));
 }
 
 #[test]
@@ -669,4 +670,128 @@ fn test_no_match_keyword_still_works() {
     let q = gqlrust::compile_query("(x) -[]-> (y)").unwrap();
     assert!(matches!(q.pattern, PathPattern::Concat(_, _)));
     assert!(q.returns.is_none());
+}
+
+// =======================================================================
+// Aggregate functions (ISO 39075 §20.9)
+// =======================================================================
+
+/// Helper: parse a query and return the single aggregate item it produces.
+fn single_agg(q: &str) -> Aggregator {
+    let parsed = gqlrust::compile_query(q).unwrap();
+    let returns = parsed.returns.expect("expected RETURN clause");
+    assert_eq!(returns.len(), 1, "expected exactly one return item");
+    match returns.into_iter().next().unwrap() {
+        ReturnItem::Aggregate { agg, .. } => agg,
+        other => panic!("expected Aggregate item, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_count_star() {
+    assert_eq!(
+        single_agg("MATCH (x) RETURN COUNT(*)"),
+        Aggregator::CountStar
+    );
+}
+
+#[test]
+fn test_parse_count_star_lowercase() {
+    // Soft-keyword: lowercase aggregate name still recognized.
+    assert_eq!(
+        single_agg("MATCH (x) RETURN count(*)"),
+        Aggregator::CountStar
+    );
+}
+
+#[test]
+fn test_parse_count_expr() {
+    let agg = single_agg("MATCH (x) RETURN COUNT(x.name)");
+    match agg {
+        Aggregator::GeneralSet {
+            kind: GeneralSetKind::Count,
+            quantifier: SetQuantifier::All,
+            ..
+        } => {}
+        other => panic!("expected GeneralSet{{Count, ALL}}, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_count_distinct() {
+    let agg = single_agg("MATCH (x) RETURN COUNT(DISTINCT x.city)");
+    match agg {
+        Aggregator::GeneralSet {
+            kind: GeneralSetKind::Count,
+            quantifier: SetQuantifier::Distinct,
+            ..
+        } => {}
+        other => panic!("expected GeneralSet{{Count, DISTINCT}}, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_count_explicit_all() {
+    // ISO §20.9: ALL is implicit, but explicit ALL is also valid syntax.
+    let agg = single_agg("MATCH (x) RETURN COUNT(ALL x.name)");
+    match agg {
+        Aggregator::GeneralSet {
+            quantifier: SetQuantifier::All,
+            ..
+        } => {}
+        other => panic!("expected ALL quantifier, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_sum_avg_min_max() {
+    for (q, expected_kind) in [
+        ("MATCH (x) RETURN SUM(x.amount)", GeneralSetKind::Sum),
+        ("MATCH (x) RETURN AVG(x.score)", GeneralSetKind::Avg),
+        ("MATCH (x) RETURN MIN(x.age)", GeneralSetKind::Min),
+        ("MATCH (x) RETURN MAX(x.age)", GeneralSetKind::Max),
+    ] {
+        let agg = single_agg(q);
+        match agg {
+            Aggregator::GeneralSet { kind, .. } if kind == expected_kind => {}
+            other => panic!("expected GeneralSet{{{expected_kind:?}}}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn test_parse_aggregate_with_alias() {
+    let parsed = gqlrust::compile_query("MATCH (x) RETURN COUNT(*) AS total").unwrap();
+    let returns = parsed.returns.unwrap();
+    assert_eq!(returns.len(), 1);
+    match &returns[0] {
+        ReturnItem::Aggregate { agg, alias } => {
+            assert_eq!(*agg, Aggregator::CountStar);
+            assert_eq!(alias.as_deref(), Some("total"));
+        }
+        other => panic!("expected Aggregate, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_mixed_aggregate_and_expr() {
+    // RETURN that mixes a plain expr and an aggregate — the parser
+    // produces a heterogeneous Vec<ReturnItem>. The full pipeline
+    // (compile_query) requires explicit GROUP BY for this to typecheck,
+    // but the parser stage doesn't enforce that — use compile_query_unchecked
+    // to verify the AST shape without typechecker rejection.
+    let parsed = gqlrust::compile_query_unchecked("MATCH (x) RETURN x.country, COUNT(*)").unwrap();
+    let returns = parsed.returns.unwrap();
+    assert_eq!(returns.len(), 2);
+    assert!(matches!(returns[0], ReturnItem::Expr { .. }));
+    assert!(matches!(returns[1], ReturnItem::Aggregate { .. }));
+}
+
+#[test]
+fn test_count_as_field_name_still_works() {
+    // Soft-keyword: `count` not followed by `(` stays a regular Name.
+    // This query treats `count` as a property name in a record literal.
+    let parsed =
+        gqlrust::compile_query("MATCH (x) WHERE x.id = 1 RETURN {name: 'ok', count: 1}").unwrap();
+    assert_eq!(parsed.returns.unwrap().len(), 1);
 }
