@@ -44,7 +44,10 @@ pub fn compile_query(input: &str) -> Result<Query, String> {
         return Err(tc.errors.join("; "));
     }
     let optimized_pattern = optimizer::compile(q.pattern);
-    Ok(Query { pattern: optimized_pattern, ..q })
+    Ok(Query {
+        pattern: optimized_pattern,
+        ..q
+    })
 }
 
 /// Compile a path pattern without typechecking. Same plan as

@@ -41,10 +41,7 @@ fn main() {
     // Known-bad: WHERE references an unbound variable.
     // - compile_query should reject (typechecker is the gatekeeper).
     // - compile_query_unchecked should still produce a plan.
-    suite.bad_unbound(
-        "MATCH (m:Movie) WHERE x.foo = 1 RETURN m.title",
-        "x",
-    );
+    suite.bad_unbound("MATCH (m:Movie) WHERE x.foo = 1 RETURN m.title", "x");
 
     suite.report();
 }
@@ -57,7 +54,11 @@ struct Suite<'a> {
 
 impl<'a> Suite<'a> {
     fn new(store: &'a LazyGraphStore) -> Self {
-        Suite { store, pass: 0, fail: 0 }
+        Suite {
+            store,
+            pass: 0,
+            fail: 0,
+        }
     }
 
     fn good(&mut self, q: &str) {

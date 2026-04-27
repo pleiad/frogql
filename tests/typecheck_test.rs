@@ -91,10 +91,7 @@ fn directed_edge(
 fn fraud_schema() -> Schema {
     let account = node_dt(
         label("Account"),
-        closed(&[
-            ("owner", SimpleType::S),
-            ("isBlocked", SimpleType::B),
-        ]),
+        closed(&[("owner", SimpleType::S), ("isBlocked", SimpleType::B)]),
     );
     let dummy_person = node_dt(
         label_and(label("Dummy"), label("Person")),
@@ -134,24 +131,15 @@ fn fraud_schema() -> Schema {
 fn social_schema() -> Schema {
     let teacher = node_dt(
         label_and(label("Person"), label("Teacher")),
-        closed(&[
-            ("name", SimpleType::S),
-            ("status", SimpleType::S),
-        ]),
+        closed(&[("name", SimpleType::S), ("status", SimpleType::S)]),
     );
     let student = node_dt(
         label_and(label("Person"), label("Student")),
-        closed(&[
-            ("name", SimpleType::S),
-            ("status", SimpleType::Z),
-        ]),
+        closed(&[("name", SimpleType::S), ("status", SimpleType::Z)]),
     );
     let comment = node_dt(
         label("Comment"),
-        closed(&[
-            ("content", SimpleType::S),
-            ("status", SimpleType::B),
-        ]),
+        closed(&[("content", SimpleType::S), ("status", SimpleType::B)]),
     );
 
     let knows = directed_edge(
@@ -183,9 +171,16 @@ fn social_schema() -> Schema {
 // Basic node patterns (untyped)
 // =======================================================================
 
-#[test] fn test_node_empty() { assert!(check("()").0.ok); }
-#[test] fn test_node_var() { assert!(check("(x)").0.ok); }
-#[test] fn test_node_non_empty() {
+#[test]
+fn test_node_empty() {
+    assert!(check("()").0.ok);
+}
+#[test]
+fn test_node_var() {
+    assert!(check("(x)").0.ok);
+}
+#[test]
+fn test_node_non_empty() {
     assert!(check("(x: Person {owner is str})").0.ok);
 }
 
@@ -195,11 +190,13 @@ fn social_schema() -> Schema {
 
 // fppc test_node_variable: `->` — gqlite's parser requires at least one
 // node anchor. Use `()-[]->()` for the equivalent typecheck.
-#[test] fn test_node_variable() {
+#[test]
+fn test_node_variable() {
     assert!(check("()-[]->()").0.ok);
 }
 
-#[test] fn test_node_variable_2() {
+#[test]
+fn test_node_variable_2() {
     assert!(check("()-[x: Transfer {amount is int}]->()").0.ok);
 }
 
@@ -207,32 +204,52 @@ fn social_schema() -> Schema {
 // Concatenation
 // =======================================================================
 
-#[test] fn test_concat() {
+#[test]
+fn test_concat() {
     assert!(check("(x:Account)(y:Account)").0.ok);
 }
-#[test] fn test_concat_1() {
-    assert!(check("(x: {a is int})(x:Person {b is bool, a is bool})").0.ok);
+#[test]
+fn test_concat_1() {
+    assert!(
+        check("(x: {a is int})(x:Person {b is bool, a is bool})")
+            .0
+            .ok
+    );
 }
-#[test] fn test_concat_node_edge() {
-    assert!(check("(x: {a is int})-[y:Person {b is bool, a is bool}]->()").0.ok);
+#[test]
+fn test_concat_node_edge() {
+    assert!(
+        check("(x: {a is int})-[y:Person {b is bool, a is bool}]->()")
+            .0
+            .ok
+    );
 }
-#[test] fn test_concat_node_node() {
+#[test]
+fn test_concat_node_node() {
     assert!(check("(x: {a is int}) (y: {b is bool})").0.ok);
 }
-#[test] fn test_concat_node_edge_node() {
+#[test]
+fn test_concat_node_edge_node() {
     assert!(
-        check("(x: {a is int}) -[y:Person {b is bool, a is bool}]-> (z: {b is bool})").0.ok
+        check("(x: {a is int}) -[y:Person {b is bool, a is bool}]-> (z: {b is bool})")
+            .0
+            .ok
     );
 }
-#[test] fn test_concat_edge_edge() {
+#[test]
+fn test_concat_edge_edge() {
     assert!(check("()-[x:Person]->()-[y:University]->()").0.ok);
 }
-#[test] fn test_concat_node_node_node_edge() {
+#[test]
+fn test_concat_node_node_node_edge() {
     assert!(
-        check("(x: {a is int}) (y: {b is bool}) (z: {c is str}) -[w:Person]-> ()").0.ok
+        check("(x: {a is int}) (y: {b is bool}) (z: {c is str}) -[w:Person]-> ()")
+            .0
+            .ok
     );
 }
-#[test] fn test_concat_node_node_empty() {
+#[test]
+fn test_concat_node_node_empty() {
     assert!(check("(x: {a is int}) (y: {a is bool})").0.ok);
 }
 
@@ -240,13 +257,15 @@ fn social_schema() -> Schema {
 // Schema-based emptiness (fraud)
 // =======================================================================
 
-#[test] fn test_empty_1() {
+#[test]
+fn test_empty_1() {
     let (r, _, _) = check_with(fraud_schema(), "(x: {a is int})");
     assert!(r.ok);
     assert!(r.empty);
 }
 
-#[test] fn test_empty_2() {
+#[test]
+fn test_empty_2() {
     let (r, _, _) = check_with(fraud_schema(), "()-[x: {nonExistant is int}]->()");
     assert!(r.ok);
     assert!(r.empty);
@@ -256,22 +275,30 @@ fn social_schema() -> Schema {
 // Filter / WHERE
 // =======================================================================
 
-#[test] fn test_where() {
-    assert!(check("(: {b is str}) (x: {a is str, b is str} WHERE x.a = x.b)").0.ok);
+#[test]
+fn test_where() {
+    assert!(
+        check("(: {b is str}) (x: {a is str, b is str} WHERE x.a = x.b)")
+            .0
+            .ok
+    );
 }
 
-#[test] fn test_filter_4() {
+#[test]
+fn test_filter_4() {
     // Just check it doesn't panic.
     let _ = check("()-[y WHERE y.a]->()");
 }
 
-#[test] fn test_no_warnings() {
+#[test]
+fn test_no_warnings() {
     let (r, _, w) = check("()-[y WHERE y.amount>=3500000]->()");
     assert!(r.ok);
     assert!(w.is_empty(), "expected no warnings, got: {:?}", w);
 }
 
-#[test] fn test_bad_attribute() {
+#[test]
+fn test_bad_attribute() {
     // Untyped: gradual typing means a bogus attribute name doesn't
     // make the query invalid — just produces Star and works.
     assert!(check("(x: {amount is int} WHERE x.amout > 1000)").0.ok);
@@ -281,23 +308,29 @@ fn social_schema() -> Schema {
 // Union
 // =======================================================================
 
-#[test] fn test_union() {
+#[test]
+fn test_union() {
     assert!(check("(x: {a is int}) | (y: {b is bool})").0.ok);
 }
-#[test] fn test_union_2() {
+#[test]
+fn test_union_2() {
     assert!(check("(x: {a is int}) | (x: {b is bool})").0.ok);
 }
-#[test] fn test_union_heterogeneous() {
+#[test]
+fn test_union_heterogeneous() {
     // fppc: `(x: {a: int}) | -[x: {a: bool}]->`. gqlite needs node anchors.
     assert!(check("(x: {a is int}) | ()-[x: {a is bool}]->()").0.ok);
 }
-#[test] fn test_union_concat_fail() {
+#[test]
+fn test_union_concat_fail() {
     assert!(check("((:{a is int}) | (:{a is bool})) (:{a is str})").0.ok);
 }
-#[test] fn test_union_concat_ok() {
+#[test]
+fn test_union_concat_ok() {
     assert!(check("((:{a is int}) | (:{a is bool})) (:{a is int})").0.ok);
 }
-#[test] fn test_zero_path() {
+#[test]
+fn test_zero_path() {
     assert!(check("((:{a is int})(:{a is bool})) | ()").0.ok);
 }
 
@@ -305,21 +338,26 @@ fn social_schema() -> Schema {
 // Repetition / quantifier
 // =======================================================================
 
-#[test] fn test_repetition_1() {
+#[test]
+fn test_repetition_1() {
     assert!(check("(x: {a is int}){1,2}").0.ok);
 }
-#[test] fn test_repetition_2() {
+#[test]
+fn test_repetition_2() {
     assert!(check("(()-[x: {a is int}]->()){1,2}").0.ok);
 }
-#[test] fn test_repetition_3() {
+#[test]
+fn test_repetition_3() {
     let (r, _, _) = check_with(fraud_schema(), "(y)((()-[x: {a is int}]->()){1,2}){2,3}");
     assert!(r.ok);
 }
-#[test] fn test_repetition_4() {
+#[test]
+fn test_repetition_4() {
     // Just check it doesn't panic.
     let _ = check("(()-[]->()){1,2}");
 }
-#[test] fn test_foo() {
+#[test]
+fn test_foo() {
     assert!(check("(()-[x]->()){1,3}").0.ok);
 }
 
@@ -327,13 +365,17 @@ fn social_schema() -> Schema {
 // Misc
 // =======================================================================
 
-#[test] fn test_bad_pop() {
+#[test]
+fn test_bad_pop() {
     assert!(check("()()").0.ok);
 }
 
-#[test] fn test_readers_digest_ex1() {
+#[test]
+fn test_readers_digest_ex1() {
     assert!(
-        check("(x)-[z:Transfer WHERE z.amount>1000000]->(y WHERE y.isBlocked=true)").0.ok
+        check("(x)-[z:Transfer WHERE z.amount>1000000]->(y WHERE y.isBlocked=true)")
+            .0
+            .ok
     );
 }
 
@@ -341,10 +383,12 @@ fn social_schema() -> Schema {
 // is / as
 // =======================================================================
 
-#[test] fn test_is() {
+#[test]
+fn test_is() {
     assert!(check("(x: {a is int} WHERE x.a is int)").0.ok);
 }
-#[test] fn test_as() {
+#[test]
+fn test_as() {
     assert!(check("(x: {a is int} WHERE x.a as bool)").0.ok);
 }
 
@@ -352,26 +396,36 @@ fn social_schema() -> Schema {
 // Error detection
 // =======================================================================
 
-#[test] fn test_example21() {
+#[test]
+fn test_example21() {
     // Same variable name for node and edge — the env meet at Concat
     // collapses incompatible shapes.
     let (r, errs, _) = check("(x)-[x]->()");
-    assert!(!r.ok, "expected !ok for shared var across node/edge, errors={:?}", errs);
+    assert!(
+        !r.ok,
+        "expected !ok for shared var across node/edge, errors={:?}",
+        errs
+    );
 }
 
-#[test] fn test_example22() {
+#[test]
+fn test_example22() {
     // Same variable with incompatible property types -> empty
-    let (r, _, _) = check(
-        "(x: {status is bool} WHERE x.status = true)-[:Knows]->(x: {status is str})",
-    );
+    let (r, _, _) =
+        check("(x: {status is bool} WHERE x.status = true)-[:Knows]->(x: {status is str})");
     assert!(r.empty);
 }
 
-#[test] fn test_example23() {
+#[test]
+fn test_example23() {
     // Untyped: ok, no warnings
     let (r1, _, w1) = check("(x: {stauts is int} WHERE x.stauts > 0)");
     assert!(r1.ok);
-    assert!(w1.is_empty(), "expected no warnings on untyped, got: {:?}", w1);
+    assert!(
+        w1.is_empty(),
+        "expected no warnings on untyped, got: {:?}",
+        w1
+    );
 
     // With closed schema {status: bool} — typo "stauts" doesn't match -> empty
     let schema = Schema {
@@ -385,7 +439,8 @@ fn social_schema() -> Schema {
     assert!(r2.empty);
 }
 
-#[test] fn test_example24() {
+#[test]
+fn test_example24() {
     let schema = Schema {
         nodes: vec![node_dt(
             LabelType::Star,
@@ -397,7 +452,8 @@ fn social_schema() -> Schema {
     assert!(r.empty);
 }
 
-#[test] fn test_unbound_variable() {
+#[test]
+fn test_unbound_variable() {
     let (r, _, _) = check("(y WHERE x.status = true)");
     assert!(!r.ok);
 }
@@ -406,7 +462,8 @@ fn social_schema() -> Schema {
 // Pure label subtype
 // =======================================================================
 
-#[test] fn test_is_subtype() {
+#[test]
+fn test_is_subtype() {
     let l = label_and(label("Person"), label("Teacher"));
     assert!(LabelType::is_subtype(&l, &l));
 }
@@ -415,17 +472,20 @@ fn social_schema() -> Schema {
 // Social network schema
 // =======================================================================
 
-#[test] fn test_social_1() {
+#[test]
+fn test_social_1() {
     let (r, _, _) = check_with(social_schema(), "(x WHERE x.status=true)");
     assert!(!r.empty);
 }
 
-#[test] fn test_paper_example_1_part_1() {
+#[test]
+fn test_paper_example_1_part_1() {
     let (r, _, _) = check_with(social_schema(), "(x : Teacher) -[: Likes]->()");
     assert!(!r.empty);
 }
 
-#[test] fn test_paper_example_1_part_2() {
+#[test]
+fn test_paper_example_1_part_2() {
     let (r, _, _) = check_with(
         social_schema(),
         "(: Student ) -[y : Knows WHERE y . since < 2019]- (x)",
@@ -442,12 +502,14 @@ fn social_schema() -> Schema {
 // Unary operators (fraud)
 // =======================================================================
 
-#[test] fn test_unop_1() {
+#[test]
+fn test_unop_1() {
     let (r, _, _) = check_with(fraud_schema(), "(x WHERE not x.isBlocked)");
     assert!(!r.empty);
 }
 
-#[test] fn test_unop_2() {
+#[test]
+fn test_unop_2() {
     let (r, _, _) = check_with(fraud_schema(), "()-[x WHERE -x.amount < 0]->()");
     assert!(!r.empty);
 }
