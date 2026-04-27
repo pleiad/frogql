@@ -232,7 +232,7 @@ fn test_join_coactors() {
 
 #[test]
 fn test_return_alias() {
-    let g = movies_graph();
+    let _g = movies_graph(); // Smoke-test that the graph loads alongside compile_query.
     let q =
         gqlrust::compile_query("MATCH (m: Movie) WHERE m.released = 1999 RETURN m.title AS title")
             .unwrap();

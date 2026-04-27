@@ -1,3 +1,8 @@
+// PyO3's #[pymethods] / #[pyfunction] macros expand to code that does
+// PyErr -> PyErr conversions clippy flags as useless. Allow at crate
+// level rather than tagging every function.
+#![allow(clippy::useless_conversion)]
+
 use std::path::Path;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -60,7 +65,11 @@ impl Connection {
                         items
                             .iter()
                             .enumerate()
-                            .map(|(i, it)| it.alias.clone().unwrap_or_else(|| format!("col{i}")))
+                            .map(|(i, it)| {
+                                it.alias()
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| format!("col{i}"))
+                            })
                             .collect()
                     })
                     .unwrap_or_default();

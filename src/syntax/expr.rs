@@ -47,7 +47,6 @@ impl BinOp {
             ),
         }
     }
-
 }
 
 impl std::str::FromStr for BinOp {
@@ -162,11 +161,9 @@ impl Expr {
             }
             (Value::Record(v_fields), SimpleType::Record(t_fields)) => {
                 v_fields.len() == t_fields.len()
-                    && v_fields.iter().all(|(k, v)| {
-                        t_fields
-                            .get(k)
-                            .is_some_and(|ty| Expr::value_is_type(v, ty))
-                    })
+                    && v_fields
+                        .iter()
+                        .all(|(k, v)| t_fields.get(k).is_some_and(|ty| Expr::value_is_type(v, ty)))
             }
             (_, SimpleType::Star) => true,
             (_, SimpleType::Union(a, b)) => {

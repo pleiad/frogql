@@ -108,7 +108,7 @@ fn fraud_schema() -> Schema {
         account.clone(),
         account.clone(),
     );
-    let foo = directed_edge(
+    let foo_edge = directed_edge(
         label("Foo"),
         closed(&[("amount", SimpleType::Z)]),
         account.clone(),
@@ -117,7 +117,7 @@ fn fraud_schema() -> Schema {
 
     Schema {
         nodes: vec![account, dummy_person],
-        edges: vec![transfer, foo],
+        edges: vec![transfer, foo_edge],
     }
 }
 

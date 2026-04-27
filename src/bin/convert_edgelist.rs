@@ -56,14 +56,16 @@ fn main() {
         let src: u32 = parts[0].trim().parse().expect("bad src id");
         let tgt: u32 = parts[1].trim().parse().expect("bad tgt id");
 
-        if !node_set.contains_key(&src) {
-            node_set.insert(src, next_iid);
+        node_set.entry(src).or_insert_with(|| {
+            let id = next_iid;
             next_iid += 1;
-        }
-        if !node_set.contains_key(&tgt) {
-            node_set.insert(tgt, next_iid);
+            id
+        });
+        node_set.entry(tgt).or_insert_with(|| {
+            let id = next_iid;
             next_iid += 1;
-        }
+            id
+        });
         edges.push((src, tgt));
 
         if let Some(lim) = limit {
@@ -150,6 +152,7 @@ fn main() {
     let edge_label_root = disk_index::write_label_index(&mut pager, &[]).expect("label index");
 
     // Adjacency index
+    #[allow(clippy::type_complexity)]
     let mut adj_entries: Vec<(u32, Vec<(u32, u32, u8)>)> = adj.into_iter().collect();
     adj_entries.sort_by_key(|(iid, _)| *iid);
     let adj_root = disk_index::write_adjacency_index(&mut pager, &adj_entries).expect("adj index");
