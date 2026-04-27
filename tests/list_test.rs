@@ -45,14 +45,14 @@ fn test_json_loads_list_property() {
 #[test]
 fn test_is_list_type_predicate() {
     let g = graph_with_lists();
-    let r = run(&g, "MATCH (x: Actor) WHERE x.roles is [str] RETURN x.name");
+    let r = run(&g, "MATCH (x: Actor) WHERE x.roles [str] RETURN x.name");
     assert_eq!(r.len(), 3); // all three match: empty list matches any element type
 }
 
 #[test]
 fn test_is_list_star_predicate() {
     let g = graph_with_lists();
-    let r = run(&g, "MATCH (x: Actor) WHERE x.roles is [*] RETURN x.name");
+    let r = run(&g, "MATCH (x: Actor) WHERE x.roles [*] RETURN x.name");
     assert_eq!(r.len(), 3);
 }
 
@@ -130,7 +130,7 @@ fn test_list_storage_roundtrip() {
 fn test_list_type_in_descriptor() {
     // `{roles: [str]}` as a type ascription inside a descriptor.
     let g = graph_with_lists();
-    let r = run(&g, "MATCH (x: Actor {roles is [str]}) RETURN x.name");
+    let r = run(&g, "MATCH (x: Actor {roles [str]}) RETURN x.name");
     assert_eq!(r.len(), 3);
 }
 
@@ -145,6 +145,6 @@ fn test_list_type_discriminates_element_types() {
     }"#;
     let g = Graph::from_json_str(json).unwrap();
     // n1 is a list of int; n2 is a list of bool. `is [int]` must pick only n1.
-    let r = run(&g, "MATCH (x: T) WHERE x.xs is [int] RETURN x.xs");
+    let r = run(&g, "MATCH (x: T) WHERE x.xs [int] RETURN x.xs");
     assert_eq!(r.len(), 1);
 }

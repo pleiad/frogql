@@ -4,7 +4,7 @@
 //! path produces the same plan as the opt-out path for a handful of
 //! representative queries, and that the checker rejects at least one
 //! obviously-broken query that would have compiled silently before the
-//! migration. Failure-detection coverage is intentionally narrow.
+//! migration. Failure-detection coverage intentionally narrow.
 
 use gqlrust::{compile_query, compile_query_unchecked};
 
@@ -39,7 +39,7 @@ fn smoke_two_hop_with_filter() {
 
 #[test]
 fn smoke_concat_three_nodes_pattern_only() {
-    assert_smoke_query("(x: {a: int})(y: {b: bool})(z: {c: str})");
+    assert_smoke_query("(x: {a int})(y: {b bool})(z: {c str})");
 }
 
 #[test]

@@ -35,7 +35,7 @@ fn test_value_filter_hoisted_to_where() {
 #[test]
 fn test_value_filter_and_type_in_same_descriptor() {
     // Mix type ascription (`is`) and value filter (`:`) in one descriptor.
-    let r = rows("MATCH (x: Account {owner is str, isBlocked: true}) RETURN x.owner");
+    let r = rows("MATCH (x: Account {owner str, isBlocked: true}) RETURN x.owner");
     assert_eq!(r, vec![vec![Value::Str("Mike".into())]]);
 }
 
@@ -49,8 +49,8 @@ fn test_value_filter_anonymous_node_gets_fresh_var() {
 
 #[test]
 fn test_legacy_type_ascription_with_colon_still_works() {
-    // Backward compat: `{isDummy: bool}` means type ascription, not value filter.
-    let r = rows("MATCH (x: Dummy {isDummy: bool}) RETURN x.isDummy");
+    // Backward compat: `{isDummy bool}` means type ascription, not value filter.
+    let r = rows("MATCH (x: Dummy {isDummy bool}) RETURN x.isDummy");
     assert_eq!(r.len(), 1);
 }
 
@@ -64,6 +64,6 @@ fn test_value_filter_combines_with_existing_where() {
 #[test]
 fn test_is_type_ascription_only() {
     // Pure type ascription form with `is`, no values.
-    let r = rows("MATCH (x: Account {owner is str}) RETURN x.owner");
+    let r = rows("MATCH (x: Account {owner str}) RETURN x.owner");
     assert_eq!(r.len(), 4); // every Account has a str-valued owner
 }

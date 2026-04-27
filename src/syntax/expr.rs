@@ -60,7 +60,7 @@ impl BinOp {
             "!=" => Some(BinOp::Ne),
             "and" => Some(BinOp::And),
             "or" => Some(BinOp::Or),
-            "is" => Some(BinOp::Is),
+            "TYPED" | "typed" => Some(BinOp::Is),
             "as" => Some(BinOp::As),
             "in" => Some(BinOp::In),
             _ => None,
@@ -81,7 +81,7 @@ impl fmt::Display for BinOp {
             BinOp::Ne => write!(f, "!="),
             BinOp::And => write!(f, "and"),
             BinOp::Or => write!(f, "or"),
-            BinOp::Is => write!(f, "is"),
+            BinOp::Is => write!(f, "TYPED"),
             BinOp::As => write!(f, "as"),
             BinOp::In => write!(f, "in"),
         }

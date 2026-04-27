@@ -2,9 +2,9 @@
 //! them into pattern descriptors.
 //!
 //! Transforms:
-//!   `(x)-[y]->(z) WHERE x.a is bool and y.b is str`
+//!   `(x)-[y]->(z) WHERE x.a bool and y.b str`
 //! into:
-//!   `(x:{a: bool})-[y:{b: str}]->(z)`
+//!   `(x:{a bool})-[y:{b str}]->(z)`
 //!
 //! Only works for top-level AND conjuncts. OR expressions cannot be pushed down
 //! because neither side is guaranteed to hold.
@@ -212,9 +212,9 @@ mod tests {
 
     #[test]
     fn test_pushdown_simple_is() {
-        // ((x)-[y]->(z) WHERE x.a is bool and y.b is str)
+        // ((x)-[y]->(z) WHERE x.a bool and y.b str)
         // → (x:{a:bool})-[y:{b:str}]->(z)
-        let p = parse("((x)-[y]->(z) WHERE x.a is bool and y.b is str)").unwrap();
+        let p = parse("((x)-[y]->(z) WHERE x.a bool and y.b str)").unwrap();
         let optimized = optimize(p);
 
         // The filter should be completely removed (all conjuncts pushed)
@@ -231,9 +231,9 @@ mod tests {
 
     #[test]
     fn test_pushdown_partial() {
-        // ((x)-[y]->(z) WHERE x.a is bool and y.b > 10)
+        // ((x)-[y]->(z) WHERE x.a bool and y.b > 10)
         // → (x:{a:bool})-[y]->(z) WHERE y.b > 10
-        let p = parse("((x)-[y]->(z) WHERE x.a is bool and y.b > 10)").unwrap();
+        let p = parse("((x)-[y]->(z) WHERE x.a bool and y.b > 10)").unwrap();
         let optimized = optimize(p);
 
         // Should still have a filter for the non-pushable y.b > 10
@@ -245,9 +245,9 @@ mod tests {
 
     #[test]
     fn test_no_pushdown_or() {
-        // (x WHERE x.a is bool or x.b is str)
+        // (x WHERE x.a bool or x.b str)
         // → no pushdown (OR can't be pushed)
-        let p = parse("(x WHERE x.a is bool or x.b is str)").unwrap();
+        let p = parse("(x WHERE x.a bool or x.b str)").unwrap();
         let optimized = optimize(p.clone());
 
         // Should keep the filter unchanged
@@ -256,9 +256,9 @@ mod tests {
 
     #[test]
     fn test_pushdown_same_var_multiple_attrs() {
-        // ((x) WHERE x.a is bool and x.b is int)
+        // ((x) WHERE x.a bool and x.b int)
         // → (x:{a:bool, b:int})
-        let p = parse("((x) WHERE x.a is bool and x.b is int)").unwrap();
+        let p = parse("((x) WHERE x.a bool and x.b int)").unwrap();
         let optimized = optimize(p);
 
         assert!(
@@ -279,10 +279,10 @@ mod tests {
         let rt = Runtime::new(&g);
 
         let queries = vec![
-            "(x WHERE x.isBlocked is bool)",
-            "(x WHERE x.isDummy is bool)",
-            "((x)-[y]->(z) WHERE x.isBlocked is bool)",
-            "(x)-[y WHERE y.amount is int]->(z)",
+            "(x WHERE x.isBlocked bool)",
+            "(x WHERE x.isDummy bool)",
+            "((x)-[y]->(z) WHERE x.isBlocked bool)",
+            "(x)-[y WHERE y.amount int]->(z)",
         ];
 
         for q in queries {

@@ -173,7 +173,23 @@ impl Parser {
                 Token::Ge => BinOp::Ge,
                 Token::Eq => BinOp::Eq,
                 Token::Ne => BinOp::Ne,
-                Token::Is => BinOp::Is,
+                Token::Typed => BinOp::Is,
+                // Implicit type predicate: a type-head token after a term.
+                Token::Int
+                | Token::Float
+                | Token::Bool
+                | Token::Str
+                | Token::Star
+                | Token::LBracket
+                | Token::LBrace => {
+                    let right = self.term()?;
+                    left = Expr::Binop {
+                        op: BinOp::Is,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    };
+                    continue;
+                }
                 // No Token::As here — reserved for alias
                 _ => break,
             };
@@ -638,10 +654,12 @@ impl Parser {
         Ok(())
     }
 
-    /// Parse one record element, either:
-    ///   `name is T`  — type ascription (new canonical form)
-    ///   `name : T`   — type ascription (legacy; only when next token is a type keyword)
-    ///   `name : e`   — value-equality filter (elaborated to `name = e` in WHERE)
+    /// Parse one record element. ISO GQL distinguishes types from values via
+    /// the `<typed>` element (optional `::` or `TYPED`) versus `:` for values:
+    ///   `name T`         — type ascription, implicit (no separator)
+    ///   `name :: T`      — type ascription, explicit
+    ///   `name TYPED T`   — type ascription, explicit keyword
+    ///   `name : e`       — value-equality filter (elaborated to `name = e`)
     fn record_element(
         &mut self,
         pt: &mut PropertyType,
@@ -652,30 +670,32 @@ impl Parser {
             t => return Err(format!("expected attribute name, got {t:?}")),
         };
         match self.peek() {
-            Token::Is => {
+            Token::DoubleColon | Token::Typed => {
                 self.advance();
+                let ty = self.simple_type()?;
+                pt.extend(name, ty);
+            }
+            // Implicit type ascription: type-head token directly after the name.
+            Token::Int
+            | Token::Float
+            | Token::Bool
+            | Token::Str
+            | Token::Star
+            | Token::LBracket
+            | Token::LBrace => {
                 let ty = self.simple_type()?;
                 pt.extend(name, ty);
             }
             Token::Colon => {
                 self.advance();
-                // Disambiguate by peeking: a lone type keyword followed by `,` or the
-                // closing brace is a type ascription (legacy); anything else is a value.
-                let is_type_head = matches!(
-                    self.peek(),
-                    Token::Int | Token::Float | Token::Bool | Token::Str | Token::Star
-                );
-                let followed_by_terminator =
-                    matches!(self.peek_at(1), Some(Token::Comma) | Some(Token::RBrace));
-                if is_type_head && followed_by_terminator {
-                    let ty = self.simple_type()?;
-                    pt.extend(name, ty);
-                } else {
-                    let e = self.expr()?;
-                    filters.push((name, e));
-                }
+                let e = self.expr()?;
+                filters.push((name, e));
             }
-            t => return Err(format!("expected 'is' or ':' after record key, got {t:?}")),
+            t => {
+                return Err(format!(
+                    "expected '::', 'TYPED', type, or ':' after record key, got {t:?}"
+                ))
+            }
         }
         Ok(())
     }
@@ -693,10 +713,9 @@ impl Parser {
                 Ok(SimpleType::List(Box::new(inner)))
             }
             Token::LBrace => {
-                // Record type `{k: T, k2: T2, ...}`. The `:` separator follows JSON
-                // and the rest of the type language; ambiguity with record value
-                // literals only arises in expression position and is resolved there
-                // via speculative parsing.
+                // Record type `{k T, ...}` / `{k :: T, ...}` / `{k TYPED T, ...}`.
+                // ISO GQL: `:` is reserved for values, so type-record fields use
+                // the `<typed>` element (optional `::` or `TYPED`) or implicit form.
                 let mut fields = std::collections::BTreeMap::new();
                 if self.eat(&Token::RBrace) {
                     return Ok(SimpleType::Record(fields));
@@ -706,7 +725,9 @@ impl Parser {
                         Token::Name(n) => n,
                         t => return Err(format!("expected field name, got {t:?}")),
                     };
-                    self.expect(&Token::Colon)?;
+                    if matches!(self.peek(), Token::DoubleColon | Token::Typed) {
+                        self.advance();
+                    }
                     fields.insert(k, self.simple_type()?);
                     if !self.eat(&Token::Comma) {
                         break;
@@ -716,7 +737,7 @@ impl Parser {
                 Ok(SimpleType::Record(fields))
             }
             t => Err(format!(
-                "expected type (int/float/bool/str/*/[T]/{{k: T}}), got {t:?}"
+                "expected type (int/float/bool/str/*/[T]/{{k T}}), got {t:?}"
             )),
         }
     }
@@ -758,7 +779,23 @@ impl Parser {
                 Token::Ge => BinOp::Ge,
                 Token::Eq => BinOp::Eq,
                 Token::Ne => BinOp::Ne,
-                Token::Is => BinOp::Is,
+                Token::Typed => BinOp::Is,
+                // Implicit type predicate: a type-head token after a term.
+                Token::Int
+                | Token::Float
+                | Token::Bool
+                | Token::Str
+                | Token::Star
+                | Token::LBracket
+                | Token::LBrace => {
+                    let right = self.term()?;
+                    left = Expr::Binop {
+                        op: BinOp::Is,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    };
+                    continue;
+                }
                 Token::As => BinOp::As,
                 Token::In => BinOp::In,
                 _ => break,
@@ -865,9 +902,13 @@ impl Parser {
                 }
             }
             Token::LBrace => {
-                // Records use `{k: T, ...}` for types and `{k: v, ...}` for values —
-                // same separator, different contexts. Here both syntaxes share a token
-                // stream, so speculate on the type parse first, fall back to value.
+                // ISO GQL: `:` is for values, the `<typed>` element (implicit, `::`,
+                // `TYPED`) is for types. The token after the first field name picks
+                // the form deterministically:
+                //   `{k : v, ...}`      → record value
+                //   `{k T, ...}`        → record type, implicit
+                //   `{k :: T, ...}`     → record type, explicit
+                //   `{k TYPED T, ...}`  → record type, keyword
                 self.advance();
                 if self.eat(&Token::RBrace) {
                     return Ok(Expr::Const(
@@ -875,59 +916,55 @@ impl Parser {
                     ));
                 }
                 let saved = self.pos;
-                // Try record type: each entry `name : simple_type`.
-                let mut type_fields: std::collections::BTreeMap<String, SimpleType> =
-                    std::collections::BTreeMap::new();
-                let type_ok = (|| -> Result<bool, ()> {
+                let is_value_record = matches!(
+                    (self.peek_at(0), self.peek_at(1)),
+                    (Some(Token::Name(_)), Some(Token::Colon))
+                );
+                if is_value_record {
+                    let mut value_fields: std::collections::BTreeMap<String, Value> =
+                        std::collections::BTreeMap::new();
                     loop {
                         let k = match self.advance() {
                             Token::Name(n) => n,
-                            _ => return Err(()),
+                            t => return Err(format!("expected field name, got {t:?}")),
                         };
-                        if !matches!(self.peek(), Token::Colon) {
-                            return Err(());
+                        self.expect(&Token::Colon)?;
+                        match self.expr()? {
+                            Expr::Const(val) => {
+                                value_fields.insert(k, val);
+                            }
+                            _ => {
+                                return Err(
+                                    "non-constant record literal values are not supported yet"
+                                        .into(),
+                                )
+                            }
                         }
-                        self.advance();
-                        let ty = self.simple_type().map_err(|_| ())?;
-                        type_fields.insert(k, ty);
                         if !self.eat(&Token::Comma) {
                             break;
                         }
                     }
-                    if !self.eat(&Token::RBrace) {
-                        return Err(());
-                    }
-                    Ok(true)
-                })();
-                if type_ok.is_ok() {
-                    return Ok(Expr::Type(SimpleType::Record(type_fields)));
+                    self.expect(&Token::RBrace)?;
+                    return Ok(Expr::Const(Value::Record(value_fields)));
                 }
-                // Fall back to record value: each entry `name : expr (constant)`.
                 self.pos = saved;
-                let mut value_fields: std::collections::BTreeMap<String, Value> =
+                let mut type_fields: std::collections::BTreeMap<String, SimpleType> =
                     std::collections::BTreeMap::new();
                 loop {
                     let k = match self.advance() {
                         Token::Name(n) => n,
                         t => return Err(format!("expected field name, got {t:?}")),
                     };
-                    self.expect(&Token::Colon)?;
-                    match self.expr()? {
-                        Expr::Const(val) => {
-                            value_fields.insert(k, val);
-                        }
-                        _ => {
-                            return Err(
-                                "non-constant record literal values are not supported yet".into()
-                            )
-                        }
+                    if matches!(self.peek(), Token::DoubleColon | Token::Typed) {
+                        self.advance();
                     }
+                    type_fields.insert(k, self.simple_type()?);
                     if !self.eat(&Token::Comma) {
                         break;
                     }
                 }
                 self.expect(&Token::RBrace)?;
-                Ok(Expr::Const(Value::Record(value_fields)))
+                Ok(Expr::Type(SimpleType::Record(type_fields)))
             }
             Token::True => {
                 self.advance();

@@ -2,8 +2,8 @@
 //!
 //! Originally translated line-for-line from `fppc/src/typechecker/checker.rs`'s
 //! inline `#[cfg(test)] mod tests` (the typechecker reference test suite).
-//! Surface-syntax differences are adapted: gqlite uses `{a is int}` for
-//! property type ascription where fppc uses `{a: int}`; gqlite's parser
+//! Surface-syntax differences are adapted: gqlite uses `{a int}` for
+//! property type ascription where fppc uses `{a int}`; gqlite's parser
 //! requires node anchors (`()-[]->()` not bare `->`); fppc's
 //! `test_incompatible_records` uses double-brace nested record syntax that
 //! gqlite's parser doesn't accept and is omitted (the underlying lattice
@@ -84,10 +84,10 @@ fn directed_edge(
 // -----------------------------------------------------------------------
 
 /// Fraud detection schema, mirroring fppc::tests::fraud_schema:
-///   Account {owner: str, isBlocked: bool}
-///   Dummy & Person {owner: str, isBlocked: bool, isDummy: bool}
-///   Transfer {amount: int}: Account -> Account
-///   Foo {amount: int}:      Account -> Dummy&Person
+///   Account {owner str, isBlocked bool}
+///   Dummy & Person {owner str, isBlocked bool, isDummy bool}
+///   Transfer {amount int}: Account -> Account
+///   Foo {amount int}:      Account -> Dummy&Person
 fn fraud_schema() -> Schema {
     let account = node_dt(
         label("Account"),
@@ -122,10 +122,10 @@ fn fraud_schema() -> Schema {
 }
 
 /// Social network schema, mirroring fppc::tests::social_schema:
-///   Person & Teacher {name: str, status: str}
-///   Person & Student {name: str, status: int}
-///   Comment {content: str, status: bool}
-///   Knows {since: int}: Teacher -> Student   (modeled directed)
+///   Person & Teacher {name str, status str}
+///   Person & Student {name str, status int}
+///   Comment {content str, status bool}
+///   Knows {since int}: Teacher -> Student   (modeled directed)
 ///   Likes {}:           Teacher -> Comment
 ///   Author {}:          Comment -> Student
 fn social_schema() -> Schema {
@@ -181,7 +181,7 @@ fn test_node_var() {
 }
 #[test]
 fn test_node_non_empty() {
-    assert!(check("(x: Person {owner is str})").0.ok);
+    assert!(check("(x: Person {owner str})").0.ok);
 }
 
 // =======================================================================
@@ -197,7 +197,7 @@ fn test_node_variable() {
 
 #[test]
 fn test_node_variable_2() {
-    assert!(check("()-[x: Transfer {amount is int}]->()").0.ok);
+    assert!(check("()-[x: Transfer {amount int}]->()").0.ok);
 }
 
 // =======================================================================
@@ -210,28 +210,20 @@ fn test_concat() {
 }
 #[test]
 fn test_concat_1() {
-    assert!(
-        check("(x: {a is int})(x:Person {b is bool, a is bool})")
-            .0
-            .ok
-    );
+    assert!(check("(x: {a int})(x:Person {b bool, a bool})").0.ok);
 }
 #[test]
 fn test_concat_node_edge() {
-    assert!(
-        check("(x: {a is int})-[y:Person {b is bool, a is bool}]->()")
-            .0
-            .ok
-    );
+    assert!(check("(x: {a int})-[y:Person {b bool, a bool}]->()").0.ok);
 }
 #[test]
 fn test_concat_node_node() {
-    assert!(check("(x: {a is int}) (y: {b is bool})").0.ok);
+    assert!(check("(x: {a int}) (y: {b bool})").0.ok);
 }
 #[test]
 fn test_concat_node_edge_node() {
     assert!(
-        check("(x: {a is int}) -[y:Person {b is bool, a is bool}]-> (z: {b is bool})")
+        check("(x: {a int}) -[y:Person {b bool, a bool}]-> (z: {b bool})")
             .0
             .ok
     );
@@ -243,14 +235,14 @@ fn test_concat_edge_edge() {
 #[test]
 fn test_concat_node_node_node_edge() {
     assert!(
-        check("(x: {a is int}) (y: {b is bool}) (z: {c is str}) -[w:Person]-> ()")
+        check("(x: {a int}) (y: {b bool}) (z: {c str}) -[w:Person]-> ()")
             .0
             .ok
     );
 }
 #[test]
 fn test_concat_node_node_empty() {
-    assert!(check("(x: {a is int}) (y: {a is bool})").0.ok);
+    assert!(check("(x: {a int}) (y: {a bool})").0.ok);
 }
 
 // =======================================================================
@@ -259,14 +251,14 @@ fn test_concat_node_node_empty() {
 
 #[test]
 fn test_empty_1() {
-    let (r, _, _) = check_with(fraud_schema(), "(x: {a is int})");
+    let (r, _, _) = check_with(fraud_schema(), "(x: {a int})");
     assert!(r.ok);
     assert!(r.empty);
 }
 
 #[test]
 fn test_empty_2() {
-    let (r, _, _) = check_with(fraud_schema(), "()-[x: {nonExistant is int}]->()");
+    let (r, _, _) = check_with(fraud_schema(), "()-[x: {nonExistant int}]->()");
     assert!(r.ok);
     assert!(r.empty);
 }
@@ -278,7 +270,7 @@ fn test_empty_2() {
 #[test]
 fn test_where() {
     assert!(
-        check("(: {b is str}) (x: {a is str, b is str} WHERE x.a = x.b)")
+        check("(: {b str}) (x: {a str, b str} WHERE x.a = x.b)")
             .0
             .ok
     );
@@ -301,7 +293,7 @@ fn test_no_warnings() {
 fn test_bad_attribute() {
     // Untyped: gradual typing means a bogus attribute name doesn't
     // make the query invalid — just produces Star and works.
-    assert!(check("(x: {amount is int} WHERE x.amout > 1000)").0.ok);
+    assert!(check("(x: {amount int} WHERE x.amout > 1000)").0.ok);
 }
 
 // =======================================================================
@@ -310,28 +302,28 @@ fn test_bad_attribute() {
 
 #[test]
 fn test_union() {
-    assert!(check("(x: {a is int}) | (y: {b is bool})").0.ok);
+    assert!(check("(x: {a int}) | (y: {b bool})").0.ok);
 }
 #[test]
 fn test_union_2() {
-    assert!(check("(x: {a is int}) | (x: {b is bool})").0.ok);
+    assert!(check("(x: {a int}) | (x: {b bool})").0.ok);
 }
 #[test]
 fn test_union_heterogeneous() {
-    // fppc: `(x: {a: int}) | -[x: {a: bool}]->`. gqlite needs node anchors.
-    assert!(check("(x: {a is int}) | ()-[x: {a is bool}]->()").0.ok);
+    // fppc: `(x: {a int}) | -[x: {a bool}]->`. gqlite needs node anchors.
+    assert!(check("(x: {a int}) | ()-[x: {a bool}]->()").0.ok);
 }
 #[test]
 fn test_union_concat_fail() {
-    assert!(check("((:{a is int}) | (:{a is bool})) (:{a is str})").0.ok);
+    assert!(check("((:{a int}) | (:{a bool})) (:{a str})").0.ok);
 }
 #[test]
 fn test_union_concat_ok() {
-    assert!(check("((:{a is int}) | (:{a is bool})) (:{a is int})").0.ok);
+    assert!(check("((:{a int}) | (:{a bool})) (:{a int})").0.ok);
 }
 #[test]
 fn test_zero_path() {
-    assert!(check("((:{a is int})(:{a is bool})) | ()").0.ok);
+    assert!(check("((:{a int})(:{a bool})) | ()").0.ok);
 }
 
 // =======================================================================
@@ -340,15 +332,15 @@ fn test_zero_path() {
 
 #[test]
 fn test_repetition_1() {
-    assert!(check("(x: {a is int}){1,2}").0.ok);
+    assert!(check("(x: {a int}){1,2}").0.ok);
 }
 #[test]
 fn test_repetition_2() {
-    assert!(check("(()-[x: {a is int}]->()){1,2}").0.ok);
+    assert!(check("(()-[x: {a int}]->()){1,2}").0.ok);
 }
 #[test]
 fn test_repetition_3() {
-    let (r, _, _) = check_with(fraud_schema(), "(y)((()-[x: {a is int}]->()){1,2}){2,3}");
+    let (r, _, _) = check_with(fraud_schema(), "(y)((()-[x: {a int}]->()){1,2}){2,3}");
     assert!(r.ok);
 }
 #[test]
@@ -385,11 +377,11 @@ fn test_readers_digest_ex1() {
 
 #[test]
 fn test_is() {
-    assert!(check("(x: {a is int} WHERE x.a is int)").0.ok);
+    assert!(check("(x: {a int} WHERE x.a int)").0.ok);
 }
 #[test]
 fn test_as() {
-    assert!(check("(x: {a is int} WHERE x.a as bool)").0.ok);
+    assert!(check("(x: {a int} WHERE x.a as bool)").0.ok);
 }
 
 // =======================================================================
@@ -411,15 +403,14 @@ fn test_example21() {
 #[test]
 fn test_example22() {
     // Same variable with incompatible property types -> empty
-    let (r, _, _) =
-        check("(x: {status is bool} WHERE x.status = true)-[:Knows]->(x: {status is str})");
+    let (r, _, _) = check("(x: {status bool} WHERE x.status = true)-[:Knows]->(x: {status str})");
     assert!(r.empty);
 }
 
 #[test]
 fn test_example23() {
     // Untyped: ok, no warnings
-    let (r1, _, w1) = check("(x: {stauts is int} WHERE x.stauts > 0)");
+    let (r1, _, w1) = check("(x: {stauts int} WHERE x.stauts > 0)");
     assert!(r1.ok);
     assert!(
         w1.is_empty(),
@@ -427,7 +418,7 @@ fn test_example23() {
         w1
     );
 
-    // With closed schema {status: bool} — typo "stauts" doesn't match -> empty
+    // With closed schema {status bool} — typo "stauts" doesn't match -> empty
     let schema = Schema {
         nodes: vec![node_dt(
             LabelType::Star,
@@ -435,7 +426,7 @@ fn test_example23() {
         )],
         edges: vec![],
     };
-    let (r2, _, _) = check_with(schema, "(x: {stauts is int} WHERE x.stauts > 0)");
+    let (r2, _, _) = check_with(schema, "(x: {stauts int} WHERE x.stauts > 0)");
     assert!(r2.empty);
 }
 
@@ -448,7 +439,7 @@ fn test_example24() {
         )],
         edges: vec![],
     };
-    let (r, _, _) = check_with(schema, "(x: {status is bool} WHERE x.status > 0)");
+    let (r, _, _) = check_with(schema, "(x: {status bool} WHERE x.status > 0)");
     assert!(r.empty);
 }
 
@@ -493,7 +484,7 @@ fn test_paper_example_1_part_2() {
     assert!(!r.empty);
 }
 
-// fppc test_incompatible_records uses `(x: {{a: bool}})` — nested record
+// fppc test_incompatible_records uses `(x: {{a bool}})` — nested record
 // syntax that gqlite's parser treats differently. Skipped in phase 1; the
 // underlying lattice test (Record vs Record incompatibility) is exercised
 // by the closed-schema tests above.

@@ -89,7 +89,7 @@ fn test_record_type_predicate() {
     let g = graph_with_records();
     let r = run(
         &g,
-        "MATCH (x: User) WHERE x.address is {street: str, city: str, zip: int} RETURN x.name",
+        "MATCH (x: User) WHERE x.address {street str, city str, zip int} RETURN x.name",
     );
     assert_eq!(r.len(), 3);
 }
@@ -100,7 +100,7 @@ fn test_record_type_rejects_wrong_shape() {
     // address has 3 fields; this type has 2 — must reject all.
     let r = run(
         &g,
-        "MATCH (x: User) WHERE x.address is {street: str, city: str} RETURN x.name",
+        "MATCH (x: User) WHERE x.address {street str, city str} RETURN x.name",
     );
     assert_eq!(r.len(), 0);
 }
@@ -111,7 +111,7 @@ fn test_record_type_in_descriptor() {
     // Use the new `is` form inside a descriptor for a record-typed field.
     let r = run(
         &g,
-        "MATCH (x: User {address is {street: str, city: str, zip: int}}) RETURN x.name",
+        "MATCH (x: User {address {street str, city str, zip int}}) RETURN x.name",
     );
     assert_eq!(r.len(), 3);
 }
@@ -179,7 +179,7 @@ fn test_list_of_records() {
     // List of records: each element is a Record.
     let r = run(
         &g,
-        "MATCH (x: T) WHERE x.people is [{name: str, age: int}] RETURN x.people",
+        "MATCH (x: T) WHERE x.people [{name str, age int}] RETURN x.people",
     );
     assert_eq!(r.len(), 1);
 }

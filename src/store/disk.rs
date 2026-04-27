@@ -42,7 +42,7 @@ pub struct DiskGraphStore {
     edge_label_dir: RefCell<Option<Vec<(u32, u32)>>>,
     adj_dir: RefCell<Option<Vec<(u32, u32)>>>,
 
-    // Node/edge record page locations: internal_id → (page_num, cell_index)
+    // Node/edge record page locations internal_id → (page_num, cell_index)
     // These are compact (8 bytes per element) and needed for any record access.
     node_locs: Vec<(u32, u16)>,
     edge_locs: Vec<(u32, u16)>,
@@ -475,7 +475,7 @@ mod tests {
     fn test_disk_filters() {
         assert_eq!(disk_fraud_run("(y WHERE y.isBlocked=true)"), 1);
         assert_eq!(disk_fraud_run("(y WHERE y.isBlocked=false)"), 4);
-        assert_eq!(disk_fraud_run("(x WHERE x.isDummy is bool)"), 1);
+        assert_eq!(disk_fraud_run("(x WHERE x.isDummy bool)"), 1);
     }
 
     #[test]

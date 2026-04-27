@@ -584,7 +584,7 @@ mod tests {
     fn test_lazy_filters() {
         assert_eq!(lazy_fraud_run("(y WHERE y.isBlocked=true)"), 1);
         assert_eq!(lazy_fraud_run("(y WHERE y.isBlocked=false)"), 4);
-        assert_eq!(lazy_fraud_run("(x WHERE x.isDummy is bool)"), 1);
+        assert_eq!(lazy_fraud_run("(x WHERE x.isDummy bool)"), 1);
     }
 
     #[test]
