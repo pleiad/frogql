@@ -350,3 +350,128 @@ fn test_aggregates_combined() {
         ]
     );
 }
+
+// =======================================================================
+// Implicit GROUP BY combinations (Cypher-style: any non-aggregate item
+// in RETURN becomes part of the group key automatically)
+//
+// The framework already supports this — the cases below only exercise
+// less-trivial combinations that weren't covered above.
+// =======================================================================
+
+/// Sort a result table by its first two columns (Str, Int) for
+/// deterministic comparison; the runtime emits groups in insertion
+/// order, which depends on graph node ordering.
+fn sort_by_first_two(mut rs: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    rs.sort_by(|a, b| match (&a[0], &b[0]) {
+        (Value::Str(x), Value::Str(y)) => x.cmp(y).then_with(|| match (&a[1], &b[1]) {
+            (Value::Int(p), Value::Int(q)) => p.cmp(q),
+            _ => std::cmp::Ordering::Equal,
+        }),
+        _ => std::cmp::Ordering::Equal,
+    });
+    rs
+}
+
+#[test]
+fn test_groupby_with_sum() {
+    // Boston: Alice (30) + Bob (25) = 55. Seattle: Carol (40) = 40.
+    let g = graph_three_users();
+    let rs = sort_by_first_two(run(&g, "MATCH (x: User) RETURN x.city, SUM(x.age)"));
+    assert_eq!(
+        rs,
+        vec![
+            vec![Value::Str("Boston".into()), Value::Int(55)],
+            vec![Value::Str("Seattle".into()), Value::Int(40)],
+        ]
+    );
+}
+
+#[test]
+fn test_groupby_with_avg() {
+    // Boston: avg(30, 25) = 27.5. Seattle: avg(40) = 40.0.
+    let g = graph_three_users();
+    let rs = sort_by_first_two(run(&g, "MATCH (x: User) RETURN x.city, AVG(x.age)"));
+    assert_eq!(rs.len(), 2);
+    match &rs[0][1] {
+        Value::Float(f) => assert!((f - 27.5).abs() < 1e-9, "Boston avg: {f}"),
+        other => panic!("expected Float, got {other:?}"),
+    }
+    match &rs[1][1] {
+        Value::Float(f) => assert!((f - 40.0).abs() < 1e-9, "Seattle avg: {f}"),
+        other => panic!("expected Float, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_groupby_with_min_max_per_group() {
+    let g = graph_three_users();
+    let rs = sort_by_first_two(run(
+        &g,
+        "MATCH (x: User) RETURN x.city, MIN(x.age), MAX(x.age)",
+    ));
+    assert_eq!(
+        rs,
+        vec![
+            vec![
+                Value::Str("Boston".into()),
+                Value::Int(25), // min
+                Value::Int(30), // max
+            ],
+            vec![Value::Str("Seattle".into()), Value::Int(40), Value::Int(40),],
+        ]
+    );
+}
+
+#[test]
+fn test_groupby_two_columns() {
+    // Group key has two columns; expect one row per (country, city) pair.
+    let json = r#"{
+      "nodes": [
+        {"id": "u1", "labels": ["U"], "props": {"country": "CL", "city": "Santiago"}},
+        {"id": "u2", "labels": ["U"], "props": {"country": "CL", "city": "Santiago"}},
+        {"id": "u3", "labels": ["U"], "props": {"country": "CL", "city": "Valparaiso"}},
+        {"id": "u4", "labels": ["U"], "props": {"country": "AR", "city": "BuenosAires"}}
+      ],
+      "edges": []
+    }"#;
+    let g = Graph::from_json_str(json).unwrap();
+    let rs = sort_by_first_two(run(&g, "MATCH (x: U) RETURN x.country, x.city, COUNT(*)"));
+    // Three groups: (AR, BuenosAires) → 1, (CL, Santiago) → 2, (CL, Valparaiso) → 1.
+    assert_eq!(rs.len(), 3);
+    assert_eq!(rs[0][2], Value::Int(1)); // AR/BuenosAires
+    assert_eq!(rs[1][2], Value::Int(2)); // CL/Santiago
+    assert_eq!(rs[2][2], Value::Int(1)); // CL/Valparaiso
+}
+
+#[test]
+fn test_groupby_count_distinct_per_group() {
+    // Per-city distinct ages: Boston has {30, 25} = 2 distinct;
+    // Seattle has {40} = 1.
+    let g = graph_three_users();
+    let rs = sort_by_first_two(run(
+        &g,
+        "MATCH (x: User) RETURN x.city, COUNT(DISTINCT x.age)",
+    ));
+    assert_eq!(
+        rs,
+        vec![
+            vec![Value::Str("Boston".into()), Value::Int(2)],
+            vec![Value::Str("Seattle".into()), Value::Int(1)],
+        ]
+    );
+}
+
+#[test]
+fn test_groupby_pure_aggregates_no_key() {
+    // Confirm that with NO non-aggregate items, the result is exactly one
+    // row regardless of how many input rows existed.
+    let g = graph_three_users();
+    let rs = run(&g, "MATCH (x: User) RETURN COUNT(*), AVG(x.age)");
+    assert_eq!(rs.len(), 1);
+    assert_eq!(rs[0][0], Value::Int(3));
+    match &rs[0][1] {
+        Value::Float(f) => assert!((f - 31.666666_f64).abs() < 1e-3),
+        other => panic!("expected Float, got {other:?}"),
+    }
+}
