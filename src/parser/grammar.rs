@@ -171,7 +171,9 @@ impl Parser {
         let quantifier = if self.eat(&Token::Distinct) {
             SetQuantifier::Distinct
         } else {
-            // Consume optional ALL keyword (no behavior change either way).
+            // Consume an optional ALL token if present — preserves the
+            // token-stream side effect that the prior `else if eat(&All)`
+            // branch had, even though both arms produce SetQuantifier::All.
             self.eat(&Token::All);
             SetQuantifier::All
         };

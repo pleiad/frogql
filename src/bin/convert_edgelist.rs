@@ -151,7 +151,7 @@ fn main() {
     let node_label_root = disk_index::write_label_index(&mut pager, &[]).expect("label index");
     let edge_label_root = disk_index::write_label_index(&mut pager, &[]).expect("label index");
 
-    // Adjacency index
+    // Adjacency index — shape matches disk_index::write_adjacency_index (file format).
     #[allow(clippy::type_complexity)]
     let mut adj_entries: Vec<(u32, Vec<(u32, u32, u8)>)> = adj.into_iter().collect();
     adj_entries.sort_by_key(|(iid, _)| *iid);

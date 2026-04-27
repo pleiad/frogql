@@ -72,6 +72,8 @@ pub fn read_u32_chain(pager: &mut Pager, first_page: u32) -> io::Result<Vec<u32>
 
 /// Write adjacency index: one page chain per node with (edge_id, other_node, kind) triples.
 /// Returns the root page containing (node_internal_id, first_adj_page) pairs.
+// Nested-Vec shape mirrors the on-disk record layout — extracting a
+// type alias would obscure the file format more than it clarifies.
 #[allow(clippy::type_complexity)]
 pub fn write_adjacency_index(
     pager: &mut Pager,
@@ -361,6 +363,8 @@ pub fn write_edge_topo(
 
 /// Read edge topology from a page chain.
 /// Returns (locs, src, tgt, directed).
+// Tuple of parallel vectors — one column per field. Listing them here
+// is clearer than naming the bundle.
 #[allow(clippy::type_complexity)]
 pub fn read_edge_topo(
     pager: &mut Pager,

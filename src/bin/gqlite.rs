@@ -506,7 +506,7 @@ impl NodeType {
         NodeType { labels, props }
     }
 
-    #[allow(dead_code)] // Used ad-hoc for debug rendering of node types.
+    #[allow(dead_code)]
     fn format(&self) -> String {
         let label_part = if self.labels.is_empty() {
             String::new()
@@ -698,6 +698,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
         directed: bool,
     }
 
+    // edge_key -> (intersection of prop name+types across instances, total count)
     #[allow(clippy::type_complexity)]
     let mut edge_groups: HashMap<
         SimpleEdgeKey,
