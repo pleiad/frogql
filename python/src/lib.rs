@@ -36,8 +36,17 @@ impl Connection {
         query: &str,
         limit: usize,
     ) -> PyResult<Bound<'py, PyList>> {
-        let q = gqlrust::compile_query(query)
-            .map_err(|e| PyValueError::new_err(format!("parse error: {e}")))?;
+        let result = gqlrust::compile_query_with_diagnostics(query)
+            .map_err(|e| PyValueError::new_err(e.message()))?;
+        let q = result.query;
+
+        // Forward typechecker warnings through Python's `warnings` module.
+        if !result.warnings.is_empty() {
+            let warn = py.import_bound("warnings")?.getattr("warn")?;
+            for w in &result.warnings {
+                warn.call1((w.as_str(),))?;
+            }
+        }
 
         let rt = Runtime::new(&self.store);
         let result = rt.run_query(&q, limit);
