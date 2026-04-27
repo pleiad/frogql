@@ -3,11 +3,79 @@ use std::fmt;
 use super::expr::Expr;
 use super::path_pattern::PathPattern;
 
-/// A return item: expression with optional alias.
+/// `<set quantifier>` per ISO 39075 §20.9. `ALL` is the default when the
+/// quantifier is omitted in the source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetQuantifier {
+    All,
+    Distinct,
+}
+
+/// `<general set function type>` per ISO 39075 §20.9. The five listed here
+/// are core (always supported); `COLLECT_LIST` and `STDDEV_*` are Feature
+/// GF10 (opt-in) and intentionally not modeled in this phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneralSetKind {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+/// An aggregate function in a RETURN clause. Mirrors the three syntactic
+/// shapes of ISO 39075 §20.9 `<aggregate function>`:
+///
+/// - `COUNT(*)`            — `CountStar`, a special form distinct from `COUNT(expr)`.
+/// - `KIND([DISTINCT|ALL] expr)` — `GeneralSet`, the core 5 (Count/Sum/Avg/Min/Max).
+/// - `PERCENTILE_*(...)`   — Feature GF11, not modeled in this phase.
+///
+/// Aggregates are computed across the set of result rows, not row-by-row.
+/// Per the ISO General Rules, `<general set function>`s eliminate null
+/// inputs (with a warning) before applying the kind; `COUNT(*)` does not.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ReturnItem {
-    pub expr: Expr,
-    pub alias: Option<String>,
+pub enum Aggregator {
+    /// `COUNT(*)` — counts every row in the (group of) result(s).
+    CountStar,
+    /// `<general set function>` — `kind([quantifier] expr)`.
+    GeneralSet {
+        kind: GeneralSetKind,
+        quantifier: SetQuantifier,
+        expr: Expr,
+    },
+}
+
+/// A RETURN-clause item: either a plain expression projection or an aggregate.
+///
+/// A query that mixes both (e.g. `RETURN x.country, COUNT(*)`) implicitly
+/// groups by the non-aggregate items. See `Runtime::run_query` for the
+/// grouping semantics.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReturnItem {
+    /// A plain expression: `RETURN x.name AS who`.
+    Expr { expr: Expr, alias: Option<String> },
+    /// An aggregate: `RETURN COUNT(*) AS total`.
+    Aggregate {
+        agg: Aggregator,
+        alias: Option<String>,
+    },
+}
+
+impl ReturnItem {
+    /// Returns the alias if present, regardless of variant.
+    pub fn alias(&self) -> Option<&str> {
+        match self {
+            ReturnItem::Expr { alias, .. } | ReturnItem::Aggregate { alias, .. } => {
+                alias.as_deref()
+            }
+        }
+    }
+
+    /// True if this item is an aggregate. Used by the runtime to choose
+    /// between row-by-row projection and the group-and-aggregate path.
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self, ReturnItem::Aggregate { .. })
+    }
 }
 
 /// A full GQL query: MATCH pattern WHERE condition RETURN projections.
@@ -31,11 +99,52 @@ impl Query {
     }
 }
 
+impl fmt::Display for GeneralSetKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            GeneralSetKind::Count => "COUNT",
+            GeneralSetKind::Sum => "SUM",
+            GeneralSetKind::Avg => "AVG",
+            GeneralSetKind::Min => "MIN",
+            GeneralSetKind::Max => "MAX",
+        };
+        f.write_str(s)
+    }
+}
+
+impl fmt::Display for Aggregator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Aggregator::CountStar => write!(f, "COUNT(*)"),
+            Aggregator::GeneralSet {
+                kind,
+                quantifier: SetQuantifier::All,
+                expr,
+            } => write!(f, "{kind}({expr})"),
+            Aggregator::GeneralSet {
+                kind,
+                quantifier: SetQuantifier::Distinct,
+                expr,
+            } => write!(f, "{kind}(DISTINCT {expr})"),
+        }
+    }
+}
+
 impl fmt::Display for ReturnItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.expr)?;
-        if let Some(alias) = &self.alias {
-            write!(f, " AS {alias}")?;
+        match self {
+            ReturnItem::Expr { expr, alias } => {
+                write!(f, "{expr}")?;
+                if let Some(a) = alias {
+                    write!(f, " AS {a}")?;
+                }
+            }
+            ReturnItem::Aggregate { agg, alias } => {
+                write!(f, "{agg}")?;
+                if let Some(a) = alias {
+                    write!(f, " AS {a}")?;
+                }
+            }
         }
         Ok(())
     }

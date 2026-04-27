@@ -594,8 +594,8 @@ fn test_match_return_alias() {
         .unwrap();
     let returns = q.returns.as_ref().unwrap();
     assert_eq!(returns.len(), 2);
-    assert_eq!(returns[0].alias.as_deref(), Some("title"));
-    assert_eq!(returns[1].alias.as_deref(), Some("votes"));
+    assert_eq!(returns[0].alias(), Some("title"));
+    assert_eq!(returns[1].alias(), Some("votes"));
 }
 
 #[test]

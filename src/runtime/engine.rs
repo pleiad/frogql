@@ -6,7 +6,7 @@ use crate::model::value::{Id, Path, PathValue, Value};
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::Query;
+use crate::syntax::query::{Query, ReturnItem};
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
 use crate::typing::property_type::PropertyType;
@@ -54,9 +54,19 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 for row in &ir.rows {
                     let vals: Vec<Value> = return_items
                         .iter()
-                        .map(|item| match self.run_expr(&row.assignment, &item.expr) {
-                            ExprResult::Success(v) => v,
-                            ExprResult::Failure(_) => Value::Str("NULL".into()),
+                        .map(|item| match item {
+                            ReturnItem::Expr { expr, .. } => {
+                                match self.run_expr(&row.assignment, expr) {
+                                    ExprResult::Success(v) => v,
+                                    ExprResult::Failure(_) => Value::Str("NULL".into()),
+                                }
+                            }
+                            ReturnItem::Aggregate { .. } => {
+                                // Aggregates need a group-and-aggregate pass that lands in
+                                // a follow-up commit. The parser does not yet emit this
+                                // variant, so this branch is statically unreachable today.
+                                unimplemented!("aggregate handling lands in a later commit")
+                            }
                         })
                         .collect();
                     if query.distinct {

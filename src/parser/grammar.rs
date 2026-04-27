@@ -127,7 +127,7 @@ impl Parser {
             self.advance(); // consume AS
             if let Token::Name(n) = self.peek().clone() {
                 self.advance();
-                return Ok(ReturnItem {
+                return Ok(ReturnItem::Expr {
                     expr,
                     alias: Some(n),
                 });
@@ -135,7 +135,7 @@ impl Parser {
             // Not a name after AS — backtrack, it wasn't an alias
             self.pos = saved;
         }
-        Ok(ReturnItem { expr, alias: None })
+        Ok(ReturnItem::Expr { expr, alias: None })
     }
 
     // Like expr but excludes AS from comparison operators (reserved for alias).
