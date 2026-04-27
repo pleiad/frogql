@@ -94,6 +94,7 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
             adj.entry(tgt).or_default().push((eid32, src, 2));
         }
     }
+    #[allow(clippy::type_complexity)]
     let adj_entries: Vec<(u32, Vec<(u32, u32, u8)>)> = adj.into_iter().collect();
     let adj_root = disk_index::write_adjacency_index(&mut pager, &adj_entries)?;
 

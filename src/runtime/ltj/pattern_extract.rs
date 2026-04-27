@@ -192,6 +192,7 @@ fn decompose(pattern: &PathPattern, index: &TripleIndex) -> Option<Decomposition
 }
 
 /// Top-level decomposition that tracks join boundaries.
+#[allow(clippy::too_many_arguments)]
 fn decompose_pattern_top(
     pattern: &PathPattern,
     index: &TripleIndex,
@@ -258,6 +259,7 @@ fn decompose_pattern_top(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decompose_pattern(
     pattern: &PathPattern,
     index: &TripleIndex,
@@ -344,6 +346,7 @@ fn decompose_pattern(
 }
 
 /// Decompose a flat chain [Node, Edge, Node, Edge, Node] into triples.
+#[allow(clippy::too_many_arguments)]
 fn decompose_flat_chain(
     elems: &[FlatElement],
     index: &TripleIndex,

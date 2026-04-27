@@ -72,6 +72,7 @@ pub fn read_u32_chain(pager: &mut Pager, first_page: u32) -> io::Result<Vec<u32>
 
 /// Write adjacency index: one page chain per node with (edge_id, other_node, kind) triples.
 /// Returns the root page containing (node_internal_id, first_adj_page) pairs.
+#[allow(clippy::type_complexity)]
 pub fn write_adjacency_index(
     pager: &mut Pager,
     adj_entries: &[(u32, Vec<(u32, u32, u8)>)], // (node_iid, vec of (edge_iid, other_node_iid, kind))
@@ -360,6 +361,7 @@ pub fn write_edge_topo(
 
 /// Read edge topology from a page chain.
 /// Returns (locs, src, tgt, directed).
+#[allow(clippy::type_complexity)]
 pub fn read_edge_topo(
     pager: &mut Pager,
     first_page: u32,
