@@ -21,6 +21,15 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  check:
+    name: cargo check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
   build:
     name: cargo build
     runs-on: ubuntu-latest
@@ -45,6 +54,7 @@ jobs:
 
   test:
     name: cargo test
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
