@@ -61,9 +61,7 @@ pub struct CompileResult {
 /// This is the canonical compile pipeline. Both [`compile_query`] and
 /// the REPL build on top of this — there is no second copy of
 /// "what compiling means."
-pub fn compile_query_with_diagnostics(
-    input: &str,
-) -> Result<CompileResult, CompileError> {
+pub fn compile_query_with_diagnostics(input: &str) -> Result<CompileResult, CompileError> {
     let ast = parser::parse_query(input).map_err(CompileError::Parse)?;
     let q = elaborate::elaborate_query(ast);
     let mut tc = Typechecker::untyped();
@@ -74,7 +72,10 @@ pub fn compile_query_with_diagnostics(
     let warnings = tc.warnings;
     let optimized_pattern = optimizer::compile(q.pattern);
     Ok(CompileResult {
-        query: Query { pattern: optimized_pattern, ..q },
+        query: Query {
+            pattern: optimized_pattern,
+            ..q
+        },
         warnings,
     })
 }

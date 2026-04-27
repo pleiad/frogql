@@ -11,8 +11,7 @@
 //!   / "Type error: …" prefixes.
 
 use gqlrust::{
-    compile_query, compile_query_unchecked, compile_query_with_diagnostics,
-    CompileError,
+    compile_query, compile_query_unchecked, compile_query_with_diagnostics, CompileError,
 };
 
 // -----------------------------------------------------------------------
@@ -23,7 +22,11 @@ use gqlrust::{
 fn ok_clean_query_has_no_warnings() {
     let r = compile_query_with_diagnostics("MATCH (m:Movie) RETURN m.title")
         .expect("clean query should compile");
-    assert!(r.warnings.is_empty(), "expected no warnings, got: {:?}", r.warnings);
+    assert!(
+        r.warnings.is_empty(),
+        "expected no warnings, got: {:?}",
+        r.warnings
+    );
 }
 
 #[test]
@@ -56,8 +59,7 @@ fn ok_non_boolean_filter_produces_warning() {
 
 #[test]
 fn err_parse_on_malformed_input() {
-    let err = compile_query_with_diagnostics("MATCH (((")
-        .expect_err("malformed input should fail");
+    let err = compile_query_with_diagnostics("MATCH (((").expect_err("malformed input should fail");
     assert!(
         matches!(err, CompileError::Parse(_)),
         "expected Parse error, got: {:?}",
@@ -73,10 +75,8 @@ fn err_parse_on_malformed_input() {
 fn err_type_on_unbound_variable() {
     // `y` is bound by the pattern; `x` is not. WHERE references
     // unbound `x.foo` — typechecker rejects.
-    let err = compile_query_with_diagnostics(
-        "MATCH (y) WHERE x.foo = 1 RETURN y.bar",
-    )
-    .expect_err("unbound variable should fail");
+    let err = compile_query_with_diagnostics("MATCH (y) WHERE x.foo = 1 RETURN y.bar")
+        .expect_err("unbound variable should fail");
     match err {
         CompileError::Type(es) => {
             assert!(!es.is_empty(), "expected at least one error message");

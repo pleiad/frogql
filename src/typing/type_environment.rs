@@ -70,10 +70,7 @@ impl TypeEnvironment {
             let merged = match result.get(key) {
                 Some(self_t) => {
                     let met = VariableType::meet(self_t, other);
-                    if met == VariableType::Zero
-                        && !self_t.is_empty()
-                        && !other.is_empty()
-                    {
+                    if met == VariableType::Zero && !self_t.is_empty() && !other.is_empty() {
                         return Err(format!(
                             "Cannot reconcile types for variable {}: {} and {}",
                             key, self_t, other
