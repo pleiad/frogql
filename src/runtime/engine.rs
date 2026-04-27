@@ -181,8 +181,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// the inner expression once per row, applies ISO null-elimination
     /// (Failure → drop), and reduces according to the kind.
     ///
-    /// Kinds wired up so far: `CountStar`, `GeneralSet{Count, …}`.
-    /// Sum/Avg/Min/Max land in the next commit.
+    /// All five core kinds (Count/Sum/Avg/Min/Max) plus `CountStar` are
+    /// wired up. Each general-set kind shares the same prefix of work
+    /// via `collect_aggregate_values` (eval + null-elim + optional
+    /// distinct dedup) and differs only in the reduction step.
     fn apply_aggregator(&self, agg: &Aggregator, row_idxs: &[usize], rows: &[ResultRow]) -> Value {
         match agg {
             // ISO §20.9 GR 2: COUNT(*) is the cardinality of the group's row set.
@@ -190,39 +192,47 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             Aggregator::CountStar => Value::Int(row_idxs.len() as i64),
 
             Aggregator::GeneralSet {
-                kind: GeneralSetKind::Count,
+                kind,
                 quantifier,
                 expr,
             } => {
-                // ISO §20.9 GR 5b-ii: evaluate `expr` per row, drop nulls
-                // (Failure here stands in for null), then either count or
-                // count distinct. Null-elimination runs BEFORE distinct.
-                let mut count: i64 = 0;
-                let mut seen: Vec<Value> = Vec::new();
-                for &idx in row_idxs {
-                    let v = match self.run_expr(&rows[idx].assignment, expr) {
-                        ExprResult::Success(v) => v,
-                        ExprResult::Failure(_) => continue, // null-eliminated
-                    };
-                    match quantifier {
-                        SetQuantifier::All => count += 1,
-                        SetQuantifier::Distinct => {
-                            // Linear-scan dedup: Value lacks Hash/Eq because
-                            // of f64. O(n*d) per group; fine at thesis scale.
-                            if !seen.contains(&v) {
-                                seen.push(v);
-                                count += 1;
-                            }
-                        }
-                    }
+                let values = self.collect_aggregate_values(expr, *quantifier, row_idxs, rows);
+                match kind {
+                    GeneralSetKind::Count => Value::Int(values.len() as i64),
+                    GeneralSetKind::Sum => sum_values(&values),
+                    GeneralSetKind::Avg => avg_values(&values),
+                    GeneralSetKind::Min => min_values(&values),
+                    GeneralSetKind::Max => max_values(&values),
                 }
-                Value::Int(count)
-            }
-
-            Aggregator::GeneralSet { .. } => {
-                unimplemented!("Sum/Avg/Min/Max land in the next commit")
             }
         }
+    }
+
+    /// Evaluate an aggregate's inner expression once per row, applying
+    /// ISO null-elimination (Failure → drop) and, when the quantifier is
+    /// DISTINCT, deduping the surviving values.
+    ///
+    /// The dedup is a linear scan because `Value` lacks `Hash`/`Eq` (f64
+    /// inside). O(n*d) per group; fine at thesis scale, profile later.
+    fn collect_aggregate_values(
+        &self,
+        expr: &Expr,
+        quantifier: SetQuantifier,
+        row_idxs: &[usize],
+        rows: &[ResultRow],
+    ) -> Vec<Value> {
+        let mut out: Vec<Value> = Vec::new();
+        for &idx in row_idxs {
+            let v = match self.run_expr(&rows[idx].assignment, expr) {
+                ExprResult::Success(v) => v,
+                ExprResult::Failure(_) => continue, // null-eliminated
+            };
+            if matches!(quantifier, SetQuantifier::Distinct) && out.contains(&v) {
+                continue;
+            }
+            out.push(v);
+        }
+        out
     }
 
     fn limit_reached(&self, rows: &[ResultRow], limit: usize) -> bool {
@@ -1089,5 +1099,138 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             },
             _ => ExprResult::Failure(format!("unexpected op {op} in eval_binop")),
         }
+    }
+}
+
+// =======================================================================
+// Aggregate reducers (ISO §20.9 General Rules 7a-iii through 7a-vi)
+//
+// These run on the values that survived ISO null-elimination + optional
+// DISTINCT (see Runtime::collect_aggregate_values). Each returns the
+// per-group aggregate value.
+//
+// Empty input handling: per ISO §20.9 GR 7a-ii, SUM/AVG/MIN/MAX over an
+// empty value collection yield null. gqlite represents the runtime "null"
+// as `Value::Str("NULL")` to stay consistent with how `run_expr` reports
+// missing attributes today; introducing a proper `Value::Null` is a
+// follow-up that touches multiple subsystems.
+// =======================================================================
+
+const NULL_SENTINEL: &str = "NULL";
+
+fn null_value() -> Value {
+    Value::Str(NULL_SENTINEL.into())
+}
+
+/// SUM: integer-preserving when all inputs are Int, promotes to Float
+/// when any input is Float. Non-numeric values are skipped (gradual
+/// typing tolerance — strict checking is a typechecker concern, not
+/// runtime). Empty input → null.
+fn sum_values(values: &[Value]) -> Value {
+    let mut int_acc: i64 = 0;
+    let mut float_acc: f64 = 0.0;
+    let mut had_float = false;
+    let mut had_value = false;
+    for v in values {
+        match v {
+            Value::Int(n) => {
+                if had_float {
+                    float_acc += *n as f64;
+                } else {
+                    int_acc = int_acc.wrapping_add(*n);
+                }
+                had_value = true;
+            }
+            Value::Float(f) => {
+                if !had_float {
+                    float_acc = int_acc as f64;
+                    had_float = true;
+                }
+                float_acc += f;
+                had_value = true;
+            }
+            _ => {} // skip non-numeric
+        }
+    }
+    if !had_value {
+        null_value()
+    } else if had_float {
+        Value::Float(float_acc)
+    } else {
+        Value::Int(int_acc)
+    }
+}
+
+/// AVG: always Float (averages of integers are usually not integers).
+/// Computed as sum/count over the numeric survivors. Empty → null.
+fn avg_values(values: &[Value]) -> Value {
+    let mut sum: f64 = 0.0;
+    let mut count: u64 = 0;
+    for v in values {
+        let n = match v {
+            Value::Int(n) => *n as f64,
+            Value::Float(f) => *f,
+            _ => continue, // skip non-numeric
+        };
+        sum += n;
+        count += 1;
+    }
+    if count == 0 {
+        null_value()
+    } else {
+        Value::Float(sum / count as f64)
+    }
+}
+
+/// MIN: smallest value by `value_cmp`. Values incomparable with the
+/// running best are skipped (gradual tolerance). Empty → null.
+fn min_values(values: &[Value]) -> Value {
+    let mut best: Option<&Value> = None;
+    for v in values {
+        match best {
+            None => best = Some(v),
+            Some(current) => {
+                if let Some(std::cmp::Ordering::Less) = value_cmp(v, current) {
+                    best = Some(v);
+                }
+            }
+        }
+    }
+    best.cloned().unwrap_or_else(null_value)
+}
+
+/// MAX: symmetric to MIN.
+fn max_values(values: &[Value]) -> Value {
+    let mut best: Option<&Value> = None;
+    for v in values {
+        match best {
+            None => best = Some(v),
+            Some(current) => {
+                if let Some(std::cmp::Ordering::Greater) = value_cmp(v, current) {
+                    best = Some(v);
+                }
+            }
+        }
+    }
+    best.cloned().unwrap_or_else(null_value)
+}
+
+/// Total ordering between `Value`s for MIN/MAX. Mixes Int<->Float by
+/// promotion; comparisons across unrelated kinds (e.g. Int vs Str)
+/// return None and the caller skips them. List/Record never compare.
+fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y),
+        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y),
+        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)),
+        (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
+        (Value::Bool(x), Value::Bool(y)) => Some(match (x, y) {
+            (false, true) => Ordering::Less,
+            (true, false) => Ordering::Greater,
+            _ => Ordering::Equal,
+        }),
+        _ => None,
     }
 }

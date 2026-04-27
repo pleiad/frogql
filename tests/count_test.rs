@@ -199,3 +199,154 @@ fn test_count_star_groupby_implicit() {
         ]
     );
 }
+
+// =======================================================================
+// SUM, AVG, MIN, MAX — ISO §20.9 <general set function>, kinds 7a-iii..vi
+//
+// Shared with COUNT(expr) on the runtime side: same null-elimination,
+// same DISTINCT semantics. Differ only in the reduction step, exercised
+// by tests below.
+// =======================================================================
+
+#[test]
+fn test_sum_int() {
+    let g = graph_three_users();
+    // Ages: 30 + 25 + 40 = 95.
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN SUM(x.age)"),
+        vec![vec![Value::Int(95)]]
+    );
+}
+
+#[test]
+fn test_sum_promotes_to_float_on_mixed() {
+    // One user has a float field, two have ints — SUM promotes to Float.
+    let json = r#"{
+      "nodes": [
+        {"id": "a", "labels": ["P"], "props": {"v": 1}},
+        {"id": "b", "labels": ["P"], "props": {"v": 2}},
+        {"id": "c", "labels": ["P"], "props": {"v": 3.5}}
+      ],
+      "edges": []
+    }"#;
+    let g = Graph::from_json_str(json).unwrap();
+    assert_eq!(
+        run(&g, "MATCH (x: P) RETURN SUM(x.v)"),
+        vec![vec![Value::Float(6.5)]]
+    );
+}
+
+#[test]
+fn test_sum_distinct() {
+    // values: 30, 30, 40 — DISTINCT keeps 30 once.
+    let json = r#"{
+      "nodes": [
+        {"id": "a", "labels": ["P"], "props": {"v": 30}},
+        {"id": "b", "labels": ["P"], "props": {"v": 30}},
+        {"id": "c", "labels": ["P"], "props": {"v": 40}}
+      ],
+      "edges": []
+    }"#;
+    let g = Graph::from_json_str(json).unwrap();
+    assert_eq!(
+        run(&g, "MATCH (x: P) RETURN SUM(DISTINCT x.v)"),
+        vec![vec![Value::Int(70)]]
+    );
+}
+
+#[test]
+fn test_sum_empty_emits_null() {
+    // No matches: pure-aggregate over empty group → ISO null.
+    let g = graph_three_users();
+    assert_eq!(
+        run(&g, "MATCH (x: ImpossibleLabel) RETURN SUM(x.age)"),
+        vec![vec![Value::Str("NULL".into())]]
+    );
+}
+
+#[test]
+fn test_avg_always_float() {
+    let g = graph_three_users();
+    // (30 + 25 + 40) / 3 = 31.666...
+    let r = run(&g, "MATCH (x: User) RETURN AVG(x.age)");
+    assert_eq!(r.len(), 1);
+    match &r[0][0] {
+        Value::Float(f) => assert!((f - 31.666666_f64).abs() < 1e-3, "got {f}"),
+        other => panic!("expected Float, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_avg_empty_emits_null() {
+    let g = graph_three_users();
+    assert_eq!(
+        run(&g, "MATCH (x: ImpossibleLabel) RETURN AVG(x.age)"),
+        vec![vec![Value::Str("NULL".into())]]
+    );
+}
+
+#[test]
+fn test_min_int() {
+    let g = graph_three_users();
+    // Ages 30/25/40 → min 25.
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN MIN(x.age)"),
+        vec![vec![Value::Int(25)]]
+    );
+}
+
+#[test]
+fn test_max_int() {
+    let g = graph_three_users();
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN MAX(x.age)"),
+        vec![vec![Value::Int(40)]]
+    );
+}
+
+#[test]
+fn test_min_max_strings() {
+    // Strings compare lexicographically.
+    let g = graph_three_users();
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN MIN(x.name)"),
+        vec![vec![Value::Str("Alice".into())]]
+    );
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN MAX(x.name)"),
+        vec![vec![Value::Str("Carol".into())]]
+    );
+}
+
+#[test]
+fn test_min_max_empty_emits_null() {
+    let g = graph_three_users();
+    assert_eq!(
+        run(&g, "MATCH (x: ImpossibleLabel) RETURN MIN(x.age)"),
+        vec![vec![Value::Str("NULL".into())]]
+    );
+    assert_eq!(
+        run(&g, "MATCH (x: ImpossibleLabel) RETURN MAX(x.age)"),
+        vec![vec![Value::Str("NULL".into())]]
+    );
+}
+
+#[test]
+fn test_aggregates_combined() {
+    // All four kinds in one RETURN, plus COUNT(*).
+    let g = graph_three_users();
+    let rs = run(
+        &g,
+        "MATCH (x: User) RETURN COUNT(*), SUM(x.age), MIN(x.age), MAX(x.age)",
+    );
+    assert_eq!(rs.len(), 1);
+    assert_eq!(
+        rs[0],
+        vec![
+            Value::Int(3),  // COUNT(*)
+            Value::Int(95), // SUM = 30+25+40
+            Value::Int(25), // MIN
+            Value::Int(40), // MAX
+        ]
+    );
+}
