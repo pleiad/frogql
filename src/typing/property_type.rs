@@ -103,6 +103,7 @@ impl PropertyType {
     /// Subtyping.
     pub fn is_subtype(t1: &PropertyType, t2: &PropertyType) -> bool {
         match (t1, t2) {
+            (PropertyType::Zero, _) => true,
             (PropertyType::Open(m1), PropertyType::Open(m2)) => {
                 let shared: BTreeSet<_> = m1.keys().filter(|k| m2.contains_key(*k)).cloned().collect();
                 shared.iter().all(|k| SimpleType::is_subtype(&m1[k], &m2[k]))

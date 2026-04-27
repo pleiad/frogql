@@ -56,11 +56,11 @@ impl LabelType {
             (_, LabelType::And(a, b)) => {
                 LabelType::is_subtype(l1, a) && LabelType::is_subtype(l1, b)
             }
-            (LabelType::And(a, b), _) => {
-                LabelType::is_subtype(a, l2) || LabelType::is_subtype(b, l2)
-            }
             (_, LabelType::Or(a, b)) => {
                 LabelType::is_subtype(l1, a) || LabelType::is_subtype(l1, b)
+            }
+            (LabelType::And(a, b), _) => {
+                LabelType::is_subtype(a, l2) || LabelType::is_subtype(b, l2)
             }
             (LabelType::Or(a, b), _) => {
                 LabelType::is_subtype(a, l2) || LabelType::is_subtype(b, l2)
