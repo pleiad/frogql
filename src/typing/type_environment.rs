@@ -1,0 +1,107 @@
+use std::collections::HashMap;
+
+use crate::syntax::descriptor::Descriptor;
+
+use super::variable_type::{Schema, VariableType};
+
+/// A type environment mapping variable names to their inferred `VariableType`.
+///
+/// Used during type checking to track the types of all variables in scope.
+#[derive(PartialEq, Eq, Clone, Debug, Default)]
+pub struct TypeEnvironment {
+    bindings: HashMap<String, VariableType>,
+}
+
+impl TypeEnvironment {
+    pub fn new() -> Self {
+        TypeEnvironment {
+            bindings: HashMap::new(),
+        }
+    }
+
+    /// If the descriptor has a variable name, bind it to `t`.
+    /// If not, return an empty environment.
+    pub fn create_context(descriptor: &Descriptor, t: VariableType) -> Self {
+        let mut env = TypeEnvironment::new();
+        if let Some(var) = &descriptor.var {
+            env.set(var, t);
+        }
+        env
+    }
+
+    pub fn set(&mut self, key: &str, value: VariableType) {
+        self.bindings.insert(key.to_string(), value);
+    }
+
+    pub fn get(&self, key: &str) -> Option<&VariableType> {
+        self.bindings.get(key)
+    }
+
+    pub fn keys(&self) -> Vec<&String> {
+        self.bindings.keys().collect()
+    }
+
+    /// Pointwise join (least upper bound) of two environments.
+    pub fn union(a: &TypeEnvironment, b: &TypeEnvironment) -> TypeEnvironment {
+        let mut result = a.bindings.clone();
+        for (key, other) in &b.bindings {
+            let merged = match result.get(key) {
+                Some(self_t) => VariableType::join(self_t, other),
+                None => other.clone(),
+            };
+            result.insert(key.clone(), merged);
+        }
+        TypeEnvironment { bindings: result }
+    }
+
+    /// Pointwise meet (greatest lower bound) of two environments with schema
+    /// refinement. fppc's meet returns `Result<_, String>` because its
+    /// `VariableType::meet` errors on shape mismatch; gqlite's `meet` returns
+    /// `Zero` instead, so we surface the failure as `Err` here when the meet
+    /// collapses to bottom on a variable that wasn't already empty in either
+    /// input. Behavior at the checker level is equivalent.
+    pub fn meet(
+        schema: &Schema,
+        a: &TypeEnvironment,
+        b: &TypeEnvironment,
+    ) -> Result<TypeEnvironment, String> {
+        let mut result = a.bindings.clone();
+        for (key, other) in &b.bindings {
+            let merged = match result.get(key) {
+                Some(self_t) => {
+                    let met = VariableType::meet(self_t, other);
+                    if met == VariableType::Zero
+                        && !self_t.is_empty()
+                        && !other.is_empty()
+                    {
+                        return Err(format!(
+                            "Cannot reconcile types for variable {}: {} and {}",
+                            key, self_t, other
+                        ));
+                    }
+                    VariableType::refine(schema, &met)
+                }
+                None => other.clone(),
+            };
+            result.insert(key.clone(), merged);
+        }
+        Ok(TypeEnvironment { bindings: result })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bindings.values().any(VariableType::is_empty)
+    }
+
+    /// Wrap each binding in `VariableType::Group`. Used for repeated/quantified
+    /// patterns where variables become groups of values. (Mirrors fppc's
+    /// `to_list` — gqlite uses `Group` for the same role.)
+    pub fn to_group(&self) -> TypeEnvironment {
+        TypeEnvironment {
+            bindings: self
+                .bindings
+                .iter()
+                .map(|(k, v)| (k.clone(), VariableType::Group(Box::new(v.clone()))))
+                .collect(),
+        }
+    }
+}

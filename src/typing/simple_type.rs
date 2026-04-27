@@ -63,7 +63,7 @@ impl SimpleType {
     pub fn is_subtype(t1: &SimpleType, t2: &SimpleType) -> bool {
         match (t1, t2) {
             (SimpleType::Star, _) | (_, SimpleType::Star) => true,
-            (_, SimpleType::Zero) => true,
+            (SimpleType::Zero, _) => true,
             (SimpleType::Union(a, b), _) => {
                 SimpleType::is_subtype(a, t2) || SimpleType::is_subtype(b, t2)
             }
