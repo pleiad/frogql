@@ -58,12 +58,20 @@ impl Typechecker {
         Typechecker::new(Schema::star())
     }
 
-    /// Type-check a full Query. Pattern first; then walk RETURN items
-    /// for unbound-var / type-mismatch detection; if GROUP BY is
-    /// present, also verify each non-aggregate RETURN item appears in
-    /// it. Result-row typing is still out of scope.
+    /// Type-check a full Query. The single public entry point: clears
+    /// the diagnostic buckets, walks the pattern, then the GROUP BY and
+    /// RETURN clauses, then rolls up `ok` from the accumulated errors.
+    ///
+    /// Result-row typing is still out of scope. Callers that only have a
+    /// `PathPattern` should wrap it via `Query::pattern_only(p)` and
+    /// invoke this — see `compile()` in `src/lib.rs`.
     pub fn check_query(&mut self, q: &Query) -> TypecheckResult {
-        let mut r = self.check_pattern(&q.pattern);
+        self.errors.clear();
+        self.warnings.clear();
+
+        let mut r = self.check_path_pattern(&q.pattern);
+        r.empty = r.path.is_unsatisfiable() || r.env.is_empty();
+
         if let Some(group_by) = &q.group_by {
             self.check_group_by(group_by, &r.env);
         }
@@ -74,6 +82,7 @@ impl Typechecker {
                 None => self.check_no_implicit_group_by(returns),
             }
         }
+
         if !self.errors.is_empty() {
             r.ok = false;
         }
@@ -134,18 +143,6 @@ impl Typechecker {
                 },
             }
         }
-    }
-
-    /// Type-check a `PathPattern`.
-    pub fn check_pattern(&mut self, p: &PathPattern) -> TypecheckResult {
-        self.errors.clear();
-        self.warnings.clear();
-        let mut r = self.check_path_pattern(p);
-        if !self.errors.is_empty() {
-            r.ok = false;
-        }
-        r.empty = r.path.is_unsatisfiable() || r.env.is_empty();
-        r
     }
 
     // -----------------------------------------------
