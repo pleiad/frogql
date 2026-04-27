@@ -6,7 +6,7 @@ use crate::model::value::{Id, Path, PathValue, Value};
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::{Aggregator, Query, ReturnItem};
+use crate::syntax::query::{Aggregator, GeneralSetKind, Query, ReturnItem, SetQuantifier};
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
 use crate::typing::property_type::PropertyType;
@@ -177,16 +177,50 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         out
     }
 
-    /// Reduce an aggregator over a group of rows. Currently only
-    /// `CountStar` is implemented; the other kinds (Count(expr), Sum, Avg,
-    /// Min, Max, with DISTINCT support) land in subsequent commits.
-    fn apply_aggregator(&self, agg: &Aggregator, row_idxs: &[usize], _rows: &[ResultRow]) -> Value {
+    /// Reduce an aggregator over a group of rows. The runtime evaluates
+    /// the inner expression once per row, applies ISO null-elimination
+    /// (Failure → drop), and reduces according to the kind.
+    ///
+    /// Kinds wired up so far: `CountStar`, `GeneralSet{Count, …}`.
+    /// Sum/Avg/Min/Max land in the next commit.
+    fn apply_aggregator(&self, agg: &Aggregator, row_idxs: &[usize], rows: &[ResultRow]) -> Value {
         match agg {
             // ISO §20.9 GR 2: COUNT(*) is the cardinality of the group's row set.
             // No null-elimination, no DISTINCT — every row counts.
             Aggregator::CountStar => Value::Int(row_idxs.len() as i64),
+
+            Aggregator::GeneralSet {
+                kind: GeneralSetKind::Count,
+                quantifier,
+                expr,
+            } => {
+                // ISO §20.9 GR 5b-ii: evaluate `expr` per row, drop nulls
+                // (Failure here stands in for null), then either count or
+                // count distinct. Null-elimination runs BEFORE distinct.
+                let mut count: i64 = 0;
+                let mut seen: Vec<Value> = Vec::new();
+                for &idx in row_idxs {
+                    let v = match self.run_expr(&rows[idx].assignment, expr) {
+                        ExprResult::Success(v) => v,
+                        ExprResult::Failure(_) => continue, // null-eliminated
+                    };
+                    match quantifier {
+                        SetQuantifier::All => count += 1,
+                        SetQuantifier::Distinct => {
+                            // Linear-scan dedup: Value lacks Hash/Eq because
+                            // of f64. O(n*d) per group; fine at thesis scale.
+                            if !seen.contains(&v) {
+                                seen.push(v);
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+                Value::Int(count)
+            }
+
             Aggregator::GeneralSet { .. } => {
-                unimplemented!("GeneralSet aggregators land in subsequent commits")
+                unimplemented!("Sum/Avg/Min/Max land in the next commit")
             }
         }
     }

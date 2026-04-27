@@ -86,6 +86,96 @@ fn test_count_star_with_alias() {
     );
 }
 
+// =======================================================================
+// COUNT(expr) — ISO §20.9 <general set function>, kind = Count
+//
+// Differs from COUNT(*): null inputs are eliminated before counting.
+// In gqlite that means "Failure" results from run_expr (e.g. attribute
+// not present on the node) drop out instead of counting as 1.
+// =======================================================================
+
+#[test]
+fn test_count_expr_total() {
+    let g = graph_three_users();
+    // Every user has a name → COUNT(x.name) == 3.
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN COUNT(x.name)"),
+        vec![vec![Value::Int(3)]]
+    );
+}
+
+#[test]
+fn test_count_expr_skips_failures() {
+    // Two of the three users have a "nickname" property; the third
+    // doesn't. ISO null-elimination drops that row from COUNT(x.nickname).
+    let json = r#"{
+      "nodes": [
+        {"id": "u1", "labels": ["User"], "props": {"name": "Alice", "nickname": "Al"}},
+        {"id": "u2", "labels": ["User"], "props": {"name": "Bob", "nickname": "Bo"}},
+        {"id": "u3", "labels": ["User"], "props": {"name": "Carol"}}
+      ],
+      "edges": []
+    }"#;
+    let g = Graph::from_json_str(json).unwrap();
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN COUNT(x.nickname)"),
+        vec![vec![Value::Int(2)]]
+    );
+}
+
+#[test]
+fn test_count_distinct() {
+    let g = graph_three_users();
+    // Cities: Boston, Boston, Seattle → 2 distinct.
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN COUNT(DISTINCT x.city)"),
+        vec![vec![Value::Int(2)]]
+    );
+}
+
+#[test]
+fn test_count_distinct_with_alias() {
+    let g = graph_three_users();
+    assert_eq!(
+        run(
+            &g,
+            "MATCH (x: User) RETURN COUNT(DISTINCT x.city) AS unique_cities"
+        ),
+        vec![vec![Value::Int(2)]]
+    );
+}
+
+#[test]
+fn test_count_distinct_skips_failures() {
+    // DISTINCT applies AFTER null-elimination, so missing nickname
+    // doesn't count as "a distinct null". Two users have nicknames
+    // ("Al" and "Bo"), both distinct → 2.
+    let json = r#"{
+      "nodes": [
+        {"id": "u1", "labels": ["User"], "props": {"nickname": "Al"}},
+        {"id": "u2", "labels": ["User"], "props": {"nickname": "Bo"}},
+        {"id": "u3", "labels": ["User"], "props": {}}
+      ],
+      "edges": []
+    }"#;
+    let g = Graph::from_json_str(json).unwrap();
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN COUNT(DISTINCT x.nickname)"),
+        vec![vec![Value::Int(2)]]
+    );
+}
+
+#[test]
+fn test_count_expr_zero_match_emits_zero_row() {
+    // Same edge case as COUNT(*) but for COUNT(expr): pure-aggregate
+    // query over zero matches still emits one row with count = 0.
+    let g = graph_three_users();
+    assert_eq!(
+        run(&g, "MATCH (x: ImpossibleLabel) RETURN COUNT(x.name)"),
+        vec![vec![Value::Int(0)]]
+    );
+}
+
 #[test]
 fn test_count_star_groupby_implicit() {
     // Two non-aggregate groups (Boston: 2, Seattle: 1) + COUNT(*) per group.
