@@ -6,7 +6,7 @@ use crate::model::value::{Id, Path, PathValue, Value};
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::{Query, ReturnItem};
+use crate::syntax::query::{Aggregator, Query, ReturnItem};
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
 use crate::typing::property_type::PropertyType;
@@ -44,40 +44,149 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// Run a full Query (MATCH ... WHERE ... RETURN).
     /// Returns projected rows as Vec<Vec<Value>> if RETURN is specified,
     /// or the raw IntermediateResult if no RETURN clause.
+    ///
+    /// Two projection paths:
+    /// - **Row-by-row** (no aggregates in RETURN): each input row produces
+    ///   one output row, optionally deduplicated by `DISTINCT`.
+    /// - **Group-and-aggregate** (any aggregate in RETURN): rows are grouped
+    ///   by the values of the non-aggregate items, and each aggregate is
+    ///   reduced over its group. See `run_aggregated`.
     pub fn run_query(&self, query: &Query, limit: usize) -> QueryResult {
         let ir = self.run_path_pattern(&query.pattern, limit);
 
         match &query.returns {
             None => QueryResult::Raw(ir),
             Some(return_items) => {
-                let mut projected: Vec<Vec<Value>> = Vec::new();
-                for row in &ir.rows {
-                    let vals: Vec<Value> = return_items
-                        .iter()
-                        .map(|item| match item {
-                            ReturnItem::Expr { expr, .. } => {
-                                match self.run_expr(&row.assignment, expr) {
-                                    ExprResult::Success(v) => v,
-                                    ExprResult::Failure(_) => Value::Str("NULL".into()),
-                                }
-                            }
-                            ReturnItem::Aggregate { .. } => {
-                                // Aggregates need a group-and-aggregate pass that lands in
-                                // a follow-up commit. The parser does not yet emit this
-                                // variant, so this branch is statically unreachable today.
-                                unimplemented!("aggregate handling lands in a later commit")
-                            }
-                        })
-                        .collect();
-                    if query.distinct {
-                        if !projected.contains(&vals) {
-                            projected.push(vals);
-                        }
-                    } else {
-                        projected.push(vals);
-                    }
+                if return_items.iter().any(|i| i.is_aggregate()) {
+                    QueryResult::Projected(self.run_aggregated(return_items, &ir.rows))
+                } else {
+                    QueryResult::Projected(self.run_row_by_row(
+                        return_items,
+                        &ir.rows,
+                        query.distinct,
+                    ))
                 }
-                QueryResult::Projected(projected)
+            }
+        }
+    }
+
+    /// Row-by-row projection: one output row per input row. The behavior
+    /// is unchanged from before aggregates landed.
+    fn run_row_by_row(
+        &self,
+        items: &[ReturnItem],
+        rows: &[ResultRow],
+        distinct: bool,
+    ) -> Vec<Vec<Value>> {
+        let mut projected: Vec<Vec<Value>> = Vec::new();
+        for row in rows {
+            let vals: Vec<Value> = items
+                .iter()
+                .map(|item| self.eval_expr_item(item, &row.assignment))
+                .collect();
+            if distinct {
+                if !projected.contains(&vals) {
+                    projected.push(vals);
+                }
+            } else {
+                projected.push(vals);
+            }
+        }
+        projected
+    }
+
+    /// Evaluate an `Expr`-shaped return item against one row's assignment.
+    /// Aggregates can't be projected per-row — calling this on an aggregate
+    /// is a runtime bug (caller forgot to take the aggregated path).
+    fn eval_expr_item(&self, item: &ReturnItem, mu: &Assignment) -> Value {
+        match item {
+            ReturnItem::Expr { expr, .. } => match self.run_expr(mu, expr) {
+                ExprResult::Success(v) => v,
+                ExprResult::Failure(_) => Value::Str("NULL".into()),
+            },
+            ReturnItem::Aggregate { .. } => {
+                unreachable!("aggregate items must be projected via run_aggregated")
+            }
+        }
+    }
+
+    /// Group-and-aggregate projection (ISO §20.9 + Cypher-style implicit
+    /// GROUP BY).
+    ///
+    /// 1. The "group key" of a row is the tuple of values produced by the
+    ///    *non-aggregate* return items in their declaration order.
+    /// 2. Rows are partitioned by group key.
+    /// 3. Each group emits one output row: non-aggregate items take the
+    ///    group's value (all rows in the group share it by construction),
+    ///    aggregate items are reduced over the group's row set.
+    ///
+    /// Edge case (ISO §20.9 GR 7a-i): a query with only aggregates and
+    /// zero input rows still emits one output row — `RETURN COUNT(*)` over
+    /// an empty match yields `[[0]]`, not `[]`. A mixed RETURN with zero
+    /// input rows yields no rows because there are no group keys to emit.
+    ///
+    /// Performance: groups are stored as `Vec<(GroupKey, Vec<usize>)>` and
+    /// looked up by linear scan. `Value` lacks `Hash`/`Ord` (because of
+    /// `f64`), so a `HashMap` would require a manual `Hash` impl. For now
+    /// linear search is fine; revisit if profiling shows it matters.
+    fn run_aggregated(&self, items: &[ReturnItem], rows: &[ResultRow]) -> Vec<Vec<Value>> {
+        // Indices into `items` of the non-aggregate items, in order.
+        // These form the GROUP BY key of each row.
+        let key_positions: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, it)| (!it.is_aggregate()).then_some(i))
+            .collect();
+
+        // groups[i] = (group_key_values, row_indices_in_input).
+        let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
+
+        for (row_idx, row) in rows.iter().enumerate() {
+            let key: Vec<Value> = key_positions
+                .iter()
+                .map(|&p| self.eval_expr_item(&items[p], &row.assignment))
+                .collect();
+            match groups.iter_mut().find(|(k, _)| k == &key) {
+                Some((_, idxs)) => idxs.push(row_idx),
+                None => groups.push((key, vec![row_idx])),
+            }
+        }
+
+        // ISO §20.9 GR 7a-i: pure-aggregate query with zero rows emits
+        // one row of "empty-group" aggregate values (e.g. COUNT(*) → 0).
+        if key_positions.is_empty() && groups.is_empty() {
+            groups.push((Vec::new(), Vec::new()));
+        }
+
+        // Project each group to one output row.
+        let mut out: Vec<Vec<Value>> = Vec::with_capacity(groups.len());
+        for (key, row_idxs) in &groups {
+            let mut key_iter = key.iter();
+            let row_vals: Vec<Value> = items
+                .iter()
+                .map(|item| match item {
+                    ReturnItem::Expr { .. } => key_iter
+                        .next()
+                        .expect("key_positions and Expr items align by construction")
+                        .clone(),
+                    ReturnItem::Aggregate { agg, .. } => self.apply_aggregator(agg, row_idxs, rows),
+                })
+                .collect();
+            out.push(row_vals);
+        }
+        out
+    }
+
+    /// Reduce an aggregator over a group of rows. Currently only
+    /// `CountStar` is implemented; the other kinds (Count(expr), Sum, Avg,
+    /// Min, Max, with DISTINCT support) land in subsequent commits.
+    fn apply_aggregator(&self, agg: &Aggregator, row_idxs: &[usize], _rows: &[ResultRow]) -> Value {
+        match agg {
+            // ISO §20.9 GR 2: COUNT(*) is the cardinality of the group's row set.
+            // No null-elimination, no DISTINCT — every row counts.
+            Aggregator::CountStar => Value::Int(row_idxs.len() as i64),
+            Aggregator::GeneralSet { .. } => {
+                unimplemented!("GeneralSet aggregators land in subsequent commits")
             }
         }
     }
