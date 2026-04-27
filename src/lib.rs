@@ -12,6 +12,55 @@ use syntax::path_pattern::PathPattern;
 use syntax::query::Query;
 use typing::checker::Typechecker;
 
+/// Phase-tagged compile failure.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompileError {
+    Parse(String),
+    Type(Vec<String>),
+}
+
+impl CompileError {
+    pub fn message(&self) -> String {
+        match self {
+            CompileError::Parse(s) => format!("Parse error: {s}"),
+            CompileError::Type(es) => format!("Type error: {}", es.join("; ")),
+        }
+    }
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+/// Successful compile with non-blocking typechecker warnings preserved.
+#[derive(Debug, Clone)]
+pub struct CompileResult {
+    pub query: Query,
+    pub warnings: Vec<String>,
+}
+
+/// Canonical compile pipeline. `compile_query` and the REPL both use this.
+pub fn compile_query_with_diagnostics(input: &str) -> Result<CompileResult, CompileError> {
+    let ast = parser::parse_query(input).map_err(CompileError::Parse)?;
+    let q = elaborate::elaborate_query(ast);
+    let mut tc = Typechecker::untyped();
+    let r = tc.check_query(&q);
+    if !r.ok {
+        return Err(CompileError::Type(tc.errors));
+    }
+    let warnings = tc.warnings;
+    let optimized_pattern = optimizer::compile(q.pattern);
+    Ok(CompileResult {
+        query: Query {
+            pattern: optimized_pattern,
+            ..q
+        },
+        warnings,
+    })
+}
+
 /// Compile a GQL path pattern string: parse → elaborate → typecheck → optimize.
 ///
 /// Typechecking uses the permissive `Schema::star()` and rejects the query if
@@ -30,21 +79,13 @@ pub fn compile(query: &str) -> Result<PathPattern, String> {
     Ok(optimizer::compile(q.pattern))
 }
 
-/// Compile a full GQL query (MATCH ... WHERE ... RETURN):
-/// parse → elaborate → typecheck → optimize.
-///
-/// Typechecking uses the permissive `Schema::star()` and rejects the query
-/// if the checker reports errors. Use [`compile_query_unchecked`] to skip.
+/// Compile a full GQL query: parse → elaborate → typecheck → optimize.
+/// Thin wrapper over [`compile_query_with_diagnostics`].
+/// Use [`compile_query_unchecked`] to skip typechecking.
 pub fn compile_query(input: &str) -> Result<Query, String> {
-    let q = parser::parse_query(input)?;
-    let q = elaborate::elaborate_query(q);
-    let mut tc = Typechecker::untyped();
-    let r = tc.check_query(&q);
-    if !r.ok {
-        return Err(tc.errors.join("; "));
-    }
-    let optimized_pattern = optimizer::compile(q.pattern);
-    Ok(Query { pattern: optimized_pattern, ..q })
+    compile_query_with_diagnostics(input)
+        .map(|r| r.query)
+        .map_err(|e| e.message())
 }
 
 /// Compile a path pattern without typechecking. Same plan as

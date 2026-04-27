@@ -14,7 +14,6 @@ pub enum Token {
     And,
     Or,
     Not,
-    Is,
     As,
     In,
     Int,
@@ -25,6 +24,7 @@ pub enum Token {
     Return,
     Distinct,
     All,
+    Typed,
     /// Compound: `group` and `by` stay valid as record/property names.
     GroupBy,
     Count,
@@ -34,29 +34,30 @@ pub enum Token {
     Max,
 
     // Symbols
-    LParen,   // (
-    RParen,   // )
-    LBracket, // [
-    RBracket, // ]
-    LBrace,   // {
-    RBrace,   // }
-    Colon,    // :
-    Comma,    // ,
-    Dot,      // .
-    Star,     // *
-    Plus,     // +
-    Minus,    // -
-    Bang,     // !
-    Eq,       // =
-    Ne,       // !=
-    Lt,       // <
-    Gt,       // >
-    Le,       // <=
-    Ge,       // >=
-    Tilde,    // ~
-    Question, // ?
-    Pipe,     // |
-    Amp,      // &
+    LParen,      // (
+    RParen,      // )
+    LBracket,    // [
+    RBracket,    // ]
+    LBrace,      // {
+    RBrace,      // }
+    Colon,       // :
+    DoubleColon, // ::
+    Comma,       // ,
+    Dot,         // .
+    Star,        // *
+    Plus,        // +
+    Minus,       // -
+    Bang,        // !
+    Eq,          // =
+    Ne,          // !=
+    Lt,          // <
+    Gt,          // >
+    Le,          // <=
+    Ge,          // >=
+    Tilde,       // ~
+    Question,    // ?
+    Pipe,        // |
+    Amp,         // &
 
     // Compound edge tokens
     RightArrow, // ->
@@ -201,7 +202,12 @@ impl Lexer {
                 }
                 ':' => {
                     self.advance();
-                    self.tokens.push(Token::Colon);
+                    if self.peek() == Some(':') {
+                        self.advance();
+                        self.tokens.push(Token::DoubleColon);
+                    } else {
+                        self.tokens.push(Token::Colon);
+                    }
                 }
                 ',' => {
                     self.advance();
@@ -378,8 +384,8 @@ impl Lexer {
                         "and" | "AND" => Token::And,
                         "or" | "OR" => Token::Or,
                         "not" | "NOT" => Token::Not,
-                        "is" | "IS" => Token::Is,
                         "as" | "AS" => Token::As,
+                        "typed" | "TYPED" => Token::Typed,
                         "in" | "IN" => Token::In,
                         "MATCH" | "match" => Token::Match,
                         "RETURN" | "return" => Token::Return,

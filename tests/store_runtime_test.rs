@@ -100,11 +100,11 @@ fn test_size_2() {
 }
 #[test]
 fn test_selector() {
-    assert_eq!(fraud_store_run("(x WHERE x.isDummy is bool)"), 1);
+    assert_eq!(fraud_store_run("(x WHERE x.isDummy bool)"), 1);
 }
 #[test]
 fn test_concat_selector() {
-    assert_eq!(fraud_store_run("()(x:{isDummy: bool})"), 1);
+    assert_eq!(fraud_store_run("()(x:{isDummy bool})"), 1);
 }
 #[test]
 fn test_union() {
@@ -162,11 +162,11 @@ fn test_digest_p4() {
 }
 #[test]
 fn test_is_bool() {
-    assert_eq!(fraud_store_run("(x WHERE x.isBlocked is bool)"), 5);
+    assert_eq!(fraud_store_run("(x WHERE x.isBlocked bool)"), 5);
 }
 #[test]
 fn test_is_str() {
-    assert_eq!(fraud_store_run("(x WHERE x.isBlocked is str)"), 0);
+    assert_eq!(fraud_store_run("(x WHERE x.isBlocked str)"), 0);
 }
 #[test]
 fn test_as_bool() {
@@ -182,7 +182,7 @@ fn test_unop_neg() {
 }
 #[test]
 fn test_social_where() {
-    assert_eq!(social_store_run("(x: {status: bool})"), 1);
+    assert_eq!(social_store_run("(x: {status bool})"), 1);
 }
 #[test]
 fn test_social_undirected() {

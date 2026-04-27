@@ -70,12 +70,12 @@ fn test_size_2() {
 
 #[test]
 fn test_selector() {
-    assert_eq!(fraud_run("(x WHERE x.isDummy is bool)"), 1);
+    assert_eq!(fraud_run("(x WHERE x.isDummy bool)"), 1);
 }
 
 #[test]
 fn test_concat_selector() {
-    assert_eq!(fraud_run("()(x:{isDummy: bool})"), 1);
+    assert_eq!(fraud_run("()(x:{isDummy bool})"), 1);
 }
 
 #[test]
@@ -146,12 +146,12 @@ fn test_digest_p4() {
 
 #[test]
 fn test_is_bool() {
-    assert_eq!(fraud_run("(x WHERE x.isBlocked is bool)"), 5);
+    assert_eq!(fraud_run("(x WHERE x.isBlocked bool)"), 5);
 }
 
 #[test]
 fn test_is_str() {
-    assert_eq!(fraud_run("(x WHERE x.isBlocked is str)"), 0);
+    assert_eq!(fraud_run("(x WHERE x.isBlocked str)"), 0);
 }
 
 #[test]
@@ -166,7 +166,7 @@ fn test_as_int_gt() {
 
 #[test]
 fn test_where_social() {
-    assert_eq!(social_run("(x: {status: bool})"), 1);
+    assert_eq!(social_run("(x: {status bool})"), 1);
 }
 
 #[test]
@@ -230,28 +230,28 @@ fn test_social_edge_label() {
 
 #[test]
 fn test_node_with_property_desc() {
-    // (x:{owner: str}) — open prop type, matches all nodes that have owner as string
+    // (x:{owner str}) — open prop type, matches all nodes that have owner as string
     // fraud: a1, a2, p1, p2, d1 all have owner:str → 5
-    assert_eq!(fraud_run("(x:{owner: str})"), 5);
+    assert_eq!(fraud_run("(x:{owner str})"), 5);
 }
 
 #[test]
 fn test_node_label_and_property() {
-    // (x: Account {owner: str}) — Account nodes with owner:str
-    assert_eq!(fraud_run("(x: Account {owner: str})"), 4);
+    // (x: Account {owner str}) — Account nodes with owner:str
+    assert_eq!(fraud_run("(x: Account {owner str})"), 4);
 }
 
 #[test]
 fn test_edge_label_and_property() {
-    // -[y: Transfer {amount: int}]-> — Transfer edges with amount:int
-    assert_eq!(fraud_run("-[y: Transfer {amount: int}]->"), 4);
+    // -[y: Transfer {amount int}]-> — Transfer edges with amount:int
+    assert_eq!(fraud_run("-[y: Transfer {amount int}]->"), 4);
 }
 
 #[test]
 fn test_full_descriptor_chain() {
-    // (x: Account {owner: str})-[y: Transfer {amount: int}]->(z)
+    // (x: Account {owner str})-[y: Transfer {amount int}]->(z)
     assert_eq!(
-        fraud_run("(x: Account {owner: str})-[y: Transfer {amount: int}]->(z)"),
+        fraud_run("(x: Account {owner str})-[y: Transfer {amount int}]->(z)"),
         4
     );
 }

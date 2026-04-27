@@ -4,15 +4,15 @@
 //! path produces the same plan as the opt-out path for a handful of
 //! representative queries, and that the checker rejects at least one
 //! obviously-broken query that would have compiled silently before the
-//! migration. Failure-detection coverage is intentionally narrow.
+//! migration. Failure-detection coverage intentionally narrow.
 
 use gqlrust::{compile_query, compile_query_unchecked};
 
 /// Each query: must typecheck successfully, and must produce the same
 /// optimized plan via the checked and unchecked entry points.
 fn assert_smoke_query(q: &str) {
-    let checked = compile_query(q)
-        .unwrap_or_else(|e| panic!("compile_query failed for {:?}: {}", q, e));
+    let checked =
+        compile_query(q).unwrap_or_else(|e| panic!("compile_query failed for {:?}: {}", q, e));
     let unchecked = compile_query_unchecked(q)
         .unwrap_or_else(|e| panic!("compile_query_unchecked failed for {:?}: {}", q, e));
 
@@ -39,7 +39,7 @@ fn smoke_two_hop_with_filter() {
 
 #[test]
 fn smoke_concat_three_nodes_pattern_only() {
-    assert_smoke_query("(x: {a: int})(y: {b: bool})(z: {c: str})");
+    assert_smoke_query("(x: {a int})(y: {b bool})(z: {c str})");
 }
 
 #[test]

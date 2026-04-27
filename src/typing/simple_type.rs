@@ -133,8 +133,7 @@ impl fmt::Display for SimpleType {
             SimpleType::Group(t) => write!(f, "group<{t}>"),
             SimpleType::List(t) => write!(f, "[{t}]"),
             SimpleType::Record(fields) => {
-                let parts: Vec<String> =
-                    fields.iter().map(|(k, v)| format!("{k} is {v}")).collect();
+                let parts: Vec<String> = fields.iter().map(|(k, v)| format!("{k} {v}")).collect();
                 write!(f, "{{{}}}", parts.join(", "))
             }
         }

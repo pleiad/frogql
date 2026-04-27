@@ -57,7 +57,7 @@ fn test_descriptor_record() {
     let mut pt = PropertyType::open_empty();
     pt.extend("a".into(), SimpleType::Z);
     assert_eq!(
-        parse("(x :Person {a: int})").unwrap(),
+        parse("(x :Person {a int})").unwrap(),
         PathPattern::Node(Some(Descriptor::new(
             Some("x".into()),
             DescriptorType::new(LabelType::Label("Person".into()), pt),
@@ -71,7 +71,7 @@ fn test_descriptor_record_multiple() {
     pt.extend("a".into(), SimpleType::Z);
     pt.extend("b".into(), SimpleType::B);
     assert_eq!(
-        parse("(:Person {a: int, b: bool})").unwrap(),
+        parse("(:Person {a int, b bool})").unwrap(),
         PathPattern::Node(Some(Descriptor::new(
             None,
             DescriptorType::new(LabelType::Label("Person".into()), pt),
@@ -80,12 +80,78 @@ fn test_descriptor_record_multiple() {
 }
 
 #[test]
+fn test_descriptor_record_double_colon() {
+    let mut pt = PropertyType::open_empty();
+    pt.extend("a".into(), SimpleType::Z);
+    pt.extend("b".into(), SimpleType::B);
+    assert_eq!(
+        parse("(:Person {a :: int, b :: bool})").unwrap(),
+        PathPattern::Node(Some(Descriptor::new(
+            None,
+            DescriptorType::new(LabelType::Label("Person".into()), pt),
+        )))
+    );
+}
+
+#[test]
+fn test_descriptor_record_typed_keyword() {
+    let mut pt = PropertyType::open_empty();
+    pt.extend("a".into(), SimpleType::Z);
+    pt.extend("b".into(), SimpleType::B);
+    assert_eq!(
+        parse("(:Person {a TYPED int, b TYPED bool})").unwrap(),
+        PathPattern::Node(Some(Descriptor::new(
+            None,
+            DescriptorType::new(LabelType::Label("Person".into()), pt),
+        )))
+    );
+}
+
+#[test]
+fn test_descriptor_record_mixed_separators() {
+    // The three type-ascription forms are interchangeable within a single
+    // descriptor: implicit, `::`, and `TYPED`.
+    let mut pt = PropertyType::open_empty();
+    pt.extend("a".into(), SimpleType::Z);
+    pt.extend("b".into(), SimpleType::B);
+    pt.extend("c".into(), SimpleType::S);
+    assert_eq!(
+        parse("(:Person {a int, b :: bool, c TYPED str})").unwrap(),
+        PathPattern::Node(Some(Descriptor::new(
+            None,
+            DescriptorType::new(LabelType::Label("Person".into()), pt),
+        )))
+    );
+}
+
+#[test]
+fn test_descriptor_value_filter_with_colon_still_works() {
+    // `:` is reserved for value filters (elaborated to WHERE).
+    let parsed = parse("(:Person {age: 30})").unwrap();
+    let s = format!("{parsed:?}");
+    assert!(s.contains("value_filters"), "got: {s}");
+    assert!(s.contains("\"age\""), "got: {s}");
+}
+
+#[test]
+fn test_typed_predicate_in_where_explicit() {
+    // `TYPED` is the explicit type-predicate operator in expressions.
+    assert!(parse("((x) WHERE x.a TYPED int)").is_ok());
+}
+
+#[test]
+fn test_typed_predicate_in_where_implicit() {
+    // After a value term, a type-head token implies the type predicate.
+    assert!(parse("((x) WHERE x.a int)").is_ok());
+}
+
+#[test]
 fn test_descriptor_no_label() {
     let mut pt = PropertyType::open_empty();
     pt.extend("a".into(), SimpleType::Z);
     pt.extend("b".into(), SimpleType::B);
     assert_eq!(
-        parse("(:{a: int, b: bool})").unwrap(),
+        parse("(:{a int, b bool})").unwrap(),
         PathPattern::Node(Some(Descriptor::new(
             None,
             DescriptorType::new(LabelType::Star, pt),
@@ -114,7 +180,7 @@ fn test_edge_right_with_descriptor() {
     let mut pt = PropertyType::open_empty();
     pt.extend("a".into(), SimpleType::Z);
     assert_eq!(
-        parse("-[x:Person {a: int}]->").unwrap(),
+        parse("-[x:Person {a int}]->").unwrap(),
         PathPattern::EdgeRight(Some(Descriptor::new(
             Some("x".into()),
             DescriptorType::new(LabelType::Label("Person".into()), pt),
@@ -143,7 +209,7 @@ fn test_edge_left_with_descriptor() {
     let mut pt = PropertyType::open_empty();
     pt.extend("a".into(), SimpleType::Z);
     assert_eq!(
-        parse("<-[x:Person {a: int}]-").unwrap(),
+        parse("<-[x:Person {a int}]-").unwrap(),
         PathPattern::EdgeLeft(Some(Descriptor::new(
             Some("x".into()),
             DescriptorType::new(LabelType::Label("Person".into()), pt),
@@ -172,7 +238,7 @@ fn test_edge_non_directional_with_descriptor() {
     let mut pt = PropertyType::open_empty();
     pt.extend("a".into(), SimpleType::Z);
     assert_eq!(
-        parse("~[x:Person {a: int}]~").unwrap(),
+        parse("~[x:Person {a int}]~").unwrap(),
         PathPattern::EdgeUndirected(Some(Descriptor::new(
             Some("x".into()),
             DescriptorType::new(LabelType::Label("Person".into()), pt),
@@ -423,7 +489,7 @@ fn test_descriptor_record_closed() {
     let mut pt = PropertyType::closed_empty();
     pt.extend("a".into(), SimpleType::Z);
     assert_eq!(
-        parse("(x :Person {{a: int}})").unwrap(),
+        parse("(x :Person {{a int}})").unwrap(),
         PathPattern::Node(Some(Descriptor::new(
             Some("x".into()),
             DescriptorType::new(LabelType::Label("Person".into()), pt),

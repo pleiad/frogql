@@ -199,11 +199,7 @@ impl PathType {
     }
 }
 
-fn directed_edge_to_path(
-    left: &VariableType,
-    right: &VariableType,
-    dir: EdgeDir,
-) -> PathType {
+fn directed_edge_to_path(left: &VariableType, right: &VariableType, dir: EdgeDir) -> PathType {
     let left_desc = match left {
         VariableType::Node(d) => d.clone(),
         _ => return PathType::Zero,
