@@ -34,15 +34,6 @@ impl TypecheckResult {
             empty: false,
         }
     }
-
-    fn failed() -> Self {
-        TypecheckResult {
-            path: PathType::Zero,
-            env: TypeEnvironment::new(),
-            ok: false,
-            empty: true,
-        }
-    }
 }
 
 /// The typechecker. Owns a `Schema` and accumulates errors / warnings

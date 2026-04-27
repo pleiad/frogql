@@ -353,7 +353,16 @@ Test totals on `typing/checker`:
 - `cargo test --test typecheck_smoke`: 4 passing (new — wire-level smoke)
 - `cargo test --test typecheck_fppc_parity`: 45 passing (new — direct
   translation of fppc's typechecker test suite; see below)
-- All other integration tests still pass with no modification
+- All other integration tests still pass with no modification — 254 total
+- `cargo test --test bench_test`: 2 of 4 failing with `attempt to subtract
+  with overflow` — **identical failure mode to `main`**, pre-existing per
+  CLAUDE.md, unrelated to this branch
+- `cargo run --release --example typecheck_repl_smoke` runs four
+  representative queries against `examples/movies.gdb` end-to-end through
+  `compile_query` and a fifth (unbound-variable) query that's correctly
+  rejected by the checked path and accepted by the unchecked path. All
+  five pass; the runtime returns expected row counts (38 movies, 133
+  people, etc.)
 
 ## fppc parity: 45/46 tests translated
 
