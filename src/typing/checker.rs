@@ -108,10 +108,8 @@ impl Typechecker {
                 let cm = match TypeEnvironment::meet(&self.schema, &r1.env, &r2.env) {
                     Ok(env) => env,
                     Err(e) => {
-                        self.errors.push(format!(
-                            "Concatenation of contexts failed: {}",
-                            e
-                        ));
+                        self.errors
+                            .push(format!("Concatenation of contexts failed: {}", e));
                         r1.env.clone()
                     }
                 };
@@ -144,7 +142,11 @@ impl Typechecker {
                 )
             }
 
-            PathPattern::Repeat { pattern, lb, ub: _ub } => {
+            PathPattern::Repeat {
+                pattern,
+                lb,
+                ub: _ub,
+            } => {
                 let r = self.check_path_pattern(pattern);
                 let raw_lb = *lb as u64;
 
@@ -156,10 +158,7 @@ impl Typechecker {
                     raw_lb
                 };
 
-                TypecheckResult::new(
-                    self.pow_path_type(&r.path, effective_lb),
-                    r.env.to_group(),
-                )
+                TypecheckResult::new(self.pow_path_type(&r.path, effective_lb), r.env.to_group())
             }
 
             PathPattern::Questioned(p) => {
@@ -295,19 +294,13 @@ impl Typechecker {
         VariableType::refine(&self.schema, &vt)
     }
 
-    fn refine_pattern_edge(
-        &mut self,
-        dir: EdgeDir,
-        desc: &Option<Descriptor>,
-    ) -> VariableType {
+    fn refine_pattern_edge(&mut self, dir: EdgeDir, desc: &Option<Descriptor>) -> VariableType {
         let dtype = descriptor_type_of(desc);
         if let Some(d) = desc {
             self.assert_filters_drained(d);
         }
         let vt = match dir {
-            EdgeDir::Right | EdgeDir::Left | EdgeDir::Any => {
-                VariableType::edge_directional(dtype)
-            }
+            EdgeDir::Right | EdgeDir::Left | EdgeDir::Any => VariableType::edge_directional(dtype),
             EdgeDir::None => VariableType::edge_non_directional(dtype),
         };
         VariableType::refine(&self.schema, &vt)
@@ -371,4 +364,3 @@ fn simple_type_of_value(v: &Value) -> SimpleType {
         Value::Record(_) => SimpleType::Star,
     }
 }
-
