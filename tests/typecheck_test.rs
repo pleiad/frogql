@@ -37,7 +37,7 @@ fn check_with(schema: Schema, query: &str) -> (TypecheckResult, Vec<String>, Vec
     let q = Query::pattern_only(ast);
     let q = elaborate::elaborate_query(q);
     let mut tc = Typechecker::new(schema);
-    let r = tc.check_pattern(&q.pattern);
+    let r = tc.check_query(&q);
     (r, tc.errors.clone(), tc.warnings.clone())
 }
 

@@ -72,7 +72,7 @@ pub fn compile(query: &str) -> Result<PathPattern, String> {
     let q = Query::pattern_only(ast);
     let q = elaborate::elaborate_query(q);
     let mut tc = Typechecker::untyped();
-    let r = tc.check_pattern(&q.pattern);
+    let r = tc.check_query(&q);
     if !r.ok {
         return Err(tc.errors.join("; "));
     }
