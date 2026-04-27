@@ -42,7 +42,10 @@ fn run(g: &Graph, q: &str) -> Vec<Vec<Value>> {
 #[test]
 fn test_json_loads_nested_record() {
     let g = graph_with_records();
-    let r = run(&g, "MATCH (x: User) WHERE x.name = 'Alice' RETURN x.address");
+    let r = run(
+        &g,
+        "MATCH (x: User) WHERE x.name = 'Alice' RETURN x.address",
+    );
     let mut expected = std::collections::BTreeMap::new();
     expected.insert("city".into(), Value::Str("Boston".into()));
     expected.insert("street".into(), Value::Str("Main".into()));
@@ -54,14 +57,20 @@ fn test_json_loads_nested_record() {
 fn test_nested_field_access() {
     let g = graph_with_records();
     // Two chained dots: first resolves variable→property, second indexes the record.
-    let r = run(&g, "MATCH (x: User) WHERE x.address.city = 'Seattle' RETURN x.name");
+    let r = run(
+        &g,
+        "MATCH (x: User) WHERE x.address.city = 'Seattle' RETURN x.name",
+    );
     assert_eq!(r, vec![vec![Value::Str("Carol".into())]]);
 }
 
 #[test]
 fn test_nested_field_in_return() {
     let g = graph_with_records();
-    let r = run(&g, "MATCH (x: User) WHERE x.name = 'Alice' RETURN x.address.city");
+    let r = run(
+        &g,
+        "MATCH (x: User) WHERE x.name = 'Alice' RETURN x.address.city",
+    );
     assert_eq!(r, vec![vec![Value::Str("Boston".into())]]);
 }
 
@@ -116,10 +125,8 @@ fn test_record_storage_roundtrip() {
 
     let store = LazyGraphStore::open(&tmp).unwrap();
     let rt = Runtime::new(&store);
-    let q = compile_query(
-        "MATCH (x: User) WHERE x.address.city = 'Seattle' RETURN x.address.zip",
-    )
-    .unwrap();
+    let q = compile_query("MATCH (x: User) WHERE x.address.city = 'Seattle' RETURN x.address.zip")
+        .unwrap();
     match rt.run_query(&q, 0) {
         QueryResult::Projected(rs) => assert_eq!(rs, vec![vec![Value::Int(98101)]]),
         _ => panic!("expected projected"),
@@ -170,6 +177,9 @@ fn test_list_of_records() {
     }"#;
     let g = Graph::from_json_str(json).unwrap();
     // List of records: each element is a Record.
-    let r = run(&g, "MATCH (x: T) WHERE x.people is [{name: str, age: int}] RETURN x.people");
+    let r = run(
+        &g,
+        "MATCH (x: T) WHERE x.people is [{name: str, age: int}] RETURN x.people",
+    );
     assert_eq!(r.len(), 1);
 }

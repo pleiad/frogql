@@ -39,11 +39,11 @@ pub struct LazyGraphStore {
     edge_count: u32,
 
     // Record locations on disk (for lazy loading)
-    node_locs: Vec<RecordLoc>,     // internal_id → disk location
+    node_locs: Vec<RecordLoc>, // internal_id → disk location
     edge_locs: Vec<RecordLoc>,
 
     // Edge topology (compact: just internal IDs, not full records)
-    edge_src: Vec<u32>,            // edge internal_id → src node internal_id
+    edge_src: Vec<u32>, // edge internal_id → src node internal_id
     edge_tgt: Vec<u32>,
     edge_directed: Vec<bool>,
 
@@ -105,8 +105,10 @@ impl LazyGraphStore {
         if has_fast_index {
             // Fast path: read pre-built indexes directly
             store.load_from_indexes(
-                node_locs_root, edge_topo_root,
-                label_index_root, edge_label_index_root,
+                node_locs_root,
+                edge_topo_root,
+                label_index_root,
+                edge_label_index_root,
                 adjacency_root,
             )?;
         } else {
@@ -133,16 +135,24 @@ impl LazyGraphStore {
         // Node locations
         let raw_node_locs = disk_index::read_node_locs(&mut pager, node_locs_root)?;
         self.node_count = raw_node_locs.len() as u32;
-        self.node_locs = raw_node_locs.into_iter()
-            .map(|(pg, ci)| RecordLoc { page_num: pg, cell_index: ci })
+        self.node_locs = raw_node_locs
+            .into_iter()
+            .map(|(pg, ci)| RecordLoc {
+                page_num: pg,
+                cell_index: ci,
+            })
             .collect();
 
         // Edge topology (locations + src/tgt/directed)
         let (raw_edge_locs, edge_src, edge_tgt, edge_directed) =
             disk_index::read_edge_topo(&mut pager, edge_topo_root)?;
         self.edge_count = raw_edge_locs.len() as u32;
-        self.edge_locs = raw_edge_locs.into_iter()
-            .map(|(pg, ci)| RecordLoc { page_num: pg, cell_index: ci })
+        self.edge_locs = raw_edge_locs
+            .into_iter()
+            .map(|(pg, ci)| RecordLoc {
+                page_num: pg,
+                cell_index: ci,
+            })
             .collect();
         self.edge_src = edge_src;
         self.edge_tgt = edge_tgt;
@@ -158,7 +168,8 @@ impl LazyGraphStore {
             }
         }
         if edge_label_index_root != 0 {
-            let label_entries = disk_index::read_label_index_root(&mut pager, edge_label_index_root)?;
+            let label_entries =
+                disk_index::read_label_index_root(&mut pager, edge_label_index_root)?;
             for (label_sid, first_page) in label_entries {
                 let label = self.strings.resolve(label_sid).unwrap().to_string();
                 let ids = disk_index::read_u32_chain(&mut pager, first_page)?;
@@ -175,7 +186,11 @@ impl LazyGraphStore {
                     match kind {
                         0 => self.outgoing.entry(node_iid).or_default().push(edge_iid),
                         1 => self.incoming.entry(node_iid).or_default().push(edge_iid),
-                        2 => self.undirected_adj.entry(node_iid).or_default().push(edge_iid),
+                        2 => self
+                            .undirected_adj
+                            .entry(node_iid)
+                            .or_default()
+                            .push(edge_iid),
                         _ => {}
                     }
                 }
@@ -213,17 +228,25 @@ impl LazyGraphStore {
         let st_root = disk_index::write_u32_list(&mut pager, &st_page_list)?;
 
         // Write node locations
-        let node_locs: Vec<(u32, u16)> = self.node_locs.iter()
+        let node_locs: Vec<(u32, u16)> = self
+            .node_locs
+            .iter()
             .map(|loc| (loc.page_num, loc.cell_index))
             .collect();
         let node_locs_root = disk_index::write_node_locs(&mut pager, &node_locs)?;
 
         // Write edge topology
-        let edge_locs: Vec<(u32, u16)> = self.edge_locs.iter()
+        let edge_locs: Vec<(u32, u16)> = self
+            .edge_locs
+            .iter()
             .map(|loc| (loc.page_num, loc.cell_index))
             .collect();
         let edge_topo_root = disk_index::write_edge_topo(
-            &mut pager, &edge_locs, &self.edge_src, &self.edge_tgt, &self.edge_directed,
+            &mut pager,
+            &edge_locs,
+            &self.edge_src,
+            &self.edge_tgt,
+            &self.edge_directed,
         )?;
 
         // Update header
@@ -247,10 +270,16 @@ impl LazyGraphStore {
 
             for &sid in &decoded.label_str_ids {
                 let label = self.strings.resolve(sid).unwrap().to_string();
-                self.label_to_nodes.entry(label).or_default().push(internal_id);
+                self.label_to_nodes
+                    .entry(label)
+                    .or_default()
+                    .push(internal_id);
             }
 
-            self.node_locs.push(RecordLoc { page_num, cell_index: i });
+            self.node_locs.push(RecordLoc {
+                page_num,
+                cell_index: i,
+            });
         }
     }
 
@@ -264,7 +293,10 @@ impl LazyGraphStore {
 
             for &sid in &decoded.node.label_str_ids {
                 let label = self.strings.resolve(sid).unwrap().to_string();
-                self.label_to_edges.entry(label).or_default().push(internal_id);
+                self.label_to_edges
+                    .entry(label)
+                    .or_default()
+                    .push(internal_id);
             }
 
             let src = decoded.src_internal_id;
@@ -274,11 +306,20 @@ impl LazyGraphStore {
                 self.outgoing.entry(src).or_default().push(internal_id);
                 self.incoming.entry(tgt).or_default().push(internal_id);
             } else {
-                self.undirected_adj.entry(src).or_default().push(internal_id);
-                self.undirected_adj.entry(tgt).or_default().push(internal_id);
+                self.undirected_adj
+                    .entry(src)
+                    .or_default()
+                    .push(internal_id);
+                self.undirected_adj
+                    .entry(tgt)
+                    .or_default()
+                    .push(internal_id);
             }
 
-            self.edge_locs.push(RecordLoc { page_num, cell_index: i });
+            self.edge_locs.push(RecordLoc {
+                page_num,
+                cell_index: i,
+            });
             self.edge_src.push(src);
             self.edge_tgt.push(tgt);
             self.edge_directed.push(decoded.directed);
@@ -303,7 +344,8 @@ impl LazyGraphStore {
     }
 
     fn decode_labels_from_record(&self, label_str_ids: &[u32]) -> LabelType {
-        let labels: Vec<String> = label_str_ids.iter()
+        let labels: Vec<String> = label_str_ids
+            .iter()
             .map(|&sid| self.strings.resolve(sid).unwrap().to_string())
             .collect();
         if labels.is_empty() {
@@ -342,8 +384,12 @@ impl LazyGraphStore {
         }
     }
 
-    pub fn node_count(&self) -> u32 { self.node_count }
-    pub fn edge_count(&self) -> u32 { self.edge_count }
+    pub fn node_count(&self) -> u32 {
+        self.node_count
+    }
+    pub fn edge_count(&self) -> u32 {
+        self.edge_count
+    }
 
     /// Cache statistics from the underlying pager.
     pub fn cache_stats(&self) -> (u64, u64) {
@@ -452,13 +498,20 @@ impl GraphAccess for LazyGraphStore {
     }
 
     fn undirected_edges_of(&self, node_id: Id) -> Vec<Id> {
-        self.undirected_adj.get(&node_id).cloned().unwrap_or_default()
+        self.undirected_adj
+            .get(&node_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
 fn cell_bounds(page: &Page, index: u16) -> (usize, usize) {
     let offset = page.cell_offset(index).unwrap() as usize;
-    let end = if index == 0 { PAGE_SIZE } else { page.cell_offset(index - 1).unwrap() as usize };
+    let end = if index == 0 {
+        PAGE_SIZE
+    } else {
+        page.cell_offset(index - 1).unwrap() as usize
+    };
     (offset, end)
 }
 

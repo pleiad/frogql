@@ -136,12 +136,7 @@ impl TripleIndex {
     }
 
     /// Get the number of distinct values at `depth` within [begin, end).
-    pub fn distinct_count(
-        slice: &[IndexEntry],
-        begin: usize,
-        end: usize,
-        depth: usize,
-    ) -> usize {
+    pub fn distinct_count(slice: &[IndexEntry], begin: usize, end: usize, depth: usize) -> usize {
         if begin >= end {
             return 0;
         }
@@ -159,12 +154,7 @@ impl TripleIndex {
     }
 
     /// Collect all distinct values at `depth` within [begin, end).
-    pub fn all_values(
-        slice: &[IndexEntry],
-        begin: usize,
-        end: usize,
-        depth: usize,
-    ) -> Vec<u32> {
+    pub fn all_values(slice: &[IndexEntry], begin: usize, end: usize, depth: usize) -> Vec<u32> {
         if begin >= end {
             return vec![];
         }

@@ -30,7 +30,12 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             // Update peak
             let mut peak = PEAK.load(Ordering::Relaxed);
             while current > peak {
-                match PEAK.compare_exchange_weak(peak, current, Ordering::Relaxed, Ordering::Relaxed) {
+                match PEAK.compare_exchange_weak(
+                    peak,
+                    current,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
                     Ok(_) => break,
                     Err(p) => peak = p,
                 }
@@ -82,25 +87,39 @@ fn fmt_bytes(bytes: usize) -> String {
 /// Simple deterministic pseudo-random (xorshift32) — no external deps needed.
 struct Rng(u32);
 impl Rng {
-    fn new(seed: u32) -> Self { Self(seed) }
+    fn new(seed: u32) -> Self {
+        Self(seed)
+    }
     fn next(&mut self) -> u32 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 17;
         self.0 ^= self.0 << 5;
         self.0
     }
-    fn usize(&mut self, max: usize) -> usize { self.next() as usize % max }
-    fn bool(&mut self, pct: u32) -> bool { self.next() % 100 < pct }
+    fn usize(&mut self, max: usize) -> usize {
+        self.next() as usize % max
+    }
+    fn bool(&mut self, pct: u32) -> bool {
+        self.next() % 100 < pct
+    }
 }
 
-fn generate_graph(num_nodes: usize, num_directed: usize, num_undirected: usize) -> serde_json::Value {
+fn generate_graph(
+    num_nodes: usize,
+    num_directed: usize,
+    num_undirected: usize,
+) -> serde_json::Value {
     let mut rng = Rng::new(42);
 
     // --- Node labels (some nodes get multiple) ---
     let primary_labels = ["Person", "Company", "Account", "Product", "City"];
     let secondary_labels = ["Premium", "Employee", "Verified", "Active", "Featured"];
-    let names = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank", "Grace", "Hank", "Ivy", "Jay"];
-    let cities = ["NYC", "London", "Tokyo", "Berlin", "Sydney", "Toronto", "Seoul", "Paris"];
+    let names = [
+        "Alice", "Bob", "Carol", "Dave", "Eve", "Frank", "Grace", "Hank", "Ivy", "Jay",
+    ];
+    let cities = [
+        "NYC", "London", "Tokyo", "Berlin", "Sydney", "Toronto", "Seoul", "Paris",
+    ];
 
     let mut nodes = Vec::new();
     for i in 0..num_nodes {
@@ -180,7 +199,9 @@ fn generate_graph(num_nodes: usize, num_directed: usize, num_undirected: usize) 
             rng.usize(num_nodes)
         };
         let tgt = rng.usize(num_nodes);
-        if src == tgt { continue; }
+        if src == tgt {
+            continue;
+        }
 
         let label = dir_labels[rng.usize(dir_labels.len())];
         // 15% of edges get a second label
@@ -211,7 +232,9 @@ fn generate_graph(num_nodes: usize, num_directed: usize, num_undirected: usize) 
     for _ in 0..num_undirected {
         let a = rng.usize(num_nodes);
         let b = rng.usize(num_nodes);
-        if a == b { continue; }
+        if a == b {
+            continue;
+        }
 
         let label = undir_labels[rng.usize(undir_labels.len())];
         edges.push(serde_json::json!({
@@ -250,17 +273,17 @@ fn bench_query<G: GraphAccess>(graph: &G, query: &str, label: &str) -> (usize, f
     let elapsed = start.elapsed();
     let ms = elapsed.as_secs_f64() * 1000.0 / iterations as f64;
 
-    println!(
-        "  {:50} {:>8} rows  {:>8.2}ms",
-        label, total_rows, ms
-    );
+    println!("  {:50} {:>8} rows  {:>8.2}ms", label, total_rows, ms);
     (total_rows, ms)
 }
 
 fn bench_compare<G1: GraphAccess, G2: GraphAccess>(
-    g1: &G1, g1_name: &str,
-    g2: &G2, g2_name: &str,
-    query: &str, label: &str,
+    g1: &G1,
+    g1_name: &str,
+    g2: &G2,
+    g2_name: &str,
+    query: &str,
+    label: &str,
 ) {
     let pattern = compile(query).unwrap();
     let iterations = 5;
@@ -270,7 +293,9 @@ fn bench_compare<G1: GraphAccess, G2: GraphAccess>(
     let _ = rt1.run(&pattern);
     let start = Instant::now();
     let mut rows1 = 0;
-    for _ in 0..iterations { rows1 = rt1.run(&pattern).rows.len(); }
+    for _ in 0..iterations {
+        rows1 = rt1.run(&pattern).rows.len();
+    }
     let ms1 = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
 
     // Bench g2
@@ -278,7 +303,9 @@ fn bench_compare<G1: GraphAccess, G2: GraphAccess>(
     let _ = rt2.run(&pattern);
     let start = Instant::now();
     let mut rows2 = 0;
-    for _ in 0..iterations { rows2 = rt2.run(&pattern).rows.len(); }
+    for _ in 0..iterations {
+        rows2 = rt2.run(&pattern).rows.len();
+    }
     let ms2 = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
 
     assert_eq!(rows1, rows2, "result mismatch for '{query}'");
@@ -297,10 +324,16 @@ fn print_graph_stats(graph: &Graph) {
     let uc = ec - dc;
     println!("  Nodes: {}, Directed: {}, Undirected: {}", nc, dc, uc);
 
-    let multi_label = graph.node_labels.iter()
+    let multi_label = graph
+        .node_labels
+        .iter()
         .filter(|lt| !matches!(lt, gqlrust::typing::label_type::LabelType::Label(_)))
         .count();
-    println!("  Multi-label nodes: {} ({:.1}%)", multi_label, 100.0 * multi_label as f64 / nc as f64);
+    println!(
+        "  Multi-label nodes: {} ({:.1}%)",
+        multi_label,
+        100.0 * multi_label as f64 / nc as f64
+    );
 }
 
 fn temp_path(name: &str) -> PathBuf {
@@ -326,13 +359,20 @@ fn bench_medium_graph() {
     let json = generate_graph(10_000, 50_000, 5_000);
     let start = Instant::now();
     let graph = Graph::from_json_value(&json).unwrap();
-    println!("  Load time: {:.1}ms", start.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "  Load time: {:.1}ms",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
     print_graph_stats(&graph);
 
     println!("\n  --- Scans ---");
     bench_query(&graph, "()", "All nodes");
     bench_query(&graph, "(x: Person)", "By label: Person");
-    bench_query(&graph, "(x: Person & Employee)", "Multi-label: Person & Employee");
+    bench_query(
+        &graph,
+        "(x: Person & Employee)",
+        "Multi-label: Person & Employee",
+    );
     bench_query(&graph, "(x: Premium)", "Secondary label: Premium");
     bench_query(&graph, "-[]->", "All directed edges");
     bench_query(&graph, "-[:Transfer]->", "Directed by label: Transfer");
@@ -342,29 +382,59 @@ fn bench_medium_graph() {
     println!("\n  --- Filters ---");
     bench_query(&graph, "(x WHERE x.active = true)", "Filter: active=true");
     bench_query(&graph, "(x WHERE x.age > 50)", "Filter: age > 50");
-    bench_query(&graph, "(x WHERE x.active = true and x.verified = true)", "Filter: active AND verified");
-    bench_query(&graph, "(x: Person WHERE x.age > 30 and x.active = true)", "Label + filter combo");
+    bench_query(
+        &graph,
+        "(x WHERE x.active = true and x.verified = true)",
+        "Filter: active AND verified",
+    );
+    bench_query(
+        &graph,
+        "(x: Person WHERE x.age > 30 and x.active = true)",
+        "Label + filter combo",
+    );
 
     println!("\n  --- 1-hop traversal ---");
-    bench_query(&graph, "(x: Person)-[:Transfer]->(y)", "Person -Transfer-> y");
-    bench_query(&graph, "(x: Person)-[:Follows]->(y: Person)", "Person -Follows-> Person");
-    bench_query(&graph, "(x)-[:Transfer]->(y WHERE y.active = true)", "Transfer to active node");
-    bench_query(&graph, "(x: Company)<-[:Manages]-(y)", "Company <-Manages- y");
+    bench_query(
+        &graph,
+        "(x: Person)-[:Transfer]->(y)",
+        "Person -Transfer-> y",
+    );
+    bench_query(
+        &graph,
+        "(x: Person)-[:Follows]->(y: Person)",
+        "Person -Follows-> Person",
+    );
+    bench_query(
+        &graph,
+        "(x)-[:Transfer]->(y WHERE y.active = true)",
+        "Transfer to active node",
+    );
+    bench_query(
+        &graph,
+        "(x: Company)<-[:Manages]-(y)",
+        "Company <-Manages- y",
+    );
     bench_query(&graph, "(x)~[:FriendOf]~(y)", "Undirected: x ~FriendOf~ y");
 
     println!("\n  --- 2-hop traversal ---");
-    bench_query(&graph,
+    bench_query(
+        &graph,
         "(x: Person)-[:Transfer]->(y)-[:Transfer]->(z)",
-        "Person -Transfer-> y -Transfer-> z");
-    bench_query(&graph,
+        "Person -Transfer-> y -Transfer-> z",
+    );
+    bench_query(
+        &graph,
         "(x: Person)-[:Follows]->(y)-[:Bought]->(z: Product)",
-        "Person -Follows-> y -Bought-> Product");
-    bench_query(&graph,
-        "(x)-[]->(y)-[]->(z)",
-        "Any 2-hop: x -> y -> z");
+        "Person -Follows-> y -Bought-> Product",
+    );
+    bench_query(&graph, "(x)-[]->(y)-[]->(z)", "Any 2-hop: x -> y -> z");
 
     println!("\n  --- Multi-direction ---");
-    bench_query(&graph, "(x: Person)-[:Transfer]->(y)~[:FriendOf]~(z)", "Directed then undirected");
+    bench_query(
+        &graph,
+        "(x: Person)-[:Transfer]->(y)~[:FriendOf]~(z)",
+        "Directed then undirected",
+    );
     bench_query(&graph, "(x)-", "Any direction edge (-)");
 
     println!("\n  --- Repetition ---");
@@ -373,17 +443,28 @@ fn bench_medium_graph() {
     bench_query(&graph, "(-[]->{1,2})", "Any edge repeat {{1,2}}");
 
     println!("\n  --- Union ---");
-    bench_query(&graph, "(x: Person) | (x: Company)", "Union: Person | Company");
-    bench_query(&graph, "(x: Person)-[:Transfer]->(y) | (x: Person)-[:Follows]->(y)",
-        "Union of 1-hop patterns");
+    bench_query(
+        &graph,
+        "(x: Person) | (x: Company)",
+        "Union: Person | Company",
+    );
+    bench_query(
+        &graph,
+        "(x: Person)-[:Transfer]->(y) | (x: Person)-[:Follows]->(y)",
+        "Union of 1-hop patterns",
+    );
 
     println!("\n  --- Complex (cycles, multi-label, property filters) ---");
-    bench_query(&graph,
+    bench_query(
+        &graph,
         "((x: Person)-[:Transfer]->(y) WHERE x.active = true and y.verified = true)",
-        "Active Person transfers to Verified");
-    bench_query(&graph,
+        "Active Person transfers to Verified",
+    );
+    bench_query(
+        &graph,
         "(x: Person & Verified)-[:Transfer]->(y)-[:Transfer]->(z: Account)",
-        "Multi-label source, 2-hop to Account");
+        "Multi-label source, 2-hop to Account",
+    );
 }
 
 #[test]
@@ -395,25 +476,32 @@ fn bench_large_graph() {
     let json = generate_graph(50_000, 250_000, 25_000);
     let start = Instant::now();
     let graph = Graph::from_json_value(&json).unwrap();
-    println!("  Load time: {:.1}ms", start.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "  Load time: {:.1}ms",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
     print_graph_stats(&graph);
 
     println!("\n  --- Key queries at scale ---");
     bench_query(&graph, "(x: Person)", "Scan: Person nodes");
     bench_query(&graph, "-[:Transfer]->", "Scan: Transfer edges");
-    bench_query(&graph, "(x: Person)-[:Transfer]->(y)", "1-hop: Person -Transfer-> y");
-    bench_query(&graph,
+    bench_query(
+        &graph,
+        "(x: Person)-[:Transfer]->(y)",
+        "1-hop: Person -Transfer-> y",
+    );
+    bench_query(
+        &graph,
         "(x: Person)-[:Transfer]->(y)-[:Transfer]->(z)",
-        "2-hop: Transfer chain");
-    bench_query(&graph,
+        "2-hop: Transfer chain",
+    );
+    bench_query(
+        &graph,
         "((x: Person)-[:Transfer]->(y) WHERE x.active = true)",
-        "1-hop + filter");
-    bench_query(&graph,
-        "(-[:Transfer]->){1,2}",
-        "Transfer repeat {{1,2}}");
-    bench_query(&graph,
-        "(x)~[:FriendOf]~(y)",
-        "Undirected: FriendOf");
+        "1-hop + filter",
+    );
+    bench_query(&graph, "(-[:Transfer]->){1,2}", "Transfer repeat {{1,2}}");
+    bench_query(&graph, "(x)~[:FriendOf]~(y)", "Undirected: FriendOf");
 }
 
 #[test]
@@ -449,11 +537,25 @@ fn bench_graph_vs_lazy() {
     print_graph_stats(&g_mem);
     println!("\n  Memory:");
     println!("    Graph:  {}", fmt_bytes(mem_graph));
-    println!("    Lazy:   {} ({:.1}x less)", fmt_bytes(mem_lazy), mem_graph as f64 / mem_lazy.max(1) as f64);
-    println!("    Disk:   {} ({:.1}x less)", fmt_bytes(mem_disk), mem_graph as f64 / mem_disk.max(1) as f64);
+    println!(
+        "    Lazy:   {} ({:.1}x less)",
+        fmt_bytes(mem_lazy),
+        mem_graph as f64 / mem_lazy.max(1) as f64
+    );
+    println!(
+        "    Disk:   {} ({:.1}x less)",
+        fmt_bytes(mem_disk),
+        mem_graph as f64 / mem_disk.max(1) as f64
+    );
 
-    println!("\n  {:35} {:>7}  {:>8}  {:>8}  {:>8}", "Query", "Rows", "Graph", "Lazy", "Disk");
-    println!("  {:35} {:>7}  {:>8}  {:>8}  {:>8}", "-----", "----", "-----", "----", "----");
+    println!(
+        "\n  {:35} {:>7}  {:>8}  {:>8}  {:>8}",
+        "Query", "Rows", "Graph", "Lazy", "Disk"
+    );
+    println!(
+        "  {:35} {:>7}  {:>8}  {:>8}  {:>8}",
+        "-----", "----", "-----", "----", "----"
+    );
 
     let queries: Vec<(&str, &str)> = vec![
         ("()", "All nodes"),
@@ -461,9 +563,15 @@ fn bench_graph_vs_lazy() {
         ("-[:Transfer]->", "Edge: Transfer"),
         ("(x WHERE x.active = true)", "Filter: active=true"),
         ("(x: Person)-[:Transfer]->(y)", "1-hop traversal"),
-        ("(x: Person)-[:Transfer]->(y)-[:Transfer]->(z)", "2-hop chain"),
+        (
+            "(x: Person)-[:Transfer]->(y)-[:Transfer]->(z)",
+            "2-hop chain",
+        ),
         ("(-[:Transfer]->){1,2}", "Repeat {1,2}"),
-        ("((x: Person)-[:Transfer]->(y) WHERE x.active = true and y.active = true)", "Complex"),
+        (
+            "((x: Person)-[:Transfer]->(y) WHERE x.active = true and y.active = true)",
+            "Complex",
+        ),
     ];
 
     for (query, label) in &queries {
@@ -474,23 +582,31 @@ fn bench_graph_vs_lazy() {
         let _ = rt.run(&pattern);
         let start = Instant::now();
         let mut rows = 0;
-        for _ in 0..iters { rows = rt.run(&pattern).rows.len(); }
+        for _ in 0..iters {
+            rows = rt.run(&pattern).rows.len();
+        }
         let ms_graph = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
         let rt = Runtime::new(&g_lazy);
         let _ = rt.run(&pattern);
         let start = Instant::now();
-        for _ in 0..iters { rt.run(&pattern); }
+        for _ in 0..iters {
+            rt.run(&pattern);
+        }
         let ms_lazy = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
         let rt = Runtime::new(&g_disk);
         let _ = rt.run(&pattern);
         let start = Instant::now();
-        for _ in 0..iters { rt.run(&pattern); }
+        for _ in 0..iters {
+            rt.run(&pattern);
+        }
         let ms_disk = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
-        println!("  {:35} {:>7}  {:>6.1}ms  {:>6.1}ms  {:>6.1}ms",
-            label, rows, ms_graph, ms_lazy, ms_disk);
+        println!(
+            "  {:35} {:>7}  {:>6.1}ms  {:>6.1}ms  {:>6.1}ms",
+            label, rows, ms_graph, ms_lazy, ms_disk
+        );
     }
 
     cleanup(&db_path);
@@ -501,8 +617,14 @@ fn bench_memory_scaling() {
     println!("\n============================================================");
     println!("  MEMORY SCALING: Graph vs Lazy vs Disk at different sizes");
     println!("============================================================");
-    println!("  {:>8} {:>8} {:>12} {:>12} {:>12}", "Nodes", "Edges", "Graph", "Lazy", "Disk");
-    println!("  {:>8} {:>8} {:>12} {:>12} {:>12}", "-----", "-----", "-----", "----", "----");
+    println!(
+        "  {:>8} {:>8} {:>12} {:>12} {:>12}",
+        "Nodes", "Edges", "Graph", "Lazy", "Disk"
+    );
+    println!(
+        "  {:>8} {:>8} {:>12} {:>12} {:>12}",
+        "-----", "-----", "-----", "----", "----"
+    );
 
     for &(nodes, edges, undirected) in &[
         (1_000, 5_000, 500),
@@ -537,9 +659,14 @@ fn bench_memory_scaling() {
         let disk_mem = allocated_bytes() - before;
         drop(d);
 
-        println!("  {:>8} {:>8} {:>12} {:>12} {:>12}",
-            nodes, edges + undirected,
-            fmt_bytes(graph_mem), fmt_bytes(lazy_mem), fmt_bytes(disk_mem));
+        println!(
+            "  {:>8} {:>8} {:>12} {:>12} {:>12}",
+            nodes,
+            edges + undirected,
+            fmt_bytes(graph_mem),
+            fmt_bytes(lazy_mem),
+            fmt_bytes(disk_mem)
+        );
 
         cleanup(&db_path);
     }

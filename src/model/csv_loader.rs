@@ -20,7 +20,8 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
     let config: serde_json::Value = serde_json::from_str(&config_str)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    let files = config["files"].as_array()
+    let files = config["files"]
+        .as_array()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing 'files' array"))?;
 
     // First pass: identify node vs edge files
@@ -28,7 +29,8 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
     let mut edge_files = Vec::new();
 
     for file_config in files {
-        let columns = file_config["columns"].as_object()
+        let columns = file_config["columns"]
+            .as_object()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing 'columns'"))?;
         let is_edge = columns.keys().any(|k| k.eq_ignore_ascii_case("SRC_ID"))
             && columns.keys().any(|k| k.eq_ignore_ascii_case("DST_ID"));
@@ -51,7 +53,8 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
         let csv_path = dir.join(csv_name);
         let columns = file_config["columns"].as_object().unwrap();
         let id_col = find_id_column(columns, &label);
-        let prop_cols: Vec<(&str, &str)> = columns.iter()
+        let prop_cols: Vec<(&str, &str)> = columns
+            .iter()
             .filter(|(k, _)| k.as_str() != id_col)
             .map(|(k, v)| (k.as_str(), v.as_str().unwrap_or("STRING")))
             .collect();
@@ -59,7 +62,9 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
         let rows = read_csv(&csv_path)?;
         for row in &rows {
             let vid = get_ci(row, &id_col).unwrap_or_default();
-            if vid.is_empty() { continue; }
+            if vid.is_empty() {
+                continue;
+            }
 
             if let Some(&existing_id) = node_name_to_id.get(&vid) {
                 // Merge label
@@ -90,7 +95,8 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
     let mut edge_directed = Vec::new();
 
     // Collect node type names (labels) for stripping from edge filenames
-    let node_type_names: Vec<String> = node_files.iter()
+    let node_type_names: Vec<String> = node_files
+        .iter()
         .map(|fc| infer_node_label(fc["path"].as_str().unwrap()))
         .collect();
 
@@ -98,12 +104,14 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
         let csv_name = file_config["path"].as_str().unwrap();
         // Use the config's label field if available (strip node types from it),
         // otherwise infer from filename
-        let raw_label = file_config["label"].as_str()
+        let raw_label = file_config["label"]
+            .as_str()
             .unwrap_or(Path::new(csv_name).file_stem().unwrap().to_str().unwrap());
         let label = strip_node_types(raw_label, &node_type_names);
         let csv_path = dir.join(csv_name);
         let columns = file_config["columns"].as_object().unwrap();
-        let prop_cols: Vec<(&str, &str)> = columns.iter()
+        let prop_cols: Vec<(&str, &str)> = columns
+            .iter()
             .filter(|(k, _)| {
                 let kl = k.to_lowercase();
                 kl != "src_id" && kl != "dst_id" && kl != "vid"
@@ -115,8 +123,7 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
         for row in &rows {
             let src_name = get_ci(row, "SRC_ID").unwrap_or_default();
             let dst_name = get_ci(row, "DST_ID").unwrap_or_default();
-            let eid_name = get_ci(row, "vid")
-                .unwrap_or_else(|| format!("e{}", edge_names.len()));
+            let eid_name = get_ci(row, "vid").unwrap_or_else(|| format!("e{}", edge_names.len()));
 
             let src_id = match node_name_to_id.get(&src_name) {
                 Some(&id) => id,
@@ -138,9 +145,15 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
     }
 
     Ok(Graph::from_raw(
-        node_names, node_labels, node_props,
-        edge_names, edge_labels_vec, edge_props_vec,
-        edge_src, edge_tgt, edge_directed,
+        node_names,
+        node_labels,
+        node_props,
+        edge_names,
+        edge_labels_vec,
+        edge_props_vec,
+        edge_src,
+        edge_tgt,
+        edge_directed,
     ))
 }
 
@@ -156,7 +169,9 @@ fn get_ci(row: &HashMap<String, String>, key: &str) -> Option<String> {
 
 /// Find the ID column in a node file. Tries: "vid", "<label>_id" (case-insensitive), first "_id" column, first column.
 fn find_id_column(columns: &serde_json::Map<String, serde_json::Value>, label: &str) -> String {
-    if columns.contains_key("vid") { return "vid".to_string(); }
+    if columns.contains_key("vid") {
+        return "vid".to_string();
+    }
     // Try "<label>_id" case-insensitive
     let label_lower = label.to_lowercase();
     for k in columns.keys() {
@@ -171,11 +186,19 @@ fn find_id_column(columns: &serde_json::Map<String, serde_json::Value>, label: &
         }
     }
     // Fallback: first column
-    columns.keys().next().cloned().unwrap_or_else(|| "vid".to_string())
+    columns
+        .keys()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "vid".to_string())
 }
 
 fn infer_node_label(filename: &str) -> String {
-    Path::new(filename).file_stem().unwrap().to_string_lossy().to_string()
+    Path::new(filename)
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Strip known node type names from a label string.
@@ -196,11 +219,17 @@ fn strip_node_types(raw: &str, node_types: &[String]) -> String {
     // Strip suffix (one pass only)
     for t in &sorted_types {
         if name.ends_with(t.as_str()) {
-            name = name[..name.len() - t.len()].trim_end_matches('_').to_string();
+            name = name[..name.len() - t.len()]
+                .trim_end_matches('_')
+                .to_string();
             break;
         }
     }
-    if name.is_empty() { raw.to_string() } else { name }
+    if name.is_empty() {
+        raw.to_string()
+    } else {
+        name
+    }
 }
 
 /// Parse a STRING-column value, detecting JSON-encoded lists and records.
@@ -210,7 +239,9 @@ fn parse_string_value(raw: &str) -> Value {
     let first = trimmed.chars().next();
     if matches!(first, Some('[') | Some('{')) {
         if let Ok(j) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(v) = json_to_value(&j) { return v; }
+            if let Some(v) = json_to_value(&j) {
+                return v;
+            }
         }
     }
     Value::Str(raw.to_string())
@@ -223,18 +254,26 @@ fn json_to_value(j: &serde_json::Value) -> Option<Value> {
         serde_json::Value::String(s) => Some(Value::Str(s.clone())),
         serde_json::Value::Bool(b) => Some(Value::Bool(*b)),
         serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() { Some(Value::Int(i)) }
-            else if let Some(x) = n.as_f64() { Some(Value::Float(x)) }
-            else { None }
+            if let Some(i) = n.as_i64() {
+                Some(Value::Int(i))
+            } else if let Some(x) = n.as_f64() {
+                Some(Value::Float(x))
+            } else {
+                None
+            }
         }
         serde_json::Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
-            for it in items { out.push(json_to_value(it)?); }
+            for it in items {
+                out.push(json_to_value(it)?);
+            }
             Some(Value::List(out))
         }
         serde_json::Value::Object(m) => {
             let mut out = std::collections::BTreeMap::new();
-            for (k, v) in m { out.insert(k.clone(), json_to_value(v)?); }
+            for (k, v) in m {
+                out.insert(k.clone(), json_to_value(v)?);
+            }
             Some(Value::Record(out))
         }
         serde_json::Value::Null => None,
@@ -246,7 +285,9 @@ fn extract_props(row: &HashMap<String, String>, prop_cols: &[(&str, &str)]) -> P
     for &(col_name, col_type) in prop_cols {
         if let Some(val) = get_ci(row, col_name) {
             let val = &val;
-            if val.is_empty() { continue; }
+            if val.is_empty() {
+                continue;
+            }
             let converted = match col_type {
                 "INT64" => val.parse::<i64>().ok().map(Value::Int),
                 "FLOAT64" | "DOUBLE" | "FLOAT" => val.parse::<f64>().ok().map(Value::Float),
@@ -270,14 +311,17 @@ fn read_csv(path: &Path) -> io::Result<Vec<HashMap<String, String>>> {
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
 
-    let header_line = lines.next()
+    let header_line = lines
+        .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty CSV"))??;
     let headers: Vec<String> = parse_csv_line(&header_line);
 
     let mut rows = Vec::new();
     for line in lines {
         let line = line?;
-        if line.trim().is_empty() { continue; }
+        if line.trim().is_empty() {
+            continue;
+        }
         let values = parse_csv_line(&line);
         let mut row = HashMap::new();
         for (i, h) in headers.iter().enumerate() {

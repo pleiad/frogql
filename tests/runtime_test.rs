@@ -298,10 +298,7 @@ fn test_concat_any_right() {
     let g = fraud_graph();
     let r = Runtime::new(&g);
     // "-" = EdgeAnyDirection(None)
-    assert_eq!(
-        r.run(&PathPattern::EdgeAnyDirection(None)).rows.len(),
-        10
-    );
+    assert_eq!(r.run(&PathPattern::EdgeAnyDirection(None)).rows.len(), 10);
 }
 
 // test_repetition: -->{1,2} parses as Concat(EdgeAnyDirection, Repeat(EdgeRight, 1, 2))
@@ -566,8 +563,9 @@ fn test_query_match_where_return() {
     let g = fraud_graph();
     let r = Runtime::new(&g);
     let q = gqlrust::compile_query(
-        "MATCH (x: Account) -[:Transfer]-> (y) WHERE x.owner = 'Jay' RETURN y.owner"
-    ).unwrap();
+        "MATCH (x: Account) -[:Transfer]-> (y) WHERE x.owner = 'Jay' RETURN y.owner",
+    )
+    .unwrap();
     let result = r.run_query(&q, 0);
     // Jay (p1) has one Transfer out: t1 → p2 (Mike)
     assert_eq!(result.row_count(), 1);
@@ -584,9 +582,7 @@ fn test_query_return_distinct() {
     let g = fraud_graph();
     let r = Runtime::new(&g);
     // All outgoing Transfer targets — some nodes might appear multiple times
-    let q = gqlrust::compile_query(
-        "MATCH (x) -[:Transfer]-> (y) RETURN DISTINCT y.owner"
-    ).unwrap();
+    let q = gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN DISTINCT y.owner").unwrap();
     let result = r.run_query(&q, 0);
     match result {
         gqlrust::runtime::result::QueryResult::Projected(rows) => {
@@ -624,8 +620,11 @@ fn test_repetition_groups_as_list() {
     assert!(!result.rows.is_empty());
     for row in &result.rows {
         let x = row.assignment.get("x").expect("x should be bound");
-        assert!(matches!(x, gqlrust::model::value::PathValue::Group(_)),
-            "x should be a List, got {:?}", x);
+        assert!(
+            matches!(x, gqlrust::model::value::PathValue::Group(_)),
+            "x should be a List, got {:?}",
+            x
+        );
     }
 }
 
@@ -657,8 +656,11 @@ fn test_repetition_nested_list() {
         match row.assignment.get("x").unwrap() {
             gqlrust::model::value::PathValue::Group(outer) => {
                 for item in outer {
-                    assert!(matches!(item, gqlrust::model::value::PathValue::Group(_)),
-                        "inner items should be Lists, got {:?}", item);
+                    assert!(
+                        matches!(item, gqlrust::model::value::PathValue::Group(_)),
+                        "inner items should be Lists, got {:?}",
+                        item
+                    );
                 }
             }
             other => panic!("expected List of Lists, got {:?}", other),

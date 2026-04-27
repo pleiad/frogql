@@ -147,9 +147,7 @@ fn merge_constraints(
     constraints: &HashMap<String, Vec<(String, SimpleType)>>,
 ) -> PathPattern {
     match p {
-        PathPattern::Node(desc) => {
-            PathPattern::Node(merge_into_descriptor(desc, constraints))
-        }
+        PathPattern::Node(desc) => PathPattern::Node(merge_into_descriptor(desc, constraints)),
         PathPattern::EdgeRight(desc) => {
             PathPattern::EdgeRight(merge_into_descriptor(desc, constraints))
         }

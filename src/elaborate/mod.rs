@@ -14,11 +14,11 @@
 
 use std::cell::Cell;
 
+use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::Query;
-use crate::model::value::Value;
 
 pub fn elaborate_query(q: Query) -> Query {
     let fresh = FreshVars::new(&q);
@@ -29,10 +29,18 @@ pub fn elaborate_query(q: Query) -> Query {
 pub fn elaborate_pattern(p: PathPattern, fresh: &FreshVars) -> PathPattern {
     match p {
         PathPattern::Node(desc_opt) => lower_node_or_edge(desc_opt, PathPattern::Node, fresh),
-        PathPattern::EdgeRight(desc_opt) => lower_node_or_edge(desc_opt, PathPattern::EdgeRight, fresh),
-        PathPattern::EdgeLeft(desc_opt) => lower_node_or_edge(desc_opt, PathPattern::EdgeLeft, fresh),
-        PathPattern::EdgeUndirected(desc_opt) => lower_node_or_edge(desc_opt, PathPattern::EdgeUndirected, fresh),
-        PathPattern::EdgeAnyDirection(desc_opt) => lower_node_or_edge(desc_opt, PathPattern::EdgeAnyDirection, fresh),
+        PathPattern::EdgeRight(desc_opt) => {
+            lower_node_or_edge(desc_opt, PathPattern::EdgeRight, fresh)
+        }
+        PathPattern::EdgeLeft(desc_opt) => {
+            lower_node_or_edge(desc_opt, PathPattern::EdgeLeft, fresh)
+        }
+        PathPattern::EdgeUndirected(desc_opt) => {
+            lower_node_or_edge(desc_opt, PathPattern::EdgeUndirected, fresh)
+        }
+        PathPattern::EdgeAnyDirection(desc_opt) => {
+            lower_node_or_edge(desc_opt, PathPattern::EdgeAnyDirection, fresh)
+        }
         PathPattern::Concat(p1, p2) => PathPattern::Concat(
             Box::new(elaborate_pattern(*p1, fresh)),
             Box::new(elaborate_pattern(*p2, fresh)),
@@ -51,18 +59,16 @@ pub fn elaborate_pattern(p: PathPattern, fresh: &FreshVars) -> PathPattern {
             lb,
             ub,
         },
-        PathPattern::Questioned(p) => PathPattern::Questioned(Box::new(elaborate_pattern(*p, fresh))),
+        PathPattern::Questioned(p) => {
+            PathPattern::Questioned(Box::new(elaborate_pattern(*p, fresh)))
+        }
     }
 }
 
 /// If the descriptor carries value filters, hoist them: assign a fresh variable
 /// if needed, clear the filter list, wrap the pattern in a `Filter` node
 /// containing `var.attr = expr AND ...`.
-fn lower_node_or_edge<F>(
-    desc_opt: Option<Descriptor>,
-    ctor: F,
-    fresh: &FreshVars,
-) -> PathPattern
+fn lower_node_or_edge<F>(desc_opt: Option<Descriptor>, ctor: F, fresh: &FreshVars) -> PathPattern
 where
     F: FnOnce(Option<Descriptor>) -> PathPattern,
 {
@@ -145,7 +151,9 @@ fn collect_vars(p: &PathPattern) -> std::collections::HashSet<String> {
 
 fn visit(p: &PathPattern, set: &mut std::collections::HashSet<String>) {
     let push_desc = |d: &Descriptor, set: &mut std::collections::HashSet<String>| {
-        if let Some(v) = &d.var { set.insert(v.clone()); }
+        if let Some(v) = &d.var {
+            set.insert(v.clone());
+        }
     };
     match p {
         PathPattern::Node(Some(d))
@@ -158,11 +166,14 @@ fn visit(p: &PathPattern, set: &mut std::collections::HashSet<String>) {
         | PathPattern::EdgeLeft(None)
         | PathPattern::EdgeUndirected(None)
         | PathPattern::EdgeAnyDirection(None) => {}
-        PathPattern::Concat(p1, p2)
-        | PathPattern::Union(p1, p2)
-        | PathPattern::Join(p1, p2) => { visit(p1, set); visit(p2, set); }
+        PathPattern::Concat(p1, p2) | PathPattern::Union(p1, p2) | PathPattern::Join(p1, p2) => {
+            visit(p1, set);
+            visit(p2, set);
+        }
         PathPattern::Filter(p, _) => visit(p, set),
-        PathPattern::Repeat { pattern, .. } | PathPattern::Questioned(pattern) => visit(pattern, set),
+        PathPattern::Repeat { pattern, .. } | PathPattern::Questioned(pattern) => {
+            visit(pattern, set)
+        }
     }
 }
 

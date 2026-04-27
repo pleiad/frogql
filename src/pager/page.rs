@@ -147,8 +147,7 @@ impl Page {
 
         // Allocate space in the cell area (growing down from the end)
         let new_cell_start = self.cell_area_start() as usize - cell_data.len();
-        self.data[new_cell_start..new_cell_start + cell_data.len()]
-            .copy_from_slice(cell_data);
+        self.data[new_cell_start..new_cell_start + cell_data.len()].copy_from_slice(cell_data);
         self.set_cell_area_start(new_cell_start as u16);
 
         // Write the cell pointer at the end of the pointer array
@@ -170,7 +169,10 @@ impl Page {
             return None;
         }
         let ptr_pos = PAGE_HEADER_SIZE + index as usize * CELL_PTR_SIZE;
-        Some(u16::from_le_bytes([self.data[ptr_pos], self.data[ptr_pos + 1]]))
+        Some(u16::from_le_bytes([
+            self.data[ptr_pos],
+            self.data[ptr_pos + 1],
+        ]))
     }
 
     /// Read `len` bytes starting at `offset` within the page.

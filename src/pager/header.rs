@@ -40,7 +40,7 @@ pub struct FileHeader {
     pub string_table_root: u32,
     pub node_data_first: u32,
     pub edge_data_first: u32,
-    pub label_index_root: u32,   // node labels
+    pub label_index_root: u32, // node labels
     pub adjacency_root: u32,
     pub edge_label_index_root: u32,
     /// Root page for node record locations index (0 = not present, legacy file).

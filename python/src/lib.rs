@@ -20,13 +20,22 @@ struct Connection {
 #[pymethods]
 impl Connection {
     #[getter]
-    fn node_count(&self) -> u32 { self.store.node_count() }
+    fn node_count(&self) -> u32 {
+        self.store.node_count()
+    }
 
     #[getter]
-    fn edge_count(&self) -> u32 { self.store.edge_count() }
+    fn edge_count(&self) -> u32 {
+        self.store.edge_count()
+    }
 
     #[pyo3(signature = (query, limit = 100))]
-    fn execute<'py>(&self, py: Python<'py>, query: &str, limit: usize) -> PyResult<Bound<'py, PyList>> {
+    fn execute<'py>(
+        &self,
+        py: Python<'py>,
+        query: &str,
+        limit: usize,
+    ) -> PyResult<Bound<'py, PyList>> {
         let q = gqlrust::compile_query(query)
             .map_err(|e| PyValueError::new_err(format!("parse error: {e}")))?;
 
@@ -35,11 +44,17 @@ impl Connection {
 
         match result {
             QueryResult::Projected(rows) => {
-                let headers: Vec<String> = q.returns.as_ref().map(|items| {
-                    items.iter().enumerate().map(|(i, it)| {
-                        it.alias.clone().unwrap_or_else(|| format!("col{i}"))
-                    }).collect()
-                }).unwrap_or_default();
+                let headers: Vec<String> = q
+                    .returns
+                    .as_ref()
+                    .map(|items| {
+                        items
+                            .iter()
+                            .enumerate()
+                            .map(|(i, it)| it.alias.clone().unwrap_or_else(|| format!("col{i}")))
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
                 let out = PyList::empty_bound(py);
                 for row in rows {
@@ -79,8 +94,11 @@ impl Connection {
     }
 
     fn __repr__(&self) -> String {
-        format!("<gqlite.Connection nodes={} edges={}>",
-            self.store.node_count(), self.store.edge_count())
+        format!(
+            "<gqlite.Connection nodes={} edges={}>",
+            self.store.node_count(),
+            self.store.edge_count()
+        )
     }
 }
 
@@ -117,12 +135,16 @@ fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<PyObject> {
         Value::Bool(b) => b.into_py(py),
         Value::List(items) => {
             let lst = PyList::empty_bound(py);
-            for it in items { lst.append(value_to_py(py, it)?)?; }
+            for it in items {
+                lst.append(value_to_py(py, it)?)?;
+            }
             lst.into_py(py)
         }
         Value::Record(fields) => {
             let d = PyDict::new_bound(py);
-            for (k, v) in fields { d.set_item(k, value_to_py(py, v)?)?; }
+            for (k, v) in fields {
+                d.set_item(k, value_to_py(py, v)?)?;
+            }
             d.into_py(py)
         }
     })
@@ -154,11 +176,17 @@ fn pathvalue_to_py<'py>(
             let d = PyDict::new_bound(py);
             d.set_item("kind", "node")?;
             d.set_item("id", *id)?;
-            let labels: Vec<String> = store.node_labels(*id).required_labels()
-                .into_iter().map(|s| s.to_string()).collect();
+            let labels: Vec<String> = store
+                .node_labels(*id)
+                .required_labels()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
             d.set_item("labels", labels)?;
             let props = PyDict::new_bound(py);
-            for (k, v) in store.node_props(*id).iter() { props.set_item(k, value_to_py(py, v)?)?; }
+            for (k, v) in store.node_props(*id).iter() {
+                props.set_item(k, value_to_py(py, v)?)?;
+            }
             d.set_item("props", props)?;
             d.into_py(py)
         }
@@ -166,15 +194,21 @@ fn pathvalue_to_py<'py>(
             let d = PyDict::new_bound(py);
             d.set_item("kind", "edge")?;
             d.set_item("id", *id)?;
-            let labels: Vec<String> = store.edge_labels(*id).required_labels()
-                .into_iter().map(|s| s.to_string()).collect();
+            let labels: Vec<String> = store
+                .edge_labels(*id)
+                .required_labels()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
             d.set_item("labels", labels)?;
             d.into_py(py)
         }
         PathValue::Nothing => py.None(),
         PathValue::Group(items) => {
             let lst = PyList::empty_bound(py);
-            for it in items { lst.append(pathvalue_to_py(py, store, it)?)?; }
+            for it in items {
+                lst.append(pathvalue_to_py(py, store, it)?)?;
+            }
             lst.into_py(py)
         }
     })

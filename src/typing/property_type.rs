@@ -57,8 +57,7 @@ impl PropertyType {
             }
             // Both open
             (PropertyType::Open(ma), PropertyType::Open(mb)) => {
-                let all_keys: BTreeSet<_> =
-                    ma.keys().chain(mb.keys()).cloned().collect();
+                let all_keys: BTreeSet<_> = ma.keys().chain(mb.keys()).cloned().collect();
                 let m = all_keys
                     .into_iter()
                     .map(|k| {
@@ -104,8 +103,11 @@ impl PropertyType {
     pub fn is_subtype(t1: &PropertyType, t2: &PropertyType) -> bool {
         match (t1, t2) {
             (PropertyType::Open(m1), PropertyType::Open(m2)) => {
-                let shared: BTreeSet<_> = m1.keys().filter(|k| m2.contains_key(*k)).cloned().collect();
-                shared.iter().all(|k| SimpleType::is_subtype(&m1[k], &m2[k]))
+                let shared: BTreeSet<_> =
+                    m1.keys().filter(|k| m2.contains_key(*k)).cloned().collect();
+                shared
+                    .iter()
+                    .all(|k| SimpleType::is_subtype(&m1[k], &m2[k]))
             }
             (PropertyType::Closed(m1), PropertyType::Closed(m2)) => {
                 let k1: BTreeSet<_> = m1.keys().cloned().collect();

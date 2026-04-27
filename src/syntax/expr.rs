@@ -23,7 +23,11 @@ pub enum BinOp {
 
 impl BinOp {
     /// Returns (expected_left_type, expected_right_type, result_type) for the operator.
-    pub fn delta(&self, ty1: &SimpleType, ty2: &SimpleType) -> (SimpleType, SimpleType, SimpleType) {
+    pub fn delta(
+        &self,
+        ty1: &SimpleType,
+        ty2: &SimpleType,
+    ) -> (SimpleType, SimpleType, SimpleType) {
         // Arithmetic and ordering accept either int or float; the runtime widens mixed
         // Int/Float operands to f64 in `eval_binop`.
         let num = SimpleType::Union(Box::new(SimpleType::Z), Box::new(SimpleType::F));
@@ -117,12 +121,25 @@ impl fmt::Display for UnOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Const(Value),
-    AttrLookup { var: String, attr: String },
+    AttrLookup {
+        var: String,
+        attr: String,
+    },
     /// Field access on a value (e.g. after an attribute lookup returns a Record):
     /// `x.addr.street` parses as `FieldAccess { base: AttrLookup { x, addr }, field: street }`.
-    FieldAccess { base: Box<Expr>, field: String },
-    Binop { op: BinOp, left: Box<Expr>, right: Box<Expr> },
-    Unop { op: UnOp, operand: Box<Expr> },
+    FieldAccess {
+        base: Box<Expr>,
+        field: String,
+    },
+    Binop {
+        op: BinOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Unop {
+        op: UnOp,
+        operand: Box<Expr>,
+    },
     /// Right-hand side of `is`/`as` operators — a type, not a value.
     Type(SimpleType),
 }
@@ -141,7 +158,9 @@ impl Expr {
             (Value::Record(v_fields), SimpleType::Record(t_fields)) => {
                 v_fields.len() == t_fields.len()
                     && v_fields.iter().all(|(k, v)| {
-                        t_fields.get(k).map_or(false, |ty| Expr::value_is_type(v, ty))
+                        t_fields
+                            .get(k)
+                            .map_or(false, |ty| Expr::value_is_type(v, ty))
                     })
             }
             (_, SimpleType::Star) => true,

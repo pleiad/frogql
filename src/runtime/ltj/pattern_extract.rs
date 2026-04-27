@@ -89,7 +89,11 @@ pub fn try_ltj<G: GraphAccess>(
             let v_id = v as u8;
             let iters = &var_to_iterators[v];
             let is_lonely = iters.len() <= 1;
-            let weight = if iters.is_empty() { usize::MAX } else { index.len() };
+            let weight = if iters.is_empty() {
+                usize::MAX
+            } else {
+                index.len()
+            };
             (v_id, weight, is_lonely)
         })
         .collect();
@@ -116,8 +120,12 @@ pub fn try_ltj<G: GraphAccess>(
 
     // Run LTJ
     let algorithm = LtjAlgorithm::new(
-        iterators, var_to_iterators, var_to_positions,
-        Box::new(veo), filters_at_level, num_vars,
+        iterators,
+        var_to_iterators,
+        var_to_positions,
+        Box::new(veo),
+        filters_at_level,
+        num_vars,
     );
 
     let mut runner = LtjRunner::new(algorithm, graph);
@@ -139,9 +147,7 @@ fn flatten_concat<'a>(p: &'a PathPattern, out: &mut Vec<FlatElement<'a>>) -> boo
             out.push(FlatElement::EdgeRight(d.as_ref()));
             true
         }
-        PathPattern::Concat(p1, p2) => {
-            flatten_concat(p1, out) && flatten_concat(p2, out)
-        }
+        PathPattern::Concat(p1, p2) => flatten_concat(p1, out) && flatten_concat(p2, out),
         _ => false, // Not decomposable
     }
 }
@@ -159,8 +165,15 @@ fn decompose(pattern: &PathPattern, index: &TripleIndex) -> Option<Decomposition
     let mut join_boundaries = Vec::new();
 
     let _last_var = decompose_pattern_top(
-        pattern, index, &mut triples, &mut var_name_to_id, &mut var_id_to_name,
-        &mut filters, &mut internal_vars, &mut triple_info, &mut fresh_counter,
+        pattern,
+        index,
+        &mut triples,
+        &mut var_name_to_id,
+        &mut var_id_to_name,
+        &mut filters,
+        &mut internal_vars,
+        &mut triple_info,
+        &mut fresh_counter,
         &mut join_boundaries,
     )?;
 
@@ -169,7 +182,12 @@ fn decompose(pattern: &PathPattern, index: &TripleIndex) -> Option<Decomposition
     }
 
     Some(Decomposition {
-        triples, var_id_to_name, filters, internal_vars, triple_info, join_boundaries,
+        triples,
+        var_id_to_name,
+        filters,
+        internal_vars,
+        triple_info,
+        join_boundaries,
     })
 }
 
@@ -189,14 +207,36 @@ fn decompose_pattern_top(
     match pattern {
         PathPattern::Join(p1, p2) => {
             let start1 = triples.len();
-            decompose_pattern_top(p1, index, triples, names, id_to_name, filters, internal, triple_info, fresh, join_boundaries)?;
+            decompose_pattern_top(
+                p1,
+                index,
+                triples,
+                names,
+                id_to_name,
+                filters,
+                internal,
+                triple_info,
+                fresh,
+                join_boundaries,
+            )?;
             // If p1 was not itself a join, record its boundary
             if join_boundaries.is_empty() || join_boundaries.last().unwrap().1 != triples.len() {
                 join_boundaries.push((start1, triples.len()));
             }
 
             let start2 = triples.len();
-            let result = decompose_pattern_top(p2, index, triples, names, id_to_name, filters, internal, triple_info, fresh, join_boundaries)?;
+            let result = decompose_pattern_top(
+                p2,
+                index,
+                triples,
+                names,
+                id_to_name,
+                filters,
+                internal,
+                triple_info,
+                fresh,
+                join_boundaries,
+            )?;
             // If p2 was not itself a join, record its boundary
             if join_boundaries.last().unwrap().1 != triples.len() {
                 join_boundaries.push((start2, triples.len()));
@@ -204,7 +244,17 @@ fn decompose_pattern_top(
 
             Some(result)
         }
-        _ => decompose_pattern(pattern, index, triples, names, id_to_name, filters, internal, triple_info, fresh),
+        _ => decompose_pattern(
+            pattern,
+            index,
+            triples,
+            names,
+            id_to_name,
+            filters,
+            internal,
+            triple_info,
+            fresh,
+        ),
     }
 }
 
@@ -222,8 +272,28 @@ fn decompose_pattern(
     match pattern {
         PathPattern::Join(p1, p2) => {
             // Join at non-top level: decompose both sides without boundary tracking
-            decompose_pattern(p1, index, triples, names, id_to_name, filters, internal, triple_info, fresh)?;
-            decompose_pattern(p2, index, triples, names, id_to_name, filters, internal, triple_info, fresh)
+            decompose_pattern(
+                p1,
+                index,
+                triples,
+                names,
+                id_to_name,
+                filters,
+                internal,
+                triple_info,
+                fresh,
+            )?;
+            decompose_pattern(
+                p2,
+                index,
+                triples,
+                names,
+                id_to_name,
+                filters,
+                internal,
+                triple_info,
+                fresh,
+            )
         }
 
         PathPattern::Concat(_, _) => {
@@ -232,17 +302,42 @@ fn decompose_pattern(
             if !flatten_concat(pattern, &mut elems) {
                 return None;
             }
-            decompose_flat_chain(&elems, index, triples, names, id_to_name, filters, internal, triple_info, fresh)
+            decompose_flat_chain(
+                &elems,
+                index,
+                triples,
+                names,
+                id_to_name,
+                filters,
+                internal,
+                triple_info,
+                fresh,
+            )
         }
 
         PathPattern::Node(desc) => {
             // Standalone node — no triple, just return the var
-            Some(node_var(desc.as_ref(), names, id_to_name, filters, internal, fresh))
+            Some(node_var(
+                desc.as_ref(),
+                names,
+                id_to_name,
+                filters,
+                internal,
+                fresh,
+            ))
         }
 
-        PathPattern::Filter(inner, _expr) => {
-            decompose_pattern(inner, index, triples, names, id_to_name, filters, internal, triple_info, fresh)
-        }
+        PathPattern::Filter(inner, _expr) => decompose_pattern(
+            inner,
+            index,
+            triples,
+            names,
+            id_to_name,
+            filters,
+            internal,
+            triple_info,
+            fresh,
+        ),
 
         _ => None,
     }
@@ -306,7 +401,11 @@ fn decompose_flat_chain(
         };
 
         triples.push(TriplePattern {
-            terms: [Term::Variable(current_node), p_term, Term::Variable(tgt_var)],
+            terms: [
+                Term::Variable(current_node),
+                p_term,
+                Term::Variable(tgt_var),
+            ],
         });
         triple_info.push((current_node, tgt_var, edge_var_name));
 
@@ -338,7 +437,11 @@ fn decompose_flat_chain(
             };
 
             triples.push(TriplePattern {
-                terms: [Term::Variable(current_node), p_term, Term::Variable(tgt_var)],
+                terms: [
+                    Term::Variable(current_node),
+                    p_term,
+                    Term::Variable(tgt_var),
+                ],
             });
             triple_info.push((current_node, tgt_var, edge_var_name));
             current_node = tgt_var;

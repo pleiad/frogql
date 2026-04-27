@@ -58,8 +58,10 @@ pub fn read_u32_chain(pager: &mut Pager, first_page: u32) -> io::Result<Vec<u32>
         for i in 0..count {
             let offset = IDX_HEADER + i * 4;
             let val = u32::from_le_bytes([
-                page.data[offset], page.data[offset+1],
-                page.data[offset+2], page.data[offset+3],
+                page.data[offset],
+                page.data[offset + 1],
+                page.data[offset + 2],
+                page.data[offset + 3],
             ]);
             result.push(val);
         }
@@ -98,14 +100,18 @@ pub fn read_triple_chain(pager: &mut Pager, first_page: u32) -> io::Result<Vec<(
         for i in 0..count {
             let offset = IDX_HEADER + i * 9; // 4 + 4 + 1 = 9 bytes per triple
             let edge_id = u32::from_le_bytes([
-                page.data[offset], page.data[offset+1],
-                page.data[offset+2], page.data[offset+3],
+                page.data[offset],
+                page.data[offset + 1],
+                page.data[offset + 2],
+                page.data[offset + 3],
             ]);
             let other_id = u32::from_le_bytes([
-                page.data[offset+4], page.data[offset+5],
-                page.data[offset+6], page.data[offset+7],
+                page.data[offset + 4],
+                page.data[offset + 5],
+                page.data[offset + 6],
+                page.data[offset + 7],
             ]);
-            let kind = page.data[offset+8];
+            let kind = page.data[offset + 8];
             result.push((edge_id, other_id, kind));
         }
         current = next;
@@ -139,7 +145,7 @@ pub fn write_u32_list(pager: &mut Pager, values: &[u32]) -> io::Result<u32> {
         let mut page = make_index_page(chunk.len() as u16, next);
         for (i, &val) in chunk.iter().enumerate() {
             let offset = IDX_HEADER + i * 4;
-            page.data[offset..offset+4].copy_from_slice(&val.to_le_bytes());
+            page.data[offset..offset + 4].copy_from_slice(&val.to_le_bytes());
         }
         pager.write_page(pg, &page)?;
         next = pg;
@@ -164,8 +170,8 @@ fn write_pair_list(pager: &mut Pager, pairs: &[(u32, u32)]) -> io::Result<u32> {
         let mut page = make_index_page(chunk.len() as u16, next);
         for (i, (a, b)) in chunk.iter().enumerate() {
             let offset = IDX_HEADER + i * 8;
-            page.data[offset..offset+4].copy_from_slice(&a.to_le_bytes());
-            page.data[offset+4..offset+8].copy_from_slice(&b.to_le_bytes());
+            page.data[offset..offset + 4].copy_from_slice(&a.to_le_bytes());
+            page.data[offset + 4..offset + 8].copy_from_slice(&b.to_le_bytes());
         }
         pager.write_page(pg, &page)?;
         next = pg;
@@ -190,9 +196,9 @@ fn write_triple_list(pager: &mut Pager, triples: &[(u32, u32, u8)]) -> io::Resul
         let mut page = make_index_page(chunk.len() as u16, next);
         for (i, (a, b, c)) in chunk.iter().enumerate() {
             let offset = IDX_HEADER + i * 9;
-            page.data[offset..offset+4].copy_from_slice(&a.to_le_bytes());
-            page.data[offset+4..offset+8].copy_from_slice(&b.to_le_bytes());
-            page.data[offset+8] = *c;
+            page.data[offset..offset + 4].copy_from_slice(&a.to_le_bytes());
+            page.data[offset + 4..offset + 8].copy_from_slice(&b.to_le_bytes());
+            page.data[offset + 8] = *c;
         }
         pager.write_page(pg, &page)?;
         next = pg;
@@ -211,12 +217,16 @@ fn read_pair_list(pager: &mut Pager, first_page: u32) -> io::Result<Vec<(u32, u3
         for i in 0..count {
             let offset = IDX_HEADER + i * 8;
             let a = u32::from_le_bytes([
-                page.data[offset], page.data[offset+1],
-                page.data[offset+2], page.data[offset+3],
+                page.data[offset],
+                page.data[offset + 1],
+                page.data[offset + 2],
+                page.data[offset + 3],
             ]);
             let b = u32::from_le_bytes([
-                page.data[offset+4], page.data[offset+5],
-                page.data[offset+6], page.data[offset+7],
+                page.data[offset + 4],
+                page.data[offset + 5],
+                page.data[offset + 6],
+                page.data[offset + 7],
             ]);
             result.push((a, b));
         }
@@ -250,8 +260,8 @@ pub fn write_node_locs(pager: &mut Pager, locs: &[(u32, u16)]) -> io::Result<u32
         let mut page = make_index_page(chunk.len() as u16, next);
         for (i, (page_num, cell_idx)) in chunk.iter().enumerate() {
             let offset = IDX_HEADER + i * LOC_ENTRY_SIZE;
-            page.data[offset..offset+4].copy_from_slice(&page_num.to_le_bytes());
-            page.data[offset+4..offset+6].copy_from_slice(&cell_idx.to_le_bytes());
+            page.data[offset..offset + 4].copy_from_slice(&page_num.to_le_bytes());
+            page.data[offset + 4..offset + 6].copy_from_slice(&cell_idx.to_le_bytes());
         }
         pager.write_page(pg, &page)?;
         next = pg;
@@ -271,12 +281,12 @@ pub fn read_node_locs(pager: &mut Pager, first_page: u32) -> io::Result<Vec<(u32
         for i in 0..count {
             let offset = IDX_HEADER + i * LOC_ENTRY_SIZE;
             let page_num = u32::from_le_bytes([
-                page.data[offset], page.data[offset+1],
-                page.data[offset+2], page.data[offset+3],
+                page.data[offset],
+                page.data[offset + 1],
+                page.data[offset + 2],
+                page.data[offset + 3],
             ]);
-            let cell_idx = u16::from_le_bytes([
-                page.data[offset+4], page.data[offset+5],
-            ]);
+            let cell_idx = u16::from_le_bytes([page.data[offset + 4], page.data[offset + 5]]);
             result.push((page_num, cell_idx));
         }
         current = next;
@@ -324,17 +334,21 @@ pub fn write_edge_topo(
     for (chunk_i, &pg) in page_nums.iter().enumerate() {
         let chunk_end = (idx + MAX_EDGE_TOPO_PER_PAGE).min(n);
         let chunk_count = chunk_end - idx;
-        let next = if chunk_i + 1 < page_nums.len() { page_nums[chunk_i + 1] } else { 0 };
+        let next = if chunk_i + 1 < page_nums.len() {
+            page_nums[chunk_i + 1]
+        } else {
+            0
+        };
         let mut page = make_index_page(chunk_count as u16, next);
 
         for i in 0..chunk_count {
             let offset = IDX_HEADER + i * EDGE_TOPO_ENTRY_SIZE;
             let ei = idx + i;
-            page.data[offset..offset+4].copy_from_slice(&locs[ei].0.to_le_bytes());
-            page.data[offset+4..offset+6].copy_from_slice(&locs[ei].1.to_le_bytes());
-            page.data[offset+6..offset+10].copy_from_slice(&src[ei].to_le_bytes());
-            page.data[offset+10..offset+14].copy_from_slice(&tgt[ei].to_le_bytes());
-            page.data[offset+14] = if directed[ei] { 1 } else { 0 };
+            page.data[offset..offset + 4].copy_from_slice(&locs[ei].0.to_le_bytes());
+            page.data[offset + 4..offset + 6].copy_from_slice(&locs[ei].1.to_le_bytes());
+            page.data[offset + 6..offset + 10].copy_from_slice(&src[ei].to_le_bytes());
+            page.data[offset + 10..offset + 14].copy_from_slice(&tgt[ei].to_le_bytes());
+            page.data[offset + 14] = if directed[ei] { 1 } else { 0 };
         }
 
         pager.write_page(pg, &page)?;
@@ -346,7 +360,10 @@ pub fn write_edge_topo(
 
 /// Read edge topology from a page chain.
 /// Returns (locs, src, tgt, directed).
-pub fn read_edge_topo(pager: &mut Pager, first_page: u32) -> io::Result<(Vec<(u32, u16)>, Vec<u32>, Vec<u32>, Vec<bool>)> {
+pub fn read_edge_topo(
+    pager: &mut Pager,
+    first_page: u32,
+) -> io::Result<(Vec<(u32, u16)>, Vec<u32>, Vec<u32>, Vec<bool>)> {
     let mut locs = Vec::new();
     let mut src = Vec::new();
     let mut tgt = Vec::new();
@@ -359,21 +376,25 @@ pub fn read_edge_topo(pager: &mut Pager, first_page: u32) -> io::Result<(Vec<(u3
         for i in 0..count {
             let offset = IDX_HEADER + i * EDGE_TOPO_ENTRY_SIZE;
             let page_num = u32::from_le_bytes([
-                page.data[offset], page.data[offset+1],
-                page.data[offset+2], page.data[offset+3],
+                page.data[offset],
+                page.data[offset + 1],
+                page.data[offset + 2],
+                page.data[offset + 3],
             ]);
-            let cell_idx = u16::from_le_bytes([
-                page.data[offset+4], page.data[offset+5],
-            ]);
+            let cell_idx = u16::from_le_bytes([page.data[offset + 4], page.data[offset + 5]]);
             let s = u32::from_le_bytes([
-                page.data[offset+6], page.data[offset+7],
-                page.data[offset+8], page.data[offset+9],
+                page.data[offset + 6],
+                page.data[offset + 7],
+                page.data[offset + 8],
+                page.data[offset + 9],
             ]);
             let t = u32::from_le_bytes([
-                page.data[offset+10], page.data[offset+11],
-                page.data[offset+12], page.data[offset+13],
+                page.data[offset + 10],
+                page.data[offset + 11],
+                page.data[offset + 12],
+                page.data[offset + 13],
             ]);
-            let d = page.data[offset+14] != 0;
+            let d = page.data[offset + 14] != 0;
             locs.push((page_num, cell_idx));
             src.push(s);
             tgt.push(t);

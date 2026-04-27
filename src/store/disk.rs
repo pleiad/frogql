@@ -133,7 +133,13 @@ impl DiskGraphStore {
             let st_page_list = strings.page_numbers().to_vec();
             let str = disk_index::write_u32_list(&mut pager, &st_page_list)?;
             let nlr = disk_index::write_node_locs(&mut pager, &node_locs)?;
-            let etr = disk_index::write_edge_topo(&mut pager, &edge_locs, &edge_src, &edge_tgt, &edge_directed)?;
+            let etr = disk_index::write_edge_topo(
+                &mut pager,
+                &edge_locs,
+                &edge_src,
+                &edge_tgt,
+                &edge_directed,
+            )?;
             pager.header.string_table_root = str;
             pager.header.node_locs_root = nlr;
             pager.header.edge_topo_root = etr;
@@ -164,8 +170,10 @@ impl DiskGraphStore {
     fn ensure_node_label_dir(&self) {
         if self.node_label_dir.borrow().is_none() {
             let dir = disk_index::read_label_index_root(
-                &mut self.pager.borrow_mut(), self.node_label_root
-            ).unwrap_or_default();
+                &mut self.pager.borrow_mut(),
+                self.node_label_root,
+            )
+            .unwrap_or_default();
             *self.node_label_dir.borrow_mut() = Some(dir);
         }
     }
@@ -173,17 +181,19 @@ impl DiskGraphStore {
     fn ensure_edge_label_dir(&self) {
         if self.edge_label_dir.borrow().is_none() {
             let dir = disk_index::read_label_index_root(
-                &mut self.pager.borrow_mut(), self.edge_label_root
-            ).unwrap_or_default();
+                &mut self.pager.borrow_mut(),
+                self.edge_label_root,
+            )
+            .unwrap_or_default();
             *self.edge_label_dir.borrow_mut() = Some(dir);
         }
     }
 
     fn ensure_adj_dir(&self) {
         if self.adj_dir.borrow().is_none() {
-            let dir = disk_index::read_adjacency_root(
-                &mut self.pager.borrow_mut(), self.adjacency_root
-            ).unwrap_or_default();
+            let dir =
+                disk_index::read_adjacency_root(&mut self.pager.borrow_mut(), self.adjacency_root)
+                    .unwrap_or_default();
             *self.adj_dir.borrow_mut() = Some(dir);
         }
     }
@@ -204,10 +214,15 @@ impl DiskGraphStore {
     }
 
     fn decode_labels(&self, label_str_ids: &[u32]) -> LabelType {
-        let labels: Vec<String> = label_str_ids.iter()
+        let labels: Vec<String> = label_str_ids
+            .iter()
             .map(|&sid| self.strings.resolve(sid).unwrap().to_string())
             .collect();
-        if labels.is_empty() { LabelType::Star } else { LabelType::from_list(&labels) }
+        if labels.is_empty() {
+            LabelType::Star
+        } else {
+            LabelType::from_list(&labels)
+        }
     }
 
     fn decode_props(&self, encoded: &[(u32, PropValue)]) -> Props {
@@ -246,10 +261,10 @@ impl DiskGraphStore {
 
         // Find this node's adjacency page
         if let Some((_, adj_page)) = dir.iter().find(|(niid, _)| *niid == node_iid) {
-            let triples = disk_index::read_triple_chain(
-                &mut self.pager.borrow_mut(), *adj_page
-            ).unwrap_or_default();
-            triples.iter()
+            let triples = disk_index::read_triple_chain(&mut self.pager.borrow_mut(), *adj_page)
+                .unwrap_or_default();
+            triples
+                .iter()
                 .filter(|(_, _, k)| *k == kind)
                 .map(|(edge_iid, _, _)| *edge_iid)
                 .collect()
@@ -350,18 +365,22 @@ impl GraphAccess for DiskGraphStore {
         self.ensure_edge_label_dir();
         let dir = self.edge_label_dir.borrow();
         let ids = self.label_index_lookup(label, dir.as_ref().unwrap())?;
-        Some(ids.into_iter()
-            .filter(|&iid| self.edge_directed[iid as usize])
-            .collect())
+        Some(
+            ids.into_iter()
+                .filter(|&iid| self.edge_directed[iid as usize])
+                .collect(),
+        )
     }
 
     fn undirected_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
         self.ensure_edge_label_dir();
         let dir = self.edge_label_dir.borrow();
         let ids = self.label_index_lookup(label, dir.as_ref().unwrap())?;
-        Some(ids.into_iter()
-            .filter(|&iid| !self.edge_directed[iid as usize])
-            .collect())
+        Some(
+            ids.into_iter()
+                .filter(|&iid| !self.edge_directed[iid as usize])
+                .collect(),
+        )
     }
 
     fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {

@@ -104,20 +104,44 @@ impl VariableType {
             }
             (VariableType::Node(da), VariableType::Node(db)) => Self::meet_node(da, db),
             (
-                VariableType::EdgeDirectional { desc: d1, left: l1, right: r1 },
-                VariableType::EdgeDirectional { desc: d2, left: l2, right: r2 },
+                VariableType::EdgeDirectional {
+                    desc: d1,
+                    left: l1,
+                    right: r1,
+                },
+                VariableType::EdgeDirectional {
+                    desc: d2,
+                    left: l2,
+                    right: r2,
+                },
             ) => Self::meet_edge_directional(d1, l1, r1, d2, l2, r2),
             (
-                VariableType::EdgeNonDirectional { desc: d1, left: l1, right: r1 },
-                VariableType::EdgeNonDirectional { desc: d2, left: l2, right: r2 },
+                VariableType::EdgeNonDirectional {
+                    desc: d1,
+                    left: l1,
+                    right: r1,
+                },
+                VariableType::EdgeNonDirectional {
+                    desc: d2,
+                    left: l2,
+                    right: r2,
+                },
             ) => {
                 // Try both orientations, join the results
                 let n1 = Self::meet_edge_directional(d1, l1, r1, d2, l2, r2);
                 let n2 = Self::meet_edge_directional(d1, l1, r1, d2, r2, l2);
                 match (&n1, &n2) {
                     (
-                        VariableType::EdgeDirectional { desc: da, left: la, right: ra },
-                        VariableType::EdgeDirectional { desc: db, left: lb, right: rb },
+                        VariableType::EdgeDirectional {
+                            desc: da,
+                            left: la,
+                            right: ra,
+                        },
+                        VariableType::EdgeDirectional {
+                            desc: db,
+                            left: lb,
+                            right: rb,
+                        },
                     ) => VariableType::join(
                         &VariableType::EdgeNonDirectional {
                             desc: da.clone(),
@@ -167,7 +191,10 @@ impl VariableType {
         if types.is_empty() {
             return VariableType::Zero;
         }
-        types.iter().skip(1).fold(types[0].clone(), |acc, t| VariableType::join(&acc, t))
+        types
+            .iter()
+            .skip(1)
+            .fold(types[0].clone(), |acc, t| VariableType::join(&acc, t))
     }
 
     // --- Subtyping ---
@@ -176,32 +203,58 @@ impl VariableType {
         match (t1, t2) {
             (VariableType::Node(a), VariableType::Node(b)) => DescriptorType::is_subtype(a, b),
             (
-                VariableType::EdgeDirectional { desc: d1, left: l1, right: r1 },
-                VariableType::EdgeDirectional { desc: d2, left: l2, right: r2 },
+                VariableType::EdgeDirectional {
+                    desc: d1,
+                    left: l1,
+                    right: r1,
+                },
+                VariableType::EdgeDirectional {
+                    desc: d2,
+                    left: l2,
+                    right: r2,
+                },
             ) => {
                 DescriptorType::is_subtype(d1, d2)
                     && match (l1.as_ref(), l2.as_ref()) {
-                        (VariableType::Node(a), VariableType::Node(b)) => DescriptorType::is_subtype(a, b),
+                        (VariableType::Node(a), VariableType::Node(b)) => {
+                            DescriptorType::is_subtype(a, b)
+                        }
                         _ => false,
                     }
                     && match (r1.as_ref(), r2.as_ref()) {
-                        (VariableType::Node(a), VariableType::Node(b)) => DescriptorType::is_subtype(a, b),
+                        (VariableType::Node(a), VariableType::Node(b)) => {
+                            DescriptorType::is_subtype(a, b)
+                        }
                         _ => false,
                     }
             }
             (
-                VariableType::EdgeNonDirectional { desc: d1, left: l1, right: r1 },
-                VariableType::EdgeNonDirectional { desc: d2, left: l2, right: r2 },
+                VariableType::EdgeNonDirectional {
+                    desc: d1,
+                    left: l1,
+                    right: r1,
+                },
+                VariableType::EdgeNonDirectional {
+                    desc: d2,
+                    left: l2,
+                    right: r2,
+                },
             ) => {
                 // Symmetric check
                 let as_dir1 = VariableType::EdgeDirectional {
-                    desc: d1.clone(), left: l1.clone(), right: r1.clone(),
+                    desc: d1.clone(),
+                    left: l1.clone(),
+                    right: r1.clone(),
                 };
                 let as_dir2a = VariableType::EdgeDirectional {
-                    desc: d2.clone(), left: l2.clone(), right: r2.clone(),
+                    desc: d2.clone(),
+                    left: l2.clone(),
+                    right: r2.clone(),
                 };
                 let as_dir2b = VariableType::EdgeDirectional {
-                    desc: d2.clone(), left: r2.clone(), right: l2.clone(),
+                    desc: d2.clone(),
+                    left: r2.clone(),
+                    right: l2.clone(),
                 };
                 VariableType::is_subtype(&as_dir1, &as_dir2a)
                     || VariableType::is_subtype(&as_dir1, &as_dir2b)

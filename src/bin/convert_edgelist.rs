@@ -83,7 +83,8 @@ fn main() {
     );
 
     // Build sorted node list (by original ID for determinism)
-    let mut nodes_sorted: Vec<(u32, u32)> = node_set.iter().map(|(&orig, &iid)| (orig, iid)).collect();
+    let mut nodes_sorted: Vec<(u32, u32)> =
+        node_set.iter().map(|(&orig, &iid)| (orig, iid)).collect();
     nodes_sorted.sort_by_key(|(orig, _)| *orig);
 
     // --- Pass 2: Write .gql file ---
@@ -138,10 +139,7 @@ fn main() {
             eprintln!("  edges: {}/{}", i + 1, edge_count);
         }
     }
-    eprintln!(
-        "  records written in {:.1}s",
-        t1.elapsed().as_secs_f64()
-    );
+    eprintln!("  records written in {:.1}s", t1.elapsed().as_secs_f64());
 
     // --- Write indexes ---
     eprintln!("Writing indexes...");
@@ -157,10 +155,7 @@ fn main() {
     let adj_root = disk_index::write_adjacency_index(&mut pager, &adj_entries).expect("adj index");
     drop(adj_entries); // free memory
 
-    eprintln!(
-        "  indexes written in {:.1}s",
-        t2.elapsed().as_secs_f64()
-    );
+    eprintln!("  indexes written in {:.1}s", t2.elapsed().as_secs_f64());
 
     // --- Update header ---
     pager.header.node_count = node_count as u32;

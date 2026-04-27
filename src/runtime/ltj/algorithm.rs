@@ -1,4 +1,3 @@
-
 use crate::model::graph_access::GraphAccess;
 
 use super::iterator::{LtjIterator, SpoPos};
@@ -169,7 +168,6 @@ impl<'a> LtjAlgorithm<'a> {
 
         // General case: leapfrog intersection
         let mut c = self.seek(var_id, None);
-
 
         while let Some(val) = c {
             tuple[j] = (var_id, val);

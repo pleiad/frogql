@@ -69,7 +69,10 @@ fn test_float_literal_comparison() {
 #[test]
 fn test_is_float_predicate() {
     let g = graph_with_floats();
-    let res = run(&g, "MATCH (x: Product) WHERE x.price is float RETURN x.name");
+    let res = run(
+        &g,
+        "MATCH (x: Product) WHERE x.price is float RETURN x.name",
+    );
     match res {
         QueryResult::Projected(rows) => assert_eq!(rows.len(), 2), // A and B
         _ => panic!("expected projected"),
@@ -79,7 +82,10 @@ fn test_is_float_predicate() {
 #[test]
 fn test_float_arithmetic() {
     let g = graph_with_floats();
-    let res = run(&g, "MATCH (x: Product) WHERE x.name = 'A' RETURN x.price + 0.01 AS total");
+    let res = run(
+        &g,
+        "MATCH (x: Product) WHERE x.name = 'A' RETURN x.price + 0.01 AS total",
+    );
     match res {
         QueryResult::Projected(rows) => {
             assert_eq!(rows.len(), 1);

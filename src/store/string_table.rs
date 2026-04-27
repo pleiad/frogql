@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::pager::pager::Pager;
 use crate::pager::page::{Page, PageType, PAGE_SIZE};
+use crate::pager::pager::Pager;
 
 /// Page header size for string table pages (reusing the standard 8-byte page header).
 const PAGE_HEADER: usize = 8;
@@ -101,7 +101,12 @@ impl StringTable {
     }
 
     /// Write a short string inline on the current (or a fresh) string table page.
-    fn intern_inline(&mut self, s: &str, encoded_len: usize, pager: &mut Pager) -> std::io::Result<()> {
+    fn intern_inline(
+        &mut self,
+        s: &str,
+        encoded_len: usize,
+        pager: &mut Pager,
+    ) -> std::io::Result<()> {
         // Ensure there's room on the current page
         if self.current_offset + encoded_len > PAGE_SIZE {
             self.allocate_string_page(pager)?;
@@ -194,12 +199,10 @@ impl StringTable {
                 0
             };
             // Write next-page pointer at offset PAGE_HEADER
-            page.data[PAGE_HEADER..PAGE_HEADER + 4]
-                .copy_from_slice(&next_page.to_le_bytes());
+            page.data[PAGE_HEADER..PAGE_HEADER + 4].copy_from_slice(&next_page.to_le_bytes());
             // Write payload
             let payload_start = PAGE_HEADER + 4;
-            page.data[payload_start..payload_start + chunk.len()]
-                .copy_from_slice(chunk);
+            page.data[payload_start..payload_start + chunk.len()].copy_from_slice(chunk);
             pager.write_page(page_nums[i], &page)?;
         }
 
@@ -232,8 +235,7 @@ impl StringTable {
             buf.extend_from_slice(&page.data[payload_start..payload_start + available]);
         }
 
-        String::from_utf8(buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     /// Resolve a string ID to its string.

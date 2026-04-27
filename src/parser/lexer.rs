@@ -26,29 +26,29 @@ pub enum Token {
     Distinct,
 
     // Symbols
-    LParen,    // (
-    RParen,    // )
-    LBracket,  // [
-    RBracket,  // ]
-    LBrace,    // {
-    RBrace,    // }
-    Colon,     // :
-    Comma,     // ,
-    Dot,       // .
-    Star,      // *
-    Plus,      // +
-    Minus,     // -
-    Bang,      // !
-    Eq,        // =
-    Ne,        // !=
-    Lt,        // <
-    Gt,        // >
-    Le,        // <=
-    Ge,        // >=
-    Tilde,     // ~
-    Question,  // ?
-    Pipe,      // |
-    Amp,       // &
+    LParen,   // (
+    RParen,   // )
+    LBracket, // [
+    RBracket, // ]
+    LBrace,   // {
+    RBrace,   // }
+    Colon,    // :
+    Comma,    // ,
+    Dot,      // .
+    Star,     // *
+    Plus,     // +
+    Minus,    // -
+    Bang,     // !
+    Eq,       // =
+    Ne,       // !=
+    Lt,       // <
+    Gt,       // >
+    Le,       // <=
+    Ge,       // >=
+    Tilde,    // ~
+    Question, // ?
+    Pipe,     // |
+    Amp,      // &
 
     // Compound edge tokens
     RightArrow, // ->
@@ -277,7 +277,12 @@ impl Lexer {
                             n.push('.');
                             self.advance();
                             while let Some(ch) = self.peek() {
-                                if ch.is_ascii_digit() { n.push(ch); self.advance(); } else { break; }
+                                if ch.is_ascii_digit() {
+                                    n.push(ch);
+                                    self.advance();
+                                } else {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -291,7 +296,12 @@ impl Lexer {
                             self.advance();
                         }
                         while let Some(ch) = self.peek() {
-                            if ch.is_ascii_digit() { n.push(ch); self.advance(); } else { break; }
+                            if ch.is_ascii_digit() {
+                                n.push(ch);
+                                self.advance();
+                            } else {
+                                break;
+                            }
                         }
                     }
                     if is_float {
@@ -332,7 +342,10 @@ impl Lexer {
                     self.tokens.push(tok);
                 }
                 _ => {
-                    return Err(format!("unexpected character: '{c}' at position {}", self.pos));
+                    return Err(format!(
+                        "unexpected character: '{c}' at position {}",
+                        self.pos
+                    ));
                 }
             }
         }

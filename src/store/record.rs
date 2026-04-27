@@ -69,7 +69,11 @@ pub fn encode_edge(
     let mut buf = encode_node(user_id_str_id, label_str_ids, props);
     buf.extend_from_slice(&src_internal_id.to_le_bytes());
     buf.extend_from_slice(&tgt_internal_id.to_le_bytes());
-    buf.push(if directed { DIR_DIRECTED } else { DIR_UNDIRECTED });
+    buf.push(if directed {
+        DIR_DIRECTED
+    } else {
+        DIR_UNDIRECTED
+    });
     buf
 }
 
@@ -209,7 +213,9 @@ fn decode_prop_value(data: &[u8], pos: &mut usize) -> PropValue {
             let len = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as usize;
             *pos += 4;
             let mut items = Vec::with_capacity(len);
-            for _ in 0..len { items.push(decode_prop_value(data, pos)); }
+            for _ in 0..len {
+                items.push(decode_prop_value(data, pos));
+            }
             PropValue::List(items)
         }
         VALUE_TYPE_RECORD => {

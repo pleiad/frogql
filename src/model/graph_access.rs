@@ -36,18 +36,33 @@ pub trait GraphAccess {
     // --- Index-aware methods ---
 
     /// Nodes with a specific label.
-    fn nodes_with_label(&self, _label: &str) -> Option<Vec<Id>> { None }
+    fn nodes_with_label(&self, _label: &str) -> Option<Vec<Id>> {
+        None
+    }
     /// Directed edges with a specific label.
-    fn directed_edges_with_label(&self, _label: &str) -> Option<Vec<Id>> { None }
+    fn directed_edges_with_label(&self, _label: &str) -> Option<Vec<Id>> {
+        None
+    }
     /// Undirected edges with a specific label.
-    fn undirected_edges_with_label(&self, _label: &str) -> Option<Vec<Id>> { None }
+    fn undirected_edges_with_label(&self, _label: &str) -> Option<Vec<Id>> {
+        None
+    }
 
     // --- Adjacency methods ---
 
     /// Outgoing directed edges from a node.
-    fn outgoing_edges(&self, node_id: Id) -> Vec<Id> { let _ = node_id; vec![] }
+    fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {
+        let _ = node_id;
+        vec![]
+    }
     /// Incoming directed edges to a node.
-    fn incoming_edges(&self, node_id: Id) -> Vec<Id> { let _ = node_id; vec![] }
+    fn incoming_edges(&self, node_id: Id) -> Vec<Id> {
+        let _ = node_id;
+        vec![]
+    }
     /// Undirected edges connected to a node.
-    fn undirected_edges_of(&self, node_id: Id) -> Vec<Id> { let _ = node_id; vec![] }
+    fn undirected_edges_of(&self, node_id: Id) -> Vec<Id> {
+        let _ = node_id;
+        vec![]
+    }
 }

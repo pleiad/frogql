@@ -52,7 +52,11 @@ fn test_csv_loader_node_types() {
     match result {
         QueryResult::Projected(rows) => {
             assert!(!rows.is_empty());
-            assert!(matches!(rows[0][0], Value::Int(_)), "votes should be Int, got {:?}", rows[0][0]);
+            assert!(
+                matches!(rows[0][0], Value::Int(_)),
+                "votes should be Int, got {:?}",
+                rows[0][0]
+            );
         }
         _ => panic!("expected Projected"),
     }
@@ -62,7 +66,8 @@ fn test_csv_loader_node_types() {
 fn test_csv_loader_string_props() {
     let g = movies_graph();
     let rt = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH (p: Person) WHERE p.name = 'Keanu Reeves' RETURN p.born").unwrap();
+    let q = gqlrust::compile_query("MATCH (p: Person) WHERE p.name = 'Keanu Reeves' RETURN p.born")
+        .unwrap();
     let result = rt.run_query(&q, 0);
     match result {
         QueryResult::Projected(rows) => {
@@ -109,14 +114,20 @@ fn test_movies_node_labels() {
 fn test_acted_in_traversal() {
     let g = movies_graph();
     // All ACTED_IN edges: 172
-    let count = row_count(&g, "MATCH (p: Person) -[:ACTED_IN]-> (m: Movie) RETURN p.name, m.title");
+    let count = row_count(
+        &g,
+        "MATCH (p: Person) -[:ACTED_IN]-> (m: Movie) RETURN p.name, m.title",
+    );
     assert_eq!(count, 172);
 }
 
 #[test]
 fn test_directed_traversal() {
     let g = movies_graph();
-    let count = row_count(&g, "MATCH (p: Person) -[:DIRECTED]-> (m: Movie) RETURN p.name, m.title");
+    let count = row_count(
+        &g,
+        "MATCH (p: Person) -[:DIRECTED]-> (m: Movie) RETURN p.name, m.title",
+    );
     assert_eq!(count, 44);
 }
 
@@ -130,21 +141,30 @@ fn test_wrote_traversal() {
 #[test]
 fn test_produced_traversal() {
     let g = movies_graph();
-    let count = row_count(&g, "MATCH (p: Person) -[:PRODUCED]-> (m: Movie) RETURN p.name");
+    let count = row_count(
+        &g,
+        "MATCH (p: Person) -[:PRODUCED]-> (m: Movie) RETURN p.name",
+    );
     assert_eq!(count, 15);
 }
 
 #[test]
 fn test_reviewed_traversal() {
     let g = movies_graph();
-    let count = row_count(&g, "MATCH (p: Person) -[:REVIEWED]-> (m: Movie) RETURN p.name");
+    let count = row_count(
+        &g,
+        "MATCH (p: Person) -[:REVIEWED]-> (m: Movie) RETURN p.name",
+    );
     assert_eq!(count, 9);
 }
 
 #[test]
 fn test_follows_traversal() {
     let g = movies_graph();
-    let count = row_count(&g, "MATCH (p1: Person) -[:FOLLOWS]-> (p2: Person) RETURN p1.name, p2.name");
+    let count = row_count(
+        &g,
+        "MATCH (p1: Person) -[:FOLLOWS]-> (p2: Person) RETURN p1.name, p2.name",
+    );
     assert_eq!(count, 3);
 }
 
@@ -154,8 +174,9 @@ fn test_follows_traversal() {
 fn test_where_property_filter() {
     let g = movies_graph();
     // Movies released in 1999
-    let rows = projected_rows(&g,
-        "MATCH (m: Movie) WHERE m.released = 1999 RETURN m.title"
+    let rows = projected_rows(
+        &g,
+        "MATCH (m: Movie) WHERE m.released = 1999 RETURN m.title",
     );
     // The Matrix was released in 1999
     let titles: Vec<&Value> = rows.iter().map(|r| &r[0]).collect();
@@ -166,9 +187,7 @@ fn test_where_property_filter() {
 fn test_where_comparison() {
     let g = movies_graph();
     // Movies with more than 1000 votes
-    let rows = projected_rows(&g,
-        "MATCH (m: Movie) WHERE m.votes > 1000 RETURN m.title"
-    );
+    let rows = projected_rows(&g, "MATCH (m: Movie) WHERE m.votes > 1000 RETURN m.title");
     // The Matrix Reloaded (1906) and others
     assert_eq!(rows.len(), 2);
 }
@@ -214,9 +233,9 @@ fn test_join_coactors() {
 #[test]
 fn test_return_alias() {
     let g = movies_graph();
-    let q = gqlrust::compile_query(
-        "MATCH (m: Movie) WHERE m.released = 1999 RETURN m.title AS title"
-    ).unwrap();
+    let q =
+        gqlrust::compile_query("MATCH (m: Movie) WHERE m.released = 1999 RETURN m.title AS title")
+            .unwrap();
     let returns = q.returns.as_ref().unwrap();
     assert_eq!(returns[0].alias.as_deref(), Some("title"));
 }
@@ -225,12 +244,14 @@ fn test_return_alias() {
 fn test_return_distinct() {
     let g = movies_graph();
     // Without DISTINCT: multiple actors per movie → duplicate movie titles
-    let all = row_count(&g,
-        "MATCH (p: Person) -[:ACTED_IN]-> (m: Movie) RETURN m.title"
+    let all = row_count(
+        &g,
+        "MATCH (p: Person) -[:ACTED_IN]-> (m: Movie) RETURN m.title",
     );
     // With DISTINCT: each unique title only once
-    let distinct = row_count(&g,
-        "MATCH (p: Person) -[:ACTED_IN]-> (m: Movie) RETURN DISTINCT m.title"
+    let distinct = row_count(
+        &g,
+        "MATCH (p: Person) -[:ACTED_IN]-> (m: Movie) RETURN DISTINCT m.title",
     );
     assert!(distinct < all);
     assert!(distinct <= 38); // at most 38 movies
