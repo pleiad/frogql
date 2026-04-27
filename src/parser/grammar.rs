@@ -79,26 +79,17 @@ impl Parser {
         }
     }
 
-    // ===== Full query (MATCH ... [MATCH ...]* [GROUP BY ...] [RETURN ...]) =====
-
-    // full_query = match_clause+ ("GROUP BY" expr (, expr)*)?
-    //              ("RETURN" ("DISTINCT")? return_list)?
+    // full_query   = match_clause+ ("GROUP BY" expr (, expr)*)?
+    //                ("RETURN" ("DISTINCT")? return_list)?
     // match_clause = "MATCH"? query ("WHERE" expr)?
     //
-    // The MATCH keyword on the first clause is optional (bare patterns
-    // like `(x)-[]->(y)` still parse), but every subsequent clause must
-    // start with MATCH. ISO §14.4 calls each clause a `<simple match
-    // statement>`; chaining them is §14.3 `<simple linear query
-    // statement>`.
+    // ISO §14.3-14.4. MATCH is optional only on the first clause for
+    // back-compat with bare-pattern queries (`(x)-[]->(y)`).
     fn full_query(&mut self) -> Result<Query, String> {
-        // First clause: MATCH keyword optional (back-compat for bare patterns).
         self.eat(&Token::Match);
         let first = self.match_clause_body()?;
         let mut matches = vec![MatchStatement::Simple { pattern: first }];
 
-        // Additional clauses require the MATCH keyword. The `eat` here
-        // is what gates the loop — anything else terminates the chain
-        // and falls through to GROUP BY / RETURN.
         while self.eat(&Token::Match) {
             let pattern = self.match_clause_body()?;
             matches.push(MatchStatement::Simple { pattern });
@@ -114,7 +105,6 @@ impl Parser {
             None
         };
 
-        // Optional RETURN clause
         if self.eat(&Token::Return) {
             let distinct = self.eat(&Token::Distinct);
             let returns = self.return_list()?;
@@ -134,10 +124,10 @@ impl Parser {
         }
     }
 
-    /// Parse a single match clause's body: the path pattern plus an
-    /// optional WHERE that wraps it in `Filter`. Each MATCH clause has
-    /// its own scoped WHERE — `MATCH (x) WHERE x.foo MATCH (y) WHERE y.bar`
-    /// produces two `Filter`-wrapped patterns.
+    /// One match clause: pattern + optional WHERE wrapped in `Filter`.
+    /// Per-clause WHERE is scoped — `MATCH (x) WHERE _ MATCH (y) WHERE _`
+    /// produces two independent `Filter`-wrapped patterns, not a single
+    /// AND-ed predicate.
     fn match_clause_body(&mut self) -> Result<PathPattern, String> {
         let mut pattern = self.query()?;
         if self.eat(&Token::Where) {

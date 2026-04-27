@@ -58,21 +58,13 @@ fn multi_match_query(patterns: &[String]) -> Query {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig {
-        // 32 cases is plenty for 8-pattern alphabet; default 256 is overkill.
-        cases: 32,
-        ..ProptestConfig::default()
-    })]
+    // 32 cases is plenty for an 8-pattern alphabet; default 256 is overkill.
+    #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
 
-    /// **Invariant**: for any sequence of patterns, the collapsed multi-MATCH
-    /// query produces the same row count as the equivalent single-MATCH
-    /// comma-join. This is the central soundness claim of the refactor —
-    /// §14.4 GR 1 says MATCH expands the working table by natural join,
-    /// which is exactly what `PathPattern::Join` already encodes.
-    ///
-    /// If this property breaks for any sequence, the collapse is unsound
-    /// and the runtime is silently producing wrong results for what the
-    /// parser will eventually emit as `MATCH p1 MATCH p2 ...`.
+    /// **Invariant**: collapsed multi-MATCH and the equivalent comma-join
+    /// produce the same row count. §14.4 GR 1 says MATCH expands the
+    /// working table by natural join — exactly `PathPattern::Join`'s
+    /// semantics. Central soundness claim of the refactor.
     #[test]
     fn multi_match_runtime_matches_comma_join(
         patterns in proptest::collection::vec(pattern(), 1..=4)
@@ -80,76 +72,50 @@ proptest! {
         let g = fraud_graph();
         let runtime = Runtime::new(&g);
 
-        // Multi-MATCH form: each pattern is its own Simple match statement.
         let multi = multi_match_query(&patterns);
         let multi_rows = runtime.run(&multi.collapsed_pattern()).rows.len();
 
-        // Comma-join form: all patterns joined into a single Simple via `,`.
-        let comma_form = patterns.join(", ");
-        let comma = multi_match_query(&[comma_form]);
+        let comma = multi_match_query(&[patterns.join(", ")]);
         let comma_rows = runtime.run(&comma.collapsed_pattern()).rows.len();
 
         prop_assert_eq!(multi_rows, comma_rows);
     }
 
-    /// **Invariant**: a multi-MATCH Query where some patterns share a
-    /// variable (natural join) cannot produce more rows than the same
-    /// set treated as disjoint (cartesian product). Natural join ⊆
-    /// cartesian product set-theoretically.
-    ///
-    /// Concretely: shared `x` either binds to the same node across both
-    /// matches (filtering) or eliminates rows. It never adds rows.
+    /// **Invariant**: natural join row count ≤ cartesian product. Sharing
+    /// a variable across matches can only filter rows, never add them.
     #[test]
-    fn natural_join_at_most_cartesian(
-        first in pattern(),
-        second in pattern()
-    ) {
+    fn natural_join_at_most_cartesian(first in pattern(), second in pattern()) {
         let g = fraud_graph();
         let runtime = Runtime::new(&g);
 
         let q = multi_match_query(&[first, second]);
         let join_rows = runtime.run(&q.collapsed_pattern()).rows.len();
 
-        // Each individual MATCH's row count.
         let p1 = q.matches[0].pattern();
         let p2 = q.matches[1].pattern();
-        let cardinality_1 = runtime.run(p1).rows.len();
-        let cardinality_2 = runtime.run(p2).rows.len();
+        let cart = runtime.run(p1).rows.len() * runtime.run(p2).rows.len();
 
-        prop_assert!(
-            join_rows <= cardinality_1 * cardinality_2,
-            "join={} > cartesian={}*{}={}",
-            join_rows, cardinality_1, cardinality_2,
-            cardinality_1 * cardinality_2
-        );
+        prop_assert!(join_rows <= cart, "join={join_rows} > cart={cart}");
     }
 
-    /// **Invariant**: after running through the optimizer, every Query
-    /// has exactly one `MatchStatement::Simple`. The collapse-then-optimize
-    /// strategy in `lib.rs::optimize_query` documents this as the post-
-    /// optimization shape; the property test pins it across the input
-    /// space.
+    /// **Invariant**: `optimize_query` collapses any Query to one Simple
+    /// match. Pins the post-optimization shape from `lib.rs::optimize_query`.
     #[test]
     fn optimize_collapses_to_single_simple(
         patterns in proptest::collection::vec(pattern(), 1..=4)
     ) {
-        // Build the equivalent single-MATCH input string and round-trip
-        // through the public `compile_query_unchecked`, which calls
-        // `optimize_query` under the hood.
         let input = patterns.join(", ");
-        let optimized = gqlrust::compile_query_unchecked(&input)
-            .expect("curated patterns must compile");
+        let optimized = gqlrust::compile_query_unchecked(&input).unwrap();
 
         prop_assert_eq!(optimized.matches.len(), 1);
         let is_simple = matches!(&optimized.matches[0], MatchStatement::Simple { .. });
         prop_assert!(is_simple);
     }
 
-    /// **Invariant**: parser-emitted multi-MATCH (via `MATCH p1 MATCH p2`
-    /// surface syntax) produces the same row count as the equivalent
-    /// comma-join. Same property as `multi_match_runtime_matches_comma_join`
-    /// but exercising the user-facing parser path instead of the manual
-    /// `Vec<MatchStatement>` construction. Closes the loop end-to-end.
+    /// **Invariant**: surface-syntax `MATCH p1 MATCH p2` ≡ `MATCH p1, p2`.
+    /// Same equivalence as `multi_match_runtime_matches_comma_join` but
+    /// exercises the parser path instead of manual `Vec<MatchStatement>`
+    /// construction.
     #[test]
     fn parser_multi_match_matches_comma_join(
         patterns in proptest::collection::vec(pattern(), 1..=4)
@@ -157,16 +123,12 @@ proptest! {
         let g = fraud_graph();
         let runtime = Runtime::new(&g);
 
-        // Surface multi-MATCH form: MATCH p1 MATCH p2 ...
         let multi_input = format!("MATCH {}", patterns.join(" MATCH "));
-        let multi_q = gqlrust::compile_query_unchecked(&multi_input)
-            .expect("parser must accept multi-MATCH");
+        let multi_q = gqlrust::compile_query_unchecked(&multi_input).unwrap();
         let multi_rows = runtime.run(&multi_q.collapsed_pattern()).rows.len();
 
-        // Comma-join form: MATCH p1, p2, ...
         let comma_input = format!("MATCH {}", patterns.join(", "));
-        let comma_q = gqlrust::compile_query_unchecked(&comma_input)
-            .expect("parser must accept comma-join");
+        let comma_q = gqlrust::compile_query_unchecked(&comma_input).unwrap();
         let comma_rows = runtime.run(&comma_q.collapsed_pattern()).rows.len();
 
         prop_assert_eq!(multi_rows, comma_rows);

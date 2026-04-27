@@ -78,9 +78,7 @@ fn collapse_three_matches_is_left_associative_join() {
     let PathPattern::Join(left, right_outer) = q.collapsed_pattern() else {
         panic!("expected outer Join");
     };
-    // Right side of outer Join is the third pattern (a Node).
     assert!(matches!(*right_outer, PathPattern::Node(_)));
-    // Left side is itself a Join of the first two.
     let PathPattern::Join(_, _) = *left else {
         panic!("expected left side to be a Join");
     };
@@ -100,18 +98,13 @@ fn runtime_disjoint_multi_match_matches_comma_join() {
     let g = fraud_graph();
     let runtime = Runtime::new(&g);
 
-    // Multi-MATCH form: MATCH (x) MATCH (y)
     let multi = multi_match_query(&["(x)", "(y)"]);
     let multi_rows = runtime.run(&multi.collapsed_pattern()).rows.len();
 
-    // Single-MATCH comma-join form: MATCH (x), (y)
     let single = multi_match_query(&["(x), (y)"]);
     let single_rows = runtime.run(&single.collapsed_pattern()).rows.len();
 
-    assert_eq!(
-        multi_rows, single_rows,
-        "multi-MATCH must produce same row count as comma-join over the same patterns"
-    );
+    assert_eq!(multi_rows, single_rows);
     // fraud.json has 5 nodes; cartesian 5×5 = 25.
     assert_eq!(multi_rows, 25);
 }
@@ -157,10 +150,7 @@ fn typecheck_accepts_shared_var_across_matches() {
 }
 
 // ---------------------------------------------------------------------
-// D. `compile_query_unchecked` round-trips a manually-built multi-MATCH
-//    Query: parse a comma-join, replace its Query with a multi-MATCH
-//    equivalent, run both through the optimizer, compare the optimized
-//    output. Validates that `optimize_query` collapses correctly.
+// D. Optimizer post-condition: matches collapse to one Simple.
 // ---------------------------------------------------------------------
 
 /// After `optimize_query` the multi-MATCH Query collapses to exactly one
@@ -169,20 +159,14 @@ fn typecheck_accepts_shared_var_across_matches() {
 #[test]
 fn optimize_query_collapses_multi_match_to_single_simple() {
     let q = multi_match_query(&["(x)", "(y)", "(z)"]);
-    assert_eq!(q.matches.len(), 3, "pre-optimization has 3 matches");
+    assert_eq!(q.matches.len(), 3);
 
-    // optimize_query is private; round-trip via the public path: build
-    // an equivalent `compile_query_unchecked` input from the collapsed
-    // pattern and compare the optimized plan.
+    // `optimize_query` is private; round-trip via the public
+    // `compile_query_unchecked` which calls it under the hood.
     let collapsed_input = format!("{}", q.collapsed_pattern());
-    let optimized = gqlrust::compile_query_unchecked(&collapsed_input)
-        .expect("compile_query_unchecked should succeed");
+    let optimized = gqlrust::compile_query_unchecked(&collapsed_input).unwrap();
 
-    assert_eq!(
-        optimized.matches.len(),
-        1,
-        "optimize_query collapses multi-match to one Simple"
-    );
+    assert_eq!(optimized.matches.len(), 1);
     assert!(matches!(
         &optimized.matches[0],
         MatchStatement::Simple { .. }

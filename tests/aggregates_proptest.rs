@@ -126,31 +126,20 @@ fn nonempty_pattern() -> impl Strategy<Value = String> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 32,
-        ..ProptestConfig::default()
-    })]
+    #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
 
-    /// **Invariant** (§20.9 GR 2): `COUNT(*)` is the cardinality of the
-    /// binding table. For any pattern P, `MATCH P RETURN COUNT(*)` must
-    /// produce one row whose value equals the number of rows produced by
-    /// running `MATCH P` raw.
+    /// **Invariant** (§20.9 GR 2): `COUNT(*)` equals the row count of the
+    /// underlying `MATCH P`.
     #[test]
     fn count_star_equals_match_cardinality(p in nonempty_pattern()) {
         let g = fraud_graph();
-
-        // Same pattern as full query (RETURN COUNT(*)) and as bare match
-        // (no RETURN — runtime returns the raw binding rows).
         let count_q = format!("{p} RETURN COUNT(*)");
         let count = one_int(&run_projected(&g, &count_q));
         let raw_count = match_row_count(&g, &p);
-
         prop_assert_eq!(count, raw_count as i64);
     }
 
-    /// **Invariant** (§20.9 GR 5b on DISTINCT): `COUNT(DISTINCT x.a)` ≤
-    /// `COUNT(x.a)` for any pattern, var, and attribute. Distinct
-    /// values are a subset of all values.
+    /// **Invariant** (§20.9 GR 5b): `COUNT(DISTINCT x.a) ≤ COUNT(x.a)`.
     #[test]
     fn count_distinct_at_most_count(
         (pattern, var, attr) in pattern_var_attr()
@@ -177,10 +166,8 @@ proptest! {
         );
     }
 
-    /// **Invariant** (ordering, §22.14): `MIN(x.a) ≤ MAX(x.a)` for any
-    /// non-empty input over a numeric attribute. Both must be `<=`-
-    /// comparable as numerics; the implementation is allowed to use
-    /// any total order on the value type as long as it is consistent.
+    /// **Invariant** (§22.14): `MIN(x.a) ≤ MAX(x.a)` for any non-empty
+    /// numeric input.
     #[test]
     fn min_at_most_max_numeric(
         (pattern, var, attr) in pattern_var_numeric_attr()
@@ -202,10 +189,9 @@ proptest! {
         );
     }
 
-    /// **Invariant**: `MIN(x.a) ≤ AVG(x.a) ≤ MAX(x.a)` for any non-empty
-    /// numeric input. AVG is bounded by the extrema by definition. This
-    /// catches bugs in numeric promotion in AVG that wouldn't be caught
-    /// by MIN/MAX alone.
+    /// **Invariant**: `MIN(x.a) ≤ AVG(x.a) ≤ MAX(x.a)` for non-empty
+    /// numeric input. Catches AVG numeric-promotion bugs that MIN/MAX
+    /// alone wouldn't surface.
     #[test]
     fn avg_between_min_and_max(
         (pattern, var, attr) in pattern_var_numeric_attr()

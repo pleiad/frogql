@@ -81,7 +81,6 @@ pub fn compile_query_with_diagnostics(input: &str) -> Result<CompileResult, Comp
 /// Use [`compile_unchecked`] to skip typechecking.
 pub fn compile(query: &str) -> Result<PathPattern, String> {
     let ast = parser::parse(query)?;
-    // Elaboration runs on whole queries; wrap the bare pattern for the pass.
     let q = Query::pattern_only(ast);
     let q = elaborate::elaborate_query(q);
     let mut tc = Typechecker::untyped();
