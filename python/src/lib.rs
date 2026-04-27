@@ -36,8 +36,10 @@ impl Connection {
         query: &str,
         limit: usize,
     ) -> PyResult<Bound<'py, PyList>> {
-        let q = gqlrust::compile_query(query)
-            .map_err(|e| PyValueError::new_err(format!("parse error: {e}")))?;
+        // `compile_query` already returns phase-prefixed messages
+        // ("Parse error: …" / "Type error: …"), so we surface them
+        // verbatim instead of double-prefixing.
+        let q = gqlrust::compile_query(query).map_err(PyValueError::new_err)?;
 
         let rt = Runtime::new(&self.store);
         let result = rt.run_query(&q, limit);
