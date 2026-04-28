@@ -231,3 +231,45 @@ fn node_descriptor(v: VariableType) -> Option<DescriptorType> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::typing::label_type::LabelType;
+    use crate::typing::property_type::PropertyType;
+
+    // is_unsatisfiable — bottom check for paths.
+    #[test]
+    fn test_zero_is_unsatisfiable() {
+        assert!(PathType::Zero.is_unsatisfiable());
+    }
+    #[test]
+    fn test_node_unsat_iff_descriptor_empty() {
+        let empty_d = DescriptorType::new(LabelType::Star, PropertyType::Zero);
+        assert!(PathType::node(empty_d).is_unsatisfiable());
+        assert!(!PathType::node(DescriptorType::star()).is_unsatisfiable());
+    }
+    #[test]
+    fn test_union_unsat_iff_both_unsat() {
+        // Different from `is_empty` (which uses OR for length min) —
+        // `is_unsatisfiable` uses AND for Union.
+        let n = || PathType::node(DescriptorType::star());
+        assert!(
+            PathType::Union(Box::new(PathType::Zero), Box::new(PathType::Zero)).is_unsatisfiable()
+        );
+        assert!(!PathType::Union(Box::new(PathType::Zero), Box::new(n())).is_unsatisfiable());
+        assert!(!PathType::Union(Box::new(n()), Box::new(PathType::Zero)).is_unsatisfiable());
+    }
+
+    // union — Zero is identity for join.
+    #[test]
+    fn test_union_drops_left_zero() {
+        let n = PathType::node(DescriptorType::star());
+        assert_eq!(PathType::union(PathType::Zero, n.clone()), n);
+    }
+    #[test]
+    fn test_union_drops_right_zero() {
+        let n = PathType::node(DescriptorType::star());
+        assert_eq!(PathType::union(n.clone(), PathType::Zero), n);
+    }
+}

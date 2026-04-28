@@ -6,10 +6,12 @@
 //! from the spec, a property fails — and the failure message names the
 //! rule that was violated.
 //!
-//! Companion file `tests/lattice_unit.rs` holds hand-picked unit tests
-//! (`predicate_locks`, `normalization_locks`, `meet_locks`) that pin
-//! specific input → output pairs for the impl. They cover the
-//! regressions canon-based proptests would mask.
+//! Hand-picked locks for the impl's specific behaviors live as inline
+//! `#[cfg(test)] mod tests` blocks in `src/typing/*.rs` — closer to the
+//! impl, the project's existing convention. Those locks pin input →
+//! output pairs that cover regressions canon-based proptests would mask
+//! (see `simple_type.rs`'s `test_is_empty_*` / `test_union_*`,
+//! `label_type.rs`'s `test_meet_*`, etc.).
 //!
 //! Auto-generated regression seeds for failing cases are persisted in
 //! `tests/proptest-regressions/lattice.txt` (configured below in `cfg`)
@@ -44,8 +46,9 @@
 //! shape genuinely matters (symmetries, distributions, refinements).
 //! For tests where the impl is allowed to pick any representative of an
 //! equivalence class — `LabelType::meet` returning either operand when
-//! they're consistent — we use `assert_consistent!` plus hand-picked
-//! `meet_locks` to backstop against Star-collapse regressions.
+//! they're consistent — we use `assert_consistent!` plus the hand-picked
+//! locks in `src/typing/*.rs`'s inline `mod tests` to backstop against
+//! Star-collapse regressions.
 //!
 //! `canon_eq` is closer to **non-gradual equality**: same shape modulo
 //! commutativity / idempotence / identity. It has its own caveat — see
@@ -104,10 +107,11 @@ use gqlrust::typing::variable_type::{Schema, VariableType};
 // `is_empty` (SimpleType, PropertyType, VariableType) and
 // `is_unsatisfiable` (PathType). If those predicates regress, canon
 // silently mis-equates types. The defense is in two layers:
-//   - `meet_locks` / `normalization_locks` pin specific behaviors of
-//     `union/meet/is_empty/is_unsatisfiable` directly.
-//   - `equivalence_relations` documents the looseness in code so a
-//     future reader understands what canon promises (and doesn't).
+//   - Inline `mod tests` blocks in `src/typing/*.rs` pin specific
+//     behaviors of `union/meet/is_empty/is_unsatisfiable` directly,
+//     independent of canon.
+//   - `equivalence_relations` (this file) documents the looseness in
+//     code so a future reader understands what canon promises.
 //
 // **What canon does NOT do.** No absorption (`Union(Star, X) → Star`),
 // no Star-from-Or removal. Going further would create false positives
@@ -337,7 +341,7 @@ mod canon {
 /// **Drift caveat.** canon's collapse-empty step depends on gqlite's
 /// `is_empty` / `is_unsatisfiable` predicates — not on `union`/`meet`'s
 /// internal normalization. If those predicates regress, canon mis-
-/// classifies. The `meet_locks` / `normalization_locks` modules pin
+/// classifies. The inline `mod tests` blocks in `src/typing/*.rs` pin
 /// the impl behaviors directly so a predicate regression is caught at
 /// a different layer.
 macro_rules! assert_canon_eq {
@@ -357,7 +361,7 @@ macro_rules! assert_canon_eq {
 /// **Loose by design.** Under plausibility, `Star ≤ τ` and `τ ≤ Star`
 /// for any τ — so anything is consistent with `Star`. A regression
 /// where meet collapses to `Star` would slip past consistency tests.
-/// Pair with hand-picked `meet_locks` to catch that.
+/// Pair with the hand-picked locks in `src/typing/*.rs` to catch that.
 ///
 /// Use this for properties on types where gqlite's impl is allowed to
 /// return any representative of an equivalence class (e.g., `LabelType
@@ -912,7 +916,7 @@ mod label_type {
 
         // Idempotent under mutual-subtype (the gradual lattice's
         // equivalence). Star-collapse regressions are locked separately
-        // by the `meet_locks` hand-picked tests below.
+        // by `src/typing/label_type.rs`'s `test_meet_*` inline tests.
         #[test]
         fn meet_idempotent(t in arb_label_type()) {
             let m = LabelType::meet(&t, &t);
