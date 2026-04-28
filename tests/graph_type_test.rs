@@ -787,3 +787,120 @@ fn format_schema_round_trips_through_parser() {
     assert!(out.contains("age INT"));
     assert!(out.contains("(:A)-[:E]->(:B)"));
 }
+
+// =========================================================
+// Refine-to-Zero diagnostics: warnings when patterns don't match.
+// =========================================================
+
+fn warnings_for(input: &str, schema: &Schema) -> Vec<String> {
+    gqlrust::compile_query_with_diagnostics_with(schema, input)
+        .map(|r| r.warnings)
+        .unwrap_or_default()
+}
+
+fn schema_with_genre_and_actor() -> Schema {
+    let body = match parse_statement(
+        "CREATE GRAPH TYPE g AS { (:Genre {name STRING}), (:Actor {name STRING}) }",
+    )
+    .unwrap()
+    {
+        Statement::CreateGraphType { body, .. } => body,
+        _ => panic!(),
+    };
+    build_schema_from_body(&body)
+}
+
+#[test]
+fn warning_label_combination_not_in_schema() {
+    let schema = schema_with_genre_and_actor();
+    let ws = warnings_for("(:Actor&Genre)", &schema);
+    assert!(
+        ws.iter().any(|w| w.contains("label not in schema")),
+        "expected label-not-in-schema warning, got {ws:?}"
+    );
+}
+
+#[test]
+fn warning_unknown_label() {
+    let schema = schema_with_genre_and_actor();
+    let ws = warnings_for("(:Foo)", &schema);
+    assert!(
+        ws.iter().any(|w| w.contains("Foo") && w.contains("label not in schema")),
+        "expected Foo label warning, got {ws:?}"
+    );
+}
+
+#[test]
+fn warning_property_type_mismatch_distinguishes_from_label() {
+    let schema = schema_with_genre_and_actor();
+    let ws = warnings_for("(:Genre {name bool})", &schema);
+    assert!(
+        ws.iter().any(|w| w.contains("properties differ")),
+        "expected properties-differ warning, got {ws:?}"
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("label not in schema")),
+        "should not blame the label, got {ws:?}"
+    );
+}
+
+#[test]
+fn warning_silent_under_permissive_schema() {
+    // No active type → permissive Schema::star(); refine never returns Zero,
+    // so even bizarre label combos compile without these warnings.
+    let star = Schema::star();
+    let ws = warnings_for("(:Actor&Genre)", &star);
+    assert!(
+        !ws.iter().any(|w| w.contains("label not in schema")
+            || w.contains("properties differ")),
+        "permissive mode should not produce refine warnings, got {ws:?}"
+    );
+}
+
+#[test]
+fn warning_edge_label_not_in_schema() {
+    let body = match parse_statement(
+        "CREATE GRAPH TYPE g AS { (:A)-[:KNOWS]->(:B) }",
+    )
+    .unwrap()
+    {
+        Statement::CreateGraphType { body, .. } => body,
+        _ => panic!(),
+    };
+    let schema = build_schema_from_body(&body);
+    let ws = warnings_for("(:A)-[:LOVES]->(:B)", &schema);
+    assert!(
+        ws.iter().any(|w| w.contains("LOVES") && w.contains("label not in schema")),
+        "expected LOVES edge-label warning, got {ws:?}"
+    );
+}
+
+#[test]
+fn warning_collapsed_variable_binding() {
+    let schema = schema_with_genre_and_actor();
+    // Each side refines fine on its own; the meet over `x` collapses
+    // because no node is both Actor and Genre.
+    let ws = warnings_for("(x:Actor)(x:Genre)", &schema);
+    assert!(
+        ws.iter().any(|w| w.contains("variable x") && w.contains("under the active schema")),
+        "expected collapsed-binding warning for x, got {ws:?}"
+    );
+    // Order shouldn't matter.
+    let ws_rev = warnings_for("(x:Genre)(x:Actor)", &schema);
+    assert!(
+        ws_rev.iter().any(|w| w.contains("variable x")),
+        "expected collapsed-binding warning regardless of order, got {ws_rev:?}"
+    );
+}
+
+#[test]
+fn warning_compatible_variable_no_collapse_warning() {
+    let schema = schema_with_genre_and_actor();
+    // (x:Actor)(x:Actor) — same type both sides, meet is non-empty,
+    // should not produce a collapsed-binding warning.
+    let ws = warnings_for("(x:Actor)(x:Actor)", &schema);
+    assert!(
+        !ws.iter().any(|w| w.contains("cannot be both")),
+        "no collapse warning expected, got {ws:?}"
+    );
+}
