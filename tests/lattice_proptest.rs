@@ -1,79 +1,27 @@
 //! Spec-driven proptest suite for the typing lattice.
 //!
-//! The spec is `docs/rules.md` (FPPC formal rules). Section references
-//! in this file (`§3.1`, `§4.2`, etc.) point there. The goal: if
-//! `rules.md` changes, this file changes; if the implementation drifts
-//! from the spec, a property fails — and the failure message names the
-//! rule that was violated.
+//! Spec is `docs/rules.md` (FPPC). Section refs (`§3.1`, etc.) point
+//! there. Failure messages name the violated rule. Hand-picked locks
+//! for impl-specific behaviors live as inline `mod tests` in
+//! `src/typing/*.rs`; this file is the proptest layer. Regression seeds
+//! land in `tests/proptest-regressions/lattice.txt` (set in `cfg`).
 //!
-//! Hand-picked locks for the impl's specific behaviors live as inline
-//! `#[cfg(test)] mod tests` blocks in `src/typing/*.rs` — closer to the
-//! impl, the project's existing convention. Those locks pin input →
-//! output pairs that cover regressions canon-based proptests would mask
-//! (see `simple_type.rs`'s `test_is_empty_*` / `test_union_*`,
-//! `label_type.rs`'s `test_meet_*`, etc.).
+//! ## Equivalence: `canon_eq` vs `assert_consistent!`
 //!
-//! Auto-generated regression seeds for failing cases are persisted in
-//! `tests/proptest-regressions/lattice.txt` (configured below in `cfg`)
-//! to keep `tests/` clean of per-source regression files.
+//! Mutual subtype (the paper's *consistency*, `A ~ B`) is too loose for
+//! testing: `Star ≤ τ` and `τ ≤ Star` per §3.2, so anything is
+//! consistent with `Star`. A regression where meet collapses to `Star`
+//! slips through. We use `canon_eq` (canonicalize then `==`) wherever
+//! shape matters, and `assert_consistent!` only where the impl can
+//! return any representative of an equivalence class (e.g.
+//! `LabelType::meet` picking either operand when both are consistent).
+//! The inline locks in `src/typing/*.rs` backstop the consistency case.
 //!
-//! ## Three equivalence relations
+//! ## Dead variants not generated
 //!
-//! rules.md / FPPC use three relations between types:
-//!
-//! - **Subtyping** `A ≤ B` — plausibility-based (§3): "it is *possible*
-//!   for A to match B".
-//! - **Consistency** `A ~ B` — `A ≤ B AND B ≤ A` (§3): "the gradual
-//!   version of equality".
-//! - **Precision** `A ⊑ B` — information content (§9): "A is more
-//!   informative / less fuzzy than B".
-//!
-//! Consistency is too loose to serve as a test equivalence:
-//!
-//! ```text
-//! is_subtype(Z, Star) = true       // §3.2 Star bidirectional
-//! is_subtype(Star, Z) = true
-//! ⇒ Z ~ Star (consistent)          // …but Z and Star are not the same type
-//!
-//! is_subtype(A, Or(A, B)) = true       // §3.1 Or-RHS plausibility
-//! is_subtype(Or(A, B), A) = true       // §3.1 Or-LHS plausibility
-//! ⇒ A ~ Or(A, B) (consistent)          // …but Or(A, B) is wider than A
-//! ```
-//!
-//! So a regression where `meet(A, B)` collapses to `Star` or to one of
-//! its operands slips through any consistency check. We use **canonical
-//! form equality** (`canon_eq`) as a tighter relation for tests where
-//! shape genuinely matters (symmetries, distributions, refinements).
-//! For tests where the impl is allowed to pick any representative of an
-//! equivalence class — `LabelType::meet` returning either operand when
-//! they're consistent — we use `assert_consistent!` plus the hand-picked
-//! locks in `src/typing/*.rs`'s inline `mod tests` to backstop against
-//! Star-collapse regressions.
-//!
-//! `canon_eq` is closer to **non-gradual equality**: same shape modulo
-//! commutativity / idempotence / identity. It has its own caveat — see
-//! the `canon` module's drift discussion.
-//!
-//! ## Layers of coverage
-//!
-//! 1. **Algebraic invariants** — subtype reflexivity, meet idempotence,
-//!    greatest-lower-bound, commutativity, identity / absorbing elements.
-//! 2. **Spec rules from `rules.md`** — direct encodings, organized by
-//!    section. Each property names the rule it validates.
-//! 3. **Schema-diverse refinement** — refines against generated schemas
-//!    (not just `Schema::star()`). Restrictive-schema dispatch is where
-//!    bugs like the `EdgeDir::Any → directional-only` port regression
-//!    (commit `9ec4975`) live; lattice-level proptests against custom
-//!    schemas exercise that surface.
-//!
-//! ## Variants intentionally NOT generated
-//!
-//! `LabelType::Top`, `LabelType::Empty`, `LabelType::Neg` are dead code
-//! in gqlite (no parser/elaborator/runtime constructs them) and their
-//! intended semantics is unsettled. Adding them to the generators here
-//! would lock in behavior that is likely to change. Re-include them once
-//! semantics are pinned down — the spec-rule tests below are structured
-//! to accept new variants.
+//! `LabelType::Top`, `Empty`, `Neg` are never constructed by the
+//! parser/elaborator/runtime in gqlite; semantics unsettled. Generators
+//! omit them so this file doesn't lock in behavior that may change.
 
 use std::collections::BTreeMap;
 
@@ -90,32 +38,14 @@ use gqlrust::typing::variable_type::{Schema, VariableType};
 // Canonicalization
 // =======================================================================
 //
-// `canon` does four things to give a spec-aligned canonical form:
+// Spec-aligned canonical form: collapse semantically empty types to ⊥
+// (§3.2), sort commutative children, dedup, drop identity elements
+// (Zero from Union, Star from And). Collapse-empty depends on gqlite's
+// `is_empty` / `is_unsatisfiable` predicates — if those regress, canon
+// mis-classifies; the inline locks in `src/typing/*.rs` cover that.
 //
-//  1. **Collapse semantically empty types to ⊥.** `Group(Zero)`,
-//     `Record({a: Zero})`, `Union(Zero, Zero)`, etc. all reduce to
-//     the bottom representative. Per rules.md §3.2, these are all
-//     consistent with ⊥, and the spec treats them interchangeably.
-//  2. **Sort** children of commutative operators (And, Or, Union) by
-//     `Debug` repr. Pure algebra — commutativity is a true lattice law.
-//  3. **Dedup** adjacent equal children (idempotence: `A & A = A`).
-//  4. **Drop identity elements from joins/meets** — bottom from Union,
-//     Star from And. Lattice identities, also what gqlite's `union/meet`
-//     drops in its match arms.
-//
-// **Drift coupling.** Steps (1) and (4) depend on gqlite's predicates:
-// `is_empty` (SimpleType, PropertyType, VariableType) and
-// `is_unsatisfiable` (PathType). If those predicates regress, canon
-// silently mis-equates types. The defense is in two layers:
-//   - Inline `mod tests` blocks in `src/typing/*.rs` pin specific
-//     behaviors of `union/meet/is_empty/is_unsatisfiable` directly,
-//     independent of canon.
-//   - `equivalence_relations` (this file) documents the looseness in
-//     code so a future reader understands what canon promises.
-//
-// **What canon does NOT do.** No absorption (`Union(Star, X) → Star`),
-// no Star-from-Or removal. Going further would create false positives
-// against gqlite's actual representation.
+// Doesn't do absorption (`Union(Star, X) → Star`), to avoid false
+// positives against gqlite's actual representation.
 
 mod canon {
     use super::*;
@@ -328,22 +258,9 @@ mod canon {
     }
 }
 
-/// Canonical-form equality. Closer to the **non-gradual** equality you'd
-/// have without plausibility — two types are `canon_eq` iff they have
-/// the same shape after the canonicalization steps in the `canon`
-/// module (collapse-empty, sort commutative children, dedup, drop
-/// identity elements).
-///
-/// Tighter than `consistent` (mutual-subtype). Catches Star-collapse
-/// regressions that consistency would hide. Use where the output's
-/// SHAPE genuinely matters (symmetries, distributions, refinements).
-///
-/// **Drift caveat.** canon's collapse-empty step depends on gqlite's
-/// `is_empty` / `is_unsatisfiable` predicates — not on `union`/`meet`'s
-/// internal normalization. If those predicates regress, canon mis-
-/// classifies. The inline `mod tests` blocks in `src/typing/*.rs` pin
-/// the impl behaviors directly so a predicate regression is caught at
-/// a different layer.
+/// Canonicalize both sides via the `canon` module, then compare with
+/// `==`. Tighter than consistency (catches Star-collapse). Use where
+/// output shape matters (symmetries, distributions, refinements).
 macro_rules! assert_canon_eq {
     ($kind:ident, $lhs:expr, $rhs:expr $(, $msg:tt)?) => {{
         let lhs = $lhs;
@@ -354,18 +271,11 @@ macro_rules! assert_canon_eq {
     }};
 }
 
-/// Consistency (rules.md §3 — `A ~ B` in paper notation): `A ≤ B AND
-/// B ≤ A`. The paper calls this "the gradual version of equality":
-/// two types are consistent if they could plausibly match.
-///
-/// **Loose by design.** Under plausibility, `Star ≤ τ` and `τ ≤ Star`
-/// for any τ — so anything is consistent with `Star`. A regression
-/// where meet collapses to `Star` would slip past consistency tests.
-/// Pair with the hand-picked locks in `src/typing/*.rs` to catch that.
-///
-/// Use this for properties on types where gqlite's impl is allowed to
-/// return any representative of an equivalence class (e.g., `LabelType
-/// ::meet` returning either operand when both are mutually consistent).
+/// Consistency (rules.md §3 `A ~ B`): `A ≤ B AND B ≤ A`. Loose under
+/// plausibility — anything is consistent with `Star`. Use only where
+/// the impl can pick any representative of an equivalence class (e.g.
+/// `LabelType::meet` picking either operand when both are consistent);
+/// inline locks in `src/typing/*.rs` backstop Star-collapse regressions.
 macro_rules! assert_consistent {
     ($subtype_path:path, $lhs:expr, $rhs:expr $(, $msg:tt)?) => {{
         let lhs = $lhs;
@@ -530,14 +440,11 @@ fn arb_refinable_variable() -> BoxedStrategy<VariableType> {
 // Constructive generators (premise satisfied by construction)
 // =======================================================================
 //
-// Conditional properties of the form `assume(P) ⇒ Q` waste cases when
-// `P` is rare under random generation. These generators construct
-// inputs that satisfy the premise BY CONSTRUCTION, so every generated
-// case is a valid test case (zero rejects).
+// For `assume(P) ⇒ Q` properties: build inputs that satisfy P, so we
+// don't waste cases on `prop_assume!` rejects.
 
-/// Returns `(child, parent)` such that `is_subtype(child, parent)` holds
-/// by construction. Uses three constructions: `child` itself (refl),
-/// `Or(child, anything)` (Or-RHS), `And(child, anything)` (And-LHS).
+/// Returns `(child, parent)` with `is_subtype(child, parent)` holding
+/// by construction (refl / Or-RHS).
 fn arb_label_with_supertype() -> impl Strategy<Value = (LabelType, LabelType)> {
     let kind = 0u8..3;
     (kind, arb_label_type(), arb_label_type()).prop_map(|(k, child, sibling)| {
@@ -550,8 +457,8 @@ fn arb_label_with_supertype() -> impl Strategy<Value = (LabelType, LabelType)> {
     })
 }
 
-/// Returns `(child, parent)` such that `is_subtype(child, parent)` holds
-/// for SimpleType. Uses Star, Or-with-self, and reflexivity.
+/// SimpleType counterpart: `(child, parent)` with `is_subtype` holding
+/// (refl / Star / Union).
 fn arb_simple_with_supertype() -> impl Strategy<Value = (SimpleType, SimpleType)> {
     let kind = 0u8..3;
     (kind, arb_simple_type(), arb_simple_type()).prop_map(|(k, child, sibling)| {
@@ -568,15 +475,12 @@ fn arb_simple_with_supertype() -> impl Strategy<Value = (SimpleType, SimpleType)
 // Schema generators
 // =======================================================================
 //
-// `Schema::star()` is the most permissive possible schema; refinement
-// against it never returns Zero, so it only exercises a tiny slice of
-// the dispatch logic. Real bugs (e.g. the `EdgeDir::Any` regression
-// fixed in commit `9ec4975`) live in restrictive-schema dispatch.
-// These generators exercise that surface.
+// `Schema::star()` is too permissive to exercise restrictive-schema
+// dispatch (where bugs like the `EdgeDir::Any` regression of `9ec4975`
+// live). These generators produce restrictive schemas instead.
 
-/// Schema with a controlled mix of node / directed-edge / undirected-
-/// edge entries. The flags pin which kinds of entries appear so a
-/// failing test's input space is interpretable.
+/// Schema with a controlled mix of node / directed / undirected edges.
+/// Flags pin which edge kinds appear so failing inputs are interpretable.
 fn arb_schema_with(
     has_directed_edges: bool,
     has_undirected_edges: bool,
@@ -608,9 +512,8 @@ fn arb_schema_with(
     })
 }
 
-/// Schema containing ONLY EdgeNonDirectional edges. This is the shape
-/// LDBC `knows` lives in, and the shape that was silently dropped by
-/// the EdgeDir::Any bug.
+/// Schema with only `EdgeNonDirectional` edges (the LDBC `knows`
+/// shape that the `EdgeDir::Any` regression dropped).
 fn arb_schema_only_undirected() -> impl Strategy<Value = Schema> {
     arb_schema_with(false, true)
 }
@@ -645,23 +548,19 @@ fn cfg() -> ProptestConfig {
 // Documentation: equivalence-relation looseness
 // =======================================================================
 //
-// Hand-picked tests that demonstrate, in code, why this file uses
-// canonical-form equality instead of mutual-subtype. If a future reader
-// is tempted to "simplify" the canon module away, these tests will fail
-// the moment they swap canon for mutual-subtype.
+// In-code demonstration of why we use canon over mutual subtype. If
+// canon is "simplified away" to mutual subtype, these tests fail.
 
 mod equivalence_relations {
     use super::*;
 
     #[test]
     fn mutual_subtype_collapses_simple_to_star() {
-        // §3.2: `Star ≤ τ` AND `τ ≤ Star` for any τ, so anything is
-        // mutually-subtype-equivalent to Star. A regression where
-        // meet returns Star instead of the expected atom would slip
-        // past mutual-subtype-based equality.
+        // §3.2 Star bidirectional: Z ~ Star, but their canonical
+        // forms differ — meet collapsing to Star would slip past
+        // mutual subtype but fail canon.
         assert!(SimpleType::is_subtype(&SimpleType::Z, &SimpleType::Star));
         assert!(SimpleType::is_subtype(&SimpleType::Star, &SimpleType::Z));
-        // …but the canonical forms differ:
         assert_ne!(
             canon::simple(&SimpleType::Z),
             canon::simple(&SimpleType::Star)
@@ -692,8 +591,6 @@ mod equivalence_relations {
 
     #[test]
     fn canon_treats_reordered_unions_as_equal() {
-        // The whole point: two ASTs that differ in only the order of
-        // a commutative operator MUST canonicalize to the same form.
         let a = LabelType::Label("A".into());
         let b = LabelType::Label("B".into());
         let ab = LabelType::And(Box::new(a.clone()), Box::new(b.clone()));
@@ -703,8 +600,7 @@ mod equivalence_relations {
 
     #[test]
     fn canon_dedups_idempotent_operators() {
-        // And and Or are idempotent: `A & A = A`. Canonicalize should
-        // collapse duplicates, mirroring what gqlite's lattice ops do.
+        // `A & A = A` (And idempotent).
         let a = LabelType::Label("A".into());
         let aa = LabelType::And(Box::new(a.clone()), Box::new(a.clone()));
         assert_eq!(canon::label(&aa), canon::label(&a));
@@ -850,14 +746,9 @@ mod simple_spec_rules {
                 "rules.md §3.2 Union-RHS plausibility: (c ≤ b) ⇒ c ≤ (a + b)");
         }
 
-        // §4.1 Union meet distributivity: `(τ₁ + τ₂) ⊓ τ = (τ₁ ⊓ τ) ⊔ (τ₂ ⊓ τ)`.
-        //
-        // NOTE: this test is largely TAUTOLOGICAL because the impl
-        // directly encodes this rule in the `(Union, _)` arm of
-        // `SimpleType::meet`. Both `direct` and `split` reduce to the
-        // same expression. It survives as a regression lock against
-        // the arm being modified — *not* as an independent verification
-        // that the rule holds. If you change the meet arm, this fires.
+        // §4.1 distributivity: `(τ₁ + τ₂) ⊓ τ = (τ₁ ⊓ τ) ⊔ (τ₂ ⊓ τ)`.
+        // Tautological — the impl's `(Union, _)` arm IS this. Kept as
+        // a regression lock against arm modification.
         #[test]
         fn union_meet_distributes(
             t1 in arb_simple_type(),
@@ -876,9 +767,8 @@ mod simple_spec_rules {
                 "rules.md §4.1: (τ₁ + τ₂) ⊓ τ = (τ₁ ⊓ τ) ⊔ (τ₂ ⊓ τ)");
         }
 
-        // §4.1 Union meet distributivity — RHS variant. Tests the
-        // *symmetric* dispatch through `(_, Union)` arm. Catches if the
-        // two arms diverge.
+        // §4.1 distributivity — RHS variant. Catches divergence between
+        // the `(Union, _)` and `(_, Union)` arms.
         #[test]
         fn union_meet_distributes_rhs(
             t1 in arb_simple_type(),
@@ -1011,10 +901,8 @@ mod label_spec_rules {
                 "rules.md §3.1 And-RHS: (c ≤ p1) ∧ (c ≤ p2) ⇒ c ≤ (p1 & p2)");
         }
 
-        // §3.1 Or-LHS plausibility (gradual rule):
-        //   (ℓ₁ ≤ ℓ₃) ⇒ (ℓ₁ + ℓ₂) ≤ ℓ₃.
-        // pygql implements the older STRICT rule (both required) — a
-        // bug there. fppc/gqlite implement the gradual rule correctly.
+        // §3.1 Or-LHS plausibility: `(ℓ₁ ≤ ℓ₃) ⇒ (ℓ₁ + ℓ₂) ≤ ℓ₃`.
+        // Gradual rule; pygql still has the older strict version.
         #[test]
         fn or_lhs_left_premise_suffices(
             (child, parent) in arb_label_with_supertype(),
@@ -1461,10 +1349,8 @@ mod variable_spec_rules {
         }
 
         // §6 Refinement union distribution.
-        //
-        // NOTE: tautological — `VariableType::refine`'s `Union` arm IS
-        // `join(refine(t1), refine(t2))`. Both sides reduce to the same
-        // expression. Regression lock against arm modification.
+        // Tautological — `refine`'s `Union` arm IS this. Regression
+        // lock against arm modification.
         #[test]
         fn refinement_distributes_over_union(
             t1 in arb_variable_type(),
@@ -1527,16 +1413,13 @@ mod variable_spec_rules {
 }
 
 // =======================================================================
-// Schema-diverse refinement (the EdgeDir::Any-bug class)
+// Schema-diverse refinement (EdgeDir::Any-bug class)
 // =======================================================================
 //
-// Refinement against `Schema::star()` only exercises a permissive
-// dispatch path. Bugs in restrictive-schema dispatch (the
-// `EdgeDir::Any → directional-only` regression fixed in `9ec4975` is
-// one) need the schema-diverse surface these tests provide. Each
-// property is constructed so that the query SHOULD admit some schema
-// entry; if dispatch silently drops the matching entries, refinement
-// returns Zero and the property fails.
+// `Schema::star()` is too permissive to exercise restrictive-schema
+// dispatch. Each property here builds a schema where the query SHOULD
+// match an entry; if dispatch silently drops it, refinement returns
+// Zero and the property fails.
 
 mod schema_refinement_rules {
     use super::*;
@@ -1641,11 +1524,9 @@ mod schema_refinement_rules {
 // PathType — rules.md §4 / §8.1 / §8.2
 // =======================================================================
 //
-// PathType has a SPECIAL meet that CONCATENATES rather than narrowing
-// (rules.md §8.2). So `meet(p, p)` is *not* idempotent — it doubles
-// the path length on compatible boundaries. Reflexivity is therefore
-// not a property of path meet; concatenation semantics is verified by
-// focused unit tests below.
+// §8.2 path meet CONCATENATES rather than narrowing, so `meet(p, p)`
+// is not idempotent. Reflexivity is not a path-meet property; the
+// concatenation semantics is verified by the unit tests below.
 
 mod path_type {
     use super::*;

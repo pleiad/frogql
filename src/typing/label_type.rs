@@ -53,11 +53,6 @@ impl LabelType {
     pub fn is_subtype(l1: &LabelType, l2: &LabelType) -> bool {
         match (l1, l2) {
             (LabelType::Star, _) | (_, LabelType::Star) => true,
-            // Empty is the bottom of the label lattice — subtype of every
-            // label expression, including Neg(_). Must fire before the
-            // structural arms (especially `(_, Neg)`) which would otherwise
-            // flip Empty's truth value via negation.
-            (LabelType::Empty, _) => true,
             (_, LabelType::Top) => true,
             (LabelType::Label(a), LabelType::Label(b)) => a == b,
             (_, LabelType::And(a, b)) => {
@@ -73,6 +68,7 @@ impl LabelType {
                 LabelType::is_subtype(a, l2) || LabelType::is_subtype(b, l2)
             }
             (_, LabelType::Neg(inner)) => !LabelType::is_subtype(l1, inner),
+            (LabelType::Empty, _) => true,
             _ => false,
         }
     }
