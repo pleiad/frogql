@@ -11,7 +11,9 @@ use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::{Aggregator, Query, ReturnItem};
 
 use super::descriptor_type::DescriptorType;
+use super::label_type::LabelType;
 use super::path_type::{EdgeDir, PathType};
+use super::property_type::PropertyType;
 use super::simple_type::SimpleType;
 use super::type_environment::TypeEnvironment;
 use super::variable_type::{Schema, VariableType};
@@ -180,6 +182,8 @@ impl Typechecker {
                         r1.env.clone()
                     }
                 };
+
+                self.warn_for_collapsed_bindings(&cm, &r1.env, &r2.env);
 
                 let p = PathType::meet(&self.schema, &r1.path, &r2.path);
                 TypecheckResult::new(p, cm)
@@ -357,8 +361,12 @@ impl Typechecker {
         if let Some(d) = desc {
             self.assert_filters_drained(d);
         }
-        let vt = VariableType::Node(dtype);
-        VariableType::refine(&self.schema, &vt)
+        let vt = VariableType::Node(dtype.clone());
+        let refined = VariableType::refine(&self.schema, &vt);
+        if matches!(refined, VariableType::Zero) {
+            self.warnings.push(diagnose_node_mismatch(&self.schema, &dtype));
+        }
+        refined
     }
 
     fn refine_pattern_edge(&mut self, dir: EdgeDir, desc: &Option<Descriptor>) -> VariableType {
@@ -367,10 +375,18 @@ impl Typechecker {
             self.assert_filters_drained(d);
         }
         let vt = match dir {
-            EdgeDir::Right | EdgeDir::Left | EdgeDir::Any => VariableType::edge_directional(dtype),
-            EdgeDir::None => VariableType::edge_non_directional(dtype),
+            EdgeDir::Right | EdgeDir::Left | EdgeDir::Any => {
+                VariableType::edge_directional(dtype.clone())
+            }
+            EdgeDir::None => VariableType::edge_non_directional(dtype.clone()),
         };
-        VariableType::refine(&self.schema, &vt)
+        let refined = VariableType::refine(&self.schema, &vt);
+        if matches!(refined, VariableType::Zero) {
+            let directed = !matches!(dir, EdgeDir::None);
+            self.warnings
+                .push(diagnose_edge_mismatch(&self.schema, &dtype, directed));
+        }
+        refined
     }
 
     /// Elaboration must drain `Descriptor::value_filters` into `Filter`
@@ -384,6 +400,54 @@ impl Typechecker {
                  (elaboration bug)",
                 d.var
             ));
+        }
+    }
+
+    /// After meeting two pattern contexts, surface any variable whose
+    /// type collapsed to bottom. Each side's contribution is shown so
+    /// the user can see the conflict directly. Pre-existing empties
+    /// (already empty in `left` or `right`) are skipped to avoid
+    /// double-warning.
+    fn warn_for_collapsed_bindings(
+        &mut self,
+        merged: &TypeEnvironment,
+        left: &TypeEnvironment,
+        right: &TypeEnvironment,
+    ) {
+        for var in merged.keys() {
+            let merged_t = match merged.get(var) {
+                Some(t) => t,
+                None => continue,
+            };
+            if !merged_t.is_empty() {
+                continue;
+            }
+            let l_t = left.get(var);
+            let r_t = right.get(var);
+            let l_was_empty = l_t.is_some_and(VariableType::is_empty);
+            let r_was_empty = r_t.is_some_and(VariableType::is_empty);
+            if l_was_empty || r_was_empty {
+                continue;
+            }
+            match (l_t, r_t) {
+                (Some(l), Some(r)) => self.warnings.push(format!(
+                    "variable {} cannot be both {} and {} under the active schema",
+                    var,
+                    short_var_type(l),
+                    short_var_type(r)
+                )),
+                (Some(l), None) => self.warnings.push(format!(
+                    "variable {} bound to {} collapses to empty under the active schema",
+                    var,
+                    short_var_type(l)
+                )),
+                (None, Some(r)) => self.warnings.push(format!(
+                    "variable {} bound to {} collapses to empty under the active schema",
+                    var,
+                    short_var_type(r)
+                )),
+                (None, None) => {}
+            }
         }
     }
 
@@ -429,5 +493,133 @@ fn simple_type_of_value(v: &Value) -> SimpleType {
         Value::Bool(_) => SimpleType::B,
         Value::List(_) => SimpleType::List(Box::new(SimpleType::Star)),
         Value::Record(_) => SimpleType::Star,
+    }
+}
+
+// -----------------------------------------------
+// Refinement diagnostics
+// -----------------------------------------------
+//
+// When `refine` returns `VariableType::Zero` we know the pattern produces
+// the empty type under the active schema, but the typechecker doesn't
+// know which dimension caused the failure. These helpers re-run the
+// match in two stages (label first, then properties) so the warning
+// message can point at the actual source. Under `Schema::star()` the
+// refine never returns Zero, so these never fire on permissive sessions.
+
+/// Diagnose why a node descriptor refined to `Zero`. Splits the cause
+/// into "no schema entry has a compatible label" vs "labels match but
+/// the property record disagrees".
+fn diagnose_node_mismatch(schema: &Schema, query: &DescriptorType) -> String {
+    let label_compatible: Vec<&DescriptorType> = schema
+        .nodes
+        .iter()
+        .filter_map(node_descriptor_ref)
+        .filter(|d| LabelType::is_subtype(&d.label, &query.label))
+        .collect();
+
+    if label_compatible.is_empty() {
+        format!(
+            "node pattern (:{}) does not match any node type in the active schema (label not in schema)",
+            query.label
+        )
+    } else {
+        let expected = describe_property_alternatives(&label_compatible);
+        format!(
+            "node pattern (:{} {}) does not match the schema — properties differ (schema expects {})",
+            query.label, query.props, expected
+        )
+    }
+}
+
+/// Diagnose why an edge descriptor refined to `Zero`. Stages: same
+/// directionality → label match → property match. Endpoint mismatches
+/// fall through to a generic message; surfacing those clearly would
+/// require carrying the query's left/right node descriptors here, which
+/// is left as future work.
+fn diagnose_edge_mismatch(schema: &Schema, query: &DescriptorType, directed: bool) -> String {
+    let arrow_open = if directed { "-[:" } else { "~[:" };
+    let arrow_close = if directed { "]->" } else { "]~" };
+
+    let same_dir: Vec<&DescriptorType> = schema
+        .edges
+        .iter()
+        .filter_map(|vt| match vt {
+            VariableType::EdgeDirectional { desc, .. } if directed => Some(desc),
+            VariableType::EdgeNonDirectional { desc, .. } if !directed => Some(desc),
+            _ => None,
+        })
+        .collect();
+
+    if same_dir.is_empty() {
+        return format!(
+            "edge pattern {arrow_open}{}{arrow_close} does not match any edge type (no schema edges with this directionality)",
+            query.label
+        );
+    }
+
+    let label_compatible: Vec<&DescriptorType> = same_dir
+        .into_iter()
+        .filter(|d| LabelType::is_subtype(&d.label, &query.label))
+        .collect();
+
+    if label_compatible.is_empty() {
+        return format!(
+            "edge pattern {arrow_open}{}{arrow_close} does not match any edge type (label not in schema)",
+            query.label
+        );
+    }
+
+    let prop_compatible: Vec<&&DescriptorType> = label_compatible
+        .iter()
+        .filter(|d| PropertyType::is_subtype(&d.props, &query.props))
+        .collect();
+
+    if prop_compatible.is_empty() {
+        let expected = describe_property_alternatives(&label_compatible);
+        return format!(
+            "edge pattern {arrow_open}{} {}{arrow_close} does not match the schema — properties differ (schema expects {})",
+            query.label, query.props, expected
+        );
+    }
+
+    // Label and props OK individually but full edge subtype still failed:
+    // the endpoint constraints don't match. Don't try to be too specific
+    // here — we don't have the query's endpoint descriptors at this
+    // shallow point.
+    format!(
+        "edge pattern {arrow_open}{}{arrow_close} does not match the schema — endpoint types do not match",
+        query.label
+    )
+}
+
+fn node_descriptor_ref(vt: &VariableType) -> Option<&DescriptorType> {
+    match vt {
+        VariableType::Node(d) => Some(d),
+        _ => None,
+    }
+}
+
+fn describe_property_alternatives(candidates: &[&DescriptorType]) -> String {
+    let parts: Vec<String> = candidates
+        .iter()
+        .map(|d| format!("{}", d.props))
+        .collect();
+    parts.join(" or ")
+}
+
+/// Compact rendering of a `VariableType` for warning text. The default
+/// `Display` uses paper-style brackets (⸨...⸩); user-facing diagnostics
+/// look cleaner with the bracket-style query syntax instead. Unions (a
+/// common output from `refine` against schemas with overlapping label
+/// combinations) are rendered as "(:A) or (:B)".
+fn short_var_type(t: &VariableType) -> String {
+    match t {
+        VariableType::Node(d) => format!("(:{})", d.label),
+        VariableType::EdgeDirectional { desc, .. } => format!("-[:{}]->", desc.label),
+        VariableType::EdgeNonDirectional { desc, .. } => format!("~[:{}]~", desc.label),
+        VariableType::Union(a, b) => format!("{} or {}", short_var_type(a), short_var_type(b)),
+        VariableType::Group(inner) => format!("group<{}>", short_var_type(inner)),
+        VariableType::Zero => "⊥".to_string(),
     }
 }
