@@ -11,7 +11,10 @@ pub enum Statement {
     /// A regular GQL query (MATCH/WHERE/RETURN).
     Query(Query),
     /// `CREATE GRAPH TYPE <name> AS { <body> };`
-    CreateGraphType { name: String, body: Vec<TypeElement> },
+    CreateGraphType {
+        name: String,
+        body: Vec<TypeElement>,
+    },
     /// `USE GRAPH TYPE <name>;`
     ///
     /// `refresh_default` is true when `<name>` is the reserved `DEFAULT`

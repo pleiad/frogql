@@ -132,7 +132,10 @@ fn group_nodes<G: GraphAccess>(g: &G) -> BTreeMap<Vec<String>, Group> {
             .iter()
             .map(|(k, v)| (k.clone(), value_to_simple_type(v)))
             .collect();
-        groups.entry(labels).or_insert_with(Group::new).update(props);
+        groups
+            .entry(labels)
+            .or_insert_with(Group::new)
+            .update(props);
     }
     groups
 }
@@ -180,7 +183,10 @@ fn labels_to_label_type(labels: &[String]) -> LabelType {
     }
 }
 
-fn props_to_property_type(props: &BTreeMap<String, SimpleType>, has_optional: bool) -> PropertyType {
+fn props_to_property_type(
+    props: &BTreeMap<String, SimpleType>,
+    has_optional: bool,
+) -> PropertyType {
     if has_optional {
         PropertyType::Open(props.clone())
     } else {
@@ -231,10 +237,7 @@ fn edge_variable_type(
     }
 }
 
-fn endpoint_node(
-    labels: &[String],
-    node_groups: &BTreeMap<Vec<String>, Group>,
-) -> VariableType {
+fn endpoint_node(labels: &[String], node_groups: &BTreeMap<Vec<String>, Group>) -> VariableType {
     match node_groups.get(labels) {
         Some(gp) => node_variable_type(labels, gp),
         None => VariableType::Node(DescriptorType::new(

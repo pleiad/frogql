@@ -1212,9 +1212,7 @@ impl Parser {
     fn graph_type_name(&mut self) -> Result<String, String> {
         match self.advance() {
             Token::Name(n) => Ok(n),
-            Token::Default => {
-                Err("DEFAULT is a reserved graph type name".into())
-            }
+            Token::Default => Err("DEFAULT is a reserved graph type name".into()),
             t => Err(format!("expected graph type name, got {t:?}")),
         }
     }
@@ -1299,13 +1297,17 @@ impl Parser {
         let right_desc = self.type_node()?;
 
         let (left_node, right_node) = match kind {
-            EdgeKind::Right | EdgeKind::Undirected => {
-                (VariableType::Node(left_desc), VariableType::Node(right_desc))
-            }
+            EdgeKind::Right | EdgeKind::Undirected => (
+                VariableType::Node(left_desc),
+                VariableType::Node(right_desc),
+            ),
             EdgeKind::Left => {
                 // Normalize to LeftEndpoint=src direction so the runtime
                 // model stays directional with src on the left.
-                (VariableType::Node(right_desc), VariableType::Node(left_desc))
+                (
+                    VariableType::Node(right_desc),
+                    VariableType::Node(left_desc),
+                )
             }
         };
 

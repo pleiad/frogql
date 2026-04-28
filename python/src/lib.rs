@@ -42,12 +42,7 @@ impl Connection {
     }
 
     #[pyo3(signature = (query, limit = 100))]
-    fn execute<'py>(
-        &self,
-        py: Python<'py>,
-        query: &str,
-        limit: usize,
-    ) -> PyResult<PyObject> {
+    fn execute<'py>(&self, py: Python<'py>, query: &str, limit: usize) -> PyResult<PyObject> {
         // Top-level dispatch: DDL goes through the catalog, queries
         // through the runtime.
         let stmt = parse_statement(query).map_err(PyValueError::new_err)?;
@@ -116,12 +111,7 @@ impl Connection {
 
 // Connection helpers (no #[pymethods]; called from execute()).
 impl Connection {
-    fn exec_query<'py>(
-        &self,
-        py: Python<'py>,
-        query: &str,
-        limit: usize,
-    ) -> PyResult<PyObject> {
+    fn exec_query<'py>(&self, py: Python<'py>, query: &str, limit: usize) -> PyResult<PyObject> {
         let active = self.store.catalog().active_schema();
         let result = gqlrust::compile_query_with_diagnostics_with(&active, query)
             .map_err(|e| PyValueError::new_err(e.message()))?;
