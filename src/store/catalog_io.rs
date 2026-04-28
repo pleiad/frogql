@@ -61,7 +61,7 @@ pub fn write_catalog(
         free_chain(pager, old_root)?;
     }
     let json = serde_json::to_vec(catalog)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("catalog encode: {e}")))?;
+        .map_err(|e| io::Error::other(format!("catalog encode: {e}")))?;
     write_chain(pager, &json)
 }
 

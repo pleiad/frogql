@@ -158,8 +158,8 @@ impl GraphTypeCatalog {
     pub fn list(&self) -> Vec<(&String, bool)> {
         let active = self.active.as_deref();
         self.types
-            .iter()
-            .map(|(name, _)| (name, Some(name.as_str()) == active))
+            .keys()
+            .map(|name| (name, Some(name.as_str()) == active))
             .collect()
     }
 
