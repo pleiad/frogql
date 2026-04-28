@@ -72,7 +72,9 @@ Page 0 is the file header. The remaining pages store data and indexes.
 │   edge_count: 5                                       │
 │   pointers to: string table, node data, edge data,   │
 │                label index, adjacency index,          │
-│                node ID index, edge ID index           │
+│                node ID index, edge ID index,          │
+│                graph-type catalog                     │
+│   active graph-type name (32-byte UTF-8)             │
 ├──────────────────────────────────────────────────────┤
 │ Pages 1-N: String Table                              │
 │   All unique strings stored once                      │
@@ -84,11 +86,20 @@ Page 0 is the file header. The remaining pages store data and indexes.
 │ Pages M+1..K: Edge Data                              │
 │   One cell per edge (slotted-page layout)            │
 ├──────────────────────────────────────────────────────┤
-│ Pages K+1...: Indexes                                │
+│ Pages K+1..L: Indexes                                │
 │   Label index (which nodes/edges have each label)    │
 │   Adjacency index (outgoing/incoming per node)       │
+├──────────────────────────────────────────────────────┤
+│ Pages L+1...: Graph-type catalog (chained, JSON)     │
+│   Named GRAPH TYPE schemas + active pointer           │
+│   See §3.5                                            │
 └──────────────────────────────────────────────────────┘
 ```
+
+The **header** carries `catalog_root` (bytes 60–63) and an inline
+`active_type_name` (bytes 64–95, 32-byte null-padded UTF-8). Both are
+zero on legacy files; readers fall back to "no catalog, no active type"
+without bumping the format version.
 
 ### 3.2 String Table
 
@@ -248,6 +259,93 @@ Page 21 (node 1 = a2):
 Each adjacency entry is 9 bytes: edge_id(4) + other_node(4) + kind(1).
 Kind: 0=outgoing, 1=incoming, 2=undirected.
 
+### 3.5 Graph-Type Catalog
+
+The catalog stores named GRAPH TYPE schemas (`CREATE GRAPH TYPE` /
+`USE GRAPH TYPE` / `DROP GRAPH TYPE`) plus the currently-active pointer.
+It survives close/reopen, so the typechecker can honor an active type
+across sessions.
+
+**Two anchor points**: the catalog root page lives in the file header
+(`catalog_root`, bytes 60–63 of page 0), and the active type name is
+mirrored inline in the same header (bytes 64–95). The header copy lets
+the REPL print the active type before reading the chain. The chain
+itself remains the source of truth.
+
+**Page chain**. The catalog is serialized as JSON (via `serde_json`) and
+written across one or more pages of `PageType::Catalog (= 8)`. Each
+page after the standard 8-byte page header carries:
+
+```
+first page:        [next_page u32 LE] [total_len u32 LE] [payload..]
+continuation page:  [next_page u32 LE]                    [payload..]
+```
+
+`next_page = 0` ends the chain. `total_len` (in the first page only)
+tells the reader how many payload bytes are valid, so trailing zeros in
+the last page are ignored. Effective payload capacity: 4080 bytes in
+the first page, 4084 bytes per continuation. Catalogs are small in
+practice — single-page is the common case.
+
+**Rewrite-and-free**. Each catalog change (CREATE/USE/DROP) calls
+`save_catalog()`, which frees the entire old chain through the pager's
+free list and allocates a fresh one. The new root replaces
+`header.catalog_root`. Page numbers are reused; there is no leak when
+the catalog stays roughly the same size.
+
+**JSON shape** (abridged):
+
+```json
+{
+  "version": 1,
+  "types": {
+    "DEFAULT": { "nodes": [...], "edges": [...] },
+    "strict":  { "nodes": [...], "edges": [...] }
+  },
+  "active": "strict",
+  "validations": {
+    "strict": {
+      "against_node_count": 171,
+      "against_edge_count": 253,
+      "violations": 38,
+      "validated_at_unix": 1738000000
+    }
+  }
+}
+```
+
+Each `Schema` is a list of `VariableType::Node` / `Edge` values. The
+typing types — `Schema`, `VariableType`, `DescriptorType`, `LabelType`,
+`PropertyType`, `SimpleType` — derive `Serialize` / `Deserialize`, so
+the catalog round-trips through `serde_json` without bespoke code. Any
+change to those types is automatically reflected in the on-disk shape;
+add a `format_version` bump if a change becomes incompatible.
+
+**Validation cache**. `validations` is a sidecar map keyed by graph
+type name. Entries are populated by `VALIDATE GRAPH TYPE <name>` (see
+`src/typing/validate.rs`), which walks every node and edge and checks
+each instance against `schema.nodes` / `schema.edges` via
+`VariableType::is_subtype`. The map uses `#[serde(default)]` so older
+catalogs that predate validation deserialize cleanly. Cache invalidation
+is automatic on `register` (re-CREATE), `drop`, and `install_default`
+(refresh). Future graph mutations must clear affected entries.
+
+**Backward compatibility**. Files written before the catalog landed
+have `catalog_root = 0` and an empty `active_type_name`. Readers treat
+this as "no catalog, no active type" and fall back to `Schema::star()`
+(permissive). Older binaries opening a file with a populated catalog
+ignore the new header bytes — the rest of the format is unchanged, so
+queries still work.
+
+**Inferred DEFAULT**. The reserved name `DEFAULT` is repopulated on
+demand by `infer_simple_schema(&store)` (`src/typing/inference.rs`),
+which groups nodes by sorted label sets and edges by
+`(edge_labels, src_labels, tgt_labels, directed)`, intersecting
+property types across instances. Optional props fall out of the
+intersection and the surviving record stays open. The CSV/JSON import
+pipeline runs this once after `graph.save` and persists the result, so
+a freshly-imported `.gdb` opens with `DEFAULT` already active.
+
 ## 4. Storage Backends
 
 gqlrust has three backends. All implement the same `GraphAccess` trait,
@@ -308,6 +406,11 @@ What's in memory:
 │                                                          │
 │  ── Page cache (LRU) ──                                  │
 │  Up to 2000 pages (≈8 MB) of recently accessed pages     │
+│                                                          │
+│  ── Graph-type catalog ──                                │
+│  Loaded eagerly from the chain at `header.catalog_root`. │
+│  Mutations go through `catalog_mut()` + `save_catalog()` │
+│  (rewrites the chain, updates the header).               │
 └──────────────────────────────────────────────────────────┘
 
                     ┌─────────────────┐

@@ -1,8 +1,11 @@
 pub mod checker;
 pub mod descriptor_type;
+pub mod format;
+pub mod inference;
 pub mod label_type;
 pub mod path_type;
 pub mod property_type;
 pub mod simple_type;
 pub mod type_environment;
+pub mod validate;
 pub mod variable_type;

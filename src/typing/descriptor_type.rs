@@ -1,11 +1,13 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use super::label_type::LabelType;
 use super::property_type::PropertyType;
 
 /// Combines a label constraint with a property constraint.
 /// Used to describe the type of a node or edge.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DescriptorType {
     pub label: LabelType,
     pub props: PropertyType,

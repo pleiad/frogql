@@ -1,10 +1,12 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use super::descriptor_type::DescriptorType;
 use super::simple_type::SimpleType;
 
 /// Types for pattern variables (nodes, edges, unions, lists, bottom).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VariableType {
     Node(DescriptorType),
     EdgeDirectional {
@@ -353,7 +355,7 @@ impl fmt::Display for VariableType {
 }
 
 /// Schema: a set of allowed node and edge types.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schema {
     pub nodes: Vec<VariableType>,
     pub edges: Vec<VariableType>,

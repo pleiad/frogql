@@ -25,6 +25,20 @@ pub enum Token {
     Distinct,
     All,
     Typed,
+    /// DDL / catalog keywords (uppercase only — see lexer rules).
+    Create,
+    Use,
+    Drop,
+    Graph,
+    TypeKw,
+    Default,
+    /// Catalog inspection / validation keywords (uppercase only).
+    Show,
+    Current,
+    Types,
+    Validate,
+    /// `LIST` keyword for `LIST<T>` type-expression form.
+    List,
     /// Compound: `group` and `by` stay valid as record/property names.
     GroupBy,
     Count,
@@ -58,6 +72,7 @@ pub enum Token {
     Question,    // ?
     Pipe,        // |
     Amp,         // &
+    Semicolon,   // ;
 
     // Compound edge tokens
     RightArrow, // ->
@@ -212,6 +227,10 @@ impl Lexer {
                 ',' => {
                     self.advance();
                     self.tokens.push(Token::Comma);
+                }
+                ';' => {
+                    self.advance();
+                    self.tokens.push(Token::Semicolon);
                 }
                 '.' => {
                     self.advance();
@@ -413,6 +432,30 @@ impl Lexer {
                         "float" => Token::Float,
                         "bool" => Token::Bool,
                         "str" => Token::Str,
+                        // ISO-style uppercase primitive aliases. Only
+                        // recognized in their canonical uppercase form to
+                        // keep lowercase identifiers (`string`, `integer`,
+                        // `boolean`, `list`, `any`) usable as property
+                        // names in existing graphs and queries.
+                        "INT" | "INTEGER" => Token::Int,
+                        "FLOAT" => Token::Float,
+                        "BOOL" | "BOOLEAN" => Token::Bool,
+                        "STRING" => Token::Str,
+                        "ANY" => Token::Star,
+                        "LIST" => Token::List,
+                        // DDL keywords. Uppercase-only for the same
+                        // backward-compat reason: `type` and `default` are
+                        // common property names.
+                        "CREATE" => Token::Create,
+                        "USE" => Token::Use,
+                        "DROP" => Token::Drop,
+                        "GRAPH" => Token::Graph,
+                        "TYPE" => Token::TypeKw,
+                        "TYPES" => Token::Types,
+                        "DEFAULT" => Token::Default,
+                        "SHOW" => Token::Show,
+                        "CURRENT" => Token::Current,
+                        "VALIDATE" => Token::Validate,
                         _ => Token::Name(name),
                     };
                     self.tokens.push(tok);
