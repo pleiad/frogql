@@ -1615,6 +1615,181 @@ mod schema_refinement_rules {
 }
 
 // =======================================================================
+// Predicate locks — ground-truth tests for `is_empty` / `is_unsatisfiable`
+// =======================================================================
+//
+// `canon`'s collapse-empty step depends on these predicates. The other
+// tests check predicates only indirectly (against canon, or against
+// themselves in the union-empty test — tautological). A subtle
+// regression in `is_empty` could slip past everything else if proptest
+// happens not to generate the triggering shape. These hand-picked
+// assertions pin specific input → bool pairs covering each match arm
+// in each predicate.
+
+mod predicate_locks {
+    use super::*;
+
+    // SimpleType::is_empty — covers each arm of the impl.
+    #[test]
+    fn simple_zero_is_empty() {
+        assert!(SimpleType::Zero.is_empty());
+    }
+    #[test]
+    fn simple_atoms_are_not_empty() {
+        assert!(!SimpleType::Z.is_empty());
+        assert!(!SimpleType::F.is_empty());
+        assert!(!SimpleType::B.is_empty());
+        assert!(!SimpleType::S.is_empty());
+        assert!(!SimpleType::Star.is_empty());
+    }
+    #[test]
+    fn simple_union_empty_iff_both_empty() {
+        // Match arm: Union(a, b) => a.is_empty() && b.is_empty()
+        let zero = || SimpleType::Zero;
+        let one = || SimpleType::Z;
+        assert!(SimpleType::Union(Box::new(zero()), Box::new(zero())).is_empty());
+        assert!(!SimpleType::Union(Box::new(zero()), Box::new(one())).is_empty());
+        assert!(!SimpleType::Union(Box::new(one()), Box::new(zero())).is_empty());
+        assert!(!SimpleType::Union(Box::new(one()), Box::new(one())).is_empty());
+    }
+    #[test]
+    fn simple_group_empty_iff_inner_empty() {
+        assert!(SimpleType::Group(Box::new(SimpleType::Zero)).is_empty());
+        assert!(!SimpleType::Group(Box::new(SimpleType::Z)).is_empty());
+    }
+    #[test]
+    fn simple_list_empty_iff_inner_empty() {
+        assert!(SimpleType::List(Box::new(SimpleType::Zero)).is_empty());
+        assert!(!SimpleType::List(Box::new(SimpleType::Z)).is_empty());
+    }
+    #[test]
+    fn simple_record_empty_iff_any_field_empty() {
+        // Match arm: Record(fields) => fields.values().any(is_empty).
+        // NOTE: this is `any`, not `all` — different from Union.
+        let mut m = BTreeMap::new();
+        m.insert("a".to_string(), SimpleType::Z);
+        m.insert("b".to_string(), SimpleType::Zero);
+        assert!(
+            SimpleType::Record(m).is_empty(),
+            "record with one Zero field should be empty (any-semantics)"
+        );
+
+        let mut m2 = BTreeMap::new();
+        m2.insert("a".to_string(), SimpleType::Z);
+        m2.insert("b".to_string(), SimpleType::F);
+        assert!(!SimpleType::Record(m2).is_empty());
+
+        // Empty record (no fields): not empty per the impl.
+        assert!(!SimpleType::Record(BTreeMap::new()).is_empty());
+    }
+
+    // PropertyType::is_empty — quirk: empty record is NOT empty,
+    // but a non-empty record with any empty field IS.
+    #[test]
+    fn property_zero_is_empty() {
+        assert!(PropertyType::Zero.is_empty());
+    }
+    #[test]
+    fn property_empty_record_is_not_empty() {
+        // Per impl: `!m.is_empty() && m.values().any(...)`.
+        // Empty maps fail the first conjunct, so are NOT empty.
+        assert!(!PropertyType::open_empty().is_empty());
+        assert!(!PropertyType::closed_empty().is_empty());
+    }
+    #[test]
+    fn property_record_with_empty_field_is_empty() {
+        let mut m = BTreeMap::new();
+        m.insert("a".to_string(), SimpleType::Zero);
+        assert!(PropertyType::Open(m.clone()).is_empty());
+        assert!(PropertyType::Closed(m).is_empty());
+    }
+    #[test]
+    fn property_record_with_only_full_fields_is_not_empty() {
+        let mut m = BTreeMap::new();
+        m.insert("a".to_string(), SimpleType::Z);
+        assert!(!PropertyType::Open(m.clone()).is_empty());
+        assert!(!PropertyType::Closed(m).is_empty());
+    }
+
+    // VariableType::is_empty — Edge variants use OR over (desc, left,
+    // right) — different from Union which uses AND.
+    #[test]
+    fn variable_zero_is_empty() {
+        assert!(VariableType::Zero.is_empty());
+    }
+    #[test]
+    fn variable_node_empty_iff_descriptor_empty() {
+        let empty_d = DescriptorType::new(LabelType::Star, PropertyType::Zero);
+        assert!(VariableType::Node(empty_d).is_empty());
+        assert!(!VariableType::node_star().is_empty());
+    }
+    #[test]
+    fn variable_edge_directional_empty_iff_any_component_empty() {
+        // Match arm: desc.is_empty() || left.is_empty() || right.is_empty()
+        let star_node = || Box::new(VariableType::node_star());
+        let empty_node = || {
+            Box::new(VariableType::Node(DescriptorType::new(
+                LabelType::Star,
+                PropertyType::Zero,
+            )))
+        };
+        // All full: not empty.
+        assert!(!VariableType::EdgeDirectional {
+            desc: DescriptorType::star(),
+            left: star_node(),
+            right: star_node(),
+        }
+        .is_empty());
+        // Empty left → empty edge.
+        assert!(VariableType::EdgeDirectional {
+            desc: DescriptorType::star(),
+            left: empty_node(),
+            right: star_node(),
+        }
+        .is_empty());
+        // Empty right → empty edge.
+        assert!(VariableType::EdgeDirectional {
+            desc: DescriptorType::star(),
+            left: star_node(),
+            right: empty_node(),
+        }
+        .is_empty());
+    }
+    #[test]
+    fn variable_union_empty_iff_both_empty() {
+        // Sanity: complement to Edge's OR semantics.
+        let zero = || Box::new(VariableType::Zero);
+        let n = || Box::new(VariableType::node_star());
+        assert!(VariableType::Union(zero(), zero()).is_empty());
+        assert!(!VariableType::Union(zero(), n()).is_empty());
+        assert!(!VariableType::Union(n(), zero()).is_empty());
+    }
+
+    // PathType::is_unsatisfiable.
+    #[test]
+    fn path_zero_is_unsatisfiable() {
+        assert!(PathType::Zero.is_unsatisfiable());
+    }
+    #[test]
+    fn path_node_unsat_iff_descriptor_empty() {
+        let empty_d = DescriptorType::new(LabelType::Star, PropertyType::Zero);
+        assert!(PathType::node(empty_d).is_unsatisfiable());
+        assert!(!PathType::node(DescriptorType::star()).is_unsatisfiable());
+    }
+    #[test]
+    fn path_union_unsat_iff_both_unsat() {
+        // Different from path is_empty (which uses OR for length min) —
+        // is_unsatisfiable uses AND for Union per §8.4.
+        let n = || PathType::node(DescriptorType::star());
+        assert!(
+            PathType::Union(Box::new(PathType::Zero), Box::new(PathType::Zero)).is_unsatisfiable()
+        );
+        assert!(!PathType::Union(Box::new(PathType::Zero), Box::new(n())).is_unsatisfiable());
+        assert!(!PathType::Union(Box::new(n()), Box::new(PathType::Zero)).is_unsatisfiable());
+    }
+}
+
+// =======================================================================
 // Normalization locks — independent assertions on the impl's normalizing
 // behavior
 // =======================================================================
