@@ -4,27 +4,41 @@
 //! implementation drifts from the spec, a property fails — and the
 //! failure message names the rule that was violated.
 //!
-//! ## Why we don't use mutual-subtype as the equivalence relation
+//! ## Three equivalence relations
 //!
-//! Plausibility-based gradual subtyping (rules.md §3) is too loose to
-//! serve as an equivalence relation:
+//! rules.md / FPPC use three relations between types:
+//!
+//! - **Subtyping** `A ≤ B` — plausibility-based (§3): "it is *possible*
+//!   for A to match B".
+//! - **Consistency** `A ~ B` — `A ≤ B AND B ≤ A` (§3): "the gradual
+//!   version of equality".
+//! - **Precision** `A ⊑ B` — information content (§9): "A is more
+//!   informative / less fuzzy than B".
+//!
+//! Consistency is too loose to serve as a test equivalence:
 //!
 //! ```text
 //! is_subtype(Z, Star) = true       // §3.2 Star bidirectional
-//! is_subtype(Star, Z) = true       // §3.2 Star bidirectional
-//! ⇒ Star ≡ Z under mutual-subtype  // …but Star and Z are not the same type
+//! is_subtype(Star, Z) = true
+//! ⇒ Z ~ Star (consistent)          // …but Z and Star are not the same type
 //!
 //! is_subtype(A, Or(A, B)) = true       // §3.1 Or-RHS plausibility
 //! is_subtype(Or(A, B), A) = true       // §3.1 Or-LHS plausibility
-//! ⇒ A ≡ Or(A, B) under mutual-subtype  // …but Or(A, B) is wider than A
+//! ⇒ A ~ Or(A, B) (consistent)          // …but Or(A, B) is wider than A
 //! ```
 //!
-//! A regression where `meet(A, B)` collapses to `Star` or to one of its
-//! operands would slip through any `is_subtype(a, b) && is_subtype(b, a)`
-//! check. So idempotence / commutativity / orientation-symmetry tests
-//! compare **canonical forms** (see `canon` module) rather than mutual
-//! subtype. The `equivalence_relations` module below pins this looseness
-//! in code so the next reader doesn't reach for mutual subtype again.
+//! So a regression where `meet(A, B)` collapses to `Star` or to one of
+//! its operands slips through any consistency check. We use **canonical
+//! form equality** (`canon_eq`) as a tighter relation for tests where
+//! shape genuinely matters (symmetries, distributions, refinements).
+//! For tests where the impl is allowed to pick any representative of an
+//! equivalence class — `LabelType::meet` returning either operand when
+//! they're consistent — we use `assert_consistent!` plus hand-picked
+//! `meet_locks` to backstop against Star-collapse regressions.
+//!
+//! `canon_eq` is closer to **non-gradual equality**: same shape modulo
+//! commutativity / idempotence / identity. It has its own caveat — see
+//! the `canon` module's drift discussion.
 //!
 //! ## Layers of coverage
 //!
@@ -62,16 +76,31 @@ use gqlrust::typing::variable_type::{Schema, VariableType};
 // Canonicalization
 // =======================================================================
 //
-// Each lattice type's commutative operators (And/Or/Union) are sorted
-// and deduplicated to give a canonical form. Two types are "lattice
-// equal" when their canonical forms are syntactically equal (`==`). This
-// is strictly tighter than mutual-subtype (which is too loose under
-// plausibility) and strictly looser than raw `==` (which would reject
-// reordered Unions that mean the same thing).
+// `canon` does four things to give a spec-aligned canonical form:
 //
-// The canonicalizers do NOT perform absorption (e.g. `Union(Star, X) →
-// Star`) because the gqlite impl doesn't either — adding it here would
-// create false positives where the impl produces a non-canonical shape.
+//  1. **Collapse semantically empty types to ⊥.** `Group(Zero)`,
+//     `Record({a: Zero})`, `Union(Zero, Zero)`, etc. all reduce to
+//     the bottom representative. Per rules.md §3.2, these are all
+//     consistent with ⊥, and the spec treats them interchangeably.
+//  2. **Sort** children of commutative operators (And, Or, Union) by
+//     `Debug` repr. Pure algebra — commutativity is a true lattice law.
+//  3. **Dedup** adjacent equal children (idempotence: `A & A = A`).
+//  4. **Drop identity elements from joins/meets** — bottom from Union,
+//     Star from And. Lattice identities, also what gqlite's `union/meet`
+//     drops in its match arms.
+//
+// **Drift coupling.** Steps (1) and (4) depend on gqlite's predicates:
+// `is_empty` (SimpleType, PropertyType, VariableType) and
+// `is_unsatisfiable` (PathType). If those predicates regress, canon
+// silently mis-equates types. The defense is in two layers:
+//   - `meet_locks` / `normalization_locks` pin specific behaviors of
+//     `union/meet/is_empty/is_unsatisfiable` directly.
+//   - `equivalence_relations` documents the looseness in code so a
+//     future reader understands what canon promises (and doesn't).
+//
+// **What canon does NOT do.** No absorption (`Union(Star, X) → Star`),
+// no Star-from-Or removal. Going further would create false positives
+// against gqlite's actual representation.
 
 mod canon {
     use super::*;
@@ -86,15 +115,29 @@ mod canon {
     }
 
     pub fn simple(t: &SimpleType) -> SimpleType {
+        // Any semantically-empty SimpleType collapses to Zero. Per
+        // §3.2 `⊥ ≤ τ AND τ ≤ ⊥` for empty τ — they're consistent.
+        // Concretely: `Group(Zero)`, `Record({a: Zero})`,
+        // `Union(Zero, Zero)`, etc. all reduce to Zero. Without this,
+        // canon would be internally inconsistent (drops Group(Zero)
+        // from a Union, but keeps it standalone).
+        if t.is_empty() {
+            return SimpleType::Zero;
+        }
         match t {
             SimpleType::Union(_, _) => {
                 let mut leaves = Vec::new();
                 flatten_simple_union(t, &mut leaves);
-                // Drop Zero — gqlite's `SimpleType::union` does the same
-                // (Zero is the identity for join). Without this the
-                // canonical form of `Union(Z, Zero)` differs from `Z`,
-                // even though the impl normalizes them to the same.
-                leaves.retain(|l| !matches!(l, SimpleType::Zero));
+                // Drop semantically-empty leaves. Per rules.md §3.2,
+                // `⊥ ≤ τ`, and Union is the gradual join — bottom is
+                // the identity. We drop anything `is_empty` (Zero,
+                // Group(Zero), Record({a: Zero}), Union(Zero, Zero), …)
+                // not just literal Zero, because the spec treats them
+                // as semantically equivalent. NOTE: gqlite's `union`
+                // impl only drops literal Zero — meet on nested types
+                // can produce Group(Zero) terms in the result, which
+                // canon-eq treats as redundant per the spec.
+                leaves.retain(|l| !l.is_empty());
                 leaves.sort_by_key(|l| format!("{l:?}"));
                 leaves.dedup();
                 leaves
@@ -164,6 +207,9 @@ mod canon {
     }
 
     pub fn property(t: &PropertyType) -> PropertyType {
+        if t.is_empty() {
+            return PropertyType::Zero;
+        }
         match t {
             PropertyType::Open(m) => {
                 let canon: BTreeMap<String, SimpleType> =
@@ -193,13 +239,17 @@ mod canon {
     }
 
     pub fn variable(t: &VariableType) -> VariableType {
+        if t.is_empty() {
+            return VariableType::Zero;
+        }
         match t {
             VariableType::Union(_, _) => {
                 let mut leaves = Vec::new();
                 flatten_variable_union(t, &mut leaves);
-                // Drop Zero — gqlite's `VariableType::join` does the
-                // same (Zero is the identity for join).
-                leaves.retain(|v| !matches!(v, VariableType::Zero));
+                // Drop semantically-empty leaves (Zero, Group(Zero),
+                // Node-with-empty-descriptor, etc.). See `canon::simple`
+                // for the spec rationale.
+                leaves.retain(|v| !v.is_empty());
                 leaves.sort_by_key(|v| format!("{v:?}"));
                 leaves.dedup();
                 leaves
@@ -235,12 +285,17 @@ mod canon {
     }
 
     pub fn path(t: &PathType) -> PathType {
+        if t.is_unsatisfiable() {
+            return PathType::Zero;
+        }
         match t {
             PathType::Union(_, _) => {
                 let mut leaves = Vec::new();
                 flatten_path_union(t, &mut leaves);
-                // Drop Zero — gqlite's `PathType::union` does the same.
-                leaves.retain(|p| !matches!(p, PathType::Zero));
+                // Drop semantically-unsatisfiable leaves. PathType has
+                // `is_unsatisfiable` (the bottom check) rather than
+                // `is_empty` (which on PathType means "no edges").
+                leaves.retain(|p| !p.is_unsatisfiable());
                 leaves.sort_by_key(|p| format!("{p:?}"));
                 leaves.dedup();
                 leaves
@@ -258,11 +313,22 @@ mod canon {
     }
 }
 
-/// Lattice equality — canonicalize both sides, compare with `==`.
-/// Tighter than mutual-subtype: catches Star-collapse regressions
-/// that mutual-subtype would hide. Use this where the output's
-/// SHAPE genuinely matters (symmetries, distributions, refinement
-/// equivalence).
+/// Canonical-form equality. Closer to the **non-gradual** equality you'd
+/// have without plausibility — two types are `canon_eq` iff they have
+/// the same shape after sorting commutative operators and dropping
+/// idempotent / identity elements.
+///
+/// Tighter than `consistent` (mutual-subtype). Catches Star-collapse
+/// regressions that consistency would hide. Use where the output's
+/// SHAPE genuinely matters (symmetries, distributions, refinements).
+///
+/// **Implementation-coupling caveat.** `canon` mirrors gqlite's own
+/// normalization — specifically the identity drops in `union`/`meet`.
+/// If the impl regresses on its normalization (e.g., stops dropping
+/// `Zero` from `Union`), canon will still equate the unnormalized
+/// output with the normalized form, hiding the regression. The
+/// `meet_locks` and `normalization_locks` modules cover that gap with
+/// hand-picked assertions.
 macro_rules! assert_canon_eq {
     ($kind:ident, $lhs:expr, $rhs:expr $(, $msg:tt)?) => {{
         let lhs = $lhs;
@@ -273,15 +339,19 @@ macro_rules! assert_canon_eq {
     }};
 }
 
-/// Mutual-subtype equivalence (the gradual lattice's own equivalence
-/// relation). Use for idempotence / commutativity properties on types
-/// where gqlite's impl is allowed to return any representative of an
-/// equivalence class — e.g., `LabelType::meet` returning the literal
-/// first or second operand when both are mutually-subtype-equivalent.
+/// Consistency (rules.md §3 — `A ~ B` in paper notation): `A ≤ B AND
+/// B ≤ A`. The paper calls this "the gradual version of equality":
+/// two types are consistent if they could plausibly match.
 ///
-/// This is intentionally loose — Star-collapse regressions slip through.
-/// Pair with hand-picked locking tests in `meet_locks` to catch them.
-macro_rules! assert_subtype_eq {
+/// **Loose by design.** Under plausibility, `Star ≤ τ` and `τ ≤ Star`
+/// for any τ — so anything is consistent with `Star`. A regression
+/// where meet collapses to `Star` would slip past consistency tests.
+/// Pair with hand-picked `meet_locks` to catch that.
+///
+/// Use this for properties on types where gqlite's impl is allowed to
+/// return any representative of an equivalence class (e.g., `LabelType
+/// ::meet` returning either operand when both are mutually consistent).
+macro_rules! assert_consistent {
     ($subtype_path:path, $lhs:expr, $rhs:expr $(, $msg:tt)?) => {{
         let lhs = $lhs;
         let rhs = $rhs;
@@ -381,7 +451,7 @@ fn arb_variable_type() -> impl Strategy<Value = VariableType> {
                 }
             }),
     ];
-    leaf.prop_recursive(2, 8, 2, |inner| {
+    leaf.prop_recursive(3, 16, 2, |inner| {
         prop_oneof![
             (inner.clone(), inner.clone())
                 .prop_map(|(a, b)| VariableType::Union(Box::new(a), Box::new(b))),
@@ -535,9 +605,13 @@ fn arb_schema_only_undirected() -> impl Strategy<Value = Schema> {
 // =======================================================================
 
 fn cfg() -> ProptestConfig {
+    // 256 cases per property is proptest's own default — chosen for
+    // genuine input-space coverage. Total runtime stays under a second
+    // even at this rate (most properties run in microseconds; the
+    // bottleneck is generator allocation, not the assertions).
     ProptestConfig {
-        cases: 64,
-        max_shrink_iters: 256,
+        cases: 256,
+        max_shrink_iters: 1024,
         ..ProptestConfig::default()
     }
 }
@@ -752,7 +826,13 @@ mod simple_spec_rules {
         }
 
         // §4.1 Union meet distributivity: `(τ₁ + τ₂) ⊓ τ = (τ₁ ⊓ τ) ⊔ (τ₂ ⊓ τ)`.
-        // The impl directly encodes this in `SimpleType::meet`.
+        //
+        // NOTE: this test is largely TAUTOLOGICAL because the impl
+        // directly encodes this rule in the `(Union, _)` arm of
+        // `SimpleType::meet`. Both `direct` and `split` reduce to the
+        // same expression. It survives as a regression lock against
+        // the arm being modified — *not* as an independent verification
+        // that the rule holds. If you change the meet arm, this fires.
         #[test]
         fn union_meet_distributes(
             t1 in arb_simple_type(),
@@ -769,6 +849,27 @@ mod simple_spec_rules {
             );
             assert_canon_eq!(simple, direct, split,
                 "rules.md §4.1: (τ₁ + τ₂) ⊓ τ = (τ₁ ⊓ τ) ⊔ (τ₂ ⊓ τ)");
+        }
+
+        // §4.1 Union meet distributivity — RHS variant. Tests the
+        // *symmetric* dispatch through `(_, Union)` arm. Catches if the
+        // two arms diverge.
+        #[test]
+        fn union_meet_distributes_rhs(
+            t1 in arb_simple_type(),
+            t2 in arb_simple_type(),
+            t3 in arb_simple_type(),
+        ) {
+            let direct = SimpleType::meet(
+                &t3,
+                &SimpleType::Union(Box::new(t1.clone()), Box::new(t2.clone())),
+            );
+            let split = SimpleType::union(
+                &SimpleType::meet(&t3, &t1),
+                &SimpleType::meet(&t3, &t2),
+            );
+            assert_canon_eq!(simple, direct, split,
+                "rules.md §4.1: τ ⊓ (τ₁ + τ₂) = (τ ⊓ τ₁) ⊔ (τ ⊓ τ₂)");
         }
     }
 }
@@ -794,7 +895,7 @@ mod label_type {
         #[test]
         fn meet_idempotent(t in arb_label_type()) {
             let m = LabelType::meet(&t, &t);
-            assert_subtype_eq!(LabelType::is_subtype, m, t.clone(),
+            assert_consistent!(LabelType::is_subtype, m, t.clone(),
                 "meet(t, t) ≡ t under mutual-subtype");
         }
 
@@ -815,7 +916,7 @@ mod label_type {
         fn meet_commutative(a in arb_label_type(), b in arb_label_type()) {
             let ab = LabelType::meet(&a, &b);
             let ba = LabelType::meet(&b, &a);
-            assert_subtype_eq!(LabelType::is_subtype, ab, ba);
+            assert_consistent!(LabelType::is_subtype, ab, ba);
         }
 
         #[test]
@@ -928,15 +1029,17 @@ mod label_spec_rules {
                 "rules.md §3.1 Or-RHS plausibility: (c ≤ b) ⇒ c ≤ (a + b)");
         }
 
-        // §4.1 Distinct atoms meet to And.
+        // §4.1 Distinct atoms meet to And — verifies the SHAPE, not just
+        // lower-bound (which Zero would also satisfy).
         #[test]
         fn distinct_atom_meet_yields_and(s in "[A-D]", t in "[A-D]") {
             prop_assume!(s != t);
             let a = LabelType::Label(s);
             let b = LabelType::Label(t);
             let m = LabelType::meet(&a, &b);
-            prop_assert!(LabelType::is_subtype(&m, &a),
-                "rules.md §4.1: 1 ⊓ 1 should be ≤ each operand");
+            prop_assert!(matches!(&m, LabelType::And(_, _)),
+                "rules.md §4.1: 1₁ ⊓ 1₂ should produce And, got {m:?}");
+            prop_assert!(LabelType::is_subtype(&m, &a));
             prop_assert!(LabelType::is_subtype(&m, &b));
         }
     }
@@ -1192,7 +1295,7 @@ mod descriptor_type {
         #[test]
         fn meet_idempotent(t in arb_descriptor_type()) {
             let m = DescriptorType::meet(&t, &t);
-            assert_subtype_eq!(DescriptorType::is_subtype, m, t.clone());
+            assert_consistent!(DescriptorType::is_subtype, m, t.clone());
         }
 
         #[test]
@@ -1206,7 +1309,7 @@ mod descriptor_type {
         fn meet_commutative(a in arb_descriptor_type(), b in arb_descriptor_type()) {
             let ab = DescriptorType::meet(&a, &b);
             let ba = DescriptorType::meet(&b, &a);
-            assert_subtype_eq!(DescriptorType::is_subtype, ab, ba);
+            assert_consistent!(DescriptorType::is_subtype, ab, ba);
         }
 
         // §3.4 Descriptor sub: `(ℓ₁ ≤ ℓ₂) ∧ (R₁ ≤ R₂) ⇒ ℓ₁R₁ ≤ ℓ₂R₂`.
@@ -1258,7 +1361,7 @@ mod variable_type {
         #[test]
         fn meet_idempotent(t in arb_variable_type()) {
             let m = VariableType::meet(&t, &t);
-            assert_subtype_eq!(VariableType::is_subtype, m, t.clone(),
+            assert_consistent!(VariableType::is_subtype, m, t.clone(),
                 "meet(t, t) ≡ t under mutual-subtype");
         }
 
@@ -1273,7 +1376,7 @@ mod variable_type {
         fn meet_commutative(a in arb_variable_type(), b in arb_variable_type()) {
             let ab = VariableType::meet(&a, &b);
             let ba = VariableType::meet(&b, &a);
-            assert_subtype_eq!(VariableType::is_subtype, ab, ba);
+            assert_consistent!(VariableType::is_subtype, ab, ba);
         }
 
         #[test]
@@ -1333,6 +1436,10 @@ mod variable_spec_rules {
         }
 
         // §6 Refinement union distribution.
+        //
+        // NOTE: tautological — `VariableType::refine`'s `Union` arm IS
+        // `join(refine(t1), refine(t2))`. Both sides reduce to the same
+        // expression. Regression lock against arm modification.
         #[test]
         fn refinement_distributes_over_union(
             t1 in arb_variable_type(),
@@ -1381,34 +1488,16 @@ mod variable_spec_rules {
                 "rules.md §3.4: edge sub is componentwise on desc/left/right");
         }
 
-        // §8.4 empty() — Union case requires BOTH sides empty.
+        // §8.4 empty() — Union case: empty(T₁+T₂) iff empty(T₁) ∧ empty(T₂).
+        // Generalized: any pair of variable types, not just Zero ∪ t.
         #[test]
-        fn union_empty_iff_both_sides_empty(t in arb_variable_type()) {
-            let u_left = VariableType::Union(
-                Box::new(VariableType::Zero),
-                Box::new(t.clone()),
-            );
-            let u_right = VariableType::Union(
-                Box::new(t.clone()),
-                Box::new(VariableType::Zero),
-            );
-            prop_assert_eq!(u_left.is_empty(), t.is_empty(),
-                "rules.md §8.4: empty(Zero + t) iff empty(t)");
-            prop_assert_eq!(u_right.is_empty(), t.is_empty(),
-                "rules.md §8.4: empty(t + Zero) iff empty(t)");
-        }
-
-        // §8.4 empty() — Star ⊔ X is never empty (X non-empty).
-        #[test]
-        fn union_with_nonempty_side_is_not_empty(
-            keep in arb_refinable_variable(),
+        fn union_empty_iff_both_components_empty(
+            t1 in arb_variable_type(),
+            t2 in arb_variable_type(),
         ) {
-            let u = VariableType::Union(
-                Box::new(VariableType::Zero),
-                Box::new(keep.clone()),
-            );
-            prop_assert_eq!(u.is_empty(), keep.is_empty(),
-                "rules.md §8.4: Union with a non-empty side is non-empty");
+            let u = VariableType::Union(Box::new(t1.clone()), Box::new(t2.clone()));
+            prop_assert_eq!(u.is_empty(), t1.is_empty() && t2.is_empty(),
+                "rules.md §8.4: empty(T₁ + T₂) iff empty(T₁) ∧ empty(T₂)");
         }
     }
 }
@@ -1520,6 +1609,91 @@ mod schema_refinement_rules {
             "non-directional `knows` query should refine non-trivially against \
              schema with non-directional `knows` (got ⊥)"
         );
+    }
+}
+
+// =======================================================================
+// Normalization locks — backstop against canon's impl coupling
+// =======================================================================
+//
+// `canon` mirrors gqlite's normalization (Zero-drop in Union, Star-drop
+// in And). If gqlite regresses on those normalizations, canon-based
+// equivalence tests would still pass — they'd just compare the
+// unnormalized impl output to a canonicalized form, hiding the bug.
+//
+// These hand-picked locks pin the normalizations directly, so a
+// regression there is caught at a different layer than canon.
+
+mod normalization_locks {
+    use super::*;
+
+    // SimpleType::union — Zero is identity for join.
+    #[test]
+    fn simple_union_drops_left_zero() {
+        assert_eq!(
+            SimpleType::union(&SimpleType::Zero, &SimpleType::Z),
+            SimpleType::Z
+        );
+    }
+    #[test]
+    fn simple_union_drops_right_zero() {
+        assert_eq!(
+            SimpleType::union(&SimpleType::Z, &SimpleType::Zero),
+            SimpleType::Z
+        );
+    }
+    #[test]
+    fn simple_union_collapses_equal_operands() {
+        assert_eq!(
+            SimpleType::union(&SimpleType::Z, &SimpleType::Z),
+            SimpleType::Z
+        );
+    }
+
+    // LabelType::meet — Star is identity for And. (Already covered in
+    // `meet_locks::label_meet_star_with_atom_returns_atom`; duplicating
+    // here for completeness so the normalization-by-normalization audit
+    // is in one place.)
+    #[test]
+    fn label_meet_drops_left_star() {
+        let a = LabelType::Label("A".into());
+        assert_eq!(LabelType::meet(&LabelType::Star, &a), a);
+    }
+    #[test]
+    fn label_meet_drops_right_star() {
+        let a = LabelType::Label("A".into());
+        assert_eq!(LabelType::meet(&a, &LabelType::Star), a);
+    }
+
+    // VariableType::join — Zero is identity for join.
+    #[test]
+    fn variable_join_drops_left_zero() {
+        let n = VariableType::node_star();
+        assert_eq!(VariableType::join(&VariableType::Zero, &n), n);
+    }
+    #[test]
+    fn variable_join_drops_right_zero() {
+        let n = VariableType::node_star();
+        assert_eq!(VariableType::join(&n, &VariableType::Zero), n);
+    }
+    #[test]
+    fn variable_join_collapses_equal_operands() {
+        let n = VariableType::node_star();
+        assert_eq!(VariableType::join(&n, &n), n);
+    }
+
+    // PathType::union — Zero is identity. (Also covered by the
+    // `path_type::zero_is_path_union_identity_*` proptests; pinned
+    // explicitly here for the audit.)
+    #[test]
+    fn path_union_drops_left_zero() {
+        let n = PathType::node(DescriptorType::star());
+        assert_eq!(PathType::union(PathType::Zero, n.clone()), n);
+    }
+    #[test]
+    fn path_union_drops_right_zero() {
+        let n = PathType::node(DescriptorType::star());
+        assert_eq!(PathType::union(n.clone(), PathType::Zero), n);
     }
 }
 
