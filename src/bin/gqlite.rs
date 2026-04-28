@@ -1,9 +1,10 @@
 //! Interactive GQL REPL (like sqlite3 but for graphs).
 //!
 //! Usage:
-//!   gqlite <database.gdb> [--no-typecheck]                        # open existing
-//!   gqlite <database.gdb> --import-csv <dir> [--no-typecheck]     # create from CSV
-//!   gqlite <database.gdb> --import-json <file> [--no-typecheck]   # create from JSON
+//!   gqlite <database.gdb> [--no-typecheck]                          # open existing
+//!   gqlite <database.gdb> --import-csv <dir> [--no-typecheck]       # create from CSV (spanner_import_config.json)
+//!   gqlite <database.gdb> --import-ldbc-csv <dir> [--no-typecheck]  # create from LDBC SNB CsvBasic dataset
+//!   gqlite <database.gdb> --import-json <file> [--no-typecheck]     # create from JSON
 
 use std::env;
 use std::path::Path;
@@ -43,11 +44,15 @@ fn main() {
             args[0]
         );
         eprintln!(
-            "  {} <database.gdb> --import-csv <dir> [--no-typecheck]     # create from CSV",
+            "  {} <database.gdb> --import-csv <dir> [--no-typecheck]       # create from CSV (spanner_import_config.json)",
             args[0]
         );
         eprintln!(
-            "  {} <database.gdb> --import-json <file> [--no-typecheck]   # create from JSON",
+            "  {} <database.gdb> --import-ldbc-csv <dir> [--no-typecheck]  # create from LDBC SNB CsvBasic dataset",
+            args[0]
+        );
+        eprintln!(
+            "  {} <database.gdb> --import-json <file> [--no-typecheck]     # create from JSON",
             args[0]
         );
         eprintln!();
@@ -297,9 +302,14 @@ fn import(db_path: &Path, mode: &str, source: &str) {
         "--import-csv" => {
             csv_loader::load_from_csv_dir(Path::new(source)).expect("failed to load CSV")
         }
+        "--import-ldbc-csv" => {
+            csv_loader::load_from_ldbc_csv_dir(Path::new(source)).expect("failed to load LDBC CSV")
+        }
         "--import-json" => Graph::from_file(Path::new(source)).expect("failed to load JSON"),
         _ => {
-            eprintln!("Unknown import mode: {mode}. Use --import-csv or --import-json");
+            eprintln!(
+                "Unknown import mode: {mode}. Use --import-csv, --import-ldbc-csv, or --import-json"
+            );
             std::process::exit(1);
         }
     };
@@ -988,9 +998,7 @@ fn handle_create(store: &LazyGraphStore, name: &str, body: &[TypeElement]) {
         eprintln!("error: failed to persist catalog: {e}");
         return;
     }
-    println!(
-        "GRAPH TYPE '{name}' created ({node_count} node types, {edge_count} edge types)."
-    );
+    println!("GRAPH TYPE '{name}' created ({node_count} node types, {edge_count} edge types).");
 }
 
 fn handle_use(store: &LazyGraphStore, name: &str, refresh_default: bool) {
@@ -1217,10 +1225,7 @@ fn color_property_record(pt: &PropertyType) -> String {
     match pt {
         PropertyType::Open(m) if m.is_empty() => String::new(),
         PropertyType::Closed(m) if m.is_empty() => "{}".to_string(),
-        PropertyType::Open(m) => format!(
-            "{{{}, {C_MAGENTA}*{C_RESET}}}",
-            color_field_map(m)
-        ),
+        PropertyType::Open(m) => format!("{{{}, {C_MAGENTA}*{C_RESET}}}", color_field_map(m)),
         PropertyType::Closed(m) => format!("{{{}}}", color_field_map(m)),
         PropertyType::Zero => format!("{C_DIM}⊥{C_RESET}"),
     }
@@ -1246,10 +1251,7 @@ fn color_simple_type(t: &SimpleType) -> String {
             color_simple_type_atom(a),
             color_simple_type_atom(b)
         ),
-        SimpleType::List(inner) => format!(
-            "{C_GREEN}LIST{C_RESET}<{}>",
-            color_simple_type(inner)
-        ),
+        SimpleType::List(inner) => format!("{C_GREEN}LIST{C_RESET}<{}>", color_simple_type(inner)),
         SimpleType::Group(inner) => format!("group<{}>", color_simple_type(inner)),
         SimpleType::Record(fields) => format!("{{{}}}", color_field_map(fields)),
     }
@@ -1293,7 +1295,11 @@ fn handle_validate(store: &LazyGraphStore, name: &str) {
     }
 }
 
-fn print_validation_report(report: &ValidationReport, type_name: &str, elapsed: std::time::Duration) {
+fn print_validation_report(
+    report: &ValidationReport,
+    type_name: &str,
+    elapsed: std::time::Duration,
+) {
     println!(
         "Validated {} nodes, {} edges against GRAPH TYPE '{type_name}' in {:.3}s",
         report.nodes_checked,
@@ -1323,11 +1329,7 @@ fn print_validation_report(report: &ValidationReport, type_name: &str, elapsed: 
             let prop_part = if v.props.is_empty() {
                 String::new()
             } else {
-                let parts: Vec<String> = v
-                    .props
-                    .iter()
-                    .map(|(k, t)| format!("{k}: {t}"))
-                    .collect();
+                let parts: Vec<String> = v.props.iter().map(|(k, t)| format!("{k}: {t}")).collect();
                 format!(" {{{}}}", parts.join(", "))
             };
             println!("    {kind} {} ({}{}) ", v.id, label_part, prop_part);

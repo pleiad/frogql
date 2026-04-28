@@ -101,7 +101,9 @@ fn decode_active_name(bytes: &[u8]) -> Option<String> {
     }
     // Lossy: bad UTF-8 in the header field is treated as "none" rather
     // than failing to open the file.
-    std::str::from_utf8(&bytes[..end]).ok().map(|s| s.to_string())
+    std::str::from_utf8(&bytes[..end])
+        .ok()
+        .map(|s| s.to_string())
 }
 
 impl FileHeader {

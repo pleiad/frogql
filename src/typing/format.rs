@@ -225,7 +225,10 @@ mod tests {
     #[test]
     fn formats_undirected_edge() {
         let edge = VariableType::EdgeNonDirectional {
-            desc: DescriptorType::new(LabelType::Label("FRIENDS".into()), PropertyType::open_empty()),
+            desc: DescriptorType::new(
+                LabelType::Label("FRIENDS".into()),
+                PropertyType::open_empty(),
+            ),
             left: Box::new(VariableType::Node(DescriptorType::new(
                 LabelType::Label("Person".into()),
                 PropertyType::open_empty(),
@@ -257,10 +260,7 @@ mod tests {
         let d = DescriptorType::new(
             LabelType::Label("Doc".into()),
             closed(&[
-                (
-                    "tags",
-                    SimpleType::List(Box::new(SimpleType::S)),
-                ),
+                ("tags", SimpleType::List(Box::new(SimpleType::S))),
                 (
                     "id",
                     SimpleType::Union(Box::new(SimpleType::S), Box::new(SimpleType::Z)),

@@ -123,14 +123,16 @@ fn push_sample(samples: &mut Vec<Violation>, v: Violation) {
     }
 }
 
-/// True if some `T` in `schema_types` admits `instance`. We use
-/// `is_subtype(instance, T)` so an instance with extra props or an
-/// `Open`-shaped record can still satisfy a `Closed` schema entry that
-/// asks for the exact same key set.
+/// True if some `T` in `schema_types` is *consistent* with `instance`,
+/// i.e. mutually subtypes: `instance <: T` AND `T <: instance`. This is
+/// stricter than plain `is_subtype` — a node with extra labels or props
+/// no longer satisfies a more permissive schema entry. The schema is
+/// expected to enumerate every concrete variant present in the data
+/// (e.g. `City&Place` separately from `Country&Place`).
 fn instance_admitted(instance: &VariableType, schema_types: &[VariableType]) -> bool {
     schema_types
         .iter()
-        .any(|t| VariableType::is_subtype(instance, t))
+        .any(|t| VariableType::is_subtype(instance, t) && VariableType::is_subtype(t, instance))
 }
 
 fn node_instance_type<G: GraphAccess>(g: &G, nid: u32) -> VariableType {
@@ -141,10 +143,7 @@ fn node_instance_type<G: GraphAccess>(g: &G, nid: u32) -> VariableType {
 }
 
 fn edge_instance_type<G: GraphAccess>(g: &G, eid: u32) -> VariableType {
-    let desc = element_descriptor(
-        &g.edge_labels(eid),
-        &props_to_simple(&g.edge_props(eid)),
-    );
+    let desc = element_descriptor(&g.edge_labels(eid), &props_to_simple(&g.edge_props(eid)));
     let left = VariableType::Node(element_descriptor(
         &g.node_labels(g.src(eid)),
         &props_to_simple(&g.node_props(g.src(eid))),
@@ -318,9 +317,7 @@ mod tests {
             if i > 0 {
                 nodes.push(',');
             }
-            nodes.push_str(&format!(
-                r#"{{"id":"n{i}","labels":["Foo"],"props":{{}}}}"#
-            ));
+            nodes.push_str(&format!(r#"{{"id":"n{i}","labels":["Foo"],"props":{{}}}}"#));
         }
         let json = format!(r#"{{"nodes":[{nodes}],"edges":[]}}"#);
         let g = build_graph(&json);

@@ -84,9 +84,8 @@ fn parse_create_simple_node() {
 
 #[test]
 fn parse_create_with_edge() {
-    let (_name, body) = parse_create(
-        "CREATE GRAPH TYPE foo AS { (:A)-[:E {w FLOAT}]->(:B), (:A) }",
-    );
+    let (_name, body) =
+        parse_create("CREATE GRAPH TYPE foo AS { (:A)-[:E {w FLOAT}]->(:B), (:A) }");
     assert_eq!(body.len(), 2);
     let (edge_desc, directed) = first_edge_desc(&body);
     assert!(directed);
@@ -144,7 +143,11 @@ fn parse_primitive_aliases() {
         let q = format!("CREATE GRAPH TYPE g AS {{ (:N {{p {alias}}}) }}");
         let (_, body) = parse_create(&q);
         let d = first_node_desc(&body);
-        assert_eq!(props_map(&d.props).get("p"), Some(&expected), "alias {alias}");
+        assert_eq!(
+            props_map(&d.props).get("p"),
+            Some(&expected),
+            "alias {alias}"
+        );
     }
 }
 
@@ -252,9 +255,8 @@ fn parse_nested_record_property_type() {
 
 #[test]
 fn parse_record_of_list_field() {
-    let (_, body) = parse_create(
-        "CREATE GRAPH TYPE g AS { (:H {history {events LIST<STRING>, total INT}}) }",
-    );
+    let (_, body) =
+        parse_create("CREATE GRAPH TYPE g AS { (:H {history {events LIST<STRING>, total INT}}) }");
     let d = first_node_desc(&body);
     let history = props_map(&d.props).remove("history").expect("history");
     let mut expected = BTreeMap::new();
@@ -305,9 +307,8 @@ fn parse_wildcard_any_and_star() {
 
 #[test]
 fn parse_deeply_mixed() {
-    let (_, body) = parse_create(
-        "CREATE GRAPH TYPE g AS { (:Doc {doc {tags LIST<STRING | INT>, meta ANY}}) }",
-    );
+    let (_, body) =
+        parse_create("CREATE GRAPH TYPE g AS { (:Doc {doc {tags LIST<STRING | INT>, meta ANY}}) }");
     let d = first_node_desc(&body);
     let doc = props_map(&d.props).remove("doc").expect("doc");
     match doc {
@@ -329,8 +330,7 @@ fn parse_deeply_mixed() {
 
 #[test]
 fn parse_label_conjunction() {
-    let (_, body) =
-        parse_create("CREATE GRAPH TYPE g AS { (:Person&Employee {salary INT}) }");
+    let (_, body) = parse_create("CREATE GRAPH TYPE g AS { (:Person&Employee {salary INT}) }");
     let d = first_node_desc(&body);
     match &d.label {
         LabelType::And(a, b) => {
@@ -438,10 +438,8 @@ fn store_register_strict_persists_and_typechecks() {
 
     {
         let store = LazyGraphStore::open(&path).unwrap();
-        let body = match parse_statement(
-            "CREATE GRAPH TYPE strict AS { (:Person {name STRING}) }",
-        )
-        .unwrap()
+        let body = match parse_statement("CREATE GRAPH TYPE strict AS { (:Person {name STRING}) }")
+            .unwrap()
         {
             Statement::CreateGraphType { body, .. } => body,
             _ => panic!(),
@@ -472,8 +470,7 @@ fn store_register_strict_persists_and_typechecks() {
 
     // Foo is not in the strict schema. The typechecker refines the type
     // to bottom; the query still parses but yields no rows when run.
-    let q_foo =
-        gqlrust::compile_query_with(&active, "MATCH (x: Foo) RETURN x.name").unwrap();
+    let q_foo = gqlrust::compile_query_with(&active, "MATCH (x: Foo) RETURN x.name").unwrap();
     match rt.run_query(&q_foo, 10) {
         gqlrust::runtime::result::QueryResult::Projected(rows) => {
             assert!(rows.is_empty(), "Foo not in schema → expected zero rows");
@@ -524,9 +521,7 @@ fn infer_then_typecheck_lists() {
         .nodes
         .iter()
         .find_map(|vt| match vt {
-            VariableType::Node(d)
-                if matches!(&d.label, LabelType::Label(s) if s == "Post") =>
-            {
+            VariableType::Node(d) if matches!(&d.label, LabelType::Label(s) if s == "Post") => {
                 Some(d)
             }
             _ => None,
@@ -658,14 +653,13 @@ fn validate_flags_strict_mismatch() {
 
     // strict requires Person nodes to have a `name STRING` and an `age INT`.
     // The fixture has a Person with name only, so validation should flag it.
-    let body = match parse_statement(
-        "CREATE GRAPH TYPE strict AS { (:Person {name STRING, age INT}) }",
-    )
-    .unwrap()
-    {
-        Statement::CreateGraphType { body, .. } => body,
-        _ => panic!(),
-    };
+    let body =
+        match parse_statement("CREATE GRAPH TYPE strict AS { (:Person {name STRING, age INT}) }")
+            .unwrap()
+        {
+            Statement::CreateGraphType { body, .. } => body,
+            _ => panic!(),
+        };
     let schema = build_schema_from_body(&body);
     let report = gqlrust::typing::validate::validate_against_data(&store, &schema);
     assert!(!report.ok());
@@ -678,10 +672,8 @@ fn validation_status_persists() {
     save_minimal_graph(&path);
     {
         let store = LazyGraphStore::open(&path).unwrap();
-        let body = match parse_statement(
-            "CREATE GRAPH TYPE strict AS { (:Person {name STRING}) }",
-        )
-        .unwrap()
+        let body = match parse_statement("CREATE GRAPH TYPE strict AS { (:Person {name STRING}) }")
+            .unwrap()
         {
             Statement::CreateGraphType { body, .. } => body,
             _ => panic!(),
@@ -691,8 +683,7 @@ fn validation_status_persists() {
             .catalog_mut()
             .register("strict".into(), schema.clone())
             .unwrap();
-        let report =
-            gqlrust::typing::validate::validate_against_data(&store, &schema);
+        let report = gqlrust::typing::validate::validate_against_data(&store, &schema);
         store.catalog_mut().record_validation(
             "strict",
             gqlrust::runtime::catalog::ValidationStatus {
@@ -825,7 +816,8 @@ fn warning_unknown_label() {
     let schema = schema_with_genre_and_actor();
     let ws = warnings_for("(:Foo)", &schema);
     assert!(
-        ws.iter().any(|w| w.contains("Foo") && w.contains("label not in schema")),
+        ws.iter()
+            .any(|w| w.contains("Foo") && w.contains("label not in schema")),
         "expected Foo label warning, got {ws:?}"
     );
 }
@@ -851,26 +843,23 @@ fn warning_silent_under_permissive_schema() {
     let star = Schema::star();
     let ws = warnings_for("(:Actor&Genre)", &star);
     assert!(
-        !ws.iter().any(|w| w.contains("label not in schema")
-            || w.contains("properties differ")),
+        !ws.iter()
+            .any(|w| w.contains("label not in schema") || w.contains("properties differ")),
         "permissive mode should not produce refine warnings, got {ws:?}"
     );
 }
 
 #[test]
 fn warning_edge_label_not_in_schema() {
-    let body = match parse_statement(
-        "CREATE GRAPH TYPE g AS { (:A)-[:KNOWS]->(:B) }",
-    )
-    .unwrap()
-    {
+    let body = match parse_statement("CREATE GRAPH TYPE g AS { (:A)-[:KNOWS]->(:B) }").unwrap() {
         Statement::CreateGraphType { body, .. } => body,
         _ => panic!(),
     };
     let schema = build_schema_from_body(&body);
     let ws = warnings_for("(:A)-[:LOVES]->(:B)", &schema);
     assert!(
-        ws.iter().any(|w| w.contains("LOVES") && w.contains("label not in schema")),
+        ws.iter()
+            .any(|w| w.contains("LOVES") && w.contains("label not in schema")),
         "expected LOVES edge-label warning, got {ws:?}"
     );
 }
@@ -882,7 +871,8 @@ fn warning_collapsed_variable_binding() {
     // because no node is both Actor and Genre.
     let ws = warnings_for("(x:Actor)(x:Genre)", &schema);
     assert!(
-        ws.iter().any(|w| w.contains("variable x") && w.contains("under the active schema")),
+        ws.iter()
+            .any(|w| w.contains("variable x") && w.contains("under the active schema")),
         "expected collapsed-binding warning for x, got {ws:?}"
     );
     // Order shouldn't matter.
