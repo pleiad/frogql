@@ -364,7 +364,8 @@ impl Typechecker {
         let vt = VariableType::Node(dtype.clone());
         let refined = VariableType::refine(&self.schema, &vt);
         if matches!(refined, VariableType::Zero) {
-            self.warnings.push(diagnose_node_mismatch(&self.schema, &dtype));
+            self.warnings
+                .push(diagnose_node_mismatch(&self.schema, &dtype));
         }
         refined
     }
@@ -374,17 +375,33 @@ impl Typechecker {
         if let Some(d) = desc {
             self.assert_filters_drained(d);
         }
-        let vt = match dir {
-            EdgeDir::Right | EdgeDir::Left | EdgeDir::Any => {
-                VariableType::edge_directional(dtype.clone())
+        // For any-direction edges (`-[L]-`), the paper defines refinement as
+        // the join of the forward and undirected refinements. Refining only
+        // as directional silently drops every undirected schema entry — e.g.
+        // `knows` in LDBC, which is registered as non-directional.
+        let refined = match dir {
+            EdgeDir::Right | EdgeDir::Left => {
+                VariableType::refine(&self.schema, &VariableType::edge_directional(dtype.clone()))
             }
-            EdgeDir::None => VariableType::edge_non_directional(dtype.clone()),
+            EdgeDir::None => VariableType::refine(
+                &self.schema,
+                &VariableType::edge_non_directional(dtype.clone()),
+            ),
+            EdgeDir::Any => {
+                let t_fwd = VariableType::refine(
+                    &self.schema,
+                    &VariableType::edge_directional(dtype.clone()),
+                );
+                let t_und = VariableType::refine(
+                    &self.schema,
+                    &VariableType::edge_non_directional(dtype.clone()),
+                );
+                VariableType::join(&t_fwd, &t_und)
+            }
         };
-        let refined = VariableType::refine(&self.schema, &vt);
         if matches!(refined, VariableType::Zero) {
-            let directed = !matches!(dir, EdgeDir::None);
             self.warnings
-                .push(diagnose_edge_mismatch(&self.schema, &dtype, directed));
+                .push(diagnose_edge_mismatch(&self.schema, &dtype, dir));
         }
         refined
     }
@@ -537,16 +554,26 @@ fn diagnose_node_mismatch(schema: &Schema, query: &DescriptorType) -> String {
 /// fall through to a generic message; surfacing those clearly would
 /// require carrying the query's left/right node descriptors here, which
 /// is left as future work.
-fn diagnose_edge_mismatch(schema: &Schema, query: &DescriptorType, directed: bool) -> String {
-    let arrow_open = if directed { "-[:" } else { "~[:" };
-    let arrow_close = if directed { "]->" } else { "]~" };
+fn diagnose_edge_mismatch(schema: &Schema, query: &DescriptorType, dir: EdgeDir) -> String {
+    let (arrow_open, arrow_close) = match dir {
+        EdgeDir::Right => ("-[:", "]->"),
+        EdgeDir::Left => ("<-[:", "]-"),
+        EdgeDir::None => ("~[:", "]~"),
+        EdgeDir::Any => ("-[:", "]-"),
+    };
 
     let same_dir: Vec<&DescriptorType> = schema
         .edges
         .iter()
-        .filter_map(|vt| match vt {
-            VariableType::EdgeDirectional { desc, .. } if directed => Some(desc),
-            VariableType::EdgeNonDirectional { desc, .. } if !directed => Some(desc),
+        .filter_map(|vt| match (vt, dir) {
+            (VariableType::EdgeDirectional { desc, .. }, EdgeDir::Right | EdgeDir::Left) => {
+                Some(desc)
+            }
+            (VariableType::EdgeNonDirectional { desc, .. }, EdgeDir::None) => Some(desc),
+            // Any-direction matches both kinds — the diagnostic reports against
+            // the union, so any schema edge is a candidate.
+            (VariableType::EdgeDirectional { desc, .. }, EdgeDir::Any)
+            | (VariableType::EdgeNonDirectional { desc, .. }, EdgeDir::Any) => Some(desc),
             _ => None,
         })
         .collect();
@@ -601,10 +628,7 @@ fn node_descriptor_ref(vt: &VariableType) -> Option<&DescriptorType> {
 }
 
 fn describe_property_alternatives(candidates: &[&DescriptorType]) -> String {
-    let parts: Vec<String> = candidates
-        .iter()
-        .map(|d| format!("{}", d.props))
-        .collect();
+    let parts: Vec<String> = candidates.iter().map(|d| format!("{}", d.props)).collect();
     parts.join(" or ")
 }
 
