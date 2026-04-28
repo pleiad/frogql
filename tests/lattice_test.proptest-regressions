@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b9f0478bd82cd1adac5851fa36ff28ffcb4af901cfe1524016d89ab7f5d549f8 # shrinks to p = Edge(EdgePathType { p1: Edge(EdgePathType { p1: Node(NodePathType { desc: DescriptorType { label: Star, props: Closed({}) } }), n2: NodePathType { desc: DescriptorType { label: Star, props: Open({}) } } }), n2: NodePathType { desc: DescriptorType { label: Star, props: Open({"a": Union(Z, Z)}) } } })
+cc 99f322ff02b40ee63490db55614021c13f646f9c861c812b1000fcf84a1da330 # shrinks to t = Node(DescriptorType { label: Star, props: Zero })
