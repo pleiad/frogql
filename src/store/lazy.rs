@@ -7,7 +7,7 @@
 //! Memory usage: O(num_elements) for indexes + O(cache_size) for page data,
 //! instead of O(graph_data_size) for the full in-memory approach.
 
-use std::cell::RefCell;
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
@@ -17,8 +17,10 @@ use crate::model::graph_access::GraphAccess;
 use crate::model::value::{Id, PathValue, Value};
 use crate::pager::page::{Page, PageType, PAGE_SIZE};
 use crate::pager::pager::Pager;
+use crate::runtime::catalog::GraphTypeCatalog;
 use crate::typing::label_type::LabelType;
 
+use super::catalog_io;
 use super::disk_index;
 use super::record::{self, PropValue};
 use super::string_table::StringTable;
@@ -53,6 +55,12 @@ pub struct LazyGraphStore {
     outgoing: HashMap<u32, Vec<u32>>,
     incoming: HashMap<u32, Vec<u32>>,
     undirected_adj: HashMap<u32, Vec<u32>>,
+
+    // Graph-type catalog (loaded from chain at open, persisted via save_catalog).
+    catalog: RefCell<GraphTypeCatalog>,
+    /// Last persisted catalog chain root. Tracked so subsequent writes
+    /// can free the old chain before allocating new pages.
+    catalog_root: Cell<u32>,
 }
 
 impl LazyGraphStore {
@@ -85,6 +93,7 @@ impl LazyGraphStore {
         // but not string_table_root — treat those as legacy.
         let has_fast_index = string_table_root != 0 && node_locs_root != 0 && edge_topo_root != 0;
 
+        let catalog_root = pager.header.catalog_root;
         let mut store = LazyGraphStore {
             pager: RefCell::new(pager),
             strings,
@@ -100,6 +109,8 @@ impl LazyGraphStore {
             outgoing: HashMap::new(),
             incoming: HashMap::new(),
             undirected_adj: HashMap::new(),
+            catalog: RefCell::new(GraphTypeCatalog::new()),
+            catalog_root: Cell::new(catalog_root),
         };
 
         if has_fast_index {
@@ -117,7 +128,42 @@ impl LazyGraphStore {
             store.upgrade_file(db_path)?;
         }
 
+        // Load the catalog chain (if any). A legacy file with
+        // catalog_root=0 yields an empty catalog and stays permissive.
+        if store.catalog_root.get() != 0 {
+            let mut pager = store.pager.borrow_mut();
+            let cat = catalog_io::read_catalog(&mut pager, store.catalog_root.get())?;
+            *store.catalog.borrow_mut() = cat;
+        }
+
         Ok(store)
+    }
+
+    // ---- Graph-type catalog ----
+
+    /// Read-only borrow of the active catalog.
+    pub fn catalog(&self) -> Ref<'_, GraphTypeCatalog> {
+        self.catalog.borrow()
+    }
+
+    /// Mutable borrow of the catalog. Callers must invoke
+    /// [`save_catalog`](Self::save_catalog) before dropping the store
+    /// for changes to persist.
+    pub fn catalog_mut(&self) -> RefMut<'_, GraphTypeCatalog> {
+        self.catalog.borrow_mut()
+    }
+
+    /// Persist the in-memory catalog to disk: rewrites the chain and
+    /// updates the file header. Idempotent.
+    pub fn save_catalog(&self) -> io::Result<()> {
+        let cat = self.catalog.borrow();
+        let mut pager = self.pager.borrow_mut();
+        let new_root = catalog_io::write_catalog(&mut pager, &cat, self.catalog_root.get())?;
+        self.catalog_root.set(new_root);
+        pager.header.catalog_root = new_root;
+        pager.header.active_type_name = cat.active_name().map(|s| s.to_string());
+        pager.write_header()?;
+        Ok(())
     }
 
     /// Fast open: read node locs, edge topology, label indexes, and adjacency

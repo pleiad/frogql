@@ -3,10 +3,12 @@ use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::{Aggregator, GeneralSetKind, Query, ReturnItem, SetQuantifier};
+use crate::syntax::statement::{Statement, TypeElement};
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
 use crate::typing::property_type::PropertyType;
 use crate::typing::simple_type::SimpleType;
+use crate::typing::variable_type::VariableType;
 
 use super::lexer::{Lexer, Token};
 
@@ -21,6 +23,7 @@ pub fn parse_query(input: &str) -> Result<Query, String> {
     let tokens = Lexer::tokenize(input)?;
     let mut p = Parser { tokens, pos: 0 };
     let result = p.full_query()?;
+    p.eat(&Token::Semicolon);
     if !p.at_eof() {
         return Err(format!(
             "unexpected token {:?} at position {}",
@@ -29,6 +32,24 @@ pub fn parse_query(input: &str) -> Result<Query, String> {
         ));
     }
     Ok(result)
+}
+
+/// Parse a single top-level statement: a query or a catalog DDL command.
+/// Trailing `;` is optional; the entry point that handles multi-statement
+/// input belongs in callers (REPL, Python bindings).
+pub fn parse_statement(input: &str) -> Result<Statement, String> {
+    let tokens = Lexer::tokenize(input)?;
+    let mut p = Parser { tokens, pos: 0 };
+    let stmt = p.statement()?;
+    p.eat(&Token::Semicolon);
+    if !p.at_eof() {
+        return Err(format!(
+            "unexpected token {:?} at position {}",
+            p.peek(),
+            p.pos
+        ));
+    }
+    Ok(stmt)
 }
 
 struct Parser {
@@ -1099,4 +1120,348 @@ impl Parser {
             _ => Err(format!("expected expression, got {:?}", self.peek())),
         }
     }
+
+    // ===== Top-level statement: query or DDL =====
+
+    fn statement(&mut self) -> Result<Statement, String> {
+        match self.peek() {
+            Token::Create => self.create_graph_type(),
+            Token::Use => self.use_graph_type(),
+            Token::Drop => self.drop_graph_type(),
+            Token::Show => self.show_graph_type(),
+            Token::Validate => self.validate_graph_type(),
+            _ => {
+                let q = self.full_query()?;
+                Ok(Statement::Query(q))
+            }
+        }
+    }
+
+    /// `SHOW GRAPH TYPES` | `SHOW GRAPH TYPE <name>` | `SHOW CURRENT GRAPH TYPE`
+    fn show_graph_type(&mut self) -> Result<Statement, String> {
+        self.expect(&Token::Show)?;
+        if self.eat(&Token::Current) {
+            self.expect_graph_type_kw()?;
+            return Ok(Statement::ShowCurrentGraphType);
+        }
+        self.expect(&Token::Graph)?;
+        if self.eat(&Token::Types) {
+            return Ok(Statement::ShowGraphTypes);
+        }
+        self.expect(&Token::TypeKw)?;
+        let (name, _is_default) = self.graph_type_name_or_default()?;
+        Ok(Statement::ShowGraphType { name })
+    }
+
+    /// `VALIDATE GRAPH TYPE <name>` — explicit data-vs-schema check.
+    /// `DEFAULT` is allowed: it's always derived from data, but the
+    /// command is still useful as a no-op sanity check.
+    fn validate_graph_type(&mut self) -> Result<Statement, String> {
+        self.expect(&Token::Validate)?;
+        self.expect_graph_type_kw()?;
+        let (name, _is_default) = self.graph_type_name_or_default()?;
+        Ok(Statement::ValidateGraphType { name })
+    }
+
+    fn expect_graph_type_kw(&mut self) -> Result<(), String> {
+        self.expect(&Token::Graph)?;
+        self.expect(&Token::TypeKw)?;
+        Ok(())
+    }
+
+    /// `CREATE GRAPH TYPE <name> AS { <type-elements> }`
+    fn create_graph_type(&mut self) -> Result<Statement, String> {
+        self.expect(&Token::Create)?;
+        self.expect_graph_type_kw()?;
+        let name = self.graph_type_name()?;
+        if name.eq_ignore_ascii_case("DEFAULT") {
+            return Err("DEFAULT is a reserved graph type name".into());
+        }
+        self.expect(&Token::As)?;
+        let body = self.type_body()?;
+        Ok(Statement::CreateGraphType { name, body })
+    }
+
+    /// `USE GRAPH TYPE <name>`. `DEFAULT` flips `refresh_default` so the
+    /// handler re-runs schema inference instead of reusing the stored copy.
+    fn use_graph_type(&mut self) -> Result<Statement, String> {
+        self.expect(&Token::Use)?;
+        self.expect_graph_type_kw()?;
+        let (name, is_default) = self.graph_type_name_or_default()?;
+        Ok(Statement::UseGraphType {
+            name,
+            refresh_default: is_default,
+        })
+    }
+
+    /// `DROP GRAPH TYPE <name>`. Reject DEFAULT at parse time so callers
+    /// don't need to repeat the check.
+    fn drop_graph_type(&mut self) -> Result<Statement, String> {
+        self.expect(&Token::Drop)?;
+        self.expect_graph_type_kw()?;
+        let (name, is_default) = self.graph_type_name_or_default()?;
+        if is_default {
+            return Err("DEFAULT is a reserved graph type and cannot be dropped".into());
+        }
+        Ok(Statement::DropGraphType { name })
+    }
+
+    /// Bare graph-type name in a CREATE position. Rejects the reserved
+    /// `DEFAULT` keyword (callers like `use_graph_type` use the variant
+    /// `graph_type_name_or_default` that allows it).
+    fn graph_type_name(&mut self) -> Result<String, String> {
+        match self.advance() {
+            Token::Name(n) => Ok(n),
+            Token::Default => {
+                Err("DEFAULT is a reserved graph type name".into())
+            }
+            t => Err(format!("expected graph type name, got {t:?}")),
+        }
+    }
+
+    fn graph_type_name_or_default(&mut self) -> Result<(String, bool), String> {
+        match self.advance() {
+            Token::Name(n) => Ok((n, false)),
+            Token::Default => Ok(("DEFAULT".to_string(), true)),
+            t => Err(format!("expected graph type name, got {t:?}")),
+        }
+    }
+
+    // ===== Type-element body =====
+    //
+    // `{ TypeElement (, TypeElement)* }` where each element is a node
+    // descriptor `(:L { ... })` or an edge triple
+    // `(:A) -[:E { ... }]-> (:B)` / `(:A) ~[:E]~ (:B)` / `(:A) <-[:E]- (:B)`.
+
+    fn type_body(&mut self) -> Result<Vec<TypeElement>, String> {
+        self.expect(&Token::LBrace)?;
+        let mut elements = Vec::new();
+        if self.eat(&Token::RBrace) {
+            return Ok(elements);
+        }
+        elements.push(self.type_element()?);
+        while self.eat(&Token::Comma) {
+            elements.push(self.type_element()?);
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(elements)
+    }
+
+    fn type_element(&mut self) -> Result<TypeElement, String> {
+        let n1 = self.type_node()?;
+        if !self.is_type_edge_start() {
+            return Ok(TypeElement::Node(VariableType::Node(n1)));
+        }
+        let edge = self.type_edge_with_endpoints(n1)?;
+        Ok(TypeElement::Edge(edge))
+    }
+
+    fn is_type_edge_start(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::DashLB | Token::TildeLB | Token::LtDashLB
+        )
+    }
+
+    /// Parse `( (:label_pattern)? type_record? )`. The body is `Closed`
+    /// when a record is given (per the plan: only listed props are
+    /// allowed and required), otherwise `Open` (no record means anything
+    /// goes).
+    fn type_node(&mut self) -> Result<DescriptorType, String> {
+        self.expect(&Token::LParen)?;
+        // Optional `:Label` — if missing, label is Star.
+        let label = if self.eat(&Token::Colon) {
+            // `(:)` with no label → Star (wildcard).
+            if matches!(self.peek(), Token::RParen | Token::LBrace) {
+                LabelType::Star
+            } else {
+                self.label_pattern()?
+            }
+        } else {
+            LabelType::Star
+        };
+        let props = if matches!(self.peek(), Token::LBrace) {
+            self.type_record_closed()?
+        } else {
+            PropertyType::open_empty()
+        };
+        self.expect(&Token::RParen)?;
+        Ok(DescriptorType::new(label, props))
+    }
+
+    /// Parse the right side of an edge type-element: the edge bracket and
+    /// the second node. The first node is supplied by the caller.
+    fn type_edge_with_endpoints(
+        &mut self,
+        left_desc: DescriptorType,
+    ) -> Result<VariableType, String> {
+        let (edge_desc, kind) = self.type_edge_bracket()?;
+        let right_desc = self.type_node()?;
+
+        let (left_node, right_node) = match kind {
+            EdgeKind::Right | EdgeKind::Undirected => {
+                (VariableType::Node(left_desc), VariableType::Node(right_desc))
+            }
+            EdgeKind::Left => {
+                // Normalize to LeftEndpoint=src direction so the runtime
+                // model stays directional with src on the left.
+                (VariableType::Node(right_desc), VariableType::Node(left_desc))
+            }
+        };
+
+        Ok(match kind {
+            EdgeKind::Right | EdgeKind::Left => VariableType::EdgeDirectional {
+                desc: edge_desc,
+                left: Box::new(left_node),
+                right: Box::new(right_node),
+            },
+            EdgeKind::Undirected => VariableType::EdgeNonDirectional {
+                desc: edge_desc,
+                left: Box::new(left_node),
+                right: Box::new(right_node),
+            },
+        })
+    }
+
+    fn type_edge_bracket(&mut self) -> Result<(DescriptorType, EdgeKind), String> {
+        match self.peek() {
+            Token::DashLB => {
+                self.advance();
+                let (desc, _) = self.type_edge_filler()?;
+                if self.eat(&Token::RBDashGt) {
+                    Ok((desc, EdgeKind::Right))
+                } else if self.eat(&Token::RBDash) {
+                    // `-[E]-` (any-direction in queries) isn't part of
+                    // the schema body grammar; users write `~[E]~` for
+                    // undirected. Reject explicitly.
+                    Err("schema edge body must be `-[...]->` (right) or `~[...]~` (undirected); got `-[...]-`".into())
+                } else {
+                    Err(format!(
+                        "expected `]->` or `]-` to close edge bracket, got {:?}",
+                        self.peek()
+                    ))
+                }
+            }
+            Token::TildeLB => {
+                self.advance();
+                let (desc, _) = self.type_edge_filler()?;
+                self.expect(&Token::RBTilde)?;
+                Ok((desc, EdgeKind::Undirected))
+            }
+            Token::LtDashLB => {
+                self.advance();
+                let (desc, _) = self.type_edge_filler()?;
+                self.expect(&Token::RBDash)?;
+                Ok((desc, EdgeKind::Left))
+            }
+            t => Err(format!("expected edge opening, got {t:?}")),
+        }
+    }
+
+    /// Inside `[ : Label record? ]` for the schema body. Variables and
+    /// WHERE clauses are not allowed here; reject them rather than
+    /// silently dropping bindings.
+    fn type_edge_filler(&mut self) -> Result<(DescriptorType, ()), String> {
+        let label = if self.eat(&Token::Colon) {
+            self.label_pattern()?
+        } else {
+            LabelType::Star
+        };
+        let props = if matches!(self.peek(), Token::LBrace) {
+            self.type_record_closed()?
+        } else {
+            PropertyType::open_empty()
+        };
+        Ok((DescriptorType::new(label, props), ()))
+    }
+
+    /// Closed record body: `{ name STRING, age INT }`. Empty `{}` produces
+    /// `Closed({})` — no extra properties allowed at all.
+    fn type_record_closed(&mut self) -> Result<PropertyType, String> {
+        self.expect(&Token::LBrace)?;
+        let mut m = std::collections::BTreeMap::new();
+        if self.eat(&Token::RBrace) {
+            return Ok(PropertyType::Closed(m));
+        }
+        loop {
+            let name = match self.advance() {
+                Token::Name(n) => n,
+                t => return Err(format!("expected property name, got {t:?}")),
+            };
+            let ty = self.schema_simple_type()?;
+            m.insert(name, ty);
+            if !self.eat(&Token::Comma) {
+                break;
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(PropertyType::Closed(m))
+    }
+
+    /// Schema-side simple type. Like `simple_type()` but additionally
+    /// supports unions (`T | U`), the `LIST<T>` keyword form, and
+    /// recursive records with optional `::` separators.
+    fn schema_simple_type(&mut self) -> Result<SimpleType, String> {
+        let mut left = self.schema_simple_type_atom()?;
+        while self.eat(&Token::Pipe) {
+            let right = self.schema_simple_type_atom()?;
+            left = SimpleType::Union(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn schema_simple_type_atom(&mut self) -> Result<SimpleType, String> {
+        match self.advance() {
+            Token::Int => Ok(SimpleType::Z),
+            Token::Float => Ok(SimpleType::F),
+            Token::Bool => Ok(SimpleType::B),
+            Token::Str => Ok(SimpleType::S),
+            Token::Star => Ok(SimpleType::Star),
+            Token::LBracket => {
+                let inner = self.schema_simple_type()?;
+                self.expect(&Token::RBracket)?;
+                Ok(SimpleType::List(Box::new(inner)))
+            }
+            Token::List => {
+                self.expect(&Token::Lt)?;
+                let inner = self.schema_simple_type()?;
+                self.expect(&Token::Gt)?;
+                Ok(SimpleType::List(Box::new(inner)))
+            }
+            Token::LBrace => {
+                let mut fields = std::collections::BTreeMap::new();
+                if self.eat(&Token::RBrace) {
+                    return Ok(SimpleType::Record(fields));
+                }
+                loop {
+                    let k = match self.advance() {
+                        Token::Name(n) => n,
+                        t => return Err(format!("expected field name, got {t:?}")),
+                    };
+                    if matches!(self.peek(), Token::DoubleColon | Token::Typed) {
+                        self.advance();
+                    }
+                    fields.insert(k, self.schema_simple_type()?);
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&Token::RBrace)?;
+                Ok(SimpleType::Record(fields))
+            }
+            t => Err(format!(
+                "expected schema type (INT/FLOAT/BOOL/STRING/ANY/LIST<T>/[T]/{{...}}), got {t:?}"
+            )),
+        }
+    }
+}
+
+/// Direction of an edge in the schema body. Distinct from the runtime
+/// `EdgeDir` because that one models the query side and includes `Any`,
+/// which the schema grammar deliberately excludes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgeKind {
+    Right,
+    Left,
+    Undirected,
 }

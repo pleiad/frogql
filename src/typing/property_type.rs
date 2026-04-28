@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use super::simple_type::SimpleType;
 
 /// Property types describe the record structure of node/edge properties.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PropertyType {
     /// Open record — allows extra unspecified attributes (returns Star for unknown keys)
     Open(BTreeMap<String, SimpleType>),

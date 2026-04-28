@@ -15,9 +15,19 @@ use gqlrust::model::csv_loader;
 use gqlrust::model::graph::Graph;
 use gqlrust::model::graph_access::GraphAccess;
 use gqlrust::model::value::PathValue;
+use gqlrust::parser::parse_statement;
+use gqlrust::runtime::catalog::ValidationStatus;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::{IntermediateResult, QueryResult};
 use gqlrust::store::lazy::LazyGraphStore;
+use gqlrust::syntax::statement::{Statement, TypeElement};
+use gqlrust::typing::descriptor_type::DescriptorType;
+use gqlrust::typing::inference::infer_simple_schema;
+use gqlrust::typing::label_type::LabelType;
+use gqlrust::typing::property_type::PropertyType;
+use gqlrust::typing::simple_type::SimpleType;
+use gqlrust::typing::validate::{validate_against_data, ElementKind, ValidationReport};
+use gqlrust::typing::variable_type::{Schema, VariableType};
 
 fn main() {
     let mut args: Vec<String> = env::args().collect();
@@ -72,6 +82,10 @@ fn main() {
         t0.elapsed().as_secs_f64()
     );
     eprintln!("Typechecker: {}", if typecheck { "on" } else { "off" });
+    match store.catalog().active_name() {
+        Some(name) => eprintln!("Active GRAPH TYPE: {name}."),
+        None => eprintln!("Active GRAPH TYPE: (none — schema-permissive)."),
+    }
     eprintln!("Type a GQL query or 'quit'. Try 'schema' to see labels.");
     eprintln!();
 
@@ -109,29 +123,83 @@ fn main() {
             continue;
         }
 
-        let query = if typecheck {
-            match gqlrust::compile_query_with_diagnostics(line) {
-                Ok(r) => {
-                    for w in &r.warnings {
-                        eprintln!("warning: {w}");
-                    }
-                    r.query
-                }
-                Err(gqlrust::CompileError::Parse(e)) => {
-                    eprintln!("Parse error: {e}");
-                    continue;
-                }
-                Err(gqlrust::CompileError::Type(es)) => {
-                    eprintln!("Type error: {}", es.join("; "));
-                    continue;
-                }
+        if line == ":graph-types" {
+            print_graph_types(&store);
+            continue;
+        }
+
+        // Parse top-level statement: query or DDL.
+        let stmt = match parse_statement(line) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Parse error: {e}");
+                continue;
             }
-        } else {
-            match gqlrust::compile_query_unchecked(line) {
-                Ok(q) => q,
-                Err(e) => {
-                    eprintln!("Parse error: {e}");
-                    continue;
+        };
+
+        let query = match stmt {
+            Statement::CreateGraphType { name, body } => {
+                handle_create(&store, &name, &body);
+                continue;
+            }
+            Statement::UseGraphType {
+                name,
+                refresh_default,
+            } => {
+                handle_use(&store, &name, refresh_default);
+                continue;
+            }
+            Statement::DropGraphType { name } => {
+                handle_drop(&store, &name);
+                continue;
+            }
+            Statement::ShowGraphTypes => {
+                print_graph_types(&store);
+                continue;
+            }
+            Statement::ShowGraphType { name } => {
+                handle_show(&store, &name);
+                continue;
+            }
+            Statement::ShowCurrentGraphType => {
+                handle_show_current(&store);
+                continue;
+            }
+            Statement::ValidateGraphType { name } => {
+                handle_validate(&store, &name);
+                continue;
+            }
+            Statement::Query(q) => {
+                if typecheck {
+                    let active = store.catalog().active_schema();
+                    match gqlrust::compile_query_with_diagnostics_with(&active, line) {
+                        Ok(r) => {
+                            for w in &r.warnings {
+                                eprintln!("warning: {w}");
+                            }
+                            r.query
+                        }
+                        Err(gqlrust::CompileError::Parse(e)) => {
+                            eprintln!("Parse error: {e}");
+                            continue;
+                        }
+                        Err(gqlrust::CompileError::Type(es)) => {
+                            eprintln!("Type error: {}", es.join("; "));
+                            continue;
+                        }
+                    }
+                } else {
+                    // The query AST is already parsed; just run optimizer
+                    // unchecked. Round-trip through the helper to keep the
+                    // pipeline canonical.
+                    let _ = q;
+                    match gqlrust::compile_query_unchecked(line) {
+                        Ok(q) => q,
+                        Err(e) => {
+                            eprintln!("Parse error: {e}");
+                            continue;
+                        }
+                    }
                 }
             }
         };
@@ -247,6 +315,27 @@ fn import(db_path: &Path, mode: &str, source: &str) {
     graph.save(db_path).expect("failed to save database");
     let size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
     eprintln!("Saved ({:.1} MB)", size as f64 / 1_048_576.0);
+
+    // Populate the DEFAULT graph type from the freshly-loaded data and
+    // mark it active. Any errors here are non-fatal — the .gdb is still
+    // usable, the user can refresh DEFAULT later via `USE GRAPH TYPE
+    // DEFAULT`.
+    match LazyGraphStore::open(db_path) {
+        Ok(store) => {
+            let schema = infer_simple_schema(&store);
+            let node_count = schema.nodes.len();
+            let edge_count = schema.edges.len();
+            store.catalog_mut().install_default(schema);
+            if let Err(e) = store.save_catalog() {
+                eprintln!("warning: failed to persist DEFAULT graph type: {e}");
+            } else {
+                eprintln!(
+                    "Inferred DEFAULT graph type: {node_count} node types, {edge_count} edge types"
+                );
+            }
+        }
+        Err(e) => eprintln!("warning: failed to reopen db for DEFAULT inference: {e}"),
+    }
 }
 
 /// Print raw results as a table with columns [path, var1, var2, ...].
@@ -868,4 +957,399 @@ fn print_schema_simple(store: &LazyGraphStore) {
         store.node_count(),
         store.edge_count()
     );
+}
+
+// ===== Catalog DDL handlers =====
+
+fn build_schema_from_body(body: &[TypeElement]) -> Schema {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    for el in body {
+        match el {
+            TypeElement::Node(vt) => nodes.push(vt.clone()),
+            TypeElement::Edge(vt) => edges.push(vt.clone()),
+        }
+    }
+    Schema { nodes, edges }
+}
+
+fn handle_create(store: &LazyGraphStore, name: &str, body: &[TypeElement]) {
+    let schema = build_schema_from_body(body);
+    let node_count = schema.nodes.len();
+    let edge_count = schema.edges.len();
+    {
+        let mut cat = store.catalog_mut();
+        if let Err(e) = cat.register(name.to_string(), schema) {
+            eprintln!("error: {e}");
+            return;
+        }
+    }
+    if let Err(e) = store.save_catalog() {
+        eprintln!("error: failed to persist catalog: {e}");
+        return;
+    }
+    println!(
+        "GRAPH TYPE '{name}' created ({node_count} node types, {edge_count} edge types)."
+    );
+}
+
+fn handle_use(store: &LazyGraphStore, name: &str, refresh_default: bool) {
+    if refresh_default {
+        let schema = infer_simple_schema(store);
+        let node_count = schema.nodes.len();
+        let edge_count = schema.edges.len();
+        store.catalog_mut().install_default(schema);
+        if let Err(e) = store.save_catalog() {
+            eprintln!("error: failed to persist catalog: {e}");
+            return;
+        }
+        println!(
+            "GRAPH TYPE 'DEFAULT' refreshed ({node_count} node types, {edge_count} edge types) and activated."
+        );
+    } else {
+        if let Err(e) = store.catalog_mut().set_active(name) {
+            eprintln!("error: {e}");
+            return;
+        }
+        if let Err(e) = store.save_catalog() {
+            eprintln!("error: failed to persist catalog: {e}");
+            return;
+        }
+        println!("Active GRAPH TYPE: {name}.");
+    }
+}
+
+fn handle_drop(store: &LazyGraphStore, name: &str) {
+    {
+        let mut cat = store.catalog_mut();
+        if let Err(e) = cat.drop(name) {
+            eprintln!("error: {e}");
+            return;
+        }
+    }
+    if let Err(e) = store.save_catalog() {
+        eprintln!("error: failed to persist catalog: {e}");
+        return;
+    }
+    println!("GRAPH TYPE '{name}' dropped.");
+}
+
+fn print_graph_types(store: &LazyGraphStore) {
+    let cat = store.catalog();
+    let entries = cat.list();
+    if entries.is_empty() {
+        println!("(no graph types)");
+        return;
+    }
+    for (name, is_active) in entries {
+        if is_active {
+            println!("* {name}");
+        } else {
+            println!("  {name}");
+        }
+    }
+}
+
+fn handle_show(store: &LazyGraphStore, name: &str) {
+    let cat = store.catalog();
+    let lookup_key = if name.eq_ignore_ascii_case("DEFAULT") {
+        "DEFAULT"
+    } else {
+        name
+    };
+    match cat.types.get(lookup_key) {
+        Some(schema) => {
+            let active_marker = if cat.active_name() == Some(lookup_key) {
+                format!(" {C_DIM}(active){C_RESET}")
+            } else {
+                String::new()
+            };
+            println!("{C_BOLD}GRAPH TYPE {lookup_key}{C_RESET}{active_marker}");
+            print_schema_colored(schema);
+            if let Some(v) = cat.validation_for(lookup_key) {
+                print_validation_summary(v);
+            }
+        }
+        None => eprintln!("error: graph type '{name}' not found"),
+    }
+}
+
+fn handle_show_current(store: &LazyGraphStore) {
+    let cat = store.catalog();
+    match cat.active_name() {
+        None => println!("CURRENT GRAPH TYPE: (none)"),
+        Some(name) => {
+            // Lookup uses the canonical key — `active` already holds it.
+            match cat.types.get(name) {
+                Some(schema) => {
+                    println!("{C_BOLD}CURRENT GRAPH TYPE: {name}{C_RESET}");
+                    print_schema_colored(schema);
+                    if let Some(v) = cat.validation_for(name) {
+                        print_validation_summary(v);
+                    }
+                }
+                None => eprintln!("error: active graph type '{name}' is missing from the catalog"),
+            }
+        }
+    }
+}
+
+// ---- Colored schema renderer ----
+//
+// Mirrors `typing::format::format_schema` but emits ANSI codes consistent
+// with the rest of the REPL output (labels bold cyan, type names green,
+// arrows yellow, open-record marker magenta).
+
+fn print_schema_colored(schema: &Schema) {
+    if !schema.nodes.is_empty() {
+        println!("{C_BOLD}Node types:{C_RESET}");
+        for vt in &schema.nodes {
+            println!("    {}", color_variable(vt));
+        }
+    }
+    if !schema.edges.is_empty() {
+        if !schema.nodes.is_empty() {
+            println!();
+        }
+        println!("{C_BOLD}Edge types:{C_RESET}");
+        for vt in &schema.edges {
+            println!("    {}", color_variable(vt));
+        }
+    }
+    if schema.nodes.is_empty() && schema.edges.is_empty() {
+        println!("{C_DIM}(empty schema){C_RESET}");
+    }
+}
+
+fn color_variable(vt: &VariableType) -> String {
+    match vt {
+        VariableType::Node(d) => color_node_descriptor(d),
+        VariableType::EdgeDirectional { desc, left, right } => format!(
+            "{}{}{}",
+            color_endpoint(left),
+            color_edge_arrow(desc, true),
+            color_endpoint(right),
+        ),
+        VariableType::EdgeNonDirectional { desc, left, right } => format!(
+            "{}{}{}",
+            color_endpoint(left),
+            color_edge_arrow(desc, false),
+            color_endpoint(right),
+        ),
+        VariableType::Union(a, b) => {
+            format!("({}) | ({})", color_variable(a), color_variable(b))
+        }
+        VariableType::Group(t) => format!("group<{}>", color_variable(t)),
+        VariableType::Zero => "⊥".to_string(),
+    }
+}
+
+fn color_endpoint(vt: &VariableType) -> String {
+    match vt {
+        VariableType::Node(d) => color_node_descriptor(d),
+        _ => format!("({})", color_variable(vt)),
+    }
+}
+
+fn color_node_descriptor(d: &DescriptorType) -> String {
+    let label = color_label_type(&d.label);
+    let props = color_property_record(&d.props);
+    match (label.is_empty(), props.is_empty()) {
+        (true, true) => "()".to_string(),
+        (false, true) => format!("(:{label})"),
+        (true, false) => format!("({props})"),
+        (false, false) => format!("(:{label} {props})"),
+    }
+}
+
+fn color_edge_arrow(d: &DescriptorType, directed: bool) -> String {
+    let body = color_edge_descriptor(d);
+    let (open, close) = if directed {
+        (
+            format!("{C_YELLOW}-[{C_RESET}"),
+            format!("{C_YELLOW}]->{C_RESET}"),
+        )
+    } else {
+        (
+            format!("{C_YELLOW}~[{C_RESET}"),
+            format!("{C_YELLOW}]~{C_RESET}"),
+        )
+    };
+    format!("{open}{body}{close}")
+}
+
+fn color_edge_descriptor(d: &DescriptorType) -> String {
+    let label = color_label_type(&d.label);
+    let props = color_property_record(&d.props);
+    match (label.is_empty(), props.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => format!(":{label}"),
+        (true, false) => props,
+        (false, false) => format!(":{label} {props}"),
+    }
+}
+
+/// Render a `LabelType` without a leading colon. Empty for `Star`/`Top`.
+/// Composite labels (And/Or/Neg) are colored token-by-token.
+fn color_label_type(lt: &LabelType) -> String {
+    match lt {
+        LabelType::Label(s) => format!("{C_BOLD}{C_CYAN}{s}{C_RESET}"),
+        LabelType::Star | LabelType::Top => String::new(),
+        LabelType::Empty => format!("{C_DIM}ε{C_RESET}"),
+        LabelType::And(a, b) => {
+            format!("{}&{}", color_label_inner(a), color_label_inner(b))
+        }
+        LabelType::Or(a, b) => {
+            format!("{}|{}", color_label_inner(a), color_label_inner(b))
+        }
+        LabelType::Neg(inner) => format!("!{}", color_label_inner(inner)),
+    }
+}
+
+fn color_label_inner(lt: &LabelType) -> String {
+    match lt {
+        LabelType::And(_, _) | LabelType::Or(_, _) => format!("({})", color_label_type(lt)),
+        _ => color_label_type(lt),
+    }
+}
+
+fn color_property_record(pt: &PropertyType) -> String {
+    match pt {
+        PropertyType::Open(m) if m.is_empty() => String::new(),
+        PropertyType::Closed(m) if m.is_empty() => "{}".to_string(),
+        PropertyType::Open(m) => format!(
+            "{{{}, {C_MAGENTA}*{C_RESET}}}",
+            color_field_map(m)
+        ),
+        PropertyType::Closed(m) => format!("{{{}}}", color_field_map(m)),
+        PropertyType::Zero => format!("{C_DIM}⊥{C_RESET}"),
+    }
+}
+
+fn color_field_map(m: &std::collections::BTreeMap<String, SimpleType>) -> String {
+    m.iter()
+        .map(|(k, v)| format!("{k} {}", color_simple_type(v)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn color_simple_type(t: &SimpleType) -> String {
+    match t {
+        SimpleType::Z => format!("{C_GREEN}INT{C_RESET}"),
+        SimpleType::F => format!("{C_GREEN}FLOAT{C_RESET}"),
+        SimpleType::B => format!("{C_GREEN}BOOL{C_RESET}"),
+        SimpleType::S => format!("{C_GREEN}STRING{C_RESET}"),
+        SimpleType::Star => format!("{C_MAGENTA}ANY{C_RESET}"),
+        SimpleType::Zero => format!("{C_DIM}⊥{C_RESET}"),
+        SimpleType::Union(a, b) => format!(
+            "{} | {}",
+            color_simple_type_atom(a),
+            color_simple_type_atom(b)
+        ),
+        SimpleType::List(inner) => format!(
+            "{C_GREEN}LIST{C_RESET}<{}>",
+            color_simple_type(inner)
+        ),
+        SimpleType::Group(inner) => format!("group<{}>", color_simple_type(inner)),
+        SimpleType::Record(fields) => format!("{{{}}}", color_field_map(fields)),
+    }
+}
+
+fn color_simple_type_atom(t: &SimpleType) -> String {
+    match t {
+        SimpleType::Union(_, _) => format!("({})", color_simple_type(t)),
+        _ => color_simple_type(t),
+    }
+}
+
+fn handle_validate(store: &LazyGraphStore, name: &str) {
+    let lookup_key = if name.eq_ignore_ascii_case("DEFAULT") {
+        "DEFAULT"
+    } else {
+        name
+    };
+    let schema = match store.catalog().types.get(lookup_key).cloned() {
+        Some(s) => s,
+        None => {
+            eprintln!("error: graph type '{name}' not found");
+            return;
+        }
+    };
+    let start = Instant::now();
+    let report = validate_against_data(store, &schema);
+    let elapsed = start.elapsed();
+
+    print_validation_report(&report, lookup_key, elapsed);
+
+    let status = ValidationStatus {
+        against_node_count: report.nodes_checked,
+        against_edge_count: report.edges_checked,
+        violations: report.total_violations(),
+        validated_at_unix: now_unix(),
+    };
+    store.catalog_mut().record_validation(lookup_key, status);
+    if let Err(e) = store.save_catalog() {
+        eprintln!("warning: failed to persist validation result: {e}");
+    }
+}
+
+fn print_validation_report(report: &ValidationReport, type_name: &str, elapsed: std::time::Duration) {
+    println!(
+        "Validated {} nodes, {} edges against GRAPH TYPE '{type_name}' in {:.3}s",
+        report.nodes_checked,
+        report.edges_checked,
+        elapsed.as_secs_f64()
+    );
+    if report.ok() {
+        println!("  OK: every element fits the schema.");
+        return;
+    }
+    println!(
+        "  Violations: {} node(s), {} edge(s)",
+        report.node_violations, report.edge_violations
+    );
+    if !report.samples.is_empty() {
+        println!("  Samples:");
+        for v in &report.samples {
+            let kind = match v.kind {
+                ElementKind::Node => "node",
+                ElementKind::Edge => "edge",
+            };
+            let label_part = if v.labels.is_empty() {
+                "()".to_string()
+            } else {
+                format!(":{}", v.labels.join("&"))
+            };
+            let prop_part = if v.props.is_empty() {
+                String::new()
+            } else {
+                let parts: Vec<String> = v
+                    .props
+                    .iter()
+                    .map(|(k, t)| format!("{k}: {t}"))
+                    .collect();
+                format!(" {{{}}}", parts.join(", "))
+            };
+            println!("    {kind} {} ({}{}) ", v.id, label_part, prop_part);
+        }
+    }
+}
+
+fn print_validation_summary(v: &ValidationStatus) {
+    let verdict = if v.violations == 0 {
+        "OK".to_string()
+    } else {
+        format!("{} violation(s)", v.violations)
+    };
+    println!(
+        "Last validated: {verdict} (against {} nodes, {} edges)",
+        v.against_node_count, v.against_edge_count
+    );
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }

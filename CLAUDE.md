@@ -51,9 +51,33 @@ empty. The optimizer is reserved for performance-preserving transforms
 
 - `compile(query) → PathPattern` — parse + elaborate + optimize a path pattern string
 - `compile_query(input) → Query` — parse a full `MATCH ... WHERE ... RETURN` query
+- `compile_query_with(&Schema, input) → Query` — same, but typechecks against a custom schema (used by REPL/Python bindings to honor the active GRAPH TYPE)
+- `parser::parse_statement(input) → Statement` — top-level parser that distinguishes a query from catalog DDL (`CREATE` / `USE` / `DROP GRAPH TYPE`)
 - `Runtime::new(graph).run(&pattern)` — execute against any `GraphAccess` backend
 - `Runtime::run_query(&query, limit)` — execute with RETURN projection
 - `Runtime::run_with_limit(&pattern, limit)` — early termination after N results
+
+### Graph-type catalog
+
+`LazyGraphStore` owns a `RefCell<GraphTypeCatalog>` (`src/runtime/catalog.rs`)
+loaded from the page chain at `header.catalog_root` on open. The REPL and
+Python bindings route input via `parse_statement`, dispatch DDL through
+`catalog_mut()` + `save_catalog()`, and compile queries with
+`catalog.active_schema()`. The reserved name `DEFAULT` is auto-populated by
+`infer_simple_schema(&store)` (`src/typing/inference.rs`) at import time and
+on `USE GRAPH TYPE DEFAULT`; both `CREATE` and `DROP` of `DEFAULT` are
+rejected. Persistence detail lives in `docs/storage-architecture.md` §3.5.
+
+DDL surface today: `CREATE / USE / DROP GRAPH TYPE`, plus inspection /
+validation:
+
+- `SHOW GRAPH TYPES` — list all entries with active markers
+- `SHOW GRAPH TYPE <name>` — pretty-print one entry (uses `typing::format::format_schema`)
+- `SHOW CURRENT GRAPH TYPE` — name + content of the active entry
+- `VALIDATE GRAPH TYPE <name>` — walks the data via `typing::validate::validate_against_data` and caches the verdict in `catalog.validations`
+
+`USE` does not validate. The walk is opt-in because it is O(N + E); the
+typechecker still constrains queries against the active schema either way.
 
 ### ID system
 

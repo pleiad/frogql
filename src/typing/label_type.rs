@@ -1,7 +1,9 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// Label types form a boolean algebra over graph element labels.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LabelType {
     /// Atomic label (e.g., "Person", "Transfer")
     Label(String),

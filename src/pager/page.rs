@@ -27,6 +27,8 @@ pub enum PageType {
     Overflow = 6,
     /// Free page (on the free list).
     Free = 7,
+    /// Graph-type catalog page (chained, JSON payload).
+    Catalog = 8,
 }
 
 impl PageType {
@@ -40,6 +42,7 @@ impl PageType {
             5 => Some(Self::StringTable),
             6 => Some(Self::Overflow),
             7 => Some(Self::Free),
+            8 => Some(Self::Catalog),
             _ => None,
         }
     }

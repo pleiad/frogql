@@ -25,7 +25,9 @@ pub const FORMAT_VERSION: u16 = 1;
 /// bytes 48-51: edge label index root page (u32 LE)
 /// bytes 52-55: node locations index root (u32 LE, 0 = legacy file without fast index)
 /// bytes 56-59: edge topology index root (u32 LE, 0 = legacy file without fast index)
-/// bytes 60+:   reserved (zeroed)
+/// bytes 60-63: graph-type catalog root page (u32 LE, 0 = no catalog)
+/// bytes 64-95: active graph-type name (u8[32], null-padded UTF-8; empty = none)
+/// bytes 96+:   reserved (zeroed)
 /// ```
 ///
 /// Note: page 0 does NOT use the standard slotted-page cell machinery.
@@ -47,6 +49,11 @@ pub struct FileHeader {
     pub node_locs_root: u32,
     /// Root page for edge topology index (0 = not present, legacy file).
     pub edge_topo_root: u32,
+    /// Root page of the graph-type catalog chain (0 = no catalog).
+    pub catalog_root: u32,
+    /// Active graph-type name. Capped at 31 bytes UTF-8 plus a null
+    /// terminator in the header. `None` ⇔ "no active type".
+    pub active_type_name: Option<String>,
 }
 
 impl Default for FileHeader {
@@ -66,8 +73,35 @@ impl Default for FileHeader {
             edge_label_index_root: 0,
             node_locs_root: 0,
             edge_topo_root: 0,
+            catalog_root: 0,
+            active_type_name: None,
         }
     }
+}
+
+/// Maximum bytes (including null terminator) reserved for the active
+/// graph-type name in the file header.
+const ACTIVE_NAME_BYTES: usize = 32;
+
+fn encode_active_name(name: Option<&str>) -> [u8; ACTIVE_NAME_BYTES] {
+    let mut buf = [0u8; ACTIVE_NAME_BYTES];
+    if let Some(s) = name {
+        let src = s.as_bytes();
+        // Reserve byte 31 for the null terminator.
+        let n = src.len().min(ACTIVE_NAME_BYTES - 1);
+        buf[..n].copy_from_slice(&src[..n]);
+    }
+    buf
+}
+
+fn decode_active_name(bytes: &[u8]) -> Option<String> {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    if end == 0 {
+        return None;
+    }
+    // Lossy: bad UTF-8 in the header field is treated as "none" rather
+    // than failing to open the file.
+    std::str::from_utf8(&bytes[..end]).ok().map(|s| s.to_string())
 }
 
 impl FileHeader {
@@ -96,6 +130,8 @@ impl FileHeader {
         d[48..52].copy_from_slice(&self.edge_label_index_root.to_le_bytes());
         d[52..56].copy_from_slice(&self.node_locs_root.to_le_bytes());
         d[56..60].copy_from_slice(&self.edge_topo_root.to_le_bytes());
+        d[60..64].copy_from_slice(&self.catalog_root.to_le_bytes());
+        d[64..96].copy_from_slice(&encode_active_name(self.active_type_name.as_deref()));
 
         page
     }
@@ -123,6 +159,8 @@ impl FileHeader {
             edge_label_index_root: u32::from_le_bytes([d[48], d[49], d[50], d[51]]),
             node_locs_root: u32::from_le_bytes([d[52], d[53], d[54], d[55]]),
             edge_topo_root: u32::from_le_bytes([d[56], d[57], d[58], d[59]]),
+            catalog_root: u32::from_le_bytes([d[60], d[61], d[62], d[63]]),
+            active_type_name: decode_active_name(&d[64..96]),
         })
     }
 }
