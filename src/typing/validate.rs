@@ -92,11 +92,7 @@ pub fn validate_against_data<G: GraphAccess>(g: &G, schema: &Schema) -> Validati
         }
     }
 
-    for eid in g
-        .edges_directed()
-        .into_iter()
-        .chain(g.edges_undirected().into_iter())
-    {
+    for eid in g.edges_directed().into_iter().chain(g.edges_undirected()) {
         report.edges_checked += 1;
         let instance = edge_instance_type(g, eid);
         if !instance_admitted(&instance, &schema.edges) {
