@@ -1,8 +1,10 @@
 //! Spec-driven proptest suite for the typing lattice.
 //!
-//! The goal: if `rules.md` changes, this file changes; if the
-//! implementation drifts from the spec, a property fails — and the
-//! failure message names the rule that was violated.
+//! The spec is `docs/rules.md` (FPPC formal rules). Section references
+//! in this file (`§3.1`, `§4.2`, etc.) point there. The goal: if
+//! `rules.md` changes, this file changes; if the implementation drifts
+//! from the spec, a property fails — and the failure message names the
+//! rule that was violated.
 //!
 //! ## Three equivalence relations
 //!
@@ -44,13 +46,13 @@
 //!
 //! 1. **Algebraic invariants** — subtype reflexivity, meet idempotence,
 //!    greatest-lower-bound, commutativity, identity / absorbing elements.
-//!    Same shape as fppc's stashed proptests, but tightened with `canon`.
 //! 2. **Spec rules from `rules.md`** — direct encodings, organized by
 //!    section. Each property names the rule it validates.
 //! 3. **Schema-diverse refinement** — refines against generated schemas
-//!    (not just `Schema::star()`). The `EdgeDir::Any → directional-only`
-//!    bug we shipped 48h ago lived in exactly this dispatch path; tests
-//!    here would have surfaced it on input #1.
+//!    (not just `Schema::star()`). Restrictive-schema dispatch is where
+//!    bugs like the `EdgeDir::Any → directional-only` port regression
+//!    (commit `9ec4975`) live; lattice-level proptests against custom
+//!    schemas exercise that surface.
 //!
 //! ## Variants intentionally NOT generated
 //!
@@ -315,20 +317,20 @@ mod canon {
 
 /// Canonical-form equality. Closer to the **non-gradual** equality you'd
 /// have without plausibility — two types are `canon_eq` iff they have
-/// the same shape after sorting commutative operators and dropping
-/// idempotent / identity elements.
+/// the same shape after the canonicalization steps in the `canon`
+/// module (collapse-empty, sort commutative children, dedup, drop
+/// identity elements).
 ///
 /// Tighter than `consistent` (mutual-subtype). Catches Star-collapse
 /// regressions that consistency would hide. Use where the output's
 /// SHAPE genuinely matters (symmetries, distributions, refinements).
 ///
-/// **Implementation-coupling caveat.** `canon` mirrors gqlite's own
-/// normalization — specifically the identity drops in `union`/`meet`.
-/// If the impl regresses on its normalization (e.g., stops dropping
-/// `Zero` from `Union`), canon will still equate the unnormalized
-/// output with the normalized form, hiding the regression. The
-/// `meet_locks` and `normalization_locks` modules cover that gap with
-/// hand-picked assertions.
+/// **Drift caveat.** canon's collapse-empty step depends on gqlite's
+/// `is_empty` / `is_unsatisfiable` predicates — not on `union`/`meet`'s
+/// internal normalization. If those predicates regress, canon mis-
+/// classifies. The `meet_locks` / `normalization_locks` modules pin
+/// the impl behaviors directly so a predicate regression is caught at
+/// a different layer.
 macro_rules! assert_canon_eq {
     ($kind:ident, $lhs:expr, $rhs:expr $(, $msg:tt)?) => {{
         let lhs = $lhs;
@@ -555,9 +557,9 @@ fn arb_simple_with_supertype() -> impl Strategy<Value = (SimpleType, SimpleType)
 //
 // `Schema::star()` is the most permissive possible schema; refinement
 // against it never returns Zero, so it only exercises a tiny slice of
-// the dispatch logic. Real bugs (the `EdgeDir::Any` regression we
-// shipped 48h ago) live in restrictive-schema dispatch. These
-// generators exercise that surface.
+// the dispatch logic. Real bugs (e.g. the `EdgeDir::Any` regression
+// fixed in commit `9ec4975`) live in restrictive-schema dispatch.
+// These generators exercise that surface.
 
 /// Schema with a controlled mix of node / directed-edge / undirected-
 /// edge entries. The flags pin which kinds of entries appear so a
@@ -1489,7 +1491,6 @@ mod variable_spec_rules {
         }
 
         // §8.4 empty() — Union case: empty(T₁+T₂) iff empty(T₁) ∧ empty(T₂).
-        // Generalized: any pair of variable types, not just Zero ∪ t.
         #[test]
         fn union_empty_iff_both_components_empty(
             t1 in arb_variable_type(),
@@ -1507,11 +1508,12 @@ mod variable_spec_rules {
 // =======================================================================
 //
 // Refinement against `Schema::star()` only exercises a permissive
-// dispatch path. The `EdgeDir::Any → directional-only` regression we
-// shipped 48 hours ago lived in restrictive-schema dispatch — exactly
-// what these tests exercise. Each property is constructed so that the
-// query SHOULD admit some schema entry; if dispatch silently drops the
-// matching entries, refinement returns Zero and the property fails.
+// dispatch path. Bugs in restrictive-schema dispatch (the
+// `EdgeDir::Any → directional-only` regression fixed in `9ec4975` is
+// one) need the schema-diverse surface these tests provide. Each
+// property is constructed so that the query SHOULD admit some schema
+// entry; if dispatch silently drops the matching entries, refinement
+// returns Zero and the property fails.
 
 mod schema_refinement_rules {
     use super::*;
@@ -1577,16 +1579,16 @@ mod schema_refinement_rules {
         }
     }
 
-    // The original EdgeDir::Any-class bug lives in the typechecker's
-    // dispatch, NOT in `VariableType::refine`. The `refine_pattern_edge`
-    // function used to bucket Any with Right/Left and refine only as
-    // directional — silently dropping non-directional schema entries.
+    // The EdgeDir::Any-class bug lived in the typechecker's dispatch,
+    // not in `VariableType::refine` itself: `refine_pattern_edge` used
+    // to bucket `Any` with `Right`/`Left` and refine only as directional,
+    // silently dropping non-directional schema entries. Catching that
+    // dispatch bug needs a typechecker-level test, not a lattice one.
     //
-    // Locking that dispatch here would require a Typechecker-level
-    // test (which is Tier 2.2 territory). What we CAN lock at the
-    // lattice level: refinement-as-meet against a schema with only
-    // non-directional edges should successfully match a non-directional
-    // query — confirming the lattice op underneath is sound.
+    // What can be locked at the lattice level: refinement-as-meet
+    // against a schema with only non-directional edges should match a
+    // non-directional query. That confirms the lattice op underneath
+    // is sound, even if dispatch above it is buggy.
 
     #[test]
     fn nondirectional_edge_query_admits_nondirectional_schema_entries() {
@@ -1613,16 +1615,21 @@ mod schema_refinement_rules {
 }
 
 // =======================================================================
-// Normalization locks — backstop against canon's impl coupling
+// Normalization locks — independent assertions on the impl's normalizing
+// behavior
 // =======================================================================
 //
-// `canon` mirrors gqlite's normalization (Zero-drop in Union, Star-drop
-// in And). If gqlite regresses on those normalizations, canon-based
-// equivalence tests would still pass — they'd just compare the
-// unnormalized impl output to a canonicalized form, hiding the bug.
+// `canon`'s collapse-empty step uses gqlite's `is_empty` /
+// `is_unsatisfiable` predicates. If gqlite's `union`/`join`/`meet`
+// regress on identity-dropping (e.g. `union(Zero, X)` returns
+// `Union(Zero, X)`), canon would still equate that with `X` — the
+// regression is silent on canon-based tests.
 //
-// These hand-picked locks pin the normalizations directly, so a
-// regression there is caught at a different layer than canon.
+// These hand-picked locks assert specific input → output pairs on
+// `union/meet/join` directly. They don't go through canon, so a
+// regression is caught even when canon's predicate-based collapse
+// would mask it. The two layers depend on different parts of the
+// impl and detect disjoint regression classes.
 
 mod normalization_locks {
     use super::*;
@@ -1701,11 +1708,11 @@ mod normalization_locks {
 // Meet output locks — backstop against Star/Zero-collapse regressions
 // =======================================================================
 //
-// The mutual-subtype-equivalence assertions above are loose: a buggy
-// `meet` that returned `Star` (or `Zero`) for everything would still
-// satisfy mutual subtype because Star is bidirectional and Zero is
-// universal subtype.  These hand-picked tests pin specific outputs so
-// such a regression fails noisily.
+// The `assert_consistent!` assertions in `mod label_type` /
+// `mod descriptor_type` / `mod variable_type` use mutual subtype, which
+// is loose: a buggy `meet` returning `Star` for everything would still
+// satisfy consistency (Star is bidirectional under §3 plausibility).
+// These hand-picked tests pin specific outputs so the regression fails.
 
 mod meet_locks {
     use super::*;
