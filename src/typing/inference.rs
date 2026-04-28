@@ -145,11 +145,7 @@ fn group_edges<G: GraphAccess>(
     _node_groups: &BTreeMap<Vec<String>, Group>,
 ) -> BTreeMap<EdgeKey, Group> {
     let mut groups: BTreeMap<EdgeKey, Group> = BTreeMap::new();
-    for eid in g
-        .edges_directed()
-        .into_iter()
-        .chain(g.edges_undirected().into_iter())
-    {
+    for eid in g.edges_directed().into_iter().chain(g.edges_undirected()) {
         let mut edge_labels = Graph::label_strings(&g.edge_labels(eid));
         edge_labels.sort();
         let mut src_labels = Graph::label_strings(&g.node_labels(g.src(eid)));
@@ -251,11 +247,7 @@ fn endpoint_node(labels: &[String], node_groups: &BTreeMap<Vec<String>, Group>) 
 /// label sets that appear as endpoints. Used by the REPL display path.
 pub fn endpoint_label_combos<G: GraphAccess>(g: &G) -> BTreeSet<Vec<String>> {
     let mut out = BTreeSet::new();
-    for eid in g
-        .edges_directed()
-        .into_iter()
-        .chain(g.edges_undirected().into_iter())
-    {
+    for eid in g.edges_directed().into_iter().chain(g.edges_undirected()) {
         let mut s = Graph::label_strings(&g.node_labels(g.src(eid)));
         s.sort();
         let mut t = Graph::label_strings(&g.node_labels(g.tgt(eid)));
