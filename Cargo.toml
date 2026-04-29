@@ -9,9 +9,12 @@ serde_json = "1"
 thiserror = "2"
 rustyline = "15"
 # sysinfo: cross-platform RSS reading for the LDBC bench's
-# Memory vs Lazy vs Disk RAM-cost comparison. Used only by
-# `src/bin/ldbc_bench.rs`; cheap to compile.
+# Memory vs Lazy vs Disk RAM-cost comparison.
 sysinfo = "0.30"
+# toml: per-IC query definitions in `bench/ldbc-queries/`.
+# Multiline strings in TOML are nicer than JSON for spec-quoted
+# query text. Used only by `src/bin/ldbc_bench.rs`.
+toml = "0.8"
 
 [workspace]
 members = [".", "python"]

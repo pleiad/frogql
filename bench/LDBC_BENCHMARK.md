@@ -5,12 +5,48 @@ workload (arXiv:2001.02299, §6) against gqlite.
 
 ## Status
 
-Currently runs **IC2 only** (recent messages by friends). The remaining
-13 IC queries need features gqlite doesn't yet have:
+Currently runs **IC2 only** (recent messages by friends). All 14 IC
+queries are catalogued under `bench/ldbc-queries/ic<n>.toml` — IC2
+is `status = "implemented"`, the other 13 are `status = "blocked"`
+with the gqlite features they need listed under `required_features`.
+Run `ldbc_bench --ic blocked` for the inventory.
 
-- IC1, IC3, IC11, IC12, IC14 — shortest paths / variable-length paths
-- IC4–IC8, IC10, IC11, IC13, IC14 — date arithmetic, OPTIONAL MATCH,
-  ORDER BY / TOP-K, complex aggregation with HAVING
+Per-IC blockers at a glance (from the TOML files):
+
+- IC1, IC3, IC5, IC6, IC9, IC10, IC11, IC12 — variable-length paths
+- IC1, IC13, IC14 — shortest path / all-shortest-paths
+- IC1, IC5, IC7, IC10 — `OPTIONAL MATCH`
+- IC3, IC4, IC5 — date arithmetic (date ranges)
+- IC3, IC4, IC5, IC6, IC10, IC12 — aggregation (`COUNT`, `GROUP BY`)
+- All ICs — `ORDER BY`
+- IC2 — `coalesce` (semi-blocking — query runs, but `imageFile`
+  fallback for empty Posts isn't honored)
+
+## Architecture: per-IC TOML query catalog
+
+Each IC has a TOML file in `bench/ldbc-queries/`:
+
+```
+ic1.toml   ← blocked, lists required_features
+ic2.toml   ← implemented, carries query template + params_file ref
+ic3.toml   ← blocked
+...
+ic14.toml  ← blocked
+```
+
+Implemented files carry:
+- `params_file` — name of the LDBC `interactive_<n>_param.txt` (looked
+  up under `--params-dir`)
+- `query` — multi-line query template with `{paramName}` placeholders
+- `divergences` — per-IC notes on spec deltas (no coalesce, no ORDER BY, etc.)
+
+Blocked files carry:
+- `blocked_reason` — prose explaining why we can't run it
+- `required_features` — list of gqlite feature gaps
+
+Adding a new IC = drop a TOML file in the directory and (if implemented)
+make sure the query parses against gqlite. No bench code changes for
+adding queries; the runner discovers them at startup.
 
 ## IC2 fidelity vs the spec
 
@@ -165,12 +201,34 @@ Output: `bench/data/ldbc-sf0.1.gdb` (~1.4 GB).
 
 ```bash
 cargo build --release --bin ldbc_bench
-./target/release/ldbc_bench bench/data/ldbc-sf0.1.gdb --iters 5 --limit 20
+
+# IC2 against Lazy (the default — mirrors REPL/Python behavior):
+./target/release/ldbc_bench bench/data/ldbc-sf0.1.gdb --ic 2 --iters 3
+
+# Same query against Disk:
+./target/release/ldbc_bench bench/data/ldbc-sf0.1.gdb --ic 2 --backend disk --iters 3
+
+# All currently-implemented ICs (skips blocked ones):
+./target/release/ldbc_bench bench/data/ldbc-sf0.1.gdb --ic all
+
+# Inventory of blocked ICs and their required_features (no run):
+./target/release/ldbc_bench placeholder --ic blocked
 ```
 
+Flag reference:
+- `--ic <n>|N,M|all|blocked` — which IC(s) to run; default `2`
+- `--backend memory|lazy|disk` — which GraphAccess; default `lazy`
+- `--params-dir <dir>` — override default location of LDBC param files
+- `--queries-dir <dir>` — override default `bench/ldbc-queries`
+- `--iters N` — measured iterations per param row
+- `--limit N` — `LIMIT` for `Runtime::run_query`
+- `--csv-dir <dir>` — required only with `--backend memory`
+
 Output is two streams:
-- **stdout**: machine-readable CSV `query;param;iter;result_count;elapsed_ns`.
-- **stderr**: per-parameter summary (min / median / mean / max in ms).
+- **stdout**: machine-readable CSV
+  `query;backend;ic;param_idx;iter;result_count;elapsed_ns`.
+- **stderr**: per-row summary (min / median / mean / max in ms when
+  `--iters >= 2`; `wall=` only when `N=1`).
 
 ## Results
 
@@ -178,56 +236,49 @@ Run on Windows (rustc 1.95.0, release profile), SF0.1 dataset
 (327k nodes, 1.48M edges), `limit=20`. Substitution parameters from
 the official LDBC `interactive_2_param.txt` archive (15 entries).
 
-The bench supports three GraphAccess backends, run separately so
-each gets its own RSS baseline and timing window:
+### Backends compared: Lazy and Disk
+
+The bench supports three backends — `Memory`, `Lazy`, `Disk` — but
+**the headline comparison is Lazy vs Disk only**. The `Memory`
+backend (`Graph` loaded from CSV with everything in RAM) is included
+as a smoke-test option in the bench code (`--backend memory`) but
+**not in the paper** because it's an unrealistic configuration for
+a database product: it requires the entire dataset to fit in process
+memory and re-parses the CSV at every startup. gqlite's actual
+embedded-DB story is Lazy and Disk against the `.gdb` file format.
 
 ```
-# Memory backend — load LDBC CSV directly into Graph
-ldbc_bench placeholder --backend memory \
-    --csv-dir bench/data/ldbc-sf0.1/social_network-sf0.1-CsvBasic-LongDateFormatter \
-    --iters 1
-
 # Lazy backend (default) — open .gdb with LazyGraphStore
-ldbc_bench bench/data/ldbc-sf0.1.gdb --backend lazy --iters 1
+ldbc_bench bench/data/ldbc-sf0.1.gdb --ic 2 --backend lazy --iters 3
 
 # Disk backend — open .gdb with DiskGraphStore
-ldbc_bench bench/data/ldbc-sf0.1.gdb --backend disk --iters 1
+ldbc_bench bench/data/ldbc-sf0.1.gdb --ic 2 --backend disk --iters 3
 ```
 
-### Speed vs RAM by backend (1 iter per param)
+### Speed vs RAM: Lazy vs Disk (IC2, 1 iter per param)
 
 | backend | load time | load RSS Δ | per-param median | per-param range | peak RSS Δ |
 |---|---|---|---|---|---|
-| memory | 3.96 s (CSV parse) | +605 MiB | **4.65 s** | 4.03 – 6.66 s | +249 MiB † |
-| lazy | 7.13 s (.gdb open) | +392 MiB | 8.42 s | 7.24 – 10.39 s | +399 MiB |
-| disk | **1.74 s** (.gdb open) | **+318 MiB** | 7.71 s | 7.27 – 8.46 s | +340 MiB |
-
-† On Windows, the OS may trim a process's working set under memory
-pressure, so peak RSS during query loop can read lower than RSS
-right after load (the committed memory is unchanged — Windows just
-shows working-set, not committed). The Memory backend's actual
-working footprint is the +605 MiB load number.
+| lazy | 7.13 s | +392 MiB | 8.42 s | 7.24 – 10.39 s | +399 MiB |
+| disk | **1.74 s** | **+318 MiB** | **7.71 s** | 7.27 – 8.46 s | +340 MiB |
 
 ### Findings
 
-- **Memory wins on speed by ~2×** but pays the most up-front: parses
-  the entire LDBC CSV directory at startup (3.96 s) and holds 605 MiB
-  resident. Once loaded, every query is page-fault-free, which is
-  why per-param median drops from ~8 s (Lazy/Disk) to ~4.65 s.
-- **Lazy and Disk are within ~10% of each other on speed** despite
-  Lazy having an in-process LRU page cache. On Windows + a small
-  enough dataset, the **OS page cache is doing most of the caching
-  anyway**, so Lazy's process-level cache adds bookkeeping without
-  much extra benefit.
-- **Lazy has the highest variance** (3.1 s spread) — first few params
+- **Disk is slightly faster than Lazy on this workload** (~10%)
+  despite Lazy having an in-process LRU page cache. The **OS page
+  cache is doing most of the caching anyway** at SF0.1 scale, so
+  Lazy's process-level cache adds bookkeeping without much extra
+  benefit. (This may flip at larger scales where the OS cache can't
+  hold the working set.)
+- **Lazy has the higher variance** (3.1 s spread) — first few params
   are colder; the LRU cache fills up and warms up over the run.
   Disk has the tightest spread (1.2 s) — it never has cache to warm,
   so each query is roughly the same cost.
 - **Disk loads fastest** (1.74 s vs Lazy's 7.13 s) because it doesn't
   build the label index in RAM at open time. Lazy pre-populates
   topology + label index up front.
-- **Disk uses the least RAM** (+318 MiB), Lazy the most for steady
-  state (+399 MiB peak — index + topology + LRU cache).
+- **Disk uses the least RAM** (+318 MiB), Lazy more (+399 MiB peak —
+  index + topology + LRU cache).
 
 ### Caveat on RSS measurement
 
@@ -237,8 +288,9 @@ which includes mapped file pages. `LazyGraphStore` and
 and +318 MiB deltas reflects mapped portions of the 1.4 GiB .gdb
 file rather than purely allocated heap. Treat the numbers as
 ordering and order-of-magnitude rather than exact private-bytes
-counts. The Memory backend's +605 MiB load delta is purely Rust
-heap and is the most reliable single number in the table.
+counts — the **relative** difference between Lazy and Disk is
+meaningful (Lazy's extra ~80 MiB is the in-process label index +
+LRU cache); the absolute values are confounded by mmap.
 
 ### Per-param times (Lazy backend, all 15 params)
 

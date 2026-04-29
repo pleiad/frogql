@@ -1,0 +1,16 @@
+# LDBC SNB Interactive Complex Read 9 — Recent messages by friends or friends of friends.
+# Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-09.yaml
+
+id = 9
+name = "Recent messages by friends or friends of friends"
+status = "blocked"
+
+blocked_reason = """
+Like IC2 but with friends-or-friends-of-friends instead of just friends.
+Needs 1-2-hop paths and ORDER BY. Otherwise structurally similar to IC2.
+"""
+
+required_features = [
+    "variable-length paths",
+    "ORDER BY",
+]

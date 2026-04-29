@@ -1,0 +1,16 @@
+# LDBC SNB Interactive Complex Read 11 — Job referral.
+# Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-11.yaml
+
+id = 11
+name = "Job referral"
+status = "blocked"
+
+blocked_reason = """
+Friends-of-friends working at companies in a given country, who started
+work before $workFromYear. Needs 1-2-hop paths, ORDER BY.
+"""
+
+required_features = [
+    "variable-length paths",
+    "ORDER BY",
+]
