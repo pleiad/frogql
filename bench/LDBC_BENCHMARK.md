@@ -12,58 +12,41 @@ inventory.
 
 ## Setup
 
-### 1. Download the SF0.1 dataset
+One command does everything — downloads the dataset + substitution
+parameters and builds the `.gdb`:
 
 ```bash
-mkdir -p bench/data && cd bench/data
-curl -L -o ldbc-sf0.1.tar.zst \
-    https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf0.1-CsvBasic-LongDateFormatter.tar.zst
-
-# Decompress (Windows: needs Python + zstandard, or install zstd):
-python - <<'EOF'
-import zstandard, tarfile
-with open('ldbc-sf0.1.tar.zst','rb') as f, \
-     zstandard.ZstdDecompressor().stream_reader(f) as r, \
-     tarfile.open(fileobj=r, mode='r|') as t:
-    t.extractall(path='ldbc-sf0.1')
-EOF
+cargo build --release --bin gqlite --bin bench_setup
+./target/release/bench_setup
 ```
 
-Extracts to `bench/data/ldbc-sf0.1/social_network-sf0.1-CsvBasic-LongDateFormatter/`.
-~327k nodes, ~1.5M edges.
+That fetches `social_network-sf0.1-CsvBasic-LongDateFormatter.tar.zst`
+(17 MiB) and `substitution_parameters-sf0.1.tar.zst` (200 KiB), unpacks
+both, and runs `gqlite --import-ldbc-csv` to produce the 1.4 GiB
+`.gdb`. Each step is idempotent and skips if its output is present;
+re-running is a no-op.
 
-### 2. Download substitution parameters
+After it completes:
 
-The dataset ships with `parametergenerator.parameters:false`, so the
-substitution params come as a separate archive:
-
-```bash
-cd bench/data
-curl -L -o substitution_parameters-sf0.1.tar.zst \
-    https://datasets.ldbcouncil.org/snb-interactive-v1/substitution_parameters-sf0.1.tar.zst
-
-python - <<'EOF'
-import zstandard, tarfile
-with open('substitution_parameters-sf0.1.tar.zst','rb') as f, \
-     zstandard.ZstdDecompressor().stream_reader(f) as r, \
-     tarfile.open(fileobj=r, mode='r|') as t:
-    t.extractall(path='substitution_parameters-sf0.1')
-EOF
+```
+bench/data/
+├── ldbc-sf0.1.gdb                                            ← what the bench opens
+├── ldbc-sf0.1/social_network-sf0.1-CsvBasic-LongDateFormatter/  ← raw CSVs
+└── substitution_parameters-sf0.1/substitution_parameters-sf0.1/ ← per-IC param files
 ```
 
-The IC2 params file ends up at
-`bench/data/substitution_parameters-sf0.1/substitution_parameters-sf0.1/interactive_2_param.txt`.
+Useful flags:
 
-### 3. Build the .gdb
+| flag | default | meaning |
+|---|---|---|
+| `--data-dir <dir>` | `bench/data` | Where archives + extracted dirs live |
+| `--rebuild` | off | Force-rebuild the `.gdb` even if present |
+| `--skip-download` | off | Use already-downloaded archives only; fail if missing |
 
-```bash
-cargo build --release --bin gqlite
-./target/release/gqlite bench/data/ldbc-sf0.1.gdb \
-    --import-ldbc-csv bench/data/ldbc-sf0.1/social_network-sf0.1-CsvBasic-LongDateFormatter \
-    --no-typecheck
-```
-
-Produces `bench/data/ldbc-sf0.1.gdb` (~1.4 GiB).
+The bench's `--params-dir` defaults match the layout above, so no
+extra flags needed if you used the default `--data-dir`. If you set
+`--data-dir <X>`, `bench_setup` prints the exact `ldbc_bench`
+invocation with the right `--params-dir`.
 
 ## Run
 
