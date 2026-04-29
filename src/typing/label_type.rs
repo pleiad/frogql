@@ -75,7 +75,7 @@ impl LabelType {
 
     /// Whether a label type is inconsistent (e.g., A & !A).
     /// Currently unimplemented — always returns false (matches Python).
-    pub fn is_empty(_l: &LabelType) -> bool {
+    pub fn is_empty(&self) -> bool {
         false
     }
 
@@ -173,5 +173,35 @@ mod tests {
             &LabelType::Label("X".into()),
             &LabelType::Label("Y".into())
         ));
+    }
+
+    // meet — Star identity, distinct atoms produce And.
+    #[test]
+    fn test_meet_same_atom_returns_atom() {
+        let a = LabelType::Label("A".into());
+        assert_eq!(LabelType::meet(&a, &a), a);
+    }
+    #[test]
+    fn test_meet_drops_left_star() {
+        // §4.1 explicit: ★ ⊓ ℓ = ℓ.
+        let a = LabelType::Label("A".into());
+        assert_eq!(LabelType::meet(&LabelType::Star, &a), a);
+    }
+    #[test]
+    fn test_meet_drops_right_star() {
+        let a = LabelType::Label("A".into());
+        assert_eq!(LabelType::meet(&a, &LabelType::Star), a);
+    }
+    #[test]
+    fn test_meet_distinct_atoms_yields_and() {
+        // §4.1: 1₁ ⊓ 1₂ = 1₁ & 1₂. A regression returning Star, or Or,
+        // or just one operand, would all fail.
+        let a = LabelType::Label("A".into());
+        let b = LabelType::Label("B".into());
+        let m = LabelType::meet(&a, &b);
+        assert!(
+            matches!(&m, LabelType::And(_, _)),
+            "meet of distinct atoms should be And, got {m:?}"
+        );
     }
 }

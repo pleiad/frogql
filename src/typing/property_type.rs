@@ -159,3 +159,65 @@ impl fmt::Display for PropertyType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn closed(fields: &[(&str, SimpleType)]) -> PropertyType {
+        let m: BTreeMap<String, SimpleType> = fields
+            .iter()
+            .map(|(k, v)| ((*k).into(), v.clone()))
+            .collect();
+        PropertyType::Closed(m)
+    }
+    fn open(fields: &[(&str, SimpleType)]) -> PropertyType {
+        let m: BTreeMap<String, SimpleType> = fields
+            .iter()
+            .map(|(k, v)| ((*k).into(), v.clone()))
+            .collect();
+        PropertyType::Open(m)
+    }
+
+    // is_empty — quirk: empty record is NOT empty, but a non-empty
+    // record with any empty field IS.
+    #[test]
+    fn test_zero_is_empty() {
+        assert!(PropertyType::Zero.is_empty());
+    }
+    #[test]
+    fn test_empty_record_is_not_empty() {
+        // Per impl: `!m.is_empty() && m.values().any(...)`. Empty maps
+        // fail the first conjunct, so are NOT empty.
+        assert!(!PropertyType::open_empty().is_empty());
+        assert!(!PropertyType::closed_empty().is_empty());
+    }
+    #[test]
+    fn test_record_with_empty_field_is_empty() {
+        let r_open = open(&[("a", SimpleType::Zero)]);
+        let r_closed = closed(&[("a", SimpleType::Zero)]);
+        assert!(r_open.is_empty());
+        assert!(r_closed.is_empty());
+    }
+    #[test]
+    fn test_record_with_only_full_fields_is_not_empty() {
+        let r_open = open(&[("a", SimpleType::Z)]);
+        let r_closed = closed(&[("a", SimpleType::Z)]);
+        assert!(!r_open.is_empty());
+        assert!(!r_closed.is_empty());
+    }
+
+    // meet — record preservation + Zero handling.
+    #[test]
+    fn test_meet_same_closed_returns_same() {
+        let r = closed(&[("a", SimpleType::Z)]);
+        assert_eq!(PropertyType::meet(&r, &r), r);
+    }
+    #[test]
+    fn test_meet_different_closed_keys_yields_zero() {
+        // gqlite treats records-with-different-keys as incompatible.
+        let r1 = closed(&[("a", SimpleType::Z)]);
+        let r2 = closed(&[("b", SimpleType::Z)]);
+        assert_eq!(PropertyType::meet(&r1, &r2), PropertyType::Zero);
+    }
+}

@@ -373,3 +373,122 @@ impl Schema {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::typing::label_type::LabelType;
+    use crate::typing::property_type::PropertyType;
+
+    fn node_with_label(name: &str) -> VariableType {
+        VariableType::Node(DescriptorType::new(
+            LabelType::Label(name.into()),
+            PropertyType::open_empty(),
+        ))
+    }
+
+    // is_empty — note: Edge variants use OR over (desc, left, right),
+    // different from Union which uses AND.
+    #[test]
+    fn test_zero_is_empty() {
+        assert!(VariableType::Zero.is_empty());
+    }
+    #[test]
+    fn test_node_empty_iff_descriptor_empty() {
+        let empty_d = DescriptorType::new(LabelType::Star, PropertyType::Zero);
+        assert!(VariableType::Node(empty_d).is_empty());
+        assert!(!VariableType::node_star().is_empty());
+    }
+    #[test]
+    fn test_edge_directional_empty_iff_any_component_empty() {
+        let star_node = || Box::new(VariableType::node_star());
+        let empty_node = || {
+            Box::new(VariableType::Node(DescriptorType::new(
+                LabelType::Star,
+                PropertyType::Zero,
+            )))
+        };
+        // All full: not empty.
+        assert!(!VariableType::EdgeDirectional {
+            desc: DescriptorType::star(),
+            left: star_node(),
+            right: star_node(),
+        }
+        .is_empty());
+        // Empty left → empty edge.
+        assert!(VariableType::EdgeDirectional {
+            desc: DescriptorType::star(),
+            left: empty_node(),
+            right: star_node(),
+        }
+        .is_empty());
+        // Empty right → empty edge.
+        assert!(VariableType::EdgeDirectional {
+            desc: DescriptorType::star(),
+            left: star_node(),
+            right: empty_node(),
+        }
+        .is_empty());
+    }
+    #[test]
+    fn test_union_empty_iff_both_empty() {
+        // Sanity: complement to Edge's OR semantics.
+        let zero = || Box::new(VariableType::Zero);
+        let n = || Box::new(VariableType::node_star());
+        assert!(VariableType::Union(zero(), zero()).is_empty());
+        assert!(!VariableType::Union(zero(), n()).is_empty());
+        assert!(!VariableType::Union(n(), zero()).is_empty());
+    }
+
+    // join — Zero is identity, equal-collapse.
+    #[test]
+    fn test_join_drops_left_zero() {
+        let n = VariableType::node_star();
+        assert_eq!(VariableType::join(&VariableType::Zero, &n), n);
+    }
+    #[test]
+    fn test_join_drops_right_zero() {
+        let n = VariableType::node_star();
+        assert_eq!(VariableType::join(&n, &VariableType::Zero), n);
+    }
+    #[test]
+    fn test_join_collapses_equal_operands() {
+        let n = VariableType::node_star();
+        assert_eq!(VariableType::join(&n, &n), n);
+    }
+
+    // meet — Node preservation + descriptor combination.
+    #[test]
+    fn test_meet_same_node_returns_same() {
+        let n = node_with_label("Person");
+        assert_eq!(VariableType::meet(&n, &n), n);
+    }
+    #[test]
+    fn test_meet_distinct_node_atoms_collapses_descriptor() {
+        // meet of two label-distinct Nodes should produce a Node whose
+        // descriptor's label is the And.
+        let na = node_with_label("A");
+        let nb = node_with_label("B");
+        match VariableType::meet(&na, &nb) {
+            VariableType::Node(d) => {
+                assert!(
+                    matches!(d.label, LabelType::And(_, _)),
+                    "meet of (:A) and (:B) should have And label, got {d}"
+                );
+            }
+            other => panic!("meet of two Nodes should be Node, got {other:?}"),
+        }
+    }
+
+    // refine — schema admission.
+    #[test]
+    fn test_refine_with_no_matching_label_returns_zero() {
+        // Schema with only `Person`; query for `Animal` → ⊥.
+        let schema = Schema {
+            nodes: vec![node_with_label("Person")],
+            edges: vec![],
+        };
+        let q = node_with_label("Animal");
+        assert_eq!(VariableType::refine(&schema, &q), VariableType::Zero);
+    }
+}

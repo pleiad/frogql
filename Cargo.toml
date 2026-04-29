@@ -9,5 +9,8 @@ serde_json = "1"
 thiserror = "2"
 rustyline = "15"
 
+[dev-dependencies]
+proptest = "1"
+
 [workspace]
 members = [".", "python"]
