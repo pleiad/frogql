@@ -11,21 +11,67 @@ Currently runs **IC2 only** (recent messages by friends). The remaining
 - IC1, IC3, IC11, IC12, IC14 — shortest paths / variable-length paths
 - IC4–IC8, IC10, IC11, IC13, IC14 — date arithmetic, OPTIONAL MATCH,
   ORDER BY / TOP-K, complex aggregation with HAVING
-- IC9 — close to IC2 shape, but adds `comment.creationDate <= maxDate`
-  filter (date predicate path)
 
-IC2 itself is run with two simplifications vs the LDBC spec:
+## IC2 fidelity vs the spec
 
-1. Parameter is `Person.firstName` (not `Person.id`). LDBC's `id` field
-   is folded into the gqlite node *name* by the loader, so it's not
-   addressable as a property. firstName is selective enough on SF0.1
-   to cover the lookup pattern.
-2. No `ORDER BY ... DESC` — gqlite doesn't support it yet. The
-   `LIMIT 20` from the spec is honored via `Runtime::run_query`'s
-   limit argument.
+LDBC IC2 spec text:
 
-The query shape is preserved: 3-node 2-edge chain with one undirected
-KNOWS edge and one reverse-direction HAS_CREATOR edge.
+```cypher
+MATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)
+      <-[:HAS_CREATOR]-(message:Message)
+WHERE message.creationDate <= $maxDate
+RETURN friend.id, friend.firstName, friend.lastName,
+       message.id,
+       coalesce(message.content, message.imageFile),
+       message.creationDate
+ORDER BY message.creationDate DESC, message.id ASC
+LIMIT 20
+```
+
+gqlite query (this bench):
+
+```
+MATCH (p:Person)~[:knows]~(friend:Person)<-[:hasCreator]-(c:Comment)
+    | (p:Person)~[:knows]~(friend:Person)<-[:hasCreator]-(c:Post)
+WHERE p.firstName = $firstName
+  AND p.lastName  = $lastName
+  AND c.creationDate <= $maxDate
+RETURN friend.firstName, friend.lastName, c.content, c.creationDate
+```
+
+Matched faithfully:
+
+- **`Message = Comment ∪ Post`** via path-pattern union (`|`). Both
+  arms tested in one query; `c` binds to whichever matched.
+- **`message.creationDate <= $maxDate`** — direct numeric WHERE
+  predicate.
+- **`LIMIT 20`** — passed via `Runtime::run_query`'s `limit`.
+- 3-node 2-edge shape with undirected KNOWS and reverse-direction
+  HAS_CREATOR.
+
+Divergences (all due to gqlite features not yet implemented):
+
+- **Anchor by `(firstName, lastName)` pair instead of `id`.** The
+  gqlite LDBC loader folds the LDBC `id` column into the internal
+  *node name*, not into a property, so `Person.id = $personId` is
+  not addressable. The 5 params used here are
+  `(firstName, lastName)` pairs that each map to *exactly one*
+  Person in SF0.1 — same per-query selectivity as `id`, just
+  spelled differently.
+- **No `ORDER BY` clause.** gqlite's parser doesn't have ORDER BY
+  yet. Output order is whatever the runtime emits. The 20 rows
+  returned per query aren't guaranteed to be the 20 *most recent*.
+  Wall time is unaffected by sort.
+- **Drop `friend.id` and `message.id` from RETURN.** Same loader
+  reason as above; both would render as `"NULL"`.
+- **`coalesce(message.content, message.imageFile)` collapsed to
+  `c.content`.** Posts in SF0.1 mostly have non-empty `content`;
+  the few image-only posts will return blank content. gqlite has
+  no `coalesce` builtin.
+
+In short: this bench is **IC2-shape-equivalent** with only
+projection / sort divergences. The lookup, the join structure,
+the message-union, and the date predicate are all faithful.
 
 ## Setup
 
@@ -77,15 +123,18 @@ Output is two streams:
 ## Results
 
 Run on Windows (rustc 1.95.0, release profile), SF0.1 dataset
-(327k nodes, 1.48M edges), 3 iterations per param, `limit=20`:
+(327k nodes, 1.48M edges), `limit=20`. Single iteration per param
+(LazyGraphStore page cache is cold on first iter, warm thereafter;
+3+ iters are recommended for stable median — single-iter numbers
+below are upper-bound order-of-magnitude):
 
-| Param      | min      | median   | mean     | max      |
-|------------|----------|----------|----------|----------|
-| Mahinda    |  51.5 s  |  56.3 s  |  55.0 s  |  57.1 s  |
-| Carmen     |  37.9 s  |  50.0 s  |  64.6 s  | 106.0 s  |
-| Bryn       |  84.2 s  |  85.4 s  |  86.0 s  |  88.4 s  |
-| Cheng      |  86.6 s  |  95.4 s  |  93.7 s  |  99.1 s  |
-| Hồ Chí     | 129.0 s  | (partial — bench killed before second iteration) |
+| Param           | result_count | wall time |
+|-----------------|--------------|-----------|
+| Mahinda Perera  | 20           |   96.4 s  |
+| Carmen Lepland  | 20           |  108.1 s  |
+| Bryn Davies     | 20           |   85.0 s  |
+| Cheng Yu        | 20           |  105.6 s  |
+| Hồ Chí Loan     | 20           |  110.7 s  |
 
 All five params returned 20 rows (the limit). These are **far above**
 the LDBC interactive target of sub-second latency; cause is the
@@ -101,16 +150,18 @@ runtime is the *separate* typechecker benchmark.
 
 The current optimizer doesn't push down value-equality WHERE predicates
 into descriptors (only `attr is type` predicates push down per the
-optimizer doc). For `WHERE p.firstName = 'Mahinda'`, this means:
+optimizer doc). For `WHERE p.firstName = '...' AND p.lastName = '...'`,
+this means:
 
 1. Enumerate every `Person~knows~Person` pair (14k undirected edges
    × 2 directions ≈ 28k base rows).
-2. Join each onto every `Comment-hasCreator->Person` (151k edges).
-3. *Then* filter by `p.firstName == 'Mahinda'`.
+2. Union-join each onto every `Comment-hasCreator->Person` (151k edges)
+   and `Post-hasCreator->Person` (135k edges) — ~286k right side.
+3. *Then* filter by `(firstName, lastName)` and `creationDate`.
 
-So per-query work scales with the join's cartesian intermediate, not
-the parameter's selectivity. This is what makes IC2 here run in tens
-of seconds rather than the sub-second times the LDBC spec assumes.
-That's a real finding for a future optimizer pass — predicate pushdown
-on `=` constants would collapse this into the firstName-anchored
-person, dropping the join's left side from 28k to ≤2 rows.
+So per-query work scales with the join's cartesian intermediate,
+not the parameter's selectivity. This is what makes IC2 here run in
+~100s rather than the sub-second times the LDBC spec assumes. That's
+a real finding for a future optimizer pass — predicate pushdown on
+`=` constants would collapse this into the (firstName, lastName)-
+anchored person (1 row), dropping the join's left side from 28k to 1.

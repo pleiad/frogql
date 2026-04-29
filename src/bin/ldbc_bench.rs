@@ -15,15 +15,58 @@
 //! time across (params × iters) runs.
 //!
 //! Currently supported: **IC2** (recent messages by friends).
-//! Skipped (need features gqlite doesn't yet have):
-//!   - IC1 (shortest paths, OPTIONAL MATCH, complex aggregation)
-//!   - IC3, IC4, IC5, IC6, IC7, IC8, IC10, IC11, IC12, IC13, IC14
-//!     (various combinations of date arithmetic, OPTIONAL, ORDER BY,
-//!     transitive paths, aggregate-with-having, etc.)
-//!   - IC9 (close to IC2 shape but adds `<= maxDate` filter on Comment)
-//!     could be added once date predicates are wired through.
 //!
-//! Typechecking is skipped — the IC queries are well-formed by design,
+//! ### IC2 fidelity vs the spec
+//!
+//! Spec text (LDBC SNB v1 §6 IC2):
+//!     MATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)
+//!           <-[:HAS_CREATOR]-(message:Message)
+//!     WHERE message.creationDate <= $maxDate
+//!     RETURN friend.id, friend.firstName, friend.lastName,
+//!            message.id, coalesce(message.content, message.imageFile),
+//!            message.creationDate
+//!     ORDER BY creationDate DESC, id ASC
+//!     LIMIT 20
+//!
+//! Divergences this bench keeps:
+//!
+//! - **Anchor by `(firstName, lastName)` pair instead of `id`.** The
+//!   gqlite LDBC loader folds the LDBC `id` column into the internal
+//!   *node name*, not into a property, so `Person.id = $personId` is
+//!   not addressable. Each parameter below is a `(firstName, lastName)`
+//!   pair that uniquely identifies one Person in SF0.1 — same per-query
+//!   selectivity as `id`, just spelled differently.
+//!
+//! - **No ORDER BY.** gqlite's parser does not have ORDER BY yet.
+//!   Output order is whatever the runtime emits. The `limit` argument
+//!   still caps at 20 rows, but those 20 are not guaranteed to be the
+//!   20 most recent. Wall time is unaffected by sort.
+//!
+//! - **Drop `friend.id` / `message.id` from RETURN.** Same loader
+//!   reason as above — both would render as `"NULL"` rather than the
+//!   spec's IDs.
+//!
+//! - **`coalesce(message.content, message.imageFile)` collapsed to
+//!   `c.content`.** Posts in SF0.1 mostly have non-empty `content`;
+//!   image-only posts will return blank content. gqlite has no
+//!   `coalesce` builtin.
+//!
+//! Spec features matched:
+//! - **`Message = Comment ∪ Post`** via path-pattern union (`|`). Both
+//!   `Comment` and `Post` arms are checked in a single query; the
+//!   `c` variable binds to whichever matched.
+//! - **`message.creationDate <= $maxDate`** — direct numeric WHERE
+//!   predicate. `maxDate` here is mid-2012 (1 340 000 000 000 ms),
+//!   chosen to retain enough rows that the join still does work but
+//!   exercise the filter on creationDate.
+//! - **`LIMIT 20`** — passed via `Runtime::run_query`'s `limit`.
+//!
+//! Other ICs need features gqlite doesn't yet have:
+//!   - IC1 (shortest paths, OPTIONAL MATCH, complex aggregation)
+//!   - IC3-IC8, IC10-IC14 (transitive paths, OPTIONAL MATCH, date
+//!     arithmetic, aggregate-with-HAVING, etc.)
+//!
+//! Typechecking is skipped — IC queries are well-formed by design,
 //! and bench timing should reflect runtime dominance, not checker work.
 
 use std::env;
@@ -34,6 +77,23 @@ use gqlrust::compile_query_unchecked;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::store::lazy::LazyGraphStore;
 
+/// Spec-fidelity anchor: `(firstName, lastName)` pairs that each map
+/// to exactly one Person in SF0.1, replacing `Person.id = $personId`.
+const PARAMS: &[(&str, &str)] = &[
+    ("Mahinda", "Perera"),
+    ("Carmen", "Lepland"),
+    ("Bryn", "Davies"),
+    ("Cheng", "Yu"),
+    ("Hồ Chí", "Loan"),
+];
+
+/// LDBC IC2's `$maxDate`. Mid-2012 in ms-since-epoch — chosen so the
+/// filter retains a sizable fraction of comments / posts in SF0.1
+/// (whose creationDates span roughly 2010-2013) without trivially
+/// matching every row. The spec's example value (1 287 230 400 000 =
+/// 2010-10-16) is keyed to a larger SF and would cut all SF0.1 data.
+const MAX_DATE_MS: i64 = 1_340_000_000_000;
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -43,7 +103,7 @@ fn main() {
     let db_path = &args[1];
 
     let mut iters: usize = 5;
-    let mut limit: usize = 20; // matches IC2's `LIMIT 20` in spec
+    let mut limit: usize = 20; // matches IC2's `LIMIT 20`
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -74,24 +134,30 @@ fn main() {
     let rt = Runtime::new(&store);
 
     eprintln!("\n=== IC2: Recent messages by friends ===");
-    eprintln!("Parameterized over Person.firstName ({iters} iters each, limit={limit})");
-    println!("query;param;iter;result_count;elapsed_ns");
+    eprintln!(
+        "Anchor: (firstName, lastName) per LDBC `personId` semantics; \
+         maxDate <= {MAX_DATE_MS}; {iters} iters/param; limit={limit}"
+    );
+    println!("query;first_name;last_name;iter;result_count;elapsed_ns");
 
-    // Curated params: a few reasonably-common firstNames in the SF0.1
-    // dataset. Each maps to one or a handful of Persons; together they
-    // give enough variation in friend / comment fan-out to exercise
-    // both warm-cache and cold-key paths.
-    for first_name in &["Mahinda", "Carmen", "Bryn", "Cheng", "Hồ Chí"] {
+    for (first_name, last_name) in PARAMS {
+        // Path-pattern union covers spec's `(message:Message)` =
+        // `Comment ∪ Post`. `c` binds to whichever arm matched.
         let q = format!(
             "MATCH (p: Person)~[:knows]~(friend: Person)\
-             <-[:hasCreator]-(c: Comment) \
+             <-[:hasCreator]-(c: Comment) | \
+             (p: Person)~[:knows]~(friend: Person)\
+             <-[:hasCreator]-(c: Post) \
              WHERE p.firstName = '{first_name}' \
-             RETURN c.creationDate"
+             AND p.lastName = '{last_name}' \
+             AND c.creationDate <= {MAX_DATE_MS} \
+             RETURN friend.firstName, friend.lastName, \
+             c.content, c.creationDate"
         );
         let parsed = match compile_query_unchecked(&q) {
             Ok(parsed) => parsed,
             Err(e) => {
-                eprintln!("  PARSE ERROR for {first_name}: {e}");
+                eprintln!("  PARSE ERROR for {first_name} {last_name}: {e}");
                 continue;
             }
         };
@@ -105,16 +171,16 @@ fn main() {
             samples.push(elapsed);
             last_count = result.row_count();
             println!(
-                "IC2;{first_name};{n};{};{}",
+                "IC2;{first_name};{last_name};{n};{};{}",
                 last_count,
                 elapsed.as_nanos()
             );
         }
-        report("IC2", first_name, &samples, last_count);
+        report("IC2", first_name, last_name, &samples, last_count);
     }
 }
 
-fn report(query: &str, param: &str, samples: &[Duration], count: usize) {
+fn report(query: &str, first_name: &str, last_name: &str, samples: &[Duration], count: usize) {
     let mut sorted: Vec<u128> = samples.iter().map(|d| d.as_nanos()).collect();
     sorted.sort_unstable();
     let n = sorted.len();
@@ -126,7 +192,7 @@ fn report(query: &str, param: &str, samples: &[Duration], count: usize) {
     let median = sorted[n / 2];
     let mean = sorted.iter().sum::<u128>() / n as u128;
     eprintln!(
-        "  {query} param={param:<10} count={count:<5} \
+        "  {query} ({first_name} {last_name:<10}) count={count:<3} \
          min={:>8.2}ms  med={:>8.2}ms  mean={:>8.2}ms  max={:>8.2}ms",
         min as f64 / 1e6,
         median as f64 / 1e6,
