@@ -15,9 +15,12 @@ params_file = "interactive_2_param.txt"
 param_columns = ["personId", "maxDate"]
 
 # Query template. {personId} and {maxDate} are placeholders the
-# runner replaces with the param values from the file. The
-# `{{` and `}}` are TOML/format escaping for literal braces in
-# the descriptor shorthand (gqlite's `(p: Person {id: 933})` syntax).
+# runner replaces with the param values from the file.
+#
+# Note: spec's `LIMIT 20` is enforced via the bench's --limit flag
+# (Runtime::run_query's row cap), since gqlite's parser doesn't have
+# a LIMIT keyword yet. When parser support lands, append `LIMIT 20`
+# to the query below and drop --limit from the bench CLI.
 query = """
 MATCH (p: Person {id: {personId}})~[:knows]~(friend: Person)<-[:hasCreator]-(c: Comment) \
     | (p: Person {id: {personId}})~[:knows]~(friend: Person)<-[:hasCreator]-(c: Post) \
