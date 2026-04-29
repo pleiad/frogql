@@ -237,9 +237,38 @@ this means:
 So per-query work scales with the join's cartesian intermediate,
 not the parameter's selectivity. This is what makes IC2 here run in
 ~100s rather than the sub-second times the LDBC spec assumes. That's
-a real finding for a future optimizer pass — predicate pushdown on
-`=` constants would collapse this into the (firstName, lastName)-
-anchored person (1 row), dropping the join's left side from 28k to 1.
+a real finding — predicate pushdown on `=` constants would collapse
+this into a single `p` (1 row), dropping the join's left side from
+28k to 1, and the right side from 286k to ~friends-of-1 = ~150 rows.
+Estimated ~100× speedup.
+
+**Why isn't it fixed in this branch?** Out of scope. This branch
+(`bench/ldbc`) is bench-only — no changes to gqlite implementation.
+Fixing the pushdown gap touches `src/optimizer/pushdown.rs` to
+extract `var.attr op literal` predicates, `src/syntax/descriptor.rs`
+to carry them post-elaboration on the descriptor, and
+`src/runtime/engine.rs` to evaluate them before joining. That's a
+separate impl PR; tracked as a follow-up to this bench branch.
+
+## What this bench does *not* do
+
+Result-set validation. LDBC ships `interactive_2_result.txt`-style
+expected outputs for use with the official driver, but two
+divergences in this bench would make any byte-for-byte expected-output
+check fail:
+
+- **#7 (no ORDER BY).** Without `ORDER BY creationDate DESC, id ASC`,
+  the 20 rows we return are *some* valid 20 friend-message pairs
+  matching the predicate, not necessarily the 20 most recent. The
+  spec's expected outputs assume the sort.
+- **#6 (no `coalesce`).** Posts with empty `content` and a non-empty
+  `imageFile` show as blank in our output; the spec's expected
+  outputs use the imageFile fallback.
+
+Either alone would invalidate a `diff -q got.txt expected.txt`
+check, and neither is fixable bench-side. The bench therefore
+asserts only `result.row_count() == LIMIT` (20 here), not row
+contents. *(Per user direction: result validation isn't pursued.)*
 
 ## Loader prerequisite
 
