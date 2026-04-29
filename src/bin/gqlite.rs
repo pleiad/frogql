@@ -182,6 +182,12 @@ fn main() {
                             for w in &r.warnings {
                                 eprintln!("warning: {w}");
                             }
+                            if r.guaranteed_empty {
+                                eprintln!(
+                                    "0 rows (typechecker: guaranteed empty, runtime skipped)"
+                                );
+                                continue;
+                            }
                             r.query
                         }
                         Err(gqlrust::CompileError::Parse(e)) => {
