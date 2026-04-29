@@ -36,10 +36,19 @@ impl std::fmt::Display for CompileError {
 }
 
 /// Successful compile with non-blocking typechecker warnings preserved.
+///
+/// `guaranteed_empty` is the typechecker's verdict from rules.md §10
+/// (Theorem 6.5 Emptiness): if true, the runtime is mathematically
+/// guaranteed to return zero rows. Callers (REPL, Python bindings) can
+/// short-circuit and skip the runtime call entirely. The field is also
+/// the basis of the typechecker benchmark's "is the typechecker faster
+/// than runtime at detecting empty?" claim — see
+/// `bench/TYPECHECKER_BENCHMARK.md`.
 #[derive(Debug, Clone)]
 pub struct CompileResult {
     pub query: Query,
     pub warnings: Vec<String>,
+    pub guaranteed_empty: bool,
 }
 
 /// Canonical compile pipeline. `compile_query` and the REPL both use this.
@@ -64,6 +73,7 @@ pub fn compile_query_with_diagnostics_with(
         return Err(CompileError::Type(tc.errors));
     }
     let warnings = tc.warnings;
+    let guaranteed_empty = r.empty;
     let optimized_pattern = optimizer::compile(q.pattern);
     Ok(CompileResult {
         query: Query {
@@ -71,6 +81,7 @@ pub fn compile_query_with_diagnostics_with(
             ..q
         },
         warnings,
+        guaranteed_empty,
     })
 }
 

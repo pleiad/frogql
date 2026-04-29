@@ -124,6 +124,11 @@ impl Connection {
             }
         }
 
+        // §10 Theorem 6.5: typecheck-flagged emptiness ⇒ skip runtime.
+        if result.guaranteed_empty {
+            return Ok(PyList::empty_bound(py).into_py(py));
+        }
+
         let rt = Runtime::new(&self.store);
         let result = rt.run_query(&q, limit);
 

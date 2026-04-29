@@ -182,6 +182,17 @@ fn main() {
                             for w in &r.warnings {
                                 eprintln!("warning: {w}");
                             }
+                            // rules.md §10 (Theorem 6.5 Emptiness): if
+                            // typecheck flagged the query as guaranteed
+                            // empty, runtime evaluation can be skipped
+                            // — the result is mathematically known to
+                            // be 0 rows.
+                            if r.guaranteed_empty {
+                                eprintln!(
+                                    "0 rows (typechecker: guaranteed empty, runtime skipped)"
+                                );
+                                continue;
+                            }
                             r.query
                         }
                         Err(gqlrust::CompileError::Parse(e)) => {
