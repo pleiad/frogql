@@ -31,19 +31,23 @@ LIMIT 20
 gqlite query (this bench, post `loader/ldbc-id-property`):
 
 ```
-MATCH (p:Person)~[:knows]~(friend:Person)<-[:hasCreator]-(c:Comment)
-    | (p:Person)~[:knows]~(friend:Person)<-[:hasCreator]-(c:Post)
-WHERE p.id = $personId
-  AND c.creationDate <= $maxDate
+MATCH (p:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(c:Comment)
+    | (p:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(c:Post)
+WHERE c.creationDate <= $maxDate
 RETURN friend.id, friend.firstName, friend.lastName,
        c.id, c.content, c.creationDate
 ```
+
+The `(:Person {id: $personId})` form is verbatim spec syntax; gqlite
+parses it and elaborates it to `(:Person) WHERE x.id = $personId`
+internally. The `maxDate` predicate stays in `WHERE` because `<=` is
+not equality and the descriptor shorthand only handles equality.
 
 ### Honest divergence audit
 
 | # | Spec | gqlite (this bench) | Behavior diff | Cause |
 |---|---|---|---|---|
-| 1 | `(:Person {id: $personId})` | `WHERE p.id = $personId` | None — same predicate, different surface syntax | gqlite's descriptor-shorthand `{id: 933}` *does* parse, but using WHERE is consistent with the rest of the query. Pure stylistic. |
+| 1 | `(:Person {id: $personId})` | `(p: Person {id: $personId})` | **None — verbatim spec syntax** | gqlite parses the descriptor shorthand and elaborates it to `(p: Person) WHERE p.id = $personId` internally. Earlier draft used the explicit `WHERE` form; switched for spec fidelity. |
 | 2 | `[:KNOWS]` / `[:HAS_CREATOR]` | `[:knows]` / `[:hasCreator]` | None | LDBC CSV filenames use camelCase stems (`person_knows_person`, `comment_hasCreator_person`); the loader preserves that casing. The spec's all-caps Cypher convention isn't carried into the data. |
 | 3 | `(message:Message)` (union via Cypher label inheritance) | `(c: Comment) \| (c: Post)` (union via path-pattern alternation) | None — same set of bound rows | gqlite has no Cypher-style label inheritance. The path-union `\|` operator covers both Comment and Post in one query. |
 | 4 | `WHERE message.creationDate <= $maxDate` | `WHERE c.creationDate <= $maxDate` | None | LDBC's `LongDateFormatter` encodes dates as ms-since-epoch in a long integer; gqlite stores those as `Value::Int`; `<=` is the standard int comparison. *No date type required.* |
@@ -214,6 +218,38 @@ and max comes from caller-degree variation (more friends → more
 join work) plus first-iter page-cache effects; it does **not**
 indicate noise in the bench. Re-running with `--iters 3` would
 tighten per-param numbers but won't change the order of magnitude.
+
+## Paper-tier disclosure (per `benchmark-checklist.tex`)
+
+LDBC's spec asks 10 disclosure questions for research-paper use of the
+benchmark (`benchmark-checklist.tex`). Verbatim answers:
+
+| spec question | answer |
+|---|---|
+| Were the results cross-validated for at least one scale factor? | **No.** Two gqlite feature gaps (no `coalesce`, no `ORDER BY`) make byte-for-byte validation against LDBC reference outputs fail by construction — see "What this bench does *not* do" below. |
+| Were the results cross-validated for all scale factors used in the benchmark? | N/A — single SF (SF0.1). |
+| Does the SUT have a persistent storage? | **Yes.** Single-file `.gdb`, page-based, persisted on disk. |
+| Does the SUT provide ACID transactions? | **No.** gqlite is read-only at query time; no transaction layer. |
+| Does the SUT provide any level of fault-tolerance? | **No.** Single-file embedded DB, no replication. |
+| How many warm-up rounds were performed? | **0.** No warm-up before the timed iters; first iter pays the page-cache cold cost. |
+| How many execution rounds were performed? | **3** per param × 15 params = 45 measured query executions. |
+| How were the execution times summarized? | Per-param: min/median/mean/max across the 3 iters. Across-params: min/median/mean/max across the 15 per-param medians. The headline number is the across-param median. |
+| Is the loading phase included in the query execution times? | **No.** `LazyGraphStore::open` runs before the timed loop. Reported separately as "loaded N nodes / M edges in T s." |
+| If the SUT is not your own system, did you contact its developers or experts to help optimizing the queries? | gqlite *is* the system being benchmarked (the SUT is our own). No external SUT-developer consultation. |
+
+The spec's audit chapter (`auditing.tex`) defines further requirements
+(2-hour run, 30-minute warmup, 95% on-time, ACID test suite, SF30+,
+driver-mediated workload mix, byte-for-byte validation against
+reference outputs, throughput-at-SLA reporting). None of those apply
+to research-paper use; the spec is explicit about that:
+
+> "For most research papers, fully audited results are unrealistic and
+> even unaudited results can provide insight into the performance of
+> the systems under test (SUT)."
+> — `benchmark-checklist.tex`
+
+See `LDBC_SPEC_CHECKLIST.md` (companion doc on this branch) for the
+full audit-tier vs paper-tier split with verbatim spec quotes.
 
 ## Why typechecker is off
 

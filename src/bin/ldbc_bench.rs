@@ -167,12 +167,15 @@ fn main() {
         // Path-pattern union covers spec's `(message:Message)` =
         // `Comment ∪ Post`. `c` binds to whichever arm matched.
         let q = format!(
-            "MATCH (p: Person)~[:knows]~(friend: Person)\
+            // The `(p: Person {{id: <n>}})` shorthand is the LDBC
+            // spec's exact syntax. gqlite parses it and elaborates
+            // it to `(p: Person) WHERE p.id = <n>`. The maxDate
+            // stays in WHERE since it's a `<=`, not an equality.
+            "MATCH (p: Person {{id: {person_id}}})~[:knows]~(friend: Person)\
              <-[:hasCreator]-(c: Comment) | \
-             (p: Person)~[:knows]~(friend: Person)\
+             (p: Person {{id: {person_id}}})~[:knows]~(friend: Person)\
              <-[:hasCreator]-(c: Post) \
-             WHERE p.id = {person_id} \
-             AND c.creationDate <= {max_date} \
+             WHERE c.creationDate <= {max_date} \
              RETURN friend.id, friend.firstName, friend.lastName, \
              c.id, c.content, c.creationDate"
         );
