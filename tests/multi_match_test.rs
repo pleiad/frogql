@@ -11,14 +11,15 @@ use std::path::Path;
 use gqlrust::elaborate::elaborate_query;
 use gqlrust::model::graph::Graph;
 use gqlrust::model::value::Value;
-use gqlrust::parser;
+use gqlrust::parser::{self, parse_statement};
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 use gqlrust::syntax::path_pattern::PathPattern;
 use gqlrust::syntax::query::{MatchStatement, Query};
+use gqlrust::syntax::statement::{Statement, TypeElement};
 use gqlrust::typing::checker::Typechecker;
 use gqlrust::typing::label_type::LabelType;
-use gqlrust::typing::variable_type::VariableType;
+use gqlrust::typing::variable_type::{Schema, VariableType};
 
 fn fraud_graph() -> Graph {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
@@ -159,6 +160,66 @@ fn meet_three_way_match_chain_converges() {
     let r = tc.check_query(&q);
     assert!(r.ok, "errors: {:?}", tc.errors);
 
+    let x_label = extract_label(r.env.get("x").unwrap()).unwrap();
+    assert!(matches!(x_label, LabelType::Label(s) if s == "Account"));
+}
+
+/// Build a Schema from a `CREATE GRAPH TYPE` body. Uses the catalog
+/// feature added in PR #11-13 to construct strict schemas in tests.
+fn schema_from_create(input: &str) -> Schema {
+    let body = match parse_statement(input).expect("parse_statement failed") {
+        Statement::CreateGraphType { body, .. } => body,
+        other => panic!("expected CreateGraphType, got {other:?}"),
+    };
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    for el in body {
+        match el {
+            TypeElement::Node(vt) => nodes.push(vt),
+            TypeElement::Edge(vt) => edges.push(vt),
+        }
+    }
+    Schema { nodes, edges }
+}
+
+/// Strict schema: Account and Person are disjoint node types. A node
+/// cannot be both. Surfaces `warn_for_collapsed_bindings` — the
+/// typechecker doesn't error on statically-empty queries; it emits a
+/// warning ("variable x cannot be both Account and Person …") and sets
+/// `r.empty = true`. Under `Schema::star()` this collapse never fires.
+#[test]
+fn meet_with_strict_schema_warns_on_disjoint_labels_on_shared_var() {
+    let schema = schema_from_create("CREATE GRAPH TYPE T AS { (:Account), (:Person) }");
+    let q = multi_match_query(&["(x: Account)", "(x: Person)"]);
+
+    let mut tc = Typechecker::new(schema);
+    let r = tc.check_query(&q);
+
+    assert!(
+        r.empty,
+        "query is statically empty under strict schema; r.empty should be true"
+    );
+    assert!(
+        tc.warnings
+            .iter()
+            .any(|w| w.contains("cannot be both") && w.contains('x')),
+        "expected disjoint-labels warning for x, got {:?}",
+        tc.warnings
+    );
+}
+
+/// Strict schema, compatible labels: a free `(x)` paired with a typed
+/// `(x: Account)` refines x to Account. Pins that strict schemas don't
+/// break the happy path.
+#[test]
+fn meet_with_strict_schema_accepts_compatible_labels() {
+    let schema = schema_from_create("CREATE GRAPH TYPE T AS { (:Account), (:Person) }");
+    let q = multi_match_query(&["(x: Account)", "(x)"]);
+
+    let mut tc = Typechecker::new(schema);
+    let r = tc.check_query(&q);
+
+    assert!(r.ok, "errors: {:?}", tc.errors);
     let x_label = extract_label(r.env.get("x").unwrap()).unwrap();
     assert!(matches!(x_label, LabelType::Label(s) if s == "Account"));
 }
