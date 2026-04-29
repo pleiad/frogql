@@ -23,7 +23,7 @@
 //!                         [--backend memory|lazy|disk]
 //!                         [--params-dir <dir>]
 //!                         [--queries-dir <dir>]
-//!                         [--iters N] [--limit N]
+//!                         [--iters N] [--warmup N] [--limit N]
 //!                         [--csv-dir <dir>]      # required for --backend memory
 //!
 //! Three GraphAccess backends:
@@ -80,7 +80,7 @@ impl Backend {
 // ----------------------------------------------------------- IcQuery TOML ---
 
 /// Per-IC TOML file shape. Optional fields apply only to one of the
-/// two `status` variants (see field comments).
+/// two `status` variants — `validate()` enforces the constraint.
 #[derive(Debug, Deserialize)]
 struct IcQuery {
     id: u32,
@@ -89,8 +89,16 @@ struct IcQuery {
 
     // implemented-only
     params_file: Option<String>,
-    #[allow(dead_code)] // documentation aid; runtime uses header line of params file
+    /// Names of param columns; documentation aid (the runtime reads
+    /// the param file's own header). When `param_types` is set,
+    /// `param_columns` length must match.
     param_columns: Option<Vec<String>>,
+    /// Per-column type tag. Currently `"int"` (raw substitution) or
+    /// `"string"` (substituted as `'<value>'`, with the value rejected
+    /// if it contains `'` since gqlite's lexer has no escape syntax).
+    /// Optional; defaults to all-`int` if absent. Length must match
+    /// `param_columns` when both are set.
+    param_types: Option<Vec<String>>,
     query: Option<String>,
     #[allow(dead_code)]
     return_columns: Option<Vec<String>>,
@@ -110,8 +118,61 @@ enum Status {
     Blocked,
 }
 
+impl IcQuery {
+    /// Validate that fields match the declared `status`. Called at
+    /// load time so a malformed TOML fails before any backend is
+    /// opened or any other IC runs.
+    fn validate(&self, source: &Path) -> Result<(), String> {
+        match self.status {
+            Status::Implemented => {
+                if self.params_file.is_none() {
+                    return Err(format!(
+                        "{}: status='implemented' but missing `params_file`",
+                        source.display()
+                    ));
+                }
+                if self.query.is_none() {
+                    return Err(format!(
+                        "{}: status='implemented' but missing `query`",
+                        source.display()
+                    ));
+                }
+                if let (Some(cols), Some(types)) = (&self.param_columns, &self.param_types) {
+                    if cols.len() != types.len() {
+                        return Err(format!(
+                            "{}: param_columns has {} entries but param_types has {}",
+                            source.display(),
+                            cols.len(),
+                            types.len()
+                        ));
+                    }
+                }
+                if let Some(types) = &self.param_types {
+                    for t in types {
+                        if t != "int" && t != "string" {
+                            return Err(format!(
+                                "{}: param_types entry {t:?} is not 'int' or 'string'",
+                                source.display()
+                            ));
+                        }
+                    }
+                }
+            }
+            Status::Blocked => {
+                if self.blocked_reason.is_none() {
+                    return Err(format!(
+                        "{}: status='blocked' but missing `blocked_reason`",
+                        source.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 fn load_queries(dir: &Path) -> Vec<IcQuery> {
-    let mut out = Vec::new();
+    let mut out: Vec<(IcQuery, PathBuf)> = Vec::new();
     let entries = fs::read_dir(dir).unwrap_or_else(|e| {
         eprintln!("failed to read queries dir {}: {e}", dir.display());
         std::process::exit(1);
@@ -129,10 +190,31 @@ fn load_queries(dir: &Path) -> Vec<IcQuery> {
             eprintln!("failed to parse {}: {e}", p.display());
             std::process::exit(1);
         });
-        out.push(q);
+        if let Err(e) = q.validate(&p) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        out.push((q, p));
     }
-    out.sort_by_key(|q| q.id);
-    out
+    out.sort_by_key(|(q, _)| q.id);
+
+    // Detect duplicate IDs after sort. Two TOMLs with `id = 2` would
+    // otherwise silently load both with `find()` returning only the
+    // first — a footgun if someone copies a TOML to bootstrap a new IC
+    // and forgets to renumber.
+    for w in out.windows(2) {
+        if w[0].0.id == w[1].0.id {
+            eprintln!(
+                "duplicate IC id {} in {} and {}",
+                w[0].0.id,
+                w[0].1.display(),
+                w[1].1.display()
+            );
+            std::process::exit(1);
+        }
+    }
+
+    out.into_iter().map(|(q, _)| q).collect()
 }
 
 // ------------------------------------------------------------- Param file ---
@@ -160,13 +242,37 @@ fn load_params(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
 }
 
 /// Replace each `{colName}` in `template` with the corresponding
-/// value from `row`, matched by position to `header`.
-fn substitute(template: &str, header: &[String], row: &[String]) -> String {
+/// value from `row`. `param_types` (default all-`int`) controls
+/// formatting per column:
+///   - `"int"`   → raw substitution (`933` becomes literal `933`)
+///   - `"string"`→ wrapped in single quotes (`Belize` becomes `'Belize'`).
+///                 Rejects values containing `'` since gqlite's lexer
+///                 has no escape syntax.
+fn substitute(
+    template: &str,
+    header: &[String],
+    row: &[String],
+    param_types: &[&str],
+) -> Result<String, String> {
     let mut out = template.to_string();
-    for (h, v) in header.iter().zip(row.iter()) {
-        out = out.replace(&format!("{{{h}}}"), v);
+    for (i, (h, v)) in header.iter().zip(row.iter()).enumerate() {
+        let ty = param_types.get(i).copied().unwrap_or("int");
+        let formatted = match ty {
+            "int" => v.clone(),
+            "string" => {
+                if v.contains('\'') {
+                    return Err(format!(
+                        "param value for column {h:?} contains a single quote ({v:?}); \
+                         gqlite's lexer has no escape syntax for embedded quotes"
+                    ));
+                }
+                format!("'{v}'")
+            }
+            other => return Err(format!("unknown param type {other:?} for column {h:?}")),
+        };
+        out = out.replace(&format!("{{{h}}}"), &formatted);
     }
-    out
+    Ok(out)
 }
 
 // ----------------------------------------------------------- RSS reading ---
@@ -185,9 +291,12 @@ fn print_usage(prog: &str) {
     eprintln!(
         "Usage: {prog} <db.gdb> [--ic <n>|all|blocked]\n\
          \t[--backend memory|lazy|disk] [--params-dir <dir>] [--queries-dir <dir>]\n\
-         \t[--iters N] [--limit N] [--csv-dir <dir>]\n\
+         \t[--iters N] [--warmup N] [--limit N] [--csv-dir <dir>]\n\
          \n\
-         Defaults: --ic 2  --backend lazy  --queries-dir bench/ldbc-queries\n\
+         Defaults: --ic 2  --backend lazy  --iters 3  --warmup 0  --limit 20\n\
+         --warmup N runs N extra iters per row before the timed ones; their\n\
+         measurements are discarded (typically used as `--warmup 1` to absorb\n\
+         OS-page-cache cold-start on the first iter of each row).\n\
          --csv-dir is required when --backend memory is used (the .gdb path is ignored).\n\
          --ic blocked prints the blocked-IC inventory (no bench run)."
     );
@@ -199,9 +308,17 @@ fn main() {
         print_usage(&args[0]);
         std::process::exit(1);
     }
+    // Bare `--help` / `-h` as the first arg (where the positional
+    // .gdb is otherwise expected) prints usage and exits without
+    // trying to open the file.
+    if args[1] == "-h" || args[1] == "--help" {
+        print_usage(&args[0]);
+        return;
+    }
     let db_path = args[1].clone();
 
     let mut iters: usize = 3;
+    let mut warmup: usize = 0;
     let mut limit: usize = 20;
     let mut backend = Backend::Lazy;
     let mut csv_dir: Option<String> = None;
@@ -213,6 +330,10 @@ fn main() {
         match args[i].as_str() {
             "--iters" => {
                 iters = args[i + 1].parse().expect("invalid iters");
+                i += 2;
+            }
+            "--warmup" => {
+                warmup = args[i + 1].parse().expect("invalid warmup");
                 i += 2;
             }
             "--limit" => {
@@ -340,6 +461,7 @@ fn main() {
                 &target_ids,
                 &params_dir,
                 iters,
+                warmup,
                 limit,
                 &mut sys,
                 rss_baseline,
@@ -363,6 +485,7 @@ fn main() {
                 &target_ids,
                 &params_dir,
                 iters,
+                warmup,
                 limit,
                 &mut sys,
                 rss_baseline,
@@ -386,6 +509,7 @@ fn main() {
                 &target_ids,
                 &params_dir,
                 iters,
+                warmup,
                 limit,
                 &mut sys,
                 rss_baseline,
@@ -410,6 +534,7 @@ fn run_targets<G: GraphAccess>(
     target_ids: &[u32],
     params_dir: &Path,
     iters: usize,
+    warmup: usize,
     limit: usize,
     sys: &mut System,
     rss_baseline: f64,
@@ -445,6 +570,7 @@ fn run_targets<G: GraphAccess>(
             q,
             params_dir,
             iters,
+            warmup,
             limit,
             sys,
             &mut peak_rss,
@@ -459,7 +585,7 @@ fn run_targets<G: GraphAccess>(
         let mut sorted = s.row_medians_ns.clone();
         sorted.sort_unstable();
         let n = sorted.len();
-        let median = sorted[n / 2];
+        let median = median_of(&sorted);
         let min = sorted[0];
         let max = sorted[n - 1];
         eprintln!(
@@ -496,17 +622,24 @@ fn run_one_ic<G: GraphAccess>(
     q: &IcQuery,
     params_dir: &Path,
     iters: usize,
+    warmup: usize,
     limit: usize,
     sys: &mut System,
     peak_rss: &mut f64,
 ) -> IcSummary {
-    let params_file_name = q
-        .params_file
-        .as_ref()
-        .expect("implemented IC must have params_file");
+    // `validate()` at load time guaranteed these are present.
+    let params_file_name = q.params_file.as_ref().unwrap();
     let params_file = params_dir.join(params_file_name);
-    let template = q.query.as_ref().expect("implemented IC must have query");
+    let template = q.query.as_ref().unwrap();
     let (header, rows) = load_params(&params_file);
+
+    // Per-column types (default all-int when absent or shorter than
+    // the param file's header — substitute() falls back to "int").
+    let param_types: Vec<&str> = q
+        .param_types
+        .as_ref()
+        .map(|ts| ts.iter().map(String::as_str).collect())
+        .unwrap_or_default();
 
     eprintln!(
         "\n=== IC{}: {} (backend={}) ===",
@@ -515,7 +648,7 @@ fn run_one_ic<G: GraphAccess>(
         backend.label()
     );
     eprintln!(
-        "Params: {} ({} rows, columns: {});  {iters} iters/param;  limit={limit}",
+        "Params: {} ({} rows, columns: {});  {warmup}+{iters} iters/param (warmup+measured);  limit={limit}",
         params_file_name,
         rows.len(),
         header.join(", "),
@@ -525,7 +658,16 @@ fn run_one_ic<G: GraphAccess>(
     let mut row_medians_ns: Vec<u128> = Vec::with_capacity(rows.len());
 
     for (row_idx, row) in rows.iter().enumerate() {
-        let query_text = substitute(template, &header, row);
+        let query_text = match substitute(template, &header, row, &param_types) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "  SUBSTITUTE ERROR on row {row_idx} (params: {}): {e}",
+                    row.join("|")
+                );
+                continue;
+            }
+        };
         let parsed = match compile_query_unchecked(&query_text) {
             Ok(parsed) => parsed,
             Err(e) => {
@@ -539,6 +681,12 @@ fn run_one_ic<G: GraphAccess>(
 
         let mut samples: Vec<Duration> = Vec::with_capacity(iters);
         let mut last_count = 0usize;
+        // Warmup iters: run silently, no CSV emit, no measurement.
+        // Their purpose is to populate the OS page cache before timed
+        // iters so cold-cache cost doesn't contaminate iter 0.
+        for _ in 0..warmup {
+            let _ = rt.run_query(&parsed, limit);
+        }
         for n in 0..iters {
             let start = Instant::now();
             let result = rt.run_query(&parsed, limit);
@@ -570,6 +718,20 @@ fn run_one_ic<G: GraphAccess>(
     }
 }
 
+/// Median of a sorted slice. For odd N, the middle element. For
+/// even N, the integer average of the two middle elements (matches
+/// the standard statistical convention; previous version returned
+/// the upper of the two midpoints, which is neither median nor a
+/// labeled percentile).
+fn median_of(sorted: &[u128]) -> u128 {
+    let n = sorted.len();
+    if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2
+    }
+}
+
 /// Print a per-row stderr summary line and return the median sample
 /// in nanoseconds (so `run_one_ic` can build a cross-row aggregate).
 fn report(
@@ -596,7 +758,7 @@ fn report(
     }
     let min = sorted[0];
     let max = sorted[n - 1];
-    let median = sorted[n / 2];
+    let median = median_of(&sorted);
     let mean = sorted.iter().sum::<u128>() / n as u128;
     eprintln!(
         "  IC{ic} row#{row_idx:<3} ({row_summary}) count={count:<3} \
