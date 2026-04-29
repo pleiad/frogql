@@ -249,6 +249,12 @@ fn load_params(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
 ///   - `"string"`→ wrapped in single quotes (`Belize` becomes `'Belize'`).
 ///                 Rejects values containing `'` since gqlite's lexer
 ///                 has no escape syntax.
+///
+/// Errors if any `{...}` placeholder remains unsubstituted after the
+/// pass — that means the query template references a column not in
+/// the param file's header (typo or mismatch between TOML and the
+/// LDBC param file). Catching this here gives a clearer error than
+/// letting the gqlite parser fail on a stray brace.
 fn substitute(
     template: &str,
     header: &[String],
@@ -273,7 +279,58 @@ fn substitute(
         };
         out = out.replace(&format!("{{{h}}}"), &formatted);
     }
+    // Detect unsubstituted `{name}` placeholders. Looks for `{` …
+    // `}` pairs where the contents are a valid identifier (avoids
+    // false positives on the `(p: Person {id: ...})` descriptor
+    // shorthand, which has no leftover braces post-substitute since
+    // the inner placeholder *was* replaced).
+    if let Some(stray) = find_unsubstituted_placeholder(&out) {
+        return Err(format!(
+            "unsubstituted placeholder {{{stray}}} remains after substitution; \
+             check that the query template's column names match the param file's header \
+             ({})",
+            header.join(", ")
+        ));
+    }
     Ok(out)
+}
+
+/// Look for a `{IDENT}` token in `s` — used to spot unsubstituted
+/// placeholders. Returns the inner identifier, or None if the only
+/// braces are part of legitimate gqlite syntax (descriptor shorthand
+/// `{k: v}`, repetitions `{n,m}`).
+fn find_unsubstituted_placeholder(s: &str) -> Option<&str> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            // Find matching `}` on the same span; only consider the
+            // contents an "unsubstituted placeholder" if it's a bare
+            // identifier (letters / digits / underscore, starting with
+            // a letter or underscore). Things like `{id: 933}` or
+            // `{1,3}` won't match.
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != b'}' {
+                end += 1;
+            }
+            if end < bytes.len() {
+                let inner = &s[start..end];
+                if !inner.is_empty()
+                    && inner
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    && !inner.bytes().next().unwrap().is_ascii_digit()
+                {
+                    return Some(inner);
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 // ----------------------------------------------------------- RSS reading ---
@@ -296,10 +353,12 @@ fn print_usage(prog: &str) {
          \n\
          Defaults: --ic 2  --backend lazy  --iters 3  --warmup 0  --limit 20\n\
          --warmup N runs N extra iters per row before the timed ones; their\n\
-         measurements are discarded. Empirically not needed at SF0.1 scale\n\
-         (within-row variance is general jitter, not first-iter cold cache),\n\
-         but available for parity with typecheck_bench and for larger SFs\n\
-         where the OS page cache can't hold the working set.\n\
+         measurements are discarded. Whether this helps depends on OS / RAM /\n\
+         storage: on a warm machine with free RAM >= dataset size it usually\n\
+         doesn't (OS page cache is cross-row, populated by row#0). On cold or\n\
+         cache-constrained machines it can absorb a cold-iter spike. Default 0;\n\
+         raise it if the per-row stderr summary shows iter 0 consistently\n\
+         dominating min/median.\n\
          --csv-dir is required when --backend memory is used (the .gdb path is ignored).\n\
          --ic blocked prints the blocked-IC inventory (no bench run)."
     );
@@ -329,38 +388,61 @@ fn main() {
     let mut queries_dir = PathBuf::from("bench/ldbc-queries");
     let mut ic_arg: String = "2".to_string();
     let mut i = 2;
+    // Helper to read the next arg as the value for the current flag.
+    // Avoids panicking with index-out-of-bounds when a flag is the
+    // last token (e.g. `ldbc_bench db.gdb --iters`).
+    let need_value = |i: usize, flag: &str| -> &str {
+        if i + 1 >= args.len() {
+            eprintln!("{flag} requires a value");
+            std::process::exit(1);
+        }
+        &args[i + 1]
+    };
     while i < args.len() {
         match args[i].as_str() {
             "--iters" => {
-                iters = args[i + 1].parse().expect("invalid iters");
+                iters = need_value(i, "--iters").parse().unwrap_or_else(|e| {
+                    eprintln!("invalid --iters value: {e}");
+                    std::process::exit(1);
+                });
                 i += 2;
             }
             "--warmup" => {
-                warmup = args[i + 1].parse().expect("invalid warmup");
+                warmup = need_value(i, "--warmup").parse().unwrap_or_else(|e| {
+                    eprintln!("invalid --warmup value: {e}");
+                    std::process::exit(1);
+                });
                 i += 2;
             }
             "--limit" => {
-                limit = args[i + 1].parse().expect("invalid limit");
+                limit = need_value(i, "--limit").parse().unwrap_or_else(|e| {
+                    eprintln!("invalid --limit value: {e}");
+                    std::process::exit(1);
+                });
                 i += 2;
             }
             "--backend" => {
-                backend = Backend::parse(&args[i + 1]).expect("backend must be memory|lazy|disk");
+                let v = need_value(i, "--backend");
+                backend = Backend::parse(v).unwrap_or_else(|| {
+                    eprintln!("--backend must be memory|lazy|disk, got {v:?}");
+                    std::process::exit(1);
+                });
                 i += 2;
             }
             "--csv-dir" => {
-                csv_dir = Some(args[i + 1].clone());
+                csv_dir = Some(need_value(i, "--csv-dir").to_string());
                 i += 2;
             }
             "--params-dir" => {
-                params_dir = Some(args[i + 1].clone());
+                params_dir = Some(need_value(i, "--params-dir").to_string());
                 i += 2;
             }
             "--queries-dir" => {
-                queries_dir = PathBuf::from(&args[i + 1]);
+                queries_dir = PathBuf::from(need_value(i, "--queries-dir"));
                 i += 2;
             }
             "--ic" => {
-                ic_arg = args[i + 1].clone();
+                ic_arg = need_value(i, "--ic").to_string();
                 i += 2;
             }
             "-h" | "--help" => {
@@ -580,9 +662,29 @@ fn run_targets<G: GraphAccess>(
         ));
     }
 
-    eprintln!("\n✓ done — {} IC(s) ran to completion", summaries.len());
+    let any_ic_had_no_rows = summaries
+        .iter()
+        .any(|s| s.row_medians_ns.is_empty() && s.failed_rows > 0);
+    if any_ic_had_no_rows {
+        eprintln!(
+            "\n⚠ done with errors — {} IC(s) processed, but at least one had every \
+             row fail at substitute or compile (no measurements taken).",
+            summaries.len()
+        );
+    } else {
+        eprintln!("\n✓ done — {} IC(s) ran to completion", summaries.len());
+    }
     for s in &summaries {
         if s.row_medians_ns.is_empty() {
+            // Either no rows in the params file, or every row failed.
+            // Surface the failure count so it's not invisible.
+            if s.failed_rows > 0 {
+                eprintln!(
+                    "  IC{}: 0 of {} rows produced measurements (all failed at \
+                     substitute or compile); see SUBSTITUTE/PARSE ERROR lines above.",
+                    s.ic_id, s.failed_rows,
+                );
+            }
             continue;
         }
         let mut sorted = s.row_medians_ns.clone();
@@ -591,9 +693,14 @@ fn run_targets<G: GraphAccess>(
         let median = median_of(&sorted);
         let min = sorted[0];
         let max = sorted[n - 1];
+        let suffix = if s.failed_rows > 0 {
+            format!("  ({} additional row(s) failed)", s.failed_rows)
+        } else {
+            String::new()
+        };
         eprintln!(
             "  IC{}: {} rows × {} iter(s) = {} runs; \
-             across-row median {:.2}ms (range {:.2}-{:.2}ms)",
+             across-row median {:.2}ms (range {:.2}-{:.2}ms){}",
             s.ic_id,
             n,
             s.iters,
@@ -601,6 +708,7 @@ fn run_targets<G: GraphAccess>(
             median as f64 / 1e6,
             min as f64 / 1e6,
             max as f64 / 1e6,
+            suffix,
         );
     }
     eprintln!(
@@ -614,8 +722,12 @@ fn run_targets<G: GraphAccess>(
 struct IcSummary {
     ic_id: u32,
     iters: usize,
-    /// One median (in nanoseconds) per param row.
+    /// One median (in nanoseconds) per param row that ran cleanly.
     row_medians_ns: Vec<u128>,
+    /// Rows that failed at substitute or compile time. Counted so
+    /// the final "done" summary can call out "ran 0 of N rows" vs
+    /// silently showing nothing.
+    failed_rows: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -659,6 +771,7 @@ fn run_one_ic<G: GraphAccess>(
 
     let rt = Runtime::new(graph);
     let mut row_medians_ns: Vec<u128> = Vec::with_capacity(rows.len());
+    let mut failed_rows = 0usize;
 
     for (row_idx, row) in rows.iter().enumerate() {
         let query_text = match substitute(template, &header, row, &param_types) {
@@ -668,6 +781,7 @@ fn run_one_ic<G: GraphAccess>(
                     "  SUBSTITUTE ERROR on row {row_idx} (params: {}): {e}",
                     row.join("|")
                 );
+                failed_rows += 1;
                 continue;
             }
         };
@@ -678,6 +792,7 @@ fn run_one_ic<G: GraphAccess>(
                     "  PARSE ERROR on row {row_idx} (params: {}): {e}",
                     row.join("|")
                 );
+                failed_rows += 1;
                 continue;
             }
         };
@@ -685,11 +800,13 @@ fn run_one_ic<G: GraphAccess>(
         let mut samples: Vec<Duration> = Vec::with_capacity(iters);
         let mut last_count = 0usize;
         // Warmup iters: run silently, no CSV emit, no measurement.
-        // Empirically these don't help at SF0.1 (within-row variance
-        // here is general jitter, not first-iter cold cache — iter 0
-        // isn't systematically the slowest). The flag exists for
-        // parity with typecheck_bench and for larger SFs where the
-        // OS page cache may not hold the working set.
+        // Whether this helps depends on the run environment: on a
+        // warm machine where the OS page cache holds the .gdb across
+        // rows, iter 0 of a row isn't paying any special cold cost
+        // and warmup is wasted. On cold/cache-constrained machines
+        // (or huge SFs where the cache can't hold the working set),
+        // it can absorb a real first-iter penalty. Default 0; raise
+        // via --warmup if the per-row summary shows iter 0 dominant.
         for _ in 0..warmup {
             let _ = rt.run_query(&parsed, limit);
         }
@@ -721,6 +838,7 @@ fn run_one_ic<G: GraphAccess>(
         ic_id: q.id,
         iters,
         row_medians_ns,
+        failed_rows,
     }
 }
 
@@ -775,4 +893,169 @@ fn report(
         max as f64 / 1e6,
     );
     Some(median)
+}
+
+// ----------------------------------------------------------------- Tests ---
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    // --- median_of ---
+
+    #[test]
+    fn median_odd_n() {
+        assert_eq!(median_of(&[1, 2, 3]), 2);
+        assert_eq!(median_of(&[1, 5, 9, 11, 17]), 9);
+    }
+
+    #[test]
+    fn median_even_n_averages_midpoints() {
+        // Was the bug A3 caught: previously returned sorted[n/2] = 4
+        // (the upper midpoint) for [1,2,3,4]. Now returns
+        // (sorted[n/2-1] + sorted[n/2]) / 2 = (2+3)/2 = 2 (integer
+        // division — the true median is 2.5; for u128 nanosecond
+        // timings the 1 ns rounding is negligible).
+        assert_eq!(median_of(&[1, 2, 3, 4]), 2);
+        assert_eq!(median_of(&[10, 20, 30, 40, 50, 60]), 35);
+    }
+
+    #[test]
+    fn median_single_value() {
+        assert_eq!(median_of(&[42]), 42);
+    }
+
+    // --- substitute ---
+
+    #[test]
+    fn substitute_int_default() {
+        let header = vec![s("personId"), s("maxDate")];
+        let row = vec![s("933"), s("1354060800000")];
+        let out = substitute(
+            "WHERE p.id = {personId} AND c.creationDate <= {maxDate}",
+            &header,
+            &row,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(out, "WHERE p.id = 933 AND c.creationDate <= 1354060800000");
+    }
+
+    #[test]
+    fn substitute_string_wraps_quotes() {
+        let header = vec![s("firstName")];
+        let row = vec![s("Mahinda")];
+        let out = substitute(
+            "WHERE p.firstName = {firstName}",
+            &header,
+            &row,
+            &["string"],
+        )
+        .unwrap();
+        assert_eq!(out, "WHERE p.firstName = 'Mahinda'");
+    }
+
+    #[test]
+    fn substitute_string_rejects_embedded_quote() {
+        let header = vec![s("name")];
+        let row = vec![s("d'Ivoire")];
+        let err = substitute("WHERE x.name = {name}", &header, &row, &["string"]).unwrap_err();
+        assert!(err.contains("single quote"), "error was: {err}");
+    }
+
+    #[test]
+    fn substitute_unknown_type_errors() {
+        let header = vec![s("x")];
+        let row = vec![s("v")];
+        let err = substitute("{x}", &header, &row, &["weird"]).unwrap_err();
+        assert!(err.contains("unknown param type"), "error was: {err}");
+    }
+
+    #[test]
+    fn substitute_unmatched_placeholder_errors() {
+        // Template references {countryName} but param file only has personId.
+        // Was bug C3: previously returned the template with `{countryName}`
+        // intact, then the gqlite parser failed with a confusing error.
+        let header = vec![s("personId")];
+        let row = vec![s("933")];
+        let err = substitute(
+            "MATCH (p: Person {{id: {personId}}}) WHERE c.country = {countryName}",
+            &header,
+            &row,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("unsubstituted placeholder"),
+            "error was: {err}"
+        );
+        assert!(err.contains("countryName"), "error was: {err}");
+    }
+
+    #[test]
+    fn substitute_doesnt_false_alarm_on_descriptor_shorthand() {
+        // The descriptor shorthand `{id: 933}` (with a colon and a
+        // value, post-substitute) must NOT be flagged as an
+        // unsubstituted placeholder. The placeholder check should only
+        // catch bare `{identifier}` tokens. (Rust string literals
+        // don't need `{{` escaping — what's written here is what's
+        // in the template, single-brace-on-each-side.)
+        let header = vec![s("personId")];
+        let row = vec![s("933")];
+        let out = substitute(
+            "MATCH (p: Person {id: {personId}}) RETURN p.firstName",
+            &header,
+            &row,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(out, "MATCH (p: Person {id: 933}) RETURN p.firstName");
+    }
+
+    #[test]
+    fn substitute_doesnt_false_alarm_on_repetition_quantifier() {
+        // `{1,3}` in -[:knows*1..3]- shouldn't trip the
+        // unsubstituted-placeholder check. (No params, no template
+        // placeholders — just verifying the post-pass scan is clean.)
+        let header: Vec<String> = vec![];
+        let row: Vec<String> = vec![];
+        let out = substitute(
+            "MATCH (a)-[:knows*1..3]-(b) RETURN b.name",
+            &header,
+            &row,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(out, "MATCH (a)-[:knows*1..3]-(b) RETURN b.name");
+    }
+
+    // --- find_unsubstituted_placeholder ---
+
+    #[test]
+    fn placeholder_finder_catches_bare_identifier() {
+        assert_eq!(
+            find_unsubstituted_placeholder("{personId}"),
+            Some("personId")
+        );
+        assert_eq!(
+            find_unsubstituted_placeholder("WHERE x = {foo} AND y = 1"),
+            Some("foo")
+        );
+    }
+
+    #[test]
+    fn placeholder_finder_skips_descriptor_shorthand() {
+        assert_eq!(find_unsubstituted_placeholder("{id: 933}"), None);
+        assert_eq!(find_unsubstituted_placeholder("{name: 'Alice'}"), None);
+    }
+
+    #[test]
+    fn placeholder_finder_skips_repetition() {
+        assert_eq!(find_unsubstituted_placeholder("{1,3}"), None);
+        assert_eq!(find_unsubstituted_placeholder("{0,}"), None);
+    }
 }
