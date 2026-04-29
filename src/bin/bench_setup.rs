@@ -83,7 +83,8 @@ fn main() {
         }
     }
 
-    fs::create_dir_all(&data_dir).expect("create data dir");
+    fs::create_dir_all(&data_dir)
+        .unwrap_or_else(|e| fail(&format!("create data-dir {}: {e}", data_dir.display())));
     eprintln!("data-dir: {}", data_dir.display());
 
     // Step 1: dataset.
@@ -157,13 +158,14 @@ fn main() {
         );
     } else {
         if rebuild && gdb_path.exists() {
-            fs::remove_file(&gdb_path).expect("remove old .gdb");
+            fs::remove_file(&gdb_path)
+                .unwrap_or_else(|e| fail(&format!("remove old .gdb {}: {e}", gdb_path.display())));
         }
         build_gdb(&gdb_path, &csv_dir);
     }
 
     eprintln!("\n✓ setup complete");
-    let default_data_dir = data_dir == PathBuf::from("bench/data");
+    let default_data_dir = data_dir == Path::new("bench/data");
     if default_data_dir {
         eprintln!(
             "  run the bench with:\n\
@@ -267,7 +269,7 @@ fn build_gdb(gdb_path: &Path, csv_dir: &Path) {
     let exe_dir = env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))
-        .expect("locate own exe");
+        .unwrap_or_else(|| fail("could not locate own executable to find sibling gqlite binary"));
     let gqlite_bin = exe_dir.join(if cfg!(windows) {
         "gqlite.exe"
     } else {

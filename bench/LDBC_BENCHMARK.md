@@ -73,7 +73,7 @@ cargo build --release --bin ldbc_bench
 | `--ic <n>\|N,M\|all\|blocked` | `2` | Which IC(s) to run; `all` = every implemented; `blocked` = inventory only |
 | `--backend memory\|lazy\|disk` | `lazy` | Which `GraphAccess` to use |
 | `--iters N` | `3` | Measured iterations per param row |
-| `--warmup N` | `0` | Extra iters per row before measurement; their times are discarded. Empirically *doesn't help* at SF0.1 — within-row variance is jitter, not cold-cache. Available for parity with typecheck_bench and larger SFs. |
+| `--warmup N` | `0` | Extra iters per row before measurement; their times are discarded. Whether it helps depends on OS / RAM / storage — on a warm machine with free RAM ≥ dataset size it usually doesn't (OS page cache populated by row#0); on cold or cache-constrained machines it can absorb a cold-iter spike. Raise it if the per-row summary shows iter 0 consistently dominating min/median. |
 | `--limit N` | `20` | Row cap (`Runtime::run_query`'s second arg; emulates spec `LIMIT 20` until gqlite has the keyword) |
 | `--params-dir <dir>` | `bench/data/substitution_parameters-sf0.1/substitution_parameters-sf0.1` | Where the LDBC param files live |
 | `--queries-dir <dir>` | `bench/ldbc-queries` | Where the per-IC TOML files live |

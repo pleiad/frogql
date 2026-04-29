@@ -82,7 +82,13 @@ impl Backend {
 
 /// Per-IC TOML file shape. Optional fields apply only to one of the
 /// two `status` variants — `validate()` enforces the constraint.
+///
+/// `deny_unknown_fields` so a typo like `parms_file = "..."` produces
+/// an immediate parse error naming the unknown key, instead of
+/// silently leaving `params_file = None` and surfacing later as
+/// "missing `params_file`".
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IcQuery {
     id: u32,
     name: String,
@@ -229,12 +235,14 @@ fn load_params(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
         std::process::exit(1);
     });
     let mut lines = text.lines();
-    let header: Vec<String> = lines
-        .next()
-        .expect("empty params file")
-        .split('|')
-        .map(str::to_string)
-        .collect();
+    let header_line = match lines.next() {
+        Some(l) => l,
+        None => {
+            eprintln!("params file {} is empty (no header line)", path.display());
+            std::process::exit(1);
+        }
+    };
+    let header: Vec<String> = header_line.split('|').map(str::to_string).collect();
     let rows: Vec<Vec<String>> = lines
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.split('|').map(str::to_string).collect())
@@ -245,10 +253,10 @@ fn load_params(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
 /// Replace each `{colName}` in `template` with the corresponding
 /// value from `row`. `param_types` (default all-`int`) controls
 /// formatting per column:
-///   - `"int"`   → raw substitution (`933` becomes literal `933`)
-///   - `"string"`→ wrapped in single quotes (`Belize` becomes `'Belize'`).
-///                 Rejects values containing `'` since gqlite's lexer
-///                 has no escape syntax.
+///   - `"int"` — raw substitution (`933` becomes literal `933`)
+///   - `"string"` — wrapped in single quotes (`Belize` becomes
+///     `'Belize'`). Rejects values containing `'` since gqlite's
+///     lexer has no escape syntax for embedded quotes.
 ///
 /// Errors if any `{...}` placeholder remains unsubstituted after the
 /// pass — that means the query template references a column not in
@@ -518,6 +526,16 @@ fn main() {
         return;
     }
 
+    // Reject --iters 0 explicitly: the bench would run warmup iters
+    // (if any) but record zero measured iters, producing no CSV rows
+    // and no per-IC summary line. Misleading — users would see a
+    // "✓ done" with nothing to show. Force the user to pick at
+    // least one measured iter.
+    if iters == 0 {
+        eprintln!("--iters must be >= 1 (got 0; nothing would be measured)");
+        std::process::exit(1);
+    }
+
     // Resolve params dir (default: alongside the .gdb dataset).
     let params_dir = params_dir.map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from("bench/data/substitution_parameters-sf0.1/substitution_parameters-sf0.1")
@@ -533,11 +551,16 @@ fn main() {
     // Open the chosen backend once and run all selected ICs against it.
     match backend {
         Backend::Memory => {
-            let dir = csv_dir.expect("--csv-dir required for memory backend");
+            let dir = csv_dir.unwrap_or_else(|| {
+                eprintln!("--csv-dir is required when --backend memory is used");
+                std::process::exit(1);
+            });
             eprintln!("Loading LDBC CSV from {dir} into Graph (in-memory)...");
             let t0 = Instant::now();
-            let g = csv_loader::load_from_ldbc_csv_dir(Path::new(&dir))
-                .expect("load_from_ldbc_csv_dir failed");
+            let g = csv_loader::load_from_ldbc_csv_dir(Path::new(&dir)).unwrap_or_else(|e| {
+                eprintln!("failed to load LDBC CSV from {dir}: {e}");
+                std::process::exit(1);
+            });
             eprintln!(
                 "  loaded {} nodes / {} edges in {:.2}s",
                 g.node_count(),
@@ -561,7 +584,10 @@ fn main() {
         Backend::Lazy => {
             eprintln!("Loading {db_path} (LazyGraphStore)...");
             let t0 = Instant::now();
-            let store = LazyGraphStore::open(Path::new(&db_path)).expect("open .gdb");
+            let store = LazyGraphStore::open(Path::new(&db_path)).unwrap_or_else(|e| {
+                eprintln!("failed to open .gdb {db_path}: {e}");
+                std::process::exit(1);
+            });
             eprintln!(
                 "  loaded {} nodes / {} edges in {:.2}s",
                 store.node_count(),
@@ -585,7 +611,10 @@ fn main() {
         Backend::Disk => {
             eprintln!("Loading {db_path} (DiskGraphStore)...");
             let t0 = Instant::now();
-            let store = DiskGraphStore::open(Path::new(&db_path)).expect("open .gdb");
+            let store = DiskGraphStore::open(Path::new(&db_path)).unwrap_or_else(|e| {
+                eprintln!("failed to open .gdb {db_path}: {e}");
+                std::process::exit(1);
+            });
             let n_nodes = store.nodes().len();
             let n_edges = store.edges_directed().len() + store.edges_undirected().len();
             eprintln!(
@@ -671,7 +700,15 @@ fn run_targets<G: GraphAccess>(
     let any_ic_had_no_rows = summaries
         .iter()
         .any(|s| s.row_medians_ns.is_empty() && s.failed_rows > 0);
-    if any_ic_had_no_rows {
+    if summaries.is_empty() {
+        // None of the requested ICs were available to run (either
+        // not in the catalog, or all blocked). The bench produced no
+        // measurements and "✓ done" would falsely imply success.
+        eprintln!(
+            "\n⚠ done — 0 IC(s) ran (none of the requested ICs were implemented \
+             in the catalog). Use --ic blocked to see the inventory."
+        );
+    } else if any_ic_had_no_rows {
         eprintln!(
             "\n⚠ done with errors — {} IC(s) processed, but at least one had every \
              row fail at substitute or compile (no measurements taken).",
