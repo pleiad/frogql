@@ -209,13 +209,24 @@ fn report(query: &str, person_id: i64, person_name: &str, samples: &[Duration], 
     if n == 0 {
         return;
     }
+    // With a single iter, min/median/mean/max are all the same number
+    // and the labels are misleading. Print just `wall` instead. For
+    // N>=2 the spread carries information and the labels apply.
+    if n == 1 {
+        eprintln!(
+            "  {query} id={person_id:<14} ({person_name:<16}) count={count:<3} \
+             wall={:>8.2}ms  (n=1, --iters >=3 recommended for stable median)",
+            sorted[0] as f64 / 1e6,
+        );
+        return;
+    }
     let min = sorted[0];
     let max = sorted[n - 1];
     let median = sorted[n / 2];
     let mean = sorted.iter().sum::<u128>() / n as u128;
     eprintln!(
         "  {query} id={person_id:<14} ({person_name:<16}) count={count:<3} \
-         min={:>8.2}ms  med={:>8.2}ms  mean={:>8.2}ms  max={:>8.2}ms",
+         min={:>8.2}ms  med={:>8.2}ms  mean={:>8.2}ms  max={:>8.2}ms  (n={n})",
         min as f64 / 1e6,
         median as f64 / 1e6,
         mean as f64 / 1e6,
