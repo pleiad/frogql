@@ -60,14 +60,26 @@
 //!   gqlite's LDBC loader produces `knows` / `hasCreator` (the
 //!   stems in the source CSV filenames). Pure naming, no behavior
 //!   change — but the spec query doesn't paste verbatim.
-//! - **`maxDate` value.** The spec example uses 1 287 230 400 000
-//!   (2010-10-16) keyed to a larger SF where dates extend back
-//!   further. SF0.1's dates start ~2010-12, so the spec value
-//!   would cut everything. Bench uses 1 340 000 000 000 (mid-2012)
-//!   so the filter retains enough rows for the join to do real work.
-//! - **`personId` values.** Spec example uses `10995116278009`,
-//!   which doesn't exist in SF0.1. Bench picks five real ids from
-//!   SF0.1's Person table (see `PARAMS` below).
+//! - **No parameter generator.** LDBC's canonical workflow is to run
+//!   `ldbc_snb_datagen`'s `substitution_parameters` tool against the
+//!   chosen SF, which produces SF-specific parameter sets in
+//!   `interactive_<n>.txt`. Spec example values are drawn from a
+//!   specific SF run (the personId `10995116278009` and maxDate
+//!   `2010-10-16` come from a larger SF) and are not portable —
+//!   LDBC's id space is bit-packed per SF, and event timelines stretch
+//!   with SF. We didn't run the generator (heavier Python/Hadoop dep
+//!   than the rest of this branch) and substituted hand-picked params,
+//!   which carries the two derived divergences below:
+//!     - **`personId` values.** Spec example `10995116278009` doesn't
+//!       exist in SF0.1. Bench picks five real ids from SF0.1's Person
+//!       table by inspection (see `PARAMS` below).
+//!     - **`maxDate` value.** Spec example `1 287 230 400 000`
+//!       (2010-10-16) predates SF0.1's first message and cuts every
+//!       row. Bench uses `1 340 000 000 000` (mid-2012) so the filter
+//!       retains enough rows for the join to do real work.
+//!   These don't affect the timing claim (join work is the same for
+//!   any valid anchor) but they are a methodology deviation from the
+//!   LDBC workflow worth flagging.
 //!
 //! Other ICs need features gqlite doesn't yet have:
 //!   - IC1 (shortest paths, OPTIONAL MATCH, complex aggregation)
