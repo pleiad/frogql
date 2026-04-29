@@ -711,6 +711,15 @@ fn load_ldbc_node_file(
                 }
             }
         }
+        // Store the LDBC `id` as a queryable property too. LDBC SNB
+        // Interactive queries (IC1-IC14) all parameterize by `Person.id`
+        // / `Comment.id` / `Post.id` etc. via `{id: $param}` shorthand
+        // or `WHERE x.id = $param`. Without this it can't be expressed
+        // faithfully against the spec — `id` would render as NULL. The
+        // value is also folded into the internal node name (below)
+        // for cross-file edge resolution; the duplication is small
+        // (~12 bytes per node) and required for spec-faithful queries.
+        props.insert("id".to_string(), parse_ldbc_value(&id_str));
 
         let nid = node_names.len() as Id;
         node_name_to_id.insert(key, nid);
@@ -1029,6 +1038,22 @@ mod ldbc_tests {
                 assert_eq!(items.len(), 2);
             }
             other => panic!("expected speaks as List, got {:?}", other),
+        }
+
+        // LDBC `id` is also surfaced as a queryable property — required
+        // for spec-faithful IC1-IC14 queries that anchor by `Person.id`.
+        match props.get("id") {
+            Some(Value::Int(v)) => assert_eq!(*v, 50),
+            other => panic!("expected id=Int(50) on person 50, got {:?}", other),
+        }
+
+        // Same for non-Person entities. Sanity-check on a Place node.
+        let place = g
+            .node_id_by_name("Place:1")
+            .expect("place 1 should be loaded");
+        match g.node_props(place).get("id") {
+            Some(Value::Int(v)) => assert_eq!(*v, 1),
+            other => panic!("expected id=Int(1) on place 1, got {:?}", other),
         }
 
         let _ = fs::remove_dir_all(&dir);
