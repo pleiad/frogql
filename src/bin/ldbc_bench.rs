@@ -415,12 +415,14 @@ fn run_targets<G: GraphAccess>(
     rss_baseline: f64,
 ) {
     // CSV header for stdout — same shape regardless of which IC.
-    // The `params` column carries the substitution-param values for
-    // this row, joined by `|` (the same separator the LDBC param
-    // file uses). Column meanings documented in bench/LDBC_BENCHMARK.md.
-    println!("query;backend;params;param_idx;iter;result_count;elapsed_ns");
+    // `params` carries the substitution-param values for this row
+    // joined by `|`; `row` is the 0-indexed line of the LDBC param
+    // file (matches the stderr summary's `row#N` label). Column
+    // meanings documented in bench/LDBC_BENCHMARK.md.
+    println!("query;backend;params;row;iter;result_count;elapsed_ns");
 
     let mut peak_rss = rss_baseline;
+    let mut summaries: Vec<IcSummary> = Vec::new();
 
     for &id in target_ids {
         let q = match queries.iter().find(|q| q.id == id) {
@@ -437,7 +439,7 @@ fn run_targets<G: GraphAccess>(
             }
             continue;
         }
-        run_one_ic(
+        summaries.push(run_one_ic(
             graph,
             backend,
             q,
@@ -446,13 +448,45 @@ fn run_targets<G: GraphAccess>(
             limit,
             sys,
             &mut peak_rss,
-        );
+        ));
     }
 
+    eprintln!("\n✓ done — {} IC(s) ran to completion", summaries.len());
+    for s in &summaries {
+        if s.row_medians_ns.is_empty() {
+            continue;
+        }
+        let mut sorted = s.row_medians_ns.clone();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        let median = sorted[n / 2];
+        let min = sorted[0];
+        let max = sorted[n - 1];
+        eprintln!(
+            "  IC{}: {} rows × {} iter(s) = {} runs; \
+             across-row median {:.2}ms (range {:.2}-{:.2}ms)",
+            s.ic_id,
+            n,
+            s.iters,
+            n * s.iters,
+            median as f64 / 1e6,
+            min as f64 / 1e6,
+            max as f64 / 1e6,
+        );
+    }
     eprintln!(
-        "\nPeak RSS during query loop: {peak_rss:.1} MiB (+{:.1} MiB over baseline)",
+        "Peak RSS during query loop: {peak_rss:.1} MiB (+{:.1} MiB over baseline)",
         peak_rss - rss_baseline
     );
+}
+
+/// Per-IC stats returned from `run_one_ic` so `run_targets` can
+/// build a final cross-IC summary.
+struct IcSummary {
+    ic_id: u32,
+    iters: usize,
+    /// One median (in nanoseconds) per param row.
+    row_medians_ns: Vec<u128>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -465,7 +499,7 @@ fn run_one_ic<G: GraphAccess>(
     limit: usize,
     sys: &mut System,
     peak_rss: &mut f64,
-) {
+) -> IcSummary {
     let params_file_name = q
         .params_file
         .as_ref()
@@ -488,14 +522,15 @@ fn run_one_ic<G: GraphAccess>(
     );
 
     let rt = Runtime::new(graph);
+    let mut row_medians_ns: Vec<u128> = Vec::with_capacity(rows.len());
 
-    for (param_idx, row) in rows.iter().enumerate() {
+    for (row_idx, row) in rows.iter().enumerate() {
         let query_text = substitute(template, &header, row);
         let parsed = match compile_query_unchecked(&query_text) {
             Ok(parsed) => parsed,
             Err(e) => {
                 eprintln!(
-                    "  PARSE ERROR on row {param_idx} (params: {}): {e}",
+                    "  PARSE ERROR on row {row_idx} (params: {}): {e}",
                     row.join("|")
                 );
                 continue;
@@ -511,7 +546,7 @@ fn run_one_ic<G: GraphAccess>(
             samples.push(elapsed);
             last_count = result.row_count();
             println!(
-                "IC{};{};{};{param_idx};{n};{};{}",
+                "IC{};{};{};{row_idx};{n};{};{}",
                 q.id,
                 backend.label(),
                 row.join("|"),
@@ -523,36 +558,53 @@ fn run_one_ic<G: GraphAccess>(
         if cur_rss > *peak_rss {
             *peak_rss = cur_rss;
         }
-        report(q.id, param_idx, row, &samples, last_count);
+        if let Some(med) = report(q.id, row_idx, row, &samples, last_count) {
+            row_medians_ns.push(med);
+        }
+    }
+
+    IcSummary {
+        ic_id: q.id,
+        iters,
+        row_medians_ns,
     }
 }
 
-fn report(ic: u32, param_idx: usize, row: &[String], samples: &[Duration], count: usize) {
+/// Print a per-row stderr summary line and return the median sample
+/// in nanoseconds (so `run_one_ic` can build a cross-row aggregate).
+fn report(
+    ic: u32,
+    row_idx: usize,
+    row: &[String],
+    samples: &[Duration],
+    count: usize,
+) -> Option<u128> {
     let mut sorted: Vec<u128> = samples.iter().map(|d| d.as_nanos()).collect();
     sorted.sort_unstable();
     let n = sorted.len();
     if n == 0 {
-        return;
+        return None;
     }
     let row_summary = row.join("|");
     if n == 1 {
         eprintln!(
-            "  IC{ic} row#{param_idx:<3} ({row_summary}) count={count:<3} \
+            "  IC{ic} row#{row_idx:<3} ({row_summary}) count={count:<3} \
              wall={:>8.2}ms  (n=1, --iters >=3 recommended for stable median)",
             sorted[0] as f64 / 1e6,
         );
-        return;
+        return Some(sorted[0]);
     }
     let min = sorted[0];
     let max = sorted[n - 1];
     let median = sorted[n / 2];
     let mean = sorted.iter().sum::<u128>() / n as u128;
     eprintln!(
-        "  IC{ic} row#{param_idx:<3} ({row_summary}) count={count:<3} \
+        "  IC{ic} row#{row_idx:<3} ({row_summary}) count={count:<3} \
          min={:>8.2}ms  med={:>8.2}ms  mean={:>8.2}ms  max={:>8.2}ms  (n={n})",
         min as f64 / 1e6,
         median as f64 / 1e6,
         mean as f64 / 1e6,
         max as f64 / 1e6,
     );
+    Some(median)
 }

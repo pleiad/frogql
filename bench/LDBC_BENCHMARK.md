@@ -94,7 +94,7 @@ If you don't redirect, both go to your terminal interleaved.
 #### stdout — one row per `(param, iter)` measurement
 
 ```csv
-query;backend;params;param_idx;iter;result_count;elapsed_ns
+query;backend;params;row;iter;result_count;elapsed_ns
 IC2;lazy;19791209300143|1354060800000;0;0;20;7800623500
 IC2;lazy;19791209300143|1354060800000;0;1;20;9511623200
 IC2;lazy;19791209300143|1354060800000;0;2;20;7637990200
@@ -106,15 +106,15 @@ IC2;lazy;10995116278647|1346112000000;1;0;20;8418309000
 |---|---|
 | `query` | which IC ran (e.g. `IC2`) |
 | `backend` | `memory` / `lazy` / `disk` |
-| `params` | substitution-param values for this row, joined by `\|` (same separator as LDBC's param files). For IC2, that's `<personId>\|<maxDate>` |
-| `param_idx` | 0-indexed row of the LDBC param file (`interactive_<n>_param.txt`) |
-| `iter` | 0-indexed iteration of this same param row (0 to `--iters - 1`) |
+| `params` | substitution-param values for this row, joined by `\|` (same separator LDBC's param files use). For IC2, that's `<personId>\|<maxDate>` |
+| `row` | 0-indexed line of the LDBC param file (`interactive_<n>_param.txt`); same number as `row#N` in the stderr summary |
+| `iter` | 0-indexed iteration of this same row (0 to `--iters - 1`) |
 | `result_count` | how many rows the query returned (capped at `--limit`) |
 | `elapsed_ns` | wall time of one `Runtime::run_query` call, in **nanoseconds** |
 
-For `--iters 3` with 15 IC2 params, you get 45 rows. Use this stream
-when you want to compute your own statistics (medians, percentiles,
-geomean across params, etc.) — it's the raw data.
+For `--iters 3` with 15 IC2 params, you get 45 rows of CSV. Use this
+stream when you want to compute your own statistics (medians,
+percentiles, geomean across params, etc.) — it's the raw data.
 
 #### stderr — pre-computed summaries + progress
 
@@ -132,11 +132,23 @@ Peak RSS during query loop: 407.4 MiB (+398.6 MiB over baseline)
 
 Per-row breakdown:
 
-- `row#<N>` — same as `param_idx` in the CSV
+- `row#<N>` — same as the `row` column in the CSV (0-indexed line of the LDBC param file)
 - `(personId|maxDate)` in parens — the substitution-param values for this row (same as the CSV's `params` column)
 - `count=20` — `result_count`
 - `min/med/mean/max` — computed from the `--iters` measurements of this row, in milliseconds
 - `(n=3)` — sample size, here 3 because of `--iters 3`. When `n=1` the bench prints `wall=Xms` instead (with `n=1` the four stats collapse to one number, so the `min/med/mean/max` formatting would be misleading)
+
+After the last row of the last IC, the bench prints a final "done"
+summary aggregating per-IC across all rows:
+
+```
+✓ done — 1 IC(s) ran to completion
+  IC2: 15 rows × 3 iter(s) = 45 runs; across-row median 8420.34ms (range 7240.12-10380.55ms)
+Peak RSS during query loop: 407.4 MiB (+398.6 MiB over baseline)
+```
+
+This confirms the run finished cleanly (vs got killed mid-row) and
+gives the headline number — across-row median — without grepping.
 
 #### Cross-checking the two streams
 
