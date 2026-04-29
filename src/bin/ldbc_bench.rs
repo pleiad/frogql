@@ -15,7 +15,8 @@
 //!   interactive_<n>_param.txt` file.
 //! - `status = "blocked"` queries carry a `blocked_reason` and
 //!   `required_features` listing the gqlite gaps. The runner skips
-//!   them by default and prints the reason in `--show-blocked` mode.
+//!   them silently when running other ICs; `--ic blocked` prints
+//!   the inventory and exits.
 //!
 //! ## Usage
 //!
@@ -295,8 +296,10 @@ fn print_usage(prog: &str) {
          \n\
          Defaults: --ic 2  --backend lazy  --iters 3  --warmup 0  --limit 20\n\
          --warmup N runs N extra iters per row before the timed ones; their\n\
-         measurements are discarded (typically used as `--warmup 1` to absorb\n\
-         OS-page-cache cold-start on the first iter of each row).\n\
+         measurements are discarded. Empirically not needed at SF0.1 scale\n\
+         (within-row variance is general jitter, not first-iter cold cache),\n\
+         but available for parity with typecheck_bench and for larger SFs\n\
+         where the OS page cache can't hold the working set.\n\
          --csv-dir is required when --backend memory is used (the .gdb path is ignored).\n\
          --ic blocked prints the blocked-IC inventory (no bench run)."
     );
@@ -682,8 +685,11 @@ fn run_one_ic<G: GraphAccess>(
         let mut samples: Vec<Duration> = Vec::with_capacity(iters);
         let mut last_count = 0usize;
         // Warmup iters: run silently, no CSV emit, no measurement.
-        // Their purpose is to populate the OS page cache before timed
-        // iters so cold-cache cost doesn't contaminate iter 0.
+        // Empirically these don't help at SF0.1 (within-row variance
+        // here is general jitter, not first-iter cold cache — iter 0
+        // isn't systematically the slowest). The flag exists for
+        // parity with typecheck_bench and for larger SFs where the
+        // OS page cache may not hold the working set.
         for _ in 0..warmup {
             let _ = rt.run_query(&parsed, limit);
         }

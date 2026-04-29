@@ -73,6 +73,7 @@ cargo build --release --bin ldbc_bench
 | `--ic <n>\|N,M\|all\|blocked` | `2` | Which IC(s) to run; `all` = every implemented; `blocked` = inventory only |
 | `--backend memory\|lazy\|disk` | `lazy` | Which `GraphAccess` to use |
 | `--iters N` | `3` | Measured iterations per param row |
+| `--warmup N` | `0` | Extra iters per row before measurement; their times are discarded. Empirically *doesn't help* at SF0.1 — within-row variance is jitter, not cold-cache. Available for parity with typecheck_bench and larger SFs. |
 | `--limit N` | `20` | Row cap (`Runtime::run_query`'s second arg; emulates spec `LIMIT 20` until gqlite has the keyword) |
 | `--params-dir <dir>` | `bench/data/substitution_parameters-sf0.1/substitution_parameters-sf0.1` | Where the LDBC param files live |
 | `--queries-dir <dir>` | `bench/ldbc-queries` | Where the per-IC TOML files live |
@@ -123,7 +124,7 @@ them human-readably:
 
 ```
 === IC2: Recent messages by your friends (backend=lazy) ===
-Params: interactive_2_param.txt (15 rows, columns: personId, maxDate);  3 iters/param;  limit=20
+Params: interactive_2_param.txt (15 rows, columns: personId, maxDate);  0+3 iters/param (warmup+measured);  limit=20
   IC2 row#0   (19791209300143|1354060800000) count=20  min= 7637.99ms  med= 7800.62ms  mean= 8316.74ms  max= 9511.62ms  (n=3)
   IC2 row#1   (10995116278647|1346112000000) count=20  min= 7858.60ms  med= 8418.31ms  mean= 8448.11ms  max= 9067.41ms  (n=3)
   ...
@@ -170,12 +171,21 @@ When a gqlite feature lands that unblocks an IC:
 1. Edit `bench/ldbc-queries/ic<n>.toml`:
    - Change `status` from `"blocked"` to `"implemented"`
    - Add `query = """..."""`, `params_file`, `param_columns`
+   - **If any param is a string** (e.g. `firstName` in IC1, country
+     names in IC3/IC11, `tagName` in IC6), add a `param_types` array
+     with `"string"` for those columns and `"int"` for the rest. The
+     runner wraps string values in single quotes automatically; bare
+     `{<col>}` placeholders in the query template work for both types.
+     **Caveat:** gqlite's lexer has no escape syntax for `'` inside
+     string literals, so any param value containing `'` is rejected
+     at substitute time with a clear error.
    - Move `[divergences]` (if any) from `blocked_reason` prose into the
      structured table
 2. Run `./target/release/ldbc_bench bench/data/ldbc-sf0.1.gdb --ic <n>`
    to verify the query parses and returns rows.
 
-No bench code changes — the runner discovers the file at startup.
+No bench code changes — the runner discovers the file at startup,
+validates the schema, and dispatches by id.
 
 ## Backends, in one paragraph
 
