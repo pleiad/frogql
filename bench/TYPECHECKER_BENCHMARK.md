@@ -64,7 +64,7 @@ for f in $SRC/static/*.csv;  do head -50 "$f" > "$DST/static/$(basename $f)"; do
 
 # Run bench against both:
 cargo build --release --bin typecheck_bench
-./target/release/typecheck_bench --iters 30 --warmup 1 --limit 100 \
+./target/release/typecheck_bench --iters 30 --warmup 3 --limit 100 \
     bench/data/ldbc-tiny.gdb \
     bench/data/ldbc-sf0.1.gdb \
     > /tmp/tc_data.csv 2> /tmp/tc_summary.txt
@@ -120,30 +120,56 @@ are fixed at compile time but the verdict is schema-relative.
 
 ### `ldbc-tiny.gdb` (392 nodes, 295 edges, 8 node types / 10 edge types)
 
+14 cases: 7 valid / 4 empty / 2 invalid_unbound / 1 invalid_parse.
+30 iters + 3 warmup, `--limit 100`.
+
 ```
-cat              case                parse_us  elab_us   tc_us  opt_us  rt_chk_ms  rt_unchk_ms  verdict    speedup
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-valid            v_label_person          3.00     0.70    5.30    0.30      0.38         0.37  ok           39.4x
-valid            v_label_user            1.80     0.30    1.00    0.20      0.00         0.65  empty       195.8x
-valid            v_chain_knows           2.60     0.50    7.50    0.60      0.00         0.11  empty         9.8x
-valid            v_chain_wrote           2.30     0.40    2.70    0.50      0.00         0.11  empty        18.3x
-empty            e_unknown_label         1.90     0.30    1.00    0.20      0.00         0.66  empty       192.8x
-empty            e_unknown_edge_lhs      2.50     0.50    2.60    0.60      0.00         0.11  empty        17.5x
-empty            e_chained_unknown       3.00     0.70   11.10    0.90      0.00         0.10  empty         6.6x
-invalid_unbound  i_unbound               2.60     0.40   29.30    0.20      0.00         1.09  rejected     33.6x
-invalid_unbound  i_unbound_chain         2.20     0.50   61.60    0.60      0.00         0.11  both          1.7x
-invalid_parse    i_parse                 0.90       —       —       —         —            —   parse           —
+cat              case                parse_us  elab_us    tc_us  opt_us  rt_chk_ms  rt_unchk_ms  verdict    speedup
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+valid            v_label_person          2.00     0.30     2.90    0.10      0.29         0.29  ok           55.2x
+valid            v_label_user            1.80     0.20     0.90    0.20      0.00         0.56  empty       179.5x
+valid            v_chain_knows           2.30     0.40     6.80    0.60      0.00         0.10  empty         9.9x
+valid            v_chain_wrote           1.90     0.40     2.10    0.50      0.00         0.09  empty        18.8x
+valid            v_chain4                3.60     1.00    17.00    1.20      0.00         0.10  empty         4.4x
+valid            v_union_arm             6.90     1.00    49.00    1.50      0.32         0.32  ok            5.5x
+valid            v_where_eq              3.00     0.30     3.60    0.90      0.29         0.29  ok           36.8x
+empty            e_unknown_label         1.80     0.20     0.90    0.20      0.00         0.59  empty       190.3x
+empty            e_unknown_edge_lhs      2.50     0.40     2.50    0.50      0.00         0.10  empty        17.3x
+empty            e_chained_unknown       3.30     0.80    10.70    1.00      0.00         0.11  empty         6.7x
+empty            e_unknown_mid_edge      2.00     0.40     6.00    0.50      0.00         0.09  empty        10.2x
+invalid_unbound  i_unbound               5.30     1.10    35.70    0.50      0.00         1.09  rejected     25.5x
+invalid_unbound  i_unbound_chain         4.90     1.20   106.90    1.10      0.00         0.21  both          1.8x
+invalid_parse    i_parse                 0.90       —        —       —         —            —   parse           —
 ```
 
 ### `ldbc-sf0.1.gdb` (327k nodes, 1.48M edges, 11 node types / 25 edge types)
 
-*(To be re-captured with the new columns in a follow-up commit. The
-SF0.1 disk is currently busy with the LDBC IC2 bench. Previous-version
-table — same `parse_us` / `elab_us` / `tc_us` / `rt_*_ms`, but without
-`opt_us` and with the old `empty?` column instead of `verdict` —
-showed speedups of 410× to 44 800× on the same 10 cases. The relative
-ordering and orders of magnitude are not expected to move with the
-column-set change because optimize is consistently sub-microsecond.)*
+Same 14 cases. 30 iters + 3 warmup, `--limit 100`.
+
+```
+cat              case                parse_us  elab_us    tc_us  opt_us  rt_chk_ms  rt_unchk_ms  verdict    speedup
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+valid            v_label_person          9.90     2.30    16.40    1.50      12.04        12.15  ok          403.8x
+valid            v_label_user           11.40     1.90     6.90    1.60       0.00       813.41  empty     37312.4x
+valid            v_chain_knows          13.50     3.10    77.40    2.60    1093.90      1088.42  ok        11267.3x
+valid            v_chain_wrote          18.40     4.10    16.60    2.70       0.00      1176.52  empty     28146.3x
+valid            v_chain4               18.50     3.90   163.20    3.50    1134.94      1132.05  ok         5986.5x
+valid            v_union_arm            14.00     3.10   136.50    3.00    2718.64      2711.22  ok        17313.0x
+valid            v_where_eq              7.10     0.90     9.10    1.70      11.86        11.84  ok          629.7x
+empty            e_unknown_label        11.30     1.90     6.60    1.60       0.00       739.88  empty     34573.6x
+empty            e_unknown_edge_lhs     12.90     2.60    11.90    2.20       0.00       974.81  empty     32932.7x
+empty            e_chained_unknown      14.90     3.20    76.10    2.50       0.00       972.67  empty     10058.7x
+empty            e_unknown_mid_edge     13.90     2.90    30.50    2.20       0.00       985.30  empty     19905.0x
+invalid_unbound  i_unbound              15.20     3.30    74.60    1.70       0.00      1079.33  rejected  11385.4x
+invalid_unbound  i_unbound_chain        14.40     4.00   123.30    2.40       0.00       989.19  both       6864.6x
+invalid_parse    i_parse                 1.10       —        —       —         —            —    parse           —
+```
+
+Soundness check: zero violations across all 14 cases on both DBs
+(every `verdict=empty` row has matching `rt_unchk` of zero rows
+relative to the 100-row limit; rt_unchk wall time is ~hundreds of
+ms doing the doomed enumeration but result is empty). Confirms the
+typechecker isn't lying about emptiness.
 
 ### Reading these tables
 
@@ -167,22 +193,28 @@ column-set change because optimize is consistently sub-microsecond.)*
 ### Key takeaways
 
 - **Pure typechecker performance is dataset-independent and small.**
-  3-200 μs per query, regardless of data size. (Confirms: typecheck
-  cost is schema-bound, not data-bound.)
+  ~1-200 μs per query, regardless of data size. (Confirms: typecheck
+  cost is schema-bound, not data-bound.) Criterion measures the
+  same in absolute terms but with proper CIs; see the criterion
+  baseline table below.
 - **Speedup numbers are dominated by the runtime side.** On tiny,
-  speedups are 5-180x; on SF0.1, the same code paths see
-  6000-45000x speedups. The typechecker isn't 200x faster on SF0.1
-  — runtime is 200x slower.
+  speedups are 1.8-190× across the 14 cases; on SF0.1, the same code
+  paths see 400-37 000× speedups. The typechecker isn't 200× faster
+  on SF0.1 — runtime is 200× slower.
 - **The success bar holds in both regimes.** Every cell where the
   short-circuit fires shows `tc < rt_unchk`. The typechecker is
-  never slower than what it would have skipped.
+  never slower than what it would have skipped. The closest case
+  (`i_unbound_chain` on tiny: 1.8×) is still a win.
 - **Valid-query overhead is negligible.** On SF0.1 `v_chain_knows`,
-  total compile is 175 μs vs runtime 1645 ms — typecheck adds
-  0.01% to wall time.
+  total compile is ~96 μs (parse 13.5 + elab 3.1 + tc 77.4 + opt 2.6)
+  vs runtime 1088 ms — typecheck adds **0.009%** to wall time.
 - **Invalid-unbound case carries a correctness win.** On both DBs,
-  the unchecked runtime returns 100 rows of `"NULL"` (the user's
+  the unchecked runtime returns rows of `"NULL"` (the user's
   earlier bug report). The typechecker rejects in microseconds with
   a precise error.
+- **Soundness check passes.** Across all 14 cases × 2 DBs × 30 iters,
+  no `verdict=empty` row had a non-zero `rt_unchk` row count. The
+  typechecker's emptiness verdict is sound on this case set.
 
 ## Honest critique of this bench
 
@@ -226,15 +258,22 @@ Things this bench gets right:
 
 Things this bench *doesn't* address (acknowledged):
 
-- **(a) Cold vs warm runtime is mixed in.** First iter pays page-cache
-  warmup; bench takes a `--warmup 1` discard but only one iter is
-  warm-up. Variance on the runtime side is real (LDBC bench saw
-  38-106s spread on a single param, ~3x noise floor). *Bench-side
-  fixable but expensive — multi-iter warmup multiplies bench wall
-  time linearly. Not pursued.*
-- **(b) Few queries per category.** 4 valid, 3 empty, 2 unbound,
-  1 parse. Per-category averages aren't statistically robust; treat
-  each cell as one data point, not a population estimate.
+- **(a) Cold vs warm runtime — partially addressed.** First iter
+  pays page-cache warmup. Recommended `--warmup 3` (in the Setup
+  block above) discards the first three iters before sampling, so
+  the bottom of the cold-warm distribution is dropped. Default
+  remains `--warmup 1` to keep the bench cheap to run (raising the
+  default would multiply bench wall time on SF0.1 from ~3 min to
+  ~9 min). Variance on the runtime side is still real (LDBC bench
+  saw 38-106s spread on a single param, ~3x noise floor); for
+  microsecond-scale typecheck claims use `benches/typecheck.rs`.
+- **(b) Case set — expanded.** Now 7 valid / 4 empty / 2 unbound /
+  1 parse = 14 cases total (was 10). Added: deeper chain
+  (`v_chain4`), path-pattern union (`v_union_arm`, mirrors LDBC
+  IC2's Comment|Post arm), WHERE-equality (`v_where_eq`), and
+  edge-label-not-in-schema in chain middle (`e_unknown_mid_edge`).
+  Per-category averages are still not statistically robust at this
+  N; treat each cell as one data point.
 - **(c) Single inferred schema per dataset.** Active GRAPH TYPE is
   the auto-inferred DEFAULT on both datasets. A custom restrictive
   GRAPH TYPE would be more interesting because some valid-looking
@@ -311,59 +350,81 @@ query string, so `parse` is parse-only, `elaborate` is parse+elab,
 `typecheck` is parse+elab+tc, `compile_full` is parse+elab+tc+opt.
 Per-phase costs are `group(N) − group(N-1)`.
 
+14 cases, all four groups (note: `invalid_parse` is in `parse` only — it can't elaborate).
+
 | group | case | time (µs) |
 |---|---|---|
 | parse | valid_label_person | [1.56 1.61 1.67] |
 | parse | valid_label_user | [1.58 1.62 1.66] |
 | parse | valid_chain_knows | [2.75 2.83 2.90] |
-| parse | valid_chain_wrote | [2.92 2.99 3.06] |
-| parse | empty_unknown_label | [1.74 1.82 1.90] |
-| parse | empty_unknown_edge_lhs | [2.82 2.90 2.98] |
-| parse | empty_chained_unknown | [4.17 4.28 4.39] |
-| parse | invalid_unbound | [1.46 1.50 1.54] |
-| parse | invalid_unbound_chain | [2.35 2.44 2.54] |
-| parse | invalid_parse | [1.15 1.18 1.21] |
-| elaborate | valid_label_person | [1.86 1.91 1.96] |
-| elaborate | valid_label_user | [1.84 1.89 1.94] |
-| elaborate | valid_chain_knows | [3.95 4.04 4.11] |
-| elaborate | valid_chain_wrote | [3.83 3.92 4.00] |
-| elaborate | empty_unknown_label | [1.90 1.94 1.98] |
-| elaborate | empty_unknown_edge_lhs | [3.35 3.44 3.54] |
-| elaborate | empty_chained_unknown | [4.92 5.07 5.24] |
-| elaborate | invalid_unbound | [1.85 1.91 1.96] |
-| elaborate | invalid_unbound_chain | [3.04 3.14 3.22] |
-| typecheck | valid_label_person | [6.99 7.62 8.32] |
-| typecheck | valid_label_user | [8.71 9.09 9.49] |
-| typecheck | valid_chain_knows | [12.64 12.91 13.22] |
-| typecheck | valid_chain_wrote | [12.67 13.97 15.42] |
-| typecheck | empty_unknown_label | [3.90 4.00 4.11] |
-| typecheck | empty_unknown_edge_lhs | [9.89 10.21 10.59] |
-| typecheck | empty_chained_unknown | [20.44 20.92 21.34] |
-| typecheck | invalid_unbound | [3.81 3.89 3.98] |
-| typecheck | invalid_unbound_chain | [11.37 11.80 12.27] |
-| compile_full | valid_label_person | [4.52 4.67 4.83] |
-| compile_full | valid_label_user | [4.66 4.87 5.07] |
-| compile_full | valid_chain_knows | [13.25 13.69 14.08] |
-| compile_full | valid_chain_wrote | [10.09 10.45 10.81] |
-| compile_full | empty_unknown_label | [3.67 3.72 3.79] |
-| compile_full | empty_unknown_edge_lhs | [13.00 13.32 13.58] |
-| compile_full | empty_chained_unknown | [19.67 20.29 20.94] |
-| compile_full | invalid_unbound | [3.54 3.61 3.68] |
-| compile_full | invalid_unbound_chain | [10.81 11.23 11.71] |
+| parse | valid_chain_wrote | [2.08 2.13 2.20] |
+| parse | valid_chain4 | [3.74 3.80 3.86] |
+| parse | valid_union_arm | [3.38 3.40 3.42] |
+| parse | valid_where_eq | [1.83 1.84 1.86] |
+| parse | empty_unknown_label | [1.17 1.19 1.23] |
+| parse | empty_unknown_edge_lhs | [2.04 2.07 2.09] |
+| parse | empty_chained_unknown | [2.88 2.94 3.03] |
+| parse | empty_unknown_mid_edge | [2.16 2.23 2.32] |
+| parse | invalid_unbound | [0.98 1.00 1.02] |
+| parse | invalid_unbound_chain | [1.71 1.75 1.79] |
+| parse | invalid_parse | [0.95 1.03 1.12] |
+| elaborate | valid_label_person | [1.43 1.47 1.52] |
+| elaborate | valid_label_user | [1.37 1.41 1.45] |
+| elaborate | valid_chain_knows | [2.61 2.65 2.69] |
+| elaborate | valid_chain_wrote | [2.48 2.58 2.69] |
+| elaborate | valid_chain4 | [4.81 4.95 5.11] |
+| elaborate | valid_union_arm | [4.43 4.57 4.74] |
+| elaborate | valid_where_eq | [2.30 2.34 2.38] |
+| elaborate | empty_unknown_label | [1.43 1.46 1.49] |
+| elaborate | empty_unknown_edge_lhs | [2.78 2.86 2.96] |
+| elaborate | empty_chained_unknown | [3.66 3.73 3.80] |
+| elaborate | empty_unknown_mid_edge | [2.55 2.65 2.75] |
+| elaborate | invalid_unbound | [1.12 1.18 1.24] |
+| elaborate | invalid_unbound_chain | [2.07 2.12 2.17] |
+| typecheck | valid_label_person | [3.32 3.42 3.50] |
+| typecheck | valid_label_user | [3.04 3.16 3.30] |
+| typecheck | valid_chain_knows | [7.84 7.92 8.01] |
+| typecheck | valid_chain_wrote | [6.15 6.21 6.27] |
+| typecheck | valid_chain4 | [19.09 19.50 20.03] |
+| typecheck | valid_union_arm | [11.97 12.10 12.23] |
+| typecheck | valid_where_eq | [2.97 3.01 3.04] |
+| typecheck | empty_unknown_label | [2.18 2.24 2.30] |
+| typecheck | empty_unknown_edge_lhs | [6.14 6.20 6.27] |
+| typecheck | empty_chained_unknown | [11.55 11.64 11.74] |
+| typecheck | empty_unknown_mid_edge | [6.60 6.67 6.75] |
+| typecheck | invalid_unbound | [1.83 1.85 1.87] |
+| typecheck | invalid_unbound_chain | [6.26 6.30 6.35] |
+| compile_full | valid_label_person | [2.28 2.31 2.33] |
+| compile_full | valid_label_user | [2.25 2.26 2.28] |
+| compile_full | valid_chain_knows | [8.42 8.65 8.93] |
+| compile_full | valid_chain_wrote | [7.52 7.97 8.41] |
+| compile_full | valid_chain4 | [20.41 20.65 20.91] |
+| compile_full | valid_union_arm | [13.25 13.37 13.50] |
+| compile_full | valid_where_eq | [3.95 3.98 4.00] |
+| compile_full | empty_unknown_label | [2.23 2.25 2.27] |
+| compile_full | empty_unknown_edge_lhs | [6.67 6.75 6.83] |
+| compile_full | empty_chained_unknown | [12.56 12.69 12.84] |
+| compile_full | empty_unknown_mid_edge | [6.81 6.99 7.23] |
+| compile_full | invalid_unbound | [1.94 1.96 1.99] |
+| compile_full | invalid_unbound_chain | [6.79 6.84 6.90] |
 
 Quick per-phase reads on `valid_chain_knows`:
 
 | phase | calculation | µs |
 |---|---|---|
 | parse | direct | 2.83 |
-| elaborate (alone) | 4.04 − 2.83 | 1.21 |
-| typecheck (alone) | 12.91 − 4.04 | 8.87 |
-| optimize (alone) | 13.69 − 12.91 | 0.78 |
+| typecheck arm (alone) | typecheck − parse | ≈5.09 |
+| optimize (alone) | compile_full − typecheck | ≈0.73 |
+
+(Inter-group differences are subject to compiler inlining and
+order-of-execution effects; for accurate per-phase numbers use the
+CSV bench's separate timing regions. Read criterion at the
+`compile_full` level: ~8.65 µs total end-to-end compile.)
 
 Total compile (parse+elab+tc+opt) for the `valid_chain_knows` case:
-**13.69 µs**. Compared to the runtime's 1645 ms on SF0.1, compile is
-**0.0008%** of wall time. The "typechecker overhead is negligible"
-claim survives proper statistical handling.
+**8.65 µs**. Compared to the runtime's 1088 ms on SF0.1 (table above),
+compile is **0.0008%** of wall time. The "typechecker overhead is
+negligible" claim survives proper statistical handling.
 
 The full per-case data including outlier breakdowns is captured
 under `target/criterion/` after each `cargo bench` run; HTML reports

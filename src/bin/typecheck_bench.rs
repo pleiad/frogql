@@ -79,6 +79,30 @@ const CASES: &[Case] = &[
         id: "v_chain_wrote",
         query: "MATCH (u: User)-[:WROTE]->(r: Review) RETURN r.stars",
     },
+    // Deeper chain — shows how typecheck cost scales with pattern depth.
+    Case {
+        category: Category::Valid,
+        id: "v_chain4",
+        query: "MATCH (a: Person)~[:knows]~(b: Person)\
+                ~[:knows]~(c: Person)~[:knows]~(d: Person) \
+                RETURN d.firstName",
+    },
+    // Union arm — gqlite-specific path-pattern alternation. Same shape
+    // as the LDBC IC2 message-union (Comment | Post).
+    Case {
+        category: Category::Valid,
+        id: "v_union_arm",
+        query: "MATCH (p: Person)<-[:hasCreator]-(c: Comment) | \
+                (p: Person)<-[:hasCreator]-(c: Post) \
+                RETURN c.id",
+    },
+    // Predicate via WHERE — exercises typechecker's WHERE-arm path
+    // against a typed binding.
+    Case {
+        category: Category::Valid,
+        id: "v_where_eq",
+        query: "MATCH (p: Person) WHERE p.id = 933 RETURN p.firstName",
+    },
     // --- Guaranteed empty by typing (label not in any real schema) ---
     Case {
         category: Category::EmptyByTyping,
@@ -95,6 +119,13 @@ const CASES: &[Case] = &[
         id: "e_chained_unknown",
         query: "MATCH (a: Person)~[:knows]~(b: Person)-[:e]->(c: Wagumi) \
                 RETURN c.name",
+    },
+    // Edge-label-not-in-schema in the middle of a chain — exercises
+    // the empty-by-typing detection on intermediate edges.
+    Case {
+        category: Category::EmptyByTyping,
+        id: "e_unknown_mid_edge",
+        query: "MATCH (a: Person)-[:noSuchEdge]->(b: Person) RETURN b.firstName",
     },
     // --- Invalid: unbound variable in RETURN ---
     Case {

@@ -48,6 +48,20 @@ const CASES: &[(&str, &str)] = &[
         "valid_chain_wrote",
         "MATCH (u: User)-[:WROTE]->(r: Review) RETURN r.stars",
     ),
+    (
+        "valid_chain4",
+        "MATCH (a: Person)~[:knows]~(b: Person)~[:knows]~(c: Person)~[:knows]~(d: Person) \
+         RETURN d.firstName",
+    ),
+    (
+        "valid_union_arm",
+        "MATCH (p: Person)<-[:hasCreator]-(c: Comment) | \
+         (p: Person)<-[:hasCreator]-(c: Post) RETURN c.id",
+    ),
+    (
+        "valid_where_eq",
+        "MATCH (p: Person) WHERE p.id = 933 RETURN p.firstName",
+    ),
     ("empty_unknown_label", "MATCH (x: Wagumi) RETURN x.name"),
     (
         "empty_unknown_edge_lhs",
@@ -56,6 +70,10 @@ const CASES: &[(&str, &str)] = &[
     (
         "empty_chained_unknown",
         "MATCH (a: Person)~[:knows]~(b: Person)-[:e]->(c: Wagumi) RETURN c.name",
+    ),
+    (
+        "empty_unknown_mid_edge",
+        "MATCH (a: Person)-[:noSuchEdge]->(b: Person) RETURN b.firstName",
     ),
     ("invalid_unbound", "MATCH (p) RETURN q.name"),
     ("invalid_unbound_chain", "MATCH (p)~[:e]~(f) RETURN q.name"),
