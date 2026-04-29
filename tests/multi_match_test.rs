@@ -10,8 +10,10 @@ use std::path::Path;
 
 use gqlrust::elaborate::elaborate_query;
 use gqlrust::model::graph::Graph;
+use gqlrust::model::value::Value;
 use gqlrust::parser;
 use gqlrust::runtime::engine::Runtime;
+use gqlrust::runtime::result::QueryResult;
 use gqlrust::syntax::path_pattern::PathPattern;
 use gqlrust::syntax::query::{MatchStatement, Query};
 use gqlrust::typing::checker::Typechecker;
@@ -210,6 +212,86 @@ fn runtime_constraining_match_order_independent() {
     let n_reverse = runtime.run(&reverse.collapsed_pattern()).rows.len();
     assert_eq!(n_forward, n_reverse);
     assert_eq!(n_forward, 4);
+}
+
+// ===== End-to-end: multi-MATCH + shared var + RETURN =====
+//
+// By the time RETURN runs, the natural join on shared variables has
+// already happened in the runtime (collapsed pattern → IntermediateResult
+// → one binding per variable per row). RETURN just projects each row's
+// Assignment, the same code path used for single-MATCH. These tests pin
+// that the projected values are exactly what we expect — no double
+// counting from the cartesian product, no NULL on shared bindings.
+
+fn run_compiled(g: &Graph, q: &str) -> Vec<Vec<Value>> {
+    let rt = Runtime::new(g);
+    let query = gqlrust::compile_query(q).unwrap();
+    match rt.run_query(&query, 0) {
+        QueryResult::Projected(rs) => rs,
+        other => panic!("expected Projected, got {other:?}"),
+    }
+}
+
+/// Multi-MATCH with shared `x` projects each unified value once, not the
+/// 4×5=20 cartesian. Returns the four Account owners.
+#[test]
+fn return_shared_var_projects_natural_join_values() {
+    let g = fraud_graph();
+    let rows = run_compiled(&g, "MATCH (x: Account) MATCH (x) RETURN x.owner");
+    assert_eq!(rows.len(), 4);
+
+    let mut owners: Vec<String> = rows
+        .into_iter()
+        .map(|r| match &r[0] {
+            Value::Str(s) => s.clone(),
+            v => panic!("expected string owner, got {v:?}"),
+        })
+        .collect();
+    owners.sort();
+    assert_eq!(owners, vec!["Aretha", "Jay", "Mike", "Scott"]);
+}
+
+/// Multi-MATCH binds two distinct variables, each from its own clause;
+/// RETURN projects both. Row count is the cartesian (5×4=20 because all
+/// nodes paired with each Account), values come from independent vars.
+#[test]
+fn return_disjoint_vars_projects_both() {
+    let g = fraud_graph();
+    let rows = run_compiled(&g, "MATCH (x) MATCH (y: Account) RETURN x.owner, y.owner");
+    assert_eq!(rows.len(), 5 * 4);
+    for row in &rows {
+        assert_eq!(row.len(), 2);
+        // Each row carries an x-owner and a y-owner; both are strings.
+        assert!(matches!(&row[0], Value::Str(_)));
+        assert!(matches!(&row[1], Value::Str(_)));
+    }
+}
+
+/// `MATCH (x: Account) MATCH (x) RETURN x.owner` ≡ `MATCH (x: Account)
+/// RETURN x.owner` in projected output. The second `MATCH (x)` is a
+/// no-op for results — it only re-asserts that x exists.
+#[test]
+fn return_redundant_match_does_not_alter_projection() {
+    let g = fraud_graph();
+    let with_redundant = run_compiled(&g, "MATCH (x: Account) MATCH (x) RETURN x.owner");
+    let without = run_compiled(&g, "MATCH (x: Account) RETURN x.owner");
+    let mut a: Vec<_> = with_redundant
+        .into_iter()
+        .map(|r| match &r[0] {
+            Value::Str(s) => s.clone(),
+            _ => panic!(),
+        })
+        .collect();
+    let mut b: Vec<_> = without
+        .into_iter()
+        .map(|r| match &r[0] {
+            Value::Str(s) => s.clone(),
+            _ => panic!(),
+        })
+        .collect();
+    a.sort();
+    b.sort();
+    assert_eq!(a, b);
 }
 
 /// `optimize_query` is private; round-trip via `compile_query_unchecked`
