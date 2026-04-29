@@ -5,10 +5,23 @@
 //! queries that gqlite supports today, measuring runtime per query.
 //!
 //! Usage:
-//!     ldbc_bench <db.gdb> [--iters N] [--limit N]
+//!     ldbc_bench <db.gdb> [--backend lazy|disk] [--iters N] [--limit N]
+//!     ldbc_bench placeholder --backend memory --csv-dir <path> [--iters N]
 //!
-//! The DB is built from the LDBC SF0.1 CsvBasic dataset via:
+//! The .gdb is built from the LDBC SF0.1 CsvBasic dataset via:
 //!     gqlite db.gdb --import-ldbc-csv <path-to-extracted-dataset>
+//!
+//! Three backends supported (per CLAUDE.md `GraphAccess` trait):
+//!   - **memory** — `Graph` from `csv_loader::load_from_ldbc_csv_dir`,
+//!     everything in RAM. Needs `--csv-dir`; the .gdb path is ignored.
+//!   - **lazy** — `LazyGraphStore::open(.gdb)`, topology + label
+//!     index in RAM, props via LRU page cache. Default.
+//!   - **disk** — `DiskGraphStore::open(.gdb)`, topology in RAM,
+//!     everything else from disk per access.
+//!
+//! Each backend run reports peak RSS via `sysinfo`, so the bench
+//! produces both speed (wall time per param) and RAM (RSS delta
+//! over baseline) — the speed-vs-memory tradeoff per backend.
 //!
 //! Per LDBC methodology, each IC is parameterized — we sweep a small
 //! curated parameter set per query and report min / median / max wall
@@ -83,9 +96,58 @@ use std::env;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+
 use gqlrust::compile_query_unchecked;
+use gqlrust::model::csv_loader;
+use gqlrust::model::graph_access::GraphAccess;
 use gqlrust::runtime::engine::Runtime;
+use gqlrust::store::disk::DiskGraphStore;
 use gqlrust::store::lazy::LazyGraphStore;
+
+/// Read current process resident-set size in MiB. Used to compare
+/// per-backend RAM cost (Memory loads everything; Lazy keeps topology
+/// + label index + LRU page cache; Disk keeps just topology). The
+/// number is the OS-reported RSS (working set on Windows), which
+/// includes Rust allocator overhead and any incidental heap from the
+/// bench harness — so the per-backend deltas are more meaningful than
+/// absolute values.
+fn rss_mb(sys: &mut System) -> f64 {
+    let pid = Pid::from_u32(std::process::id());
+    sys.refresh_process_specifics(pid, ProcessRefreshKind::new().with_memory());
+    sys.process(pid)
+        .map(|p| p.memory() as f64 / (1024.0 * 1024.0))
+        .unwrap_or(0.0)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Backend {
+    /// `Graph` — everything in RAM, loaded from LDBC CSV directory.
+    Memory,
+    /// `LazyGraphStore` — topology + label index in RAM, props lazily
+    /// from disk via LRU page cache. Default.
+    Lazy,
+    /// `DiskGraphStore` — topology in RAM, everything else from disk.
+    Disk,
+}
+
+impl Backend {
+    fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "memory" | "mem" => Some(Backend::Memory),
+            "lazy" => Some(Backend::Lazy),
+            "disk" => Some(Backend::Disk),
+            _ => None,
+        }
+    }
+    fn label(&self) -> &'static str {
+        match self {
+            Backend::Memory => "memory",
+            Backend::Lazy => "lazy",
+            Backend::Disk => "disk",
+        }
+    }
+}
 
 /// IC2 substitution parameters from LDBC's official
 /// `substitution_parameters-sf0.1` archive (file
@@ -120,13 +182,20 @@ const PARAMS: &[(i64, &str, i64)] = &[
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <db.gdb> [--iters N] [--limit N]", args[0]);
+        eprintln!(
+            "Usage: {} <db.gdb> [--csv-dir <dir>] [--backend memory|lazy|disk] [--iters N] [--limit N]",
+            args[0]
+        );
+        eprintln!("  --csv-dir is required when --backend memory is used");
+        eprintln!("  default backend is lazy");
         std::process::exit(1);
     }
-    let db_path = &args[1];
+    let db_path = args[1].clone();
 
-    let mut iters: usize = 5;
+    let mut iters: usize = 3;
     let mut limit: usize = 20; // matches IC2's `LIMIT 20`
+    let mut backend = Backend::Lazy;
+    let mut csv_dir: Option<String> = None;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -138,6 +207,14 @@ fn main() {
                 limit = args[i + 1].parse().expect("invalid limit");
                 i += 2;
             }
+            "--backend" => {
+                backend = Backend::parse(&args[i + 1]).expect("backend must be memory|lazy|disk");
+                i += 2;
+            }
+            "--csv-dir" => {
+                csv_dir = Some(args[i + 1].clone());
+                i += 2;
+            }
             other => {
                 eprintln!("unknown arg: {other}");
                 std::process::exit(1);
@@ -145,32 +222,98 @@ fn main() {
         }
     }
 
-    eprintln!("Loading {db_path}...");
-    let t0 = Instant::now();
-    let store = LazyGraphStore::open(Path::new(db_path)).expect("open .gdb");
-    eprintln!(
-        "  loaded {} nodes / {} edges in {:.2}s",
-        store.node_count(),
-        store.edge_count(),
-        t0.elapsed().as_secs_f64()
+    let mut sys = System::new_with_specifics(
+        RefreshKind::new().with_processes(ProcessRefreshKind::new().with_memory()),
     );
-    let rt = Runtime::new(&store);
+    let rss_baseline = rss_mb(&mut sys);
+    eprintln!("RSS baseline: {rss_baseline:.1} MiB");
 
-    eprintln!("\n=== IC2: Recent messages by friends ===");
+    match backend {
+        Backend::Memory => {
+            let dir = csv_dir.expect("--csv-dir required for memory backend");
+            eprintln!("Loading LDBC CSV from {dir} into Graph (in-memory)...");
+            let t0 = Instant::now();
+            let g = csv_loader::load_from_ldbc_csv_dir(Path::new(&dir))
+                .expect("load_from_ldbc_csv_dir failed");
+            let load_s = t0.elapsed().as_secs_f64();
+            let rss_loaded = rss_mb(&mut sys);
+            eprintln!(
+                "  loaded {} nodes / {} edges in {:.2}s",
+                g.node_count(),
+                g.edge_count(),
+                load_s
+            );
+            eprintln!(
+                "  RSS after load: {:.1} MiB (+{:.1} MiB)",
+                rss_loaded,
+                rss_loaded - rss_baseline
+            );
+            run_bench(&g, backend, iters, limit, &mut sys, rss_baseline);
+        }
+        Backend::Lazy => {
+            eprintln!("Loading {db_path} (LazyGraphStore)...");
+            let t0 = Instant::now();
+            let store = LazyGraphStore::open(Path::new(&db_path)).expect("open .gdb");
+            let load_s = t0.elapsed().as_secs_f64();
+            let rss_loaded = rss_mb(&mut sys);
+            eprintln!(
+                "  loaded {} nodes / {} edges in {:.2}s",
+                store.node_count(),
+                store.edge_count(),
+                load_s
+            );
+            eprintln!(
+                "  RSS after open: {:.1} MiB (+{:.1} MiB)",
+                rss_loaded,
+                rss_loaded - rss_baseline
+            );
+            run_bench(&store, backend, iters, limit, &mut sys, rss_baseline);
+        }
+        Backend::Disk => {
+            eprintln!("Loading {db_path} (DiskGraphStore)...");
+            let t0 = Instant::now();
+            let store = DiskGraphStore::open(Path::new(&db_path)).expect("open .gdb");
+            let load_s = t0.elapsed().as_secs_f64();
+            let rss_loaded = rss_mb(&mut sys);
+            // DiskGraphStore doesn't expose public node/edge counts the
+            // way LazyGraphStore does; use the trait. One-time cost.
+            let n_nodes = store.nodes().len();
+            let n_edges = store.edges_directed().len() + store.edges_undirected().len();
+            eprintln!("  loaded {n_nodes} nodes / {n_edges} edges in {load_s:.2}s");
+            eprintln!(
+                "  RSS after open: {:.1} MiB (+{:.1} MiB)",
+                rss_loaded,
+                rss_loaded - rss_baseline
+            );
+            run_bench(&store, backend, iters, limit, &mut sys, rss_baseline);
+        }
+    }
+}
+
+fn run_bench<G: GraphAccess>(
+    graph: &G,
+    backend: Backend,
+    iters: usize,
+    limit: usize,
+    sys: &mut System,
+    rss_baseline: f64,
+) {
+    let rt = Runtime::new(graph);
+
+    eprintln!(
+        "\n=== IC2: Recent messages by friends (backend={}) ===",
+        backend.label()
+    );
     eprintln!(
         "Params from official LDBC interactive_2_param.txt (15 entries); \
          {iters} iters/param; limit={limit}"
     );
-    println!("query;person_id;person_name;max_date;iter;result_count;elapsed_ns");
+    println!("query;backend;person_id;person_name;max_date;iter;result_count;elapsed_ns");
+
+    let mut peak_rss = rss_baseline;
 
     for (person_id, person_name, max_date) in PARAMS {
-        // Path-pattern union covers spec's `(message:Message)` =
-        // `Comment ∪ Post`. `c` binds to whichever arm matched.
         let q = format!(
-            // The `(p: Person {{id: <n>}})` shorthand is the LDBC
-            // spec's exact syntax. gqlite parses it and elaborates
-            // it to `(p: Person) WHERE p.id = <n>`. The maxDate
-            // stays in WHERE since it's a `<=`, not an equality.
             "MATCH (p: Person {{id: {person_id}}})~[:knows]~(friend: Person)\
              <-[:hasCreator]-(c: Comment) | \
              (p: Person {{id: {person_id}}})~[:knows]~(friend: Person)\
@@ -196,13 +339,23 @@ fn main() {
             samples.push(elapsed);
             last_count = result.row_count();
             println!(
-                "IC2;{person_id};{person_name};{max_date};{n};{};{}",
+                "IC2;{};{person_id};{person_name};{max_date};{n};{};{}",
+                backend.label(),
                 last_count,
                 elapsed.as_nanos()
             );
         }
+        let cur_rss = rss_mb(sys);
+        if cur_rss > peak_rss {
+            peak_rss = cur_rss;
+        }
         report("IC2", *person_id, person_name, &samples, last_count);
     }
+
+    eprintln!(
+        "\nPeak RSS during query loop: {peak_rss:.1} MiB (+{:.1} MiB over baseline)",
+        peak_rss - rss_baseline
+    );
 }
 
 fn report(query: &str, person_id: i64, person_name: &str, samples: &[Duration], count: usize) {
