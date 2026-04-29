@@ -15,6 +15,8 @@ use gqlrust::runtime::engine::Runtime;
 use gqlrust::syntax::path_pattern::PathPattern;
 use gqlrust::syntax::query::{MatchStatement, Query};
 use gqlrust::typing::checker::Typechecker;
+use gqlrust::typing::label_type::LabelType;
+use gqlrust::typing::variable_type::VariableType;
 
 fn fraud_graph() -> Graph {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
@@ -97,6 +99,117 @@ fn typecheck_accepts_shared_var_across_matches() {
     let r = tc.check_query(&q);
     assert!(r.ok, "errors: {:?}", tc.errors);
     assert!(tc.errors.is_empty());
+}
+
+// ===== Meet semantics on shared variables across matches =====
+//
+// `Typechecker::check_query` walks `q.collapsed_pattern()`. The Concat/Join
+// arm calls `TypeEnvironment::meet` on the two sub-environments, which for
+// every shared variable computes `VariableType::meet`. These tests pin the
+// shape of the resulting env, not just the absence of errors — they are the
+// thing the prof asked for.
+
+fn extract_label(t: &VariableType) -> Option<&LabelType> {
+    match t {
+        VariableType::Node(desc) => Some(&desc.label),
+        _ => None,
+    }
+}
+
+/// Compatible labels collapse to the more specific one. `(x: Account)`
+/// meeting `(x)` (Star label) refines `x` to `Label("Account")`.
+#[test]
+fn meet_shared_var_takes_label_intersection() {
+    let q = multi_match_query(&["(x: Account)", "(x)"]);
+    let mut tc = Typechecker::untyped();
+    let r = tc.check_query(&q);
+    assert!(r.ok, "errors: {:?}", tc.errors);
+
+    let x_ty = r.env.get("x").expect("x must be bound");
+    let label = extract_label(x_ty).expect("x must be a Node");
+    assert!(
+        matches!(label, LabelType::Label(s) if s == "Account"),
+        "x label should be Account after meet, got {label:?}"
+    );
+}
+
+/// Disjoint variables across matches are unaffected by the meet. Each
+/// keeps its own type; `meet` only touches keys present in both envs.
+#[test]
+fn meet_disjoint_vars_each_keep_own_type() {
+    let q = multi_match_query(&["(x: Account)", "(y: Person)"]);
+    let mut tc = Typechecker::untyped();
+    let r = tc.check_query(&q);
+    assert!(r.ok, "errors: {:?}", tc.errors);
+
+    let x_label = extract_label(r.env.get("x").unwrap()).unwrap();
+    let y_label = extract_label(r.env.get("y").unwrap()).unwrap();
+    assert!(matches!(x_label, LabelType::Label(s) if s == "Account"));
+    assert!(matches!(y_label, LabelType::Label(s) if s == "Person"));
+}
+
+/// Three-way chain converges via left-associative meet:
+/// `meet(meet(Account, Star), Account) = Account`.
+#[test]
+fn meet_three_way_match_chain_converges() {
+    let q = multi_match_query(&["(x: Account)", "(x)", "(x: Account)"]);
+    let mut tc = Typechecker::untyped();
+    let r = tc.check_query(&q);
+    assert!(r.ok, "errors: {:?}", tc.errors);
+
+    let x_label = extract_label(r.env.get("x").unwrap()).unwrap();
+    assert!(matches!(x_label, LabelType::Label(s) if s == "Account"));
+}
+
+/// Property filters across matches don't affect the env binding shape
+/// (they get hoisted to `Filter` wrappers by elaborate, not into the
+/// descriptor's PropertyType). What matters is that the meet on the
+/// shared var still goes through cleanly without collapsing to Zero.
+#[test]
+fn meet_shared_var_with_property_filters_does_not_collapse() {
+    let q = multi_match_query(&[
+        "(x: Account {owner: 'Aretha'})",
+        "(x: Account {isBlocked: false})",
+    ]);
+    let mut tc = Typechecker::untyped();
+    let r = tc.check_query(&q);
+    assert!(r.ok, "errors: {:?}", tc.errors);
+
+    let x_ty = r.env.get("x").expect("x must be bound");
+    assert!(!x_ty.is_empty(), "meet must not collapse x to Zero");
+    let label = extract_label(x_ty).expect("x must be a Node");
+    assert!(matches!(label, LabelType::Label(s) if s == "Account"));
+}
+
+// ===== Runtime: shared-var natural join, beyond the 2-way case =====
+
+/// Three-way shared `x` with one constraining clause: each MATCH that
+/// further restricts `x` only filters rows. Final count is the number of
+/// Account nodes (4), regardless of how many free `(x)` matches follow.
+#[test]
+fn runtime_three_way_shared_var_natural_join() {
+    let g = fraud_graph();
+    let runtime = Runtime::new(&g);
+    let q = multi_match_query(&["(x: Account)", "(x)", "(x)"]);
+    let rows = runtime.run(&q.collapsed_pattern()).rows.len();
+    assert_eq!(rows, 4);
+}
+
+/// Constraining match comes second: `MATCH (x) MATCH (x: Account)` yields
+/// the same row count as the reverse order. Natural join is commutative
+/// over Simple matches, so order should not matter.
+#[test]
+fn runtime_constraining_match_order_independent() {
+    let g = fraud_graph();
+    let runtime = Runtime::new(&g);
+
+    let forward = multi_match_query(&["(x: Account)", "(x)"]);
+    let reverse = multi_match_query(&["(x)", "(x: Account)"]);
+
+    let n_forward = runtime.run(&forward.collapsed_pattern()).rows.len();
+    let n_reverse = runtime.run(&reverse.collapsed_pattern()).rows.len();
+    assert_eq!(n_forward, n_reverse);
+    assert_eq!(n_forward, 4);
 }
 
 /// `optimize_query` is private; round-trip via `compile_query_unchecked`
