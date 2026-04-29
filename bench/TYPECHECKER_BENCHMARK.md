@@ -105,48 +105,45 @@ needs both, which is why the bench takes multiple `--db` arguments.
 
 ## Results (multi-DB, 30 iters + 1 warmup, limit=100)
 
+The `verdict` column is the typechecker's decision:
+
+- `ok` — typecheck passed, statically non-empty
+- `empty` — typecheck passed but ⊥ in path/env (rules.md §10) — runtime short-circuits
+- `rejected` — typecheck error (free var, type mismatch) — runtime short-circuits
+- `both` — `empty` and `rejected` simultaneously (legal: e.g. free var in a pattern that's also unsatisfiable)
+- `parse` — parse error before typecheck (rt_chk and rt_unchk also skipped)
+
+Some `valid`-categorized cases come back `empty` against a schema that
+doesn't have the right labels (e.g. `v_label_user` against an LDBC-only
+schema where `User` doesn't exist). That's expected: the case categories
+are fixed at compile time but the verdict is schema-relative.
+
 ### `ldbc-tiny.gdb` (392 nodes, 295 edges, 8 node types / 10 edge types)
 
 ```
-cat              case               parse_us  elab_us   tc_us  rt_chk_ms  rt_unchk_ms  empty?  speedup
-─────────────────────────────────────────────────────────────────────────────────────────────────────────
-valid            v_label_person       11.70     2.30    18.50      0.56         0.53     no    16.3x
-valid            v_label_user          6.40     1.10     3.80      0.00         0.66    yes    58.1x  ◀
-valid            v_chain_knows         3.10     0.60    10.20      0.00         0.14    yes    10.2x  ◀
-valid            v_chain_wrote         2.60     0.70     3.60      0.00         0.10    yes    14.8x  ◀
-empty            e_unknown_label       2.80     0.30     1.10      0.00         0.73    yes   174.4x
-empty            e_unknown_edge_lhs    5.80     1.30     7.40      0.00         0.22    yes    15.4x
-empty            e_chained_unknown     9.40     1.90    31.40      0.00         0.22    yes     5.2x
-invalid_unbound  i_unbound             6.00     1.20    33.70      0.00         1.04     no    25.5x
-invalid_unbound  i_unbound_chain       2.40     0.60    56.20      0.00         0.11    yes     1.9x
-invalid_parse    i_parse               1.10     ─       ─          ─            ─       no     ─
+cat              case                parse_us  elab_us   tc_us  opt_us  rt_chk_ms  rt_unchk_ms  verdict    speedup
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+valid            v_label_person          3.00     0.70    5.30    0.30      0.38         0.37  ok           39.4x
+valid            v_label_user            1.80     0.30    1.00    0.20      0.00         0.65  empty       195.8x
+valid            v_chain_knows           2.60     0.50    7.50    0.60      0.00         0.11  empty         9.8x
+valid            v_chain_wrote           2.30     0.40    2.70    0.50      0.00         0.11  empty        18.3x
+empty            e_unknown_label         1.90     0.30    1.00    0.20      0.00         0.66  empty       192.8x
+empty            e_unknown_edge_lhs      2.50     0.50    2.60    0.60      0.00         0.11  empty        17.5x
+empty            e_chained_unknown       3.00     0.70   11.10    0.90      0.00         0.10  empty         6.6x
+invalid_unbound  i_unbound               2.60     0.40   29.30    0.20      0.00         1.09  rejected     33.6x
+invalid_unbound  i_unbound_chain         2.20     0.50   61.60    0.60      0.00         0.11  both          1.7x
+invalid_parse    i_parse                 0.90       —       —       —         —            —   parse           —
 ```
 
 ### `ldbc-sf0.1.gdb` (327k nodes, 1.48M edges, 11 node types / 25 edge types)
 
-```
-cat              case               parse_us  elab_us   tc_us  rt_chk_ms  rt_unchk_ms  empty?    speedup
-─────────────────────────────────────────────────────────────────────────────────────────────────────────
-valid            v_label_person       25.90     4.70    25.60     22.50        23.05     no     410.2x
-valid            v_label_user         14.80     2.50     9.00      0.00      1178.44    yes   44807.7x  ◀
-valid            v_chain_knows        30.80     4.00   140.90   1645.40      1673.71     no    9526.0x
-valid            v_chain_wrote        20.90     4.90    22.00      0.00      1593.55    yes   33337.8x  ◀
-empty            e_unknown_label      17.50     2.80     9.10      0.00      1084.74    yes   36896.0x
-empty            e_unknown_edge_lhs   22.70     4.80    14.60      0.00      1435.55    yes   34098.6x
-empty            e_chained_unknown    19.00     4.80   141.10      0.00      1549.90    yes    9399.0x
-invalid_unbound  i_unbound            19.80     3.60   113.80      0.00      1857.10     no   13535.7x
-invalid_unbound  i_unbound_chain      21.50     4.80   211.20      0.00      1483.21    yes    6245.1x
-invalid_parse    i_parse               1.10     ─       ─          ─           ─        no     ─
-```
-
-`◀` marks rows where a query *categorized* "valid" came back as
-`empty=yes` against that DB. This isn't a bug — the case categories
-are fixed at compile time, but the typechecker's verdict is
-schema-relative. `v_label_user` is valid against grandstack-style
-schemas (User exists) and empty against any LDBC-derived schema (no
-User label). The bench surfaces this honestly: a query that's valid
-against the wrong schema gets caught by the typechecker and the
-runtime is skipped. Same effective shape as `empty` cases.
+*(To be re-captured with the new columns in a follow-up commit. The
+SF0.1 disk is currently busy with the LDBC IC2 bench. Previous-version
+table — same `parse_us` / `elab_us` / `tc_us` / `rt_*_ms`, but without
+`opt_us` and with the old `empty?` column instead of `verdict` —
+showed speedups of 410× to 44 800× on the same 10 cases. The relative
+ordering and orders of magnitude are not expected to move with the
+column-set change because optimize is consistently sub-microsecond.)*
 
 ### Reading these tables
 
@@ -157,10 +154,15 @@ runtime is skipped. Same effective shape as `empty` cases.
   Zero when the typechecker said skip.
 - `rt_unchk_ms` — runtime time *without* the typechecker. Always runs.
   This is the "would-be" cost the speedup ratio compares against.
-- `empty?` — `r.empty` from the typechecker.
-- `speedup` — `rt_unchk / (parse + elab + tc)`. Meaningful when the
-  short-circuit fires (`rt_chk = 0`); informational for valid cases
-  (just shows runtime/compile ratio).
+  Each unchecked iter also captures `result.row_count()` and is
+  cross-checked: if `verdict=empty` but `rt_unchk` returns >0 rows,
+  the bench prints a SOUNDNESS warning (the typechecker would be
+  lying about emptiness). No violations observed against either DB.
+- `verdict` — see the legend above the tables.
+- `speedup` — `rt_unchk / (parse + elab + tc + opt)`. Meaningful when
+  the short-circuit fires (`rt_chk = 0`); informational for valid
+  cases (just shows runtime/compile ratio). Optimize is included in
+  the denominator because both checked and unchecked paths pay it.
 
 ### Key takeaways
 
@@ -190,43 +192,63 @@ Things this bench gets right:
   in one invocation. No "see the previous bench output for the
   baseline" footnote. Anyone running the bench from scratch gets the
   same speedup numbers.
-- **Multi-DB.** Sweeps tiny + SF0.1 by default; the dataset size axis
+- **Multi-DB.** Sweeps tiny + SF0.1 by default; the dataset-size axis
   is visible.
-- **Phase breakdown.** parse / elaborate / typecheck reported
-  separately so it's clear typecheck is the dominant compile phase
-  but still microseconds.
+- **Phase breakdown including optimize.** parse / elaborate /
+  typecheck / optimize reported separately. Optimize is included in
+  the speedup denominator so the "compile cost" isn't understated by
+  burying it in `rt_chk` / `rt_unchk`.
 - **Schema clone outside timing.** The Typechecker's schema clone is
-  measured separately from the typecheck phase, so the per-phase
-  numbers reflect typecheck cost, not setup.
+  done before the timed region, so per-phase numbers reflect
+  typecheck cost, not setup. (A *fresh* `Typechecker::new` still
+  happens per iter though — see issue (d) below.)
+- **Verdict column.** `ok` / `empty` / `rejected` / `both` / `parse`
+  is independent of the runtime columns, so a reader doesn't have to
+  infer "rt_chk=0 with empty=no must mean rejected." The legend is
+  printed above the tables.
+- **Soundness cross-check.** Every unchecked iter captures
+  `row_count()`. When `verdict=empty`, the bench asserts the
+  unchecked runtime also returned zero rows; a non-zero count prints
+  a SOUNDNESS warning so a typechecker bug can't quietly inflate
+  speedup numbers. (Currently no violations against either DB.)
+- **Schema-relevance check.** If the active schema has neither
+  `Person` nor `User`, the bench prints a warning that every "valid"
+  case will collapse to empty-by-typing — useful when running
+  against a non-LDBC, non-grandstack DB.
 
 Things this bench *doesn't* address (acknowledged):
 
-- **Cold vs warm runtime is mixed in.** First iter pays page-cache
+- **(a) Cold vs warm runtime is mixed in.** First iter pays page-cache
   warmup; bench takes a `--warmup 1` discard but only one iter is
   warm-up. Variance on the runtime side is real (LDBC bench saw
   38-106s spread on a single param, ~3x noise floor).
-- **Few queries per category.** 4 valid, 3 empty, 2 unbound, 1 parse.
-  Per-category averages aren't statistically robust; treat each cell
-  as one data point, not a population estimate.
-- **`empty?` column self-reports.** It just shows `r.empty`. If a
-  regression made `r.empty` always `true`, the column would still
-  say `yes`. The cross-check is the runtime side: when `empty=yes`,
-  `rt_unchk` should also return zero rows. The bench currently
-  doesn't assert that, but the CSV output exposes both for manual
-  cross-check.
-- **Single inferred schema per dataset.** The active GRAPH TYPE on
-  both datasets is the auto-inferred DEFAULT (every label/edge that
-  exists in the data). A custom restrictive GRAPH TYPE would be more
-  interesting because some valid-looking queries would be rejected
-  by typing — but that needs a hand-written schema and is left
-  for a follow-up. *(User-flagged as optional.)*
-- **Limit is fixed.** `--limit 100` per the bench default. Different
-  limits change runtime cost per case; the bench doesn't sweep.
-- **Predicate-pushdown gap dominates valid runtime.** Same finding as
-  the LDBC bench — the optimizer doesn't push down value-equality
-  predicates. The "valid" category's runtime numbers are inflated by
-  this; with pushdown they would shrink and the typechecker overhead
-  ratios would change. The relative ratios in this bench are tied to
+- **(b) Few queries per category.** 4 valid, 3 empty, 2 unbound,
+  1 parse. Per-category averages aren't statistically robust; treat
+  each cell as one data point, not a population estimate.
+- **(c) Single inferred schema per dataset.** Active GRAPH TYPE is
+  the auto-inferred DEFAULT on both datasets. A custom restrictive
+  GRAPH TYPE would be more interesting because some valid-looking
+  queries would be rejected by typing — needs a hand-written schema
+  and is left for a follow-up. *(User-flagged as optional.)*
+- **(d) Schema clone per iter.** Outside the timed region, but
+  `Typechecker::new(active.clone())` still runs every iteration. Real
+  workloads would cache a Typechecker per session. Bench's `tc_us`
+  is per-cold-Typechecker, slightly inflated.
+- **(e) μs-scale jitter.** Typecheck phases are 3-200 μs. Windows
+  `Instant` resolution is on the order of 100 ns under
+  `QueryPerformanceCounter`, but per-call jitter can dominate at this
+  scale. 30 iters with min/median/max reporting doesn't compute
+  confidence intervals; we don't use `criterion`.
+- **(f) No CI on the bench.** `typecheck_bench` is in `src/bin/` but
+  not run by `cargo test` or by any GitHub Actions job. Drift is
+  only caught when a human runs it.
+- **(g) Limit is fixed.** `--limit 100` is the default; different
+  limits change runtime cost. The bench doesn't sweep limit.
+- **(h) Predicate-pushdown gap dominates valid runtime.** Same
+  finding as the LDBC bench — the optimizer doesn't push down
+  value-equality predicates. The "valid" category's runtime numbers
+  are inflated by this; with pushdown they would shrink and the
+  typechecker overhead ratios would change. Ratios here are tied to
   gqlite's *current* optimizer, not an idealized one.
 
 ## Things to investigate (not in this bench)

@@ -173,21 +173,44 @@ fn bench_db(db_path: &str, iters: usize, warmup: usize, limit: usize) {
         t0.elapsed().as_secs_f64()
     );
     let active = store.catalog().active_schema();
+
+    // Schema-relevance warning: bench's hardcoded queries reference
+    // Person, User, Wagumi labels. If the active schema doesn't have
+    // at least Person OR User, every "valid" case will collapse to
+    // empty-by-typing and the speedup numbers become uninformative
+    // (everything is just "typecheck rejects in μs" against a schema
+    // the queries don't fit).
+    let has_known_label = active.nodes.iter().any(|n| {
+        n.descriptor()
+            .map(|d| {
+                let labels = d.label.required_labels();
+                labels.iter().any(|l| *l == "Person" || *l == "User")
+            })
+            .unwrap_or(false)
+    });
+    if !has_known_label {
+        eprintln!(
+            "  ⚠  active schema has neither Person nor User; \
+             every valid case will collapse to empty-by-typing"
+        );
+    }
+
     let rt = Runtime::new(&store);
 
     eprintln!(
-        "{:<6} {:<22} {:>9} {:>9} {:>9} {:>10} {:>11} {:>8} {:>10}",
+        "{:<6} {:<22} {:>9} {:>9} {:>9} {:>9} {:>10} {:>11} {:>9} {:>10}",
         "cat",
         "case",
         "parse_us",
         "elab_us",
         "tc_us",
+        "opt_us",
         "rt_chk_ms",
         "rt_unchk_ms",
-        "empty?",
-        "speedup"
+        "verdict",
+        "speedup",
     );
-    eprintln!("{}", "-".repeat(110));
+    eprintln!("{}", "-".repeat(118));
 
     for case in CASES {
         run_case(
@@ -212,10 +235,14 @@ fn run_case<'g>(
     let mut parse_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut elab_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut tc_samples: Vec<u128> = Vec::with_capacity(iters);
+    let mut opt_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut rt_chk_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut rt_unchk_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut empty_flag = false;
-    let mut typecheck_rejected;
+    let mut typecheck_rejected = false;
+    let mut parse_failed = false;
+    let mut last_unchk_rows: usize = 0;
+    let mut soundness_violations = 0usize;
 
     let total = iters + warmup;
     for n in 0..total {
@@ -240,41 +267,25 @@ fn run_case<'g>(
         let ast = match parsed {
             Ok(a) => a,
             Err(_) => {
+                parse_failed = true;
                 // Parse error → no further phases possible. Both
                 // checked and unchecked paths fail at the same point.
                 if !is_warmup {
                     elab_samples.push(0);
                     tc_samples.push(0);
+                    opt_samples.push(0);
                     rt_chk_samples.push(0);
                     rt_unchk_samples.push(0);
-                    println!(
-                        "{};{};{};elab;{};0;skipped",
-                        db_path,
-                        case.category.label(),
-                        case.id,
-                        n - warmup
-                    );
-                    println!(
-                        "{};{};{};tc;{};0;skipped",
-                        db_path,
-                        case.category.label(),
-                        case.id,
-                        n - warmup
-                    );
-                    println!(
-                        "{};{};{};rt_chk;{};0;skipped",
-                        db_path,
-                        case.category.label(),
-                        case.id,
-                        n - warmup
-                    );
-                    println!(
-                        "{};{};{};rt_unchk;{};0;skipped",
-                        db_path,
-                        case.category.label(),
-                        case.id,
-                        n - warmup
-                    );
+                    for phase in ["elab", "tc", "opt", "rt_chk", "rt_unchk"] {
+                        println!(
+                            "{};{};{};{};{};0;skipped",
+                            db_path,
+                            case.category.label(),
+                            case.id,
+                            phase,
+                            n - warmup
+                        );
+                    }
                 }
                 continue;
             }
@@ -320,14 +331,34 @@ fn run_case<'g>(
         empty_flag = r.empty;
         typecheck_rejected = !r.ok;
 
+        // Optimize phase. Runs unconditionally — both the checked
+        // and unchecked compile paths invoke `optimizer::compile`,
+        // and the cost is independent of whether typecheck ran.
+        // Timed once and reused for both runtime branches below.
+        let t = Instant::now();
+        let optimized_pattern = optimizer::compile(elab.pattern.clone());
+        let opt_ns = t.elapsed().as_nanos();
+        if !is_warmup {
+            opt_samples.push(opt_ns);
+            println!(
+                "{};{};{};opt;{};{};",
+                db_path,
+                case.category.label(),
+                case.id,
+                n - warmup,
+                opt_ns
+            );
+        }
+
+        let optimized = Query {
+            pattern: optimized_pattern,
+            ..elab
+        };
+
         // Checked runtime path (skip if typecheck short-circuits).
         let rt_chk_ns = if r.empty || typecheck_rejected {
             0
         } else {
-            let optimized = Query {
-                pattern: optimizer::compile(elab.pattern.clone()),
-                ..elab.clone()
-            };
             let t = Instant::now();
             let _ = rt.run_query(&optimized, limit);
             t.elapsed().as_nanos()
@@ -353,22 +384,30 @@ fn run_case<'g>(
         // runtime would have done if the typechecker hadn't rejected.
         // This is the "would-be runtime" the success-bar comparison
         // claims; running it inline so the bench is self-contained.
-        let optimized = Query {
-            pattern: optimizer::compile(elab.pattern.clone()),
-            ..elab
-        };
+        // We capture row_count() on the *unchecked* path so we can
+        // soundness-check the typechecker's verdict: if r.empty was
+        // true, the unchecked runtime should also return zero rows.
+        // A non-zero row count there is a soundness violation
+        // (statically empty but runtime-non-empty) and the
+        // bench prints a warning summary at the end of the case.
         let t = Instant::now();
-        let _ = rt.run_query(&optimized, limit);
+        let result = rt.run_query(&optimized, limit);
         let rt_unchk_ns = t.elapsed().as_nanos();
+        let rows = result.row_count();
         if !is_warmup {
             rt_unchk_samples.push(rt_unchk_ns);
+            last_unchk_rows = rows;
+            if r.empty && rows != 0 {
+                soundness_violations += 1;
+            }
             println!(
-                "{};{};{};rt_unchk;{};{};",
+                "{};{};{};rt_unchk;{};{};rows={}",
                 db_path,
                 case.category.label(),
                 case.id,
                 n - warmup,
-                rt_unchk_ns
+                rt_unchk_ns,
+                rows,
             );
         }
     }
@@ -376,12 +415,17 @@ fn run_case<'g>(
     let parse_med = median(&parse_samples);
     let elab_med = median(&elab_samples);
     let tc_med = median(&tc_samples);
+    let opt_med = median(&opt_samples);
     let rt_chk_med = median(&rt_chk_samples);
     let rt_unchk_med = median(&rt_unchk_samples);
 
-    let total_tc_ns = parse_med + elab_med + tc_med;
-    let speedup = if total_tc_ns > 0 && rt_unchk_med > 0 {
-        rt_unchk_med as f64 / total_tc_ns as f64
+    // Speedup denominator includes parse + elab + tc + opt. Optimize
+    // is part of compile cost on both paths, so charging it here gives
+    // an honest "checked-pipeline cost vs would-be-runtime" ratio
+    // rather than understating the compile side.
+    let total_compile_ns = parse_med + elab_med + tc_med + opt_med;
+    let speedup = if total_compile_ns > 0 && rt_unchk_med > 0 {
+        rt_unchk_med as f64 / total_compile_ns as f64
     } else {
         0.0
     };
@@ -391,18 +435,51 @@ fn run_case<'g>(
         "—".to_string()
     };
 
+    // Verdict column: independently encodes the short-circuit
+    // signals so the reader doesn't have to infer "rt_chk=0 with
+    // empty=no must mean rejected".
+    //   parse    — parse error (case never reached typecheck)
+    //   ok       — typecheck passed, not statically empty
+    //   empty    — typecheck passed but ⊥ in the path/env (§10)
+    //   rejected — typecheck error (free var, type mismatch, etc.)
+    //   both     — empty AND rejected (rare, but legal)
+    let verdict = if parse_failed {
+        "parse"
+    } else {
+        match (empty_flag, typecheck_rejected) {
+            (false, false) => "ok",
+            (true, false) => "empty",
+            (false, true) => "rejected",
+            (true, true) => "both",
+        }
+    };
+
     eprintln!(
-        "{:<6} {:<22} {:>9.2} {:>9.2} {:>9.2} {:>10.2} {:>11.2} {:>8} {:>10}",
+        "{:<6} {:<22} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>10.2} {:>11.2} {:>9} {:>10}",
         case.category.label(),
         case.id,
         parse_med as f64 / 1_000.0,
         elab_med as f64 / 1_000.0,
         tc_med as f64 / 1_000.0,
+        opt_med as f64 / 1_000.0,
         rt_chk_med as f64 / 1_000_000.0,
         rt_unchk_med as f64 / 1_000_000.0,
-        if empty_flag { "yes" } else { "no" },
+        verdict,
         speedup_str,
     );
+
+    // Soundness check: if the typechecker said empty, the unchecked
+    // runtime must also return 0 rows. A violation = a typechecker
+    // bug (statically empty but actually non-empty), which this bench
+    // would otherwise cheerfully report as a great speedup.
+    if soundness_violations > 0 {
+        eprintln!(
+            "  ⚠  SOUNDNESS: case {} verdict=empty but rt_unchk returned \
+             {} rows on the last iter ({} of {} iters violated). \
+             Investigate before trusting the speedup.",
+            case.id, last_unchk_rows, soundness_violations, iters,
+        );
+    }
 }
 
 fn median(samples: &[u128]) -> u128 {
