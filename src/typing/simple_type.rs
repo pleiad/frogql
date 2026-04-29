@@ -1,7 +1,9 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// Atomic and composite types for property values.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SimpleType {
     /// Integer type
     Z,
@@ -202,6 +204,61 @@ mod tests {
         assert!(!SimpleType::Z.is_empty());
         let u = SimpleType::Union(Box::new(SimpleType::Zero), Box::new(SimpleType::Zero));
         assert!(u.is_empty());
+    }
+
+    #[test]
+    fn test_is_empty_atoms() {
+        // Each non-bottom atom is non-empty.
+        assert!(!SimpleType::F.is_empty());
+        assert!(!SimpleType::B.is_empty());
+        assert!(!SimpleType::S.is_empty());
+        assert!(!SimpleType::Star.is_empty());
+    }
+
+    #[test]
+    fn test_is_empty_union_short_circuits() {
+        // Union(a, b) iff both empty.
+        let z = || SimpleType::Zero;
+        let one = || SimpleType::Z;
+        assert!(SimpleType::Union(Box::new(z()), Box::new(z())).is_empty());
+        assert!(!SimpleType::Union(Box::new(z()), Box::new(one())).is_empty());
+        assert!(!SimpleType::Union(Box::new(one()), Box::new(z())).is_empty());
+    }
+
+    #[test]
+    fn test_is_empty_group_and_list_propagate() {
+        assert!(SimpleType::Group(Box::new(SimpleType::Zero)).is_empty());
+        assert!(!SimpleType::Group(Box::new(SimpleType::Z)).is_empty());
+        assert!(SimpleType::List(Box::new(SimpleType::Zero)).is_empty());
+        assert!(!SimpleType::List(Box::new(SimpleType::Z)).is_empty());
+    }
+
+    #[test]
+    fn test_is_empty_record_uses_any_semantics() {
+        // Record(fields) iff fields.values().any(is_empty) — different
+        // from Union which uses AND.
+        let m_with_zero = {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("a".to_string(), SimpleType::Z);
+            m.insert("b".to_string(), SimpleType::Zero);
+            m
+        };
+        assert!(
+            SimpleType::Record(m_with_zero).is_empty(),
+            "record with one Zero field should be empty (any-semantics)"
+        );
+
+        // Empty record (no fields) is not empty per the impl.
+        assert!(!SimpleType::Record(std::collections::BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn test_union_collapses_equal_operands() {
+        // Beyond test_union_with_zero — `union(X, X) = X`.
+        assert_eq!(
+            SimpleType::union(&SimpleType::Z, &SimpleType::Z),
+            SimpleType::Z
+        );
     }
 
     // meet on composite types — covariant recursion.

@@ -11,6 +11,7 @@ pub mod typing;
 use syntax::path_pattern::PathPattern;
 use syntax::query::{MatchStatement, Query};
 use typing::checker::Typechecker;
+use typing::variable_type::Schema;
 
 /// Optimize a Query: collapse the match chain into a single PathPattern,
 /// run the optimizer over that, and rebuild the Query with the result
@@ -59,10 +60,22 @@ pub struct CompileResult {
 }
 
 /// Canonical compile pipeline. `compile_query` and the REPL both use this.
+/// The typechecker uses `Schema::star()`; callers with a custom catalog
+/// schema should use [`compile_query_with_diagnostics_with`].
 pub fn compile_query_with_diagnostics(input: &str) -> Result<CompileResult, CompileError> {
+    compile_query_with_diagnostics_with(&Schema::star(), input)
+}
+
+/// Same as [`compile_query_with_diagnostics`] but typechecks against the
+/// supplied schema. Used by the REPL / Python bindings to honor the
+/// active GRAPH TYPE.
+pub fn compile_query_with_diagnostics_with(
+    schema: &Schema,
+    input: &str,
+) -> Result<CompileResult, CompileError> {
     let ast = parser::parse_query(input).map_err(CompileError::Parse)?;
     let q = elaborate::elaborate_query(ast);
-    let mut tc = Typechecker::untyped();
+    let mut tc = Typechecker::new(schema.clone());
     let r = tc.check_query(&q);
     if !r.ok {
         return Err(CompileError::Type(tc.errors));
@@ -96,6 +109,16 @@ pub fn compile(query: &str) -> Result<PathPattern, String> {
 /// Use [`compile_query_unchecked`] to skip typechecking.
 pub fn compile_query(input: &str) -> Result<Query, String> {
     compile_query_with_diagnostics(input)
+        .map(|r| r.query)
+        .map_err(|e| e.message())
+}
+
+/// Compile a full GQL query against an explicit schema. Identical to
+/// [`compile_query`] but consults the supplied schema instead of the
+/// permissive default. Used by the REPL after a `USE GRAPH TYPE` to
+/// honor the active type.
+pub fn compile_query_with(schema: &Schema, input: &str) -> Result<Query, String> {
+    compile_query_with_diagnostics_with(schema, input)
         .map(|r| r.query)
         .map_err(|e| e.message())
 }

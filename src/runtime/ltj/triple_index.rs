@@ -55,6 +55,35 @@ impl TripleIndex {
             }
         }
 
+        // Undirected edges are emitted in both senses so that a forward
+        // triple lookup (the only kind LTJ understands today) finds them
+        // regardless of which endpoint the query binds first. The eid is
+        // shared across both senses; the runner uses `graph.edge_path_value`
+        // to recover the `PathValue::EdgeUndirectional` variant.
+        for eid in graph.edges_undirected() {
+            let src = graph.src(eid);
+            let tgt = graph.tgt(eid);
+            let labels = graph.edge_labels(eid);
+            let label_strings = labels.required_labels();
+
+            let push_both = |raw: &mut Vec<(u32, u32, u32, u32)>, lid: u32| {
+                raw.push((src, lid, tgt, eid));
+                if src != tgt {
+                    raw.push((tgt, lid, src, eid));
+                }
+            };
+
+            if label_strings.is_empty() {
+                let lid = Self::get_or_insert_label(&mut label_to_id, &mut id_to_label, "");
+                push_both(&mut raw_triples, lid);
+            } else {
+                for ls in label_strings {
+                    let lid = Self::get_or_insert_label(&mut label_to_id, &mut id_to_label, ls);
+                    push_both(&mut raw_triples, lid);
+                }
+            }
+        }
+
         // Build 6 orderings
         let spo = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (s, p, o, e));
         let sop = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (s, o, p, e));

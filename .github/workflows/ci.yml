@@ -47,10 +47,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Lib unit tests (inline `#[cfg(test)] mod tests` in src/).
+      - name: Lib tests
+        run: cargo test --workspace --lib
       # bench_test has pre-existing failures — exclude it (see CLAUDE.md).
-      # All other integration test binaries are listed explicitly so a
-      # newly-added file isn't silently skipped from CI.
-      - name: Run tests
+      # All other integration binaries listed explicitly. Adding a new
+      # `tests/foo.rs` requires adding `--test foo` here, otherwise it's
+      # silently skipped from CI.
+      - name: Integration tests
         run: |
           cargo test --test parser_test \
                      --test runtime_test \
@@ -63,4 +67,7 @@ jobs:
                      --test list_test \
                      --test record_test \
                      --test count_test \
-                     --test parse_and_run_test
+                     --test parse_and_run_test \
+                     --test compile_diagnostics \
+                     --test graph_type_test \
+                     --test lattice_proptest

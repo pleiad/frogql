@@ -20,8 +20,11 @@ struct Decomposition {
     filters: Vec<ExtractedFilter>,
     /// Variables that are internal (anonymous) — excluded from final assignment
     internal_vars: Vec<u8>,
-    /// For each triple: (src_var, tgt_var, edge_var_name)
-    triple_info: Vec<(u8, u8, Option<String>)>,
+    /// For each triple: (src_var, tgt_var, edge_var_name, kind).
+    /// `src_var` and `tgt_var` reflect the order of the *triple*, after the
+    /// leftward swap; `kind` lets result reconstruction recover the
+    /// original pattern direction for path display and edge lookup.
+    triple_info: Vec<(u8, u8, Option<String>, EdgeKind)>,
     /// Join boundaries: triple index ranges for each sub-query in a Join.
     /// E.g., for `Q1, Q2` with 3 triples from Q1 and 2 from Q2: [(0,3), (3,5)].
     /// Empty means the whole pattern is a single path.
@@ -36,10 +39,22 @@ struct ExtractedFilter {
 
 // ---- Flat element of a concat chain ----
 
+/// Edge direction at the pattern level. LTJ extracts a forward triple
+/// `(src, label, tgt)` for every edge regardless of direction; the
+/// `EdgeKind` lets the decomposition know whether to swap endpoints
+/// (Left) and lets result reconstruction pick the right `PathValue`
+/// variant (`EdgeUndirectional` for Undirected).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgeKind {
+    Right,
+    Left,
+    Undirected,
+}
+
 #[derive(Debug)]
 enum FlatElement<'a> {
     Node(Option<&'a Descriptor>),
-    EdgeRight(Option<&'a Descriptor>),
+    Edge(EdgeKind, Option<&'a Descriptor>),
 }
 
 // ---- Main entry point ----
@@ -144,11 +159,19 @@ fn flatten_concat<'a>(p: &'a PathPattern, out: &mut Vec<FlatElement<'a>>) -> boo
             true
         }
         PathPattern::EdgeRight(d) => {
-            out.push(FlatElement::EdgeRight(d.as_ref()));
+            out.push(FlatElement::Edge(EdgeKind::Right, d.as_ref()));
+            true
+        }
+        PathPattern::EdgeLeft(d) => {
+            out.push(FlatElement::Edge(EdgeKind::Left, d.as_ref()));
+            true
+        }
+        PathPattern::EdgeUndirected(d) => {
+            out.push(FlatElement::Edge(EdgeKind::Undirected, d.as_ref()));
             true
         }
         PathPattern::Concat(p1, p2) => flatten_concat(p1, out) && flatten_concat(p2, out),
-        _ => false, // Not decomposable
+        _ => false, // Not decomposable (any-direction `-[]-`, unions, repetition, …)
     }
 }
 
@@ -203,7 +226,7 @@ fn decompose_pattern_top(
     id_to_name: &mut Vec<String>,
     filters: &mut Vec<ExtractedFilter>,
     internal: &mut Vec<u8>,
-    triple_info: &mut Vec<(u8, u8, Option<String>)>,
+    triple_info: &mut Vec<(u8, u8, Option<String>, EdgeKind)>,
     fresh: &mut u32,
     join_boundaries: &mut Vec<(usize, usize)>,
 ) -> Option<u8> {
@@ -271,7 +294,7 @@ fn decompose_pattern(
     id_to_name: &mut Vec<String>,
     filters: &mut Vec<ExtractedFilter>,
     internal: &mut Vec<u8>,
-    triple_info: &mut Vec<(u8, u8, Option<String>)>,
+    triple_info: &mut Vec<(u8, u8, Option<String>, EdgeKind)>,
     fresh: &mut u32,
 ) -> Option<u8> {
     match pattern {
@@ -359,7 +382,7 @@ fn decompose_flat_chain(
     id_to_name: &mut Vec<String>,
     filters: &mut Vec<ExtractedFilter>,
     internal: &mut Vec<u8>,
-    triple_info: &mut Vec<(u8, u8, Option<String>)>,
+    triple_info: &mut Vec<(u8, u8, Option<String>, EdgeKind)>,
     fresh: &mut u32,
 ) -> Option<u8> {
     // Expected pattern: Node (Edge Node)*
@@ -377,81 +400,52 @@ fn decompose_flat_chain(
     let mut i = 1;
     while i + 1 < elems.len() {
         // Expect: Edge, Node
-        let FlatElement::EdgeRight(edge_desc) = &elems[i] else {
-            return None; // Not a directed edge
+        let FlatElement::Edge(kind, edge_desc) = &elems[i] else {
+            return None;
         };
         let FlatElement::Node(tgt_desc) = &elems[i + 1] else {
             return None;
         };
 
-        let tgt_var = node_var(*tgt_desc, names, id_to_name, filters, internal, fresh);
+        let next_var = node_var(*tgt_desc, names, id_to_name, filters, internal, fresh);
         let edge_var_name = edge_desc.and_then(|d| d.var.clone());
+        let p_term = build_p_term(*edge_desc, index, names, id_to_name, internal, fresh);
 
-        // Build the P (label) term
-        let p_term = if let Some(d) = edge_desc {
-            let labels = d.dtype.label.required_labels();
-            if labels.len() == 1 {
-                if let Some(&lid) = index.label_to_id.get(labels[0]) {
-                    Term::Constant(lid)
-                } else {
-                    Term::Constant(u32::MAX) // label not in graph
-                }
-            } else {
-                // Wildcard / multiple labels — use a variable
-                let p_var = fresh_var(names, id_to_name, internal, fresh);
-                Term::Variable(p_var)
-            }
-        } else {
-            // No descriptor — any label
-            let p_var = fresh_var(names, id_to_name, internal, fresh);
-            Term::Variable(p_var)
+        // Forward (`-[L]->`) and undirected (`~[L]~`) emit a triple
+        // (current, L, next). Leftward (`<-[L]-`) emits (next, L, current)
+        // — i.e. the physical directed edge that flows from `next` into
+        // `current`. Undirected schema entries are present in both senses
+        // in the index, so a forward triple lookup catches them.
+        let (src_var, tgt_var) = match kind {
+            EdgeKind::Right | EdgeKind::Undirected => (current_node, next_var),
+            EdgeKind::Left => (next_var, current_node),
         };
 
         triples.push(TriplePattern {
-            terms: [
-                Term::Variable(current_node),
-                p_term,
-                Term::Variable(tgt_var),
-            ],
+            terms: [Term::Variable(src_var), p_term, Term::Variable(tgt_var)],
         });
-        triple_info.push((current_node, tgt_var, edge_var_name));
+        triple_info.push((src_var, tgt_var, edge_var_name, *kind));
 
-        current_node = tgt_var;
+        current_node = next_var;
         i += 2;
     }
 
     // If there's a trailing edge with no node after it, create a fresh target
     if i < elems.len() {
-        if let FlatElement::EdgeRight(edge_desc) = &elems[i] {
-            let tgt_var = fresh_var(names, id_to_name, internal, fresh);
+        if let FlatElement::Edge(kind, edge_desc) = &elems[i] {
+            let next_var = fresh_var(names, id_to_name, internal, fresh);
             let edge_var_name = edge_desc.and_then(|d| d.var.clone());
-
-            let p_term = if let Some(d) = edge_desc {
-                let labels = d.dtype.label.required_labels();
-                if labels.len() == 1 {
-                    if let Some(&lid) = index.label_to_id.get(labels[0]) {
-                        Term::Constant(lid)
-                    } else {
-                        Term::Constant(u32::MAX)
-                    }
-                } else {
-                    let p_var = fresh_var(names, id_to_name, internal, fresh);
-                    Term::Variable(p_var)
-                }
-            } else {
-                let p_var = fresh_var(names, id_to_name, internal, fresh);
-                Term::Variable(p_var)
+            let p_term = build_p_term(*edge_desc, index, names, id_to_name, internal, fresh);
+            let (src_var, tgt_var) = match kind {
+                EdgeKind::Right | EdgeKind::Undirected => (current_node, next_var),
+                EdgeKind::Left => (next_var, current_node),
             };
 
             triples.push(TriplePattern {
-                terms: [
-                    Term::Variable(current_node),
-                    p_term,
-                    Term::Variable(tgt_var),
-                ],
+                terms: [Term::Variable(src_var), p_term, Term::Variable(tgt_var)],
             });
-            triple_info.push((current_node, tgt_var, edge_var_name));
-            current_node = tgt_var;
+            triple_info.push((src_var, tgt_var, edge_var_name, *kind));
+            current_node = next_var;
         }
     }
 
@@ -522,6 +516,30 @@ fn fresh_var(
     id
 }
 
+/// Build the P-term of a triple pattern from an edge descriptor: a label
+/// constant when there's exactly one required label, a fresh variable
+/// otherwise (wildcard / multi-label).
+fn build_p_term(
+    edge_desc: Option<&Descriptor>,
+    index: &TripleIndex,
+    names: &mut HashMap<String, u8>,
+    id_to_name: &mut Vec<String>,
+    internal: &mut Vec<u8>,
+    fresh: &mut u32,
+) -> Term {
+    if let Some(d) = edge_desc {
+        let labels = d.dtype.label.required_labels();
+        if labels.len() == 1 {
+            return match index.label_to_id.get(labels[0]) {
+                Some(&lid) => Term::Constant(lid),
+                None => Term::Constant(u32::MAX), // label not in graph
+            };
+        }
+    }
+    let p_var = fresh_var(names, id_to_name, internal, fresh);
+    Term::Variable(p_var)
+}
+
 // ---- Result conversion ----
 
 fn convert_results<G: GraphAccess>(
@@ -557,7 +575,7 @@ fn convert_results<G: GraphAccess>(
         for &(start, end) in &ranges {
             let mut path_elements = Vec::new();
             for ti in start..end {
-                let (src_var, tgt_var, ref edge_var) = decomp.triple_info[ti];
+                let (src_var, tgt_var, ref edge_var, _kind) = decomp.triple_info[ti];
                 let src_id = tuple.iter().find(|(v, _)| *v == src_var).map(|(_, id)| *id);
                 let tgt_id = tuple.iter().find(|(v, _)| *v == tgt_var).map(|(_, id)| *id);
 
@@ -566,9 +584,13 @@ fn convert_results<G: GraphAccess>(
                         path_elements.push(PathValue::Node(src));
                     }
                     if let Some(eid) = find_edge(graph, src, tgt) {
-                        path_elements.push(PathValue::EdgeDirectional(eid));
+                        // Use edge_path_value so undirected edges land as
+                        // PathValue::EdgeUndirectional rather than being
+                        // forced into the directional variant.
+                        let pv = graph.edge_path_value(eid);
+                        path_elements.push(pv.clone());
                         if let Some(ref ev) = edge_var {
-                            assignment.extend(ev.clone(), PathValue::EdgeDirectional(eid));
+                            assignment.extend(ev.clone(), pv);
                         }
                     }
                     path_elements.push(PathValue::Node(tgt));
@@ -583,10 +605,22 @@ fn convert_results<G: GraphAccess>(
     IntermediateResult::new(rows)
 }
 
+/// Resolve the edge id for a (src, tgt) pair. Walks outgoing-directional
+/// adjacency first; falls back to undirected adjacency when the matching
+/// triple was sourced from an undirected edge (those entries are emitted
+/// in both senses by `TripleIndex::from_graph`, so either endpoint may
+/// appear as the triple's "source").
 fn find_edge<G: GraphAccess>(graph: &G, src: Id, tgt: Id) -> Option<Id> {
-    graph
+    if let Some(&eid) = graph
         .outgoing_edges(src)
         .iter()
         .find(|&&eid| graph.tgt(eid) == tgt)
-        .copied()
+    {
+        return Some(eid);
+    }
+    graph.undirected_edges_of(src).iter().copied().find(|&eid| {
+        let s = graph.src(eid);
+        let t = graph.tgt(eid);
+        (s == src && t == tgt) || (s == tgt && t == src)
+    })
 }
