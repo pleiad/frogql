@@ -171,31 +171,49 @@ Output is two streams:
 ## Results
 
 Run on Windows (rustc 1.95.0, release profile), SF0.1 dataset
-(327k nodes, 1.48M edges), `limit=20`, 1 iteration per param,
-official LDBC interactive_2 substitution parameters (15 entries):
+(327k nodes, 1.48M edges), `limit=20`, **1 iteration per param**
+(LazyGraphStore page cache is cold on first iter, warm thereafter;
+3+ iters are recommended for stable median — but at ~80 s per
+param × 15 params, even 1 iter takes ~20 minutes, and the
+optimizer-bound bottleneck dominates the noise floor anyway).
 
-(Results table to be filled in by the run that re-uses the official
-params; see the bench output CSV. Earlier hand-picked-param numbers
-were 97-108 s per param; we expect the same order of magnitude with
-the official params since the bench's bottleneck — see "Things this
-surfaces" below — is independent of the parameter values.)
+Substitution parameters: official LDBC `interactive_2_param.txt`
+(15 entries), unchanged from the published archive.
 
-The previous run (with hand-picked params, before this branch
-switched to LDBC's official `interactive_2_param.txt`):
+| `Person.id`      | resolves to     | rows | wall time |
+|------------------|-----------------|------|-----------|
+| 19 791 209 300 143 | Bichang Li     | 20   | 101.1 s |
+| 10 995 116 278 647 | Ali Kountche   | 20   |  91.6 s |
+| 32 985 348 834 326 | Eduard Eduard  | 20   |  52.8 s |
+| 30 786 325 579 117 | Chunlai Wang   | 20   |  56.4 s |
+|              1 644 | Paul Roberts   | 20   |  64.5 s |
+|  6 597 069 766 983 | A. C. Bos      | 20   |  82.1 s |
+|  8 796 093 023 470 | Carlos Parra   | 20   |  87.3 s |
+|  2 199 023 256 520 | Lei Liu        | 20   |  79.7 s |
+| 26 388 279 067 159 | John Brown     | 20   |  82.1 s |
+| 28 587 302 323 283 | John Sharma    | 20   | 129.0 s |
+| 21 990 232 556 837 | Bing Li        | 20   | 146.9 s |
+| 28 587 302 322 755 | Wei Huang      | 20   |  78.7 s |
+| 26 388 279 067 442 | Lin Li         | 20   |  59.4 s |
+| 24 189 255 811 500 | Dominic Santos | 20   |  64.3 s |
+| 15 393 162 790 221 | Pierre Arnaud  | 20   |  68.7 s |
 
-| `Person.id`      | resolves to    | rows | wall time |
-|------------------|----------------|------|-----------|
-| 933              | Mahinda Perera | 20   |  108.5 s  |
-| 1129             | Carmen Lepland | 20   |  100.6 s  |
-| 8 796 093 023 296  | Hồ Chí Loan    | 20   |   97.4 s  |
-| 21 990 232 555 524 | Bryn Davies    | 20   |   99.2 s  |
-| 32 985 348 833 865 | Cheng Yu       | 20   |  107.5 s  |
+Aggregates across all 15 params:
 
-All five returned 20 rows (the limit). Wall times are **far above**
-the LDBC interactive target of sub-second latency; cause is the
-optimizer gap explained below — and that finding is independent
-of the parameter values, so the official-param re-run will land
-in the same range.
+| stat | wall time |
+|------|-----------|
+| min | 52.8 s |
+| median | 79.7 s |
+| mean | 83.0 s |
+| max | 146.9 s |
+
+All 15 params returned 20 rows (the limit). Wall times are **far
+above** the LDBC interactive target of sub-second latency; cause
+is the optimizer gap explained below. The 3× spread between min
+and max comes from caller-degree variation (more friends → more
+join work) plus first-iter page-cache effects; it does **not**
+indicate noise in the bench. Re-running with `--iters 3` would
+tighten per-param numbers but won't change the order of magnitude.
 
 ## Why typechecker is off
 
