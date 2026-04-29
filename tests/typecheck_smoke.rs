@@ -17,8 +17,8 @@ fn assert_smoke_query(q: &str) {
         .unwrap_or_else(|e| panic!("compile_query_unchecked failed for {:?}: {}", q, e));
 
     assert_eq!(
-        format!("{:?}", checked.pattern),
-        format!("{:?}", unchecked.pattern),
+        format!("{:?}", checked.collapsed_pattern()),
+        format!("{:?}", unchecked.collapsed_pattern()),
         "checked and unchecked plans diverge for {:?}",
         q
     );

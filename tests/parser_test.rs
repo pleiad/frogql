@@ -1,9 +1,11 @@
 use gqlrust::model::value::Value;
-use gqlrust::parser::parse;
+use gqlrust::parser::{parse, parse_query};
 use gqlrust::syntax::descriptor::Descriptor;
 use gqlrust::syntax::expr::{BinOp, Expr, UnOp};
 use gqlrust::syntax::path_pattern::PathPattern;
-use gqlrust::syntax::query::{Aggregator, GeneralSetKind, ReturnItem, SetQuantifier};
+use gqlrust::syntax::query::{
+    Aggregator, GeneralSetKind, MatchStatement, ReturnItem, SetQuantifier,
+};
 use gqlrust::typing::descriptor_type::DescriptorType;
 use gqlrust::typing::label_type::LabelType;
 use gqlrust::typing::property_type::PropertyType;
@@ -633,8 +635,22 @@ fn test_join_shared_var() {
 #[test]
 fn test_match_simple() {
     let q = gqlrust::compile_query("MATCH (x)").unwrap();
-    assert!(matches!(q.pattern, PathPattern::Node(_)));
+    assert!(matches!(q.collapsed_pattern(), PathPattern::Node(_)));
     assert!(q.returns.is_none());
+}
+
+/// Pin the structural invariant of the multi-MATCH refactor (ISO §14.3-14.4):
+/// every parsed Query has exactly one match statement, and it is a `Simple`
+/// holding the parsed pattern. Without this, `Query::collapsed_pattern()`
+/// would silently panic on `vec![]` instead of failing in tests.
+#[test]
+fn test_query_has_one_simple_match_statement() {
+    let q = gqlrust::compile_query("MATCH (x)-[:Knows]->(y) RETURN x.name").unwrap();
+    assert_eq!(q.matches.len(), 1, "parser must produce exactly one match");
+    assert!(
+        matches!(&q.matches[0], MatchStatement::Simple { .. }),
+        "current parser only emits Simple match statements (Optional comes in a later PR)"
+    );
 }
 
 #[test]
@@ -643,7 +659,7 @@ fn test_match_where_return() {
         "MATCH (x) -[:Transfer]-> (y) WHERE x.amount > 100 RETURN x.name, y.name",
     )
     .unwrap();
-    assert!(matches!(q.pattern, PathPattern::Filter(_, _)));
+    assert!(matches!(q.collapsed_pattern(), PathPattern::Filter(_, _)));
     assert_eq!(q.returns.as_ref().unwrap().len(), 2);
     assert!(!q.distinct);
 }
@@ -668,8 +684,64 @@ fn test_match_return_alias() {
 #[test]
 fn test_no_match_keyword_still_works() {
     let q = gqlrust::compile_query("(x) -[]-> (y)").unwrap();
-    assert!(matches!(q.pattern, PathPattern::Concat(_, _)));
+    assert!(matches!(q.collapsed_pattern(), PathPattern::Concat(_, _)));
     assert!(q.returns.is_none());
+}
+
+// ===== Multi-MATCH parser support (ISO §14.3-14.4) =====
+//
+// Use `parse_query` directly: `compile_query_unchecked` already runs
+// `optimize_query` which collapses the chain to one Simple, hiding
+// what the parser actually produces.
+
+#[test]
+fn test_multi_match_two_clauses() {
+    let q = parse_query("MATCH (x: Account) MATCH (y: Account)").unwrap();
+    assert_eq!(q.matches.len(), 2);
+    for m in &q.matches {
+        assert!(matches!(m, MatchStatement::Simple { .. }));
+    }
+}
+
+#[test]
+fn test_multi_match_three_clauses() {
+    let q = parse_query("MATCH (x) MATCH (y) MATCH (z)").unwrap();
+    assert_eq!(q.matches.len(), 3);
+}
+
+#[test]
+fn test_multi_match_per_clause_where() {
+    let q = parse_query(
+        "MATCH (x: Account) WHERE x.isBlocked = false \
+         MATCH (y: Account) WHERE y.isBlocked = true",
+    )
+    .unwrap();
+    assert_eq!(q.matches.len(), 2);
+    for m in &q.matches {
+        let MatchStatement::Simple { pattern } = m;
+        assert!(matches!(pattern, PathPattern::Filter(_, _)));
+    }
+}
+
+#[test]
+fn test_multi_match_with_return() {
+    let q = parse_query("MATCH (x: Account) MATCH (y: Account) RETURN x.owner, y.owner").unwrap();
+    assert_eq!(q.matches.len(), 2);
+    assert_eq!(q.returns.as_ref().unwrap().len(), 2);
+}
+
+#[test]
+fn test_single_match_still_one_clause() {
+    let q = parse_query("MATCH (x) -[]-> (y)").unwrap();
+    assert_eq!(q.matches.len(), 1);
+}
+
+/// `compile_query` runs the full pipeline; `optimize_query` collapses
+/// matches to one Simple, so post-pipeline `len == 1` even from multi-MATCH.
+#[test]
+fn test_multi_match_compiles_end_to_end() {
+    let q = gqlrust::compile_query("MATCH (x: Account) MATCH (y) RETURN x.owner").unwrap();
+    assert_eq!(q.matches.len(), 1);
 }
 
 // =======================================================================
