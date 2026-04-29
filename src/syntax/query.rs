@@ -61,9 +61,30 @@ impl ReturnItem {
     }
 }
 
+/// ISO 39075 §14.4 `<match statement>`. Today only `Simple` is exposed
+/// (parser produces a single Simple wrapping the whole pattern); the enum
+/// shape is in place so `OPTIONAL MATCH` (Feature GQ21) can land without
+/// another structural refactor of `Query`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchStatement {
+    Simple { pattern: PathPattern },
+    // Future (Feature GQ21): Optional { block: Vec<MatchStatement> }
+}
+
+impl MatchStatement {
+    pub fn pattern(&self) -> &PathPattern {
+        match self {
+            MatchStatement::Simple { pattern } => pattern,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
-    pub pattern: PathPattern,
+    /// ISO §14.3 `<simple linear query statement>` — the chain of MATCH
+    /// statements. Always non-empty for parsed queries. Currently every
+    /// element is `MatchStatement::Simple`; a future PR will add OPTIONAL.
+    pub matches: Vec<MatchStatement>,
     /// ISO §16.15 explicit GROUP BY. None → no grouping (only valid when
     /// RETURN is pure-aggregate or pure-projection; the typechecker rejects
     /// mixed RETURN without an explicit GROUP BY).
@@ -78,11 +99,31 @@ pub struct Query {
 impl Query {
     pub fn pattern_only(pattern: PathPattern) -> Self {
         Query {
-            pattern,
+            matches: vec![MatchStatement::Simple { pattern }],
             group_by: None,
             returns: None,
             distinct: false,
         }
+    }
+
+    /// Collapse the match chain into a single `PathPattern` by joining
+    /// adjacent matches with `PathPattern::Join` (the comma-join). Sound
+    /// while every match is `Simple`: ISO §14.4 General Rule 1 specifies
+    /// MATCH expands the working table by the new binding table, which
+    /// for non-OPTIONAL matches matches the natural-join semantics of
+    /// gqlite's existing comma-join.
+    ///
+    /// When `OPTIONAL MATCH` lands the collapse is no longer sound
+    /// (OPTIONAL is a left-join, not a natural join) and the affected
+    /// phases will need to walk `matches` directly.
+    pub fn collapsed_pattern(&self) -> PathPattern {
+        let mut iter = self.matches.iter().map(|m| m.pattern().clone());
+        let first = iter
+            .next()
+            .expect("Query::matches must contain at least one match statement");
+        iter.fold(first, |acc, p| {
+            PathPattern::Join(Box::new(acc), Box::new(p))
+        })
     }
 }
 
@@ -139,7 +180,16 @@ impl fmt::Display for ReturnItem {
 
 impl fmt::Display for Query {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "MATCH {}", self.pattern)?;
+        let mut first = true;
+        for m in &self.matches {
+            if !first {
+                f.write_str(" ")?;
+            }
+            first = false;
+            match m {
+                MatchStatement::Simple { pattern } => write!(f, "MATCH {pattern}")?,
+            }
+        }
         if let Some(gb) = &self.group_by {
             let exprs: Vec<String> = gb.iter().map(|e| e.to_string()).collect();
             write!(f, " GROUP BY {}", exprs.join(", "))?;

@@ -48,9 +48,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// it caps input rows (early termination); with aggregates it caps
     /// output rows after grouping (truncating input would corrupt counts).
     pub fn run_query(&self, query: &Query, limit: usize) -> QueryResult {
+        let pattern = query.collapsed_pattern();
         let return_items = match &query.returns {
             None => {
-                let ir = self.run_path_pattern(&query.pattern, limit);
+                let ir = self.run_path_pattern(&pattern, limit);
                 return QueryResult::Raw(ir);
             }
             Some(items) => items,
@@ -58,7 +59,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
         let has_aggs = return_items.iter().any(|i| i.is_aggregate());
         let input_limit = if has_aggs { 0 } else { limit };
-        let ir = self.run_path_pattern(&query.pattern, input_limit);
+        let ir = self.run_path_pattern(&pattern, input_limit);
 
         let projected = if has_aggs {
             let mut p = self.run_aggregated(return_items, query.group_by.as_deref(), &ir.rows);

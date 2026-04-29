@@ -2,7 +2,9 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::{Aggregator, GeneralSetKind, Query, ReturnItem, SetQuantifier};
+use crate::syntax::query::{
+    Aggregator, GeneralSetKind, MatchStatement, Query, ReturnItem, SetQuantifier,
+};
 use crate::syntax::statement::{Statement, TypeElement};
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
@@ -15,7 +17,7 @@ use super::lexer::{Lexer, Token};
 /// Parse a GQL path pattern string into a PathPattern (backwards compatible).
 pub fn parse(input: &str) -> Result<PathPattern, String> {
     let q = parse_query(input)?;
-    Ok(q.pattern)
+    Ok(q.collapsed_pattern())
 }
 
 /// Parse a full GQL query: optional MATCH, path pattern, optional WHERE, optional RETURN.
@@ -98,22 +100,20 @@ impl Parser {
         }
     }
 
-    // ===== Full query (MATCH ... WHERE ... RETURN) =====
-
-    // full_query = ("MATCH")? query ("WHERE" expr)?
-    //              ("GROUP BY" expr (, expr)*)?
-    //              ("RETURN" ("DISTINCT")? return_list)?
+    // full_query   = match_clause+ ("GROUP BY" expr (, expr)*)?
+    //                ("RETURN" ("DISTINCT")? return_list)?
+    // match_clause = "MATCH"? query ("WHERE" expr)?
+    //
+    // ISO §14.3-14.4. MATCH is optional only on the first clause for
+    // back-compat with bare-pattern queries (`(x)-[]->(y)`).
     fn full_query(&mut self) -> Result<Query, String> {
-        // Optional MATCH keyword
         self.eat(&Token::Match);
+        let first = self.match_clause_body()?;
+        let mut matches = vec![MatchStatement::Simple { pattern: first }];
 
-        // Parse the pattern (path_pattern with comma-joins)
-        let mut pattern = self.query()?;
-
-        // Optional WHERE clause (wraps pattern in Filter)
-        if self.eat(&Token::Where) {
-            let expr = self.expr()?;
-            pattern = PathPattern::Filter(Box::new(pattern), expr);
+        while self.eat(&Token::Match) {
+            let pattern = self.match_clause_body()?;
+            matches.push(MatchStatement::Simple { pattern });
         }
 
         let group_by = if self.eat(&Token::GroupBy) {
@@ -126,24 +126,36 @@ impl Parser {
             None
         };
 
-        // Optional RETURN clause
         if self.eat(&Token::Return) {
             let distinct = self.eat(&Token::Distinct);
             let returns = self.return_list()?;
             Ok(Query {
-                pattern,
+                matches,
                 group_by,
                 returns: Some(returns),
                 distinct,
             })
         } else {
             Ok(Query {
-                pattern,
+                matches,
                 group_by,
                 returns: None,
                 distinct: false,
             })
         }
+    }
+
+    /// One match clause: pattern + optional WHERE wrapped in `Filter`.
+    /// Per-clause WHERE is scoped — `MATCH (x) WHERE _ MATCH (y) WHERE _`
+    /// produces two independent `Filter`-wrapped patterns, not a single
+    /// AND-ed predicate.
+    fn match_clause_body(&mut self) -> Result<PathPattern, String> {
+        let mut pattern = self.query()?;
+        if self.eat(&Token::Where) {
+            let expr = self.expr()?;
+            pattern = PathPattern::Filter(Box::new(pattern), expr);
+        }
+        Ok(pattern)
     }
 
     // return_list = return_item ("," return_item)*

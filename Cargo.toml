@@ -23,5 +23,8 @@ ureq = { version = "2.12", default-features = false, features = ["tls"] }
 zstd = "0.13"
 tar = "0.4"
 
+[dev-dependencies]
+proptest = "1"
+
 [workspace]
 members = [".", "python"]

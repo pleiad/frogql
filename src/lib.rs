@@ -9,9 +9,26 @@ pub mod syntax;
 pub mod typing;
 
 use syntax::path_pattern::PathPattern;
-use syntax::query::Query;
+use syntax::query::{MatchStatement, Query};
 use typing::checker::Typechecker;
 use typing::variable_type::Schema;
+
+/// Optimize a Query: collapse the match chain into a single PathPattern,
+/// run the optimizer over that, and rebuild the Query with the result
+/// stored as one `MatchStatement::Simple`.
+///
+/// Consistent with the typechecker and runtime, both of which also call
+/// `Query::collapsed_pattern()` before processing. Sound while every
+/// match is `Simple` (§14.4 GR 1 = natural join, which is what
+/// `PathPattern::Join` already encodes). When `OPTIONAL MATCH` lands all
+/// three phases will switch to walking `q.matches` per element together.
+fn optimize_query(q: Query) -> Query {
+    let pattern = optimizer::compile(q.collapsed_pattern());
+    Query {
+        matches: vec![MatchStatement::Simple { pattern }],
+        ..q
+    }
+}
 
 /// Phase-tagged compile failure.
 #[derive(Debug, Clone, PartialEq)]
@@ -35,11 +52,13 @@ impl std::fmt::Display for CompileError {
     }
 }
 
-/// Successful compile with non-blocking typechecker warnings preserved.
+/// Successful compile. `guaranteed_empty` is the typechecker's
+/// emptiness verdict (§10); when true, callers may skip the runtime.
 #[derive(Debug, Clone)]
 pub struct CompileResult {
     pub query: Query,
     pub warnings: Vec<String>,
+    pub guaranteed_empty: bool,
 }
 
 /// Canonical compile pipeline. `compile_query` and the REPL both use this.
@@ -64,13 +83,11 @@ pub fn compile_query_with_diagnostics_with(
         return Err(CompileError::Type(tc.errors));
     }
     let warnings = tc.warnings;
-    let optimized_pattern = optimizer::compile(q.pattern);
+    let guaranteed_empty = r.empty;
     Ok(CompileResult {
-        query: Query {
-            pattern: optimized_pattern,
-            ..q
-        },
+        query: optimize_query(q),
         warnings,
+        guaranteed_empty,
     })
 }
 
@@ -81,7 +98,6 @@ pub fn compile_query_with_diagnostics_with(
 /// Use [`compile_unchecked`] to skip typechecking.
 pub fn compile(query: &str) -> Result<PathPattern, String> {
     let ast = parser::parse(query)?;
-    // Elaboration runs on whole queries; wrap the bare pattern for the pass.
     let q = Query::pattern_only(ast);
     let q = elaborate::elaborate_query(q);
     let mut tc = Typechecker::untyped();
@@ -89,7 +105,7 @@ pub fn compile(query: &str) -> Result<PathPattern, String> {
     if !r.ok {
         return Err(tc.errors.join("; "));
     }
-    Ok(optimizer::compile(q.pattern))
+    Ok(optimize_query(q).collapsed_pattern())
 }
 
 /// Compile a full GQL query: parse → elaborate → typecheck → optimize.
@@ -117,7 +133,7 @@ pub fn compile_unchecked(query: &str) -> Result<PathPattern, String> {
     let ast = parser::parse(query)?;
     let q = Query::pattern_only(ast);
     let q = elaborate::elaborate_query(q);
-    Ok(optimizer::compile(q.pattern))
+    Ok(optimize_query(q).collapsed_pattern())
 }
 
 /// Compile a full GQL query without typechecking. Same plan as
@@ -125,9 +141,5 @@ pub fn compile_unchecked(query: &str) -> Result<PathPattern, String> {
 pub fn compile_query_unchecked(input: &str) -> Result<Query, String> {
     let q = parser::parse_query(input)?;
     let q = elaborate::elaborate_query(q);
-    let optimized_pattern = optimizer::compile(q.pattern);
-    Ok(Query {
-        pattern: optimized_pattern,
-        ..q
-    })
+    Ok(optimize_query(q))
 }

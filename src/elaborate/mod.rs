@@ -18,12 +18,20 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::Query;
+use crate::syntax::query::{MatchStatement, Query};
 
 pub fn elaborate_query(q: Query) -> Query {
     let fresh = FreshVars::new(&q);
-    let pattern = elaborate_pattern(q.pattern, &fresh);
-    Query { pattern, ..q }
+    let matches = q
+        .matches
+        .into_iter()
+        .map(|m| match m {
+            MatchStatement::Simple { pattern } => MatchStatement::Simple {
+                pattern: elaborate_pattern(pattern, &fresh),
+            },
+        })
+        .collect();
+    Query { matches, ..q }
 }
 
 pub fn elaborate_pattern(p: PathPattern, fresh: &FreshVars) -> PathPattern {
@@ -125,9 +133,13 @@ pub struct FreshVars {
 
 impl FreshVars {
     pub fn new(q: &Query) -> Self {
+        let mut taken = std::collections::HashSet::new();
+        for m in &q.matches {
+            visit(m.pattern(), &mut taken);
+        }
         Self {
             counter: Cell::new(0),
-            taken: collect_vars(&q.pattern),
+            taken,
         }
     }
 
@@ -141,12 +153,6 @@ impl FreshVars {
             }
         }
     }
-}
-
-fn collect_vars(p: &PathPattern) -> std::collections::HashSet<String> {
-    let mut set = std::collections::HashSet::new();
-    visit(p, &mut set);
-    set
 }
 
 fn visit(p: &PathPattern, set: &mut std::collections::HashSet<String>) {
