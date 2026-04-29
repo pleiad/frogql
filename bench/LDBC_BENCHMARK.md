@@ -175,49 +175,109 @@ Output is two streams:
 ## Results
 
 Run on Windows (rustc 1.95.0, release profile), SF0.1 dataset
-(327k nodes, 1.48M edges), `limit=20`, **1 iteration per param**
-(LazyGraphStore page cache is cold on first iter, warm thereafter;
-3+ iters are recommended for stable median — but at ~80 s per
-param × 15 params, even 1 iter takes ~20 minutes, and the
-optimizer-bound bottleneck dominates the noise floor anyway).
+(327k nodes, 1.48M edges), `limit=20`. Substitution parameters from
+the official LDBC `interactive_2_param.txt` archive (15 entries).
 
-Substitution parameters: official LDBC `interactive_2_param.txt`
-(15 entries), unchanged from the published archive.
+The bench supports three GraphAccess backends, run separately so
+each gets its own RSS baseline and timing window:
+
+```
+# Memory backend — load LDBC CSV directly into Graph
+ldbc_bench placeholder --backend memory \
+    --csv-dir bench/data/ldbc-sf0.1/social_network-sf0.1-CsvBasic-LongDateFormatter \
+    --iters 1
+
+# Lazy backend (default) — open .gdb with LazyGraphStore
+ldbc_bench bench/data/ldbc-sf0.1.gdb --backend lazy --iters 1
+
+# Disk backend — open .gdb with DiskGraphStore
+ldbc_bench bench/data/ldbc-sf0.1.gdb --backend disk --iters 1
+```
+
+### Speed vs RAM by backend (1 iter per param)
+
+| backend | load time | load RSS Δ | per-param median | per-param range | peak RSS Δ |
+|---|---|---|---|---|---|
+| memory | 3.96 s (CSV parse) | +605 MiB | **4.65 s** | 4.03 – 6.66 s | +249 MiB † |
+| lazy | 7.13 s (.gdb open) | +392 MiB | 8.42 s | 7.24 – 10.39 s | +399 MiB |
+| disk | **1.74 s** (.gdb open) | **+318 MiB** | 7.71 s | 7.27 – 8.46 s | +340 MiB |
+
+† On Windows, the OS may trim a process's working set under memory
+pressure, so peak RSS during query loop can read lower than RSS
+right after load (the committed memory is unchanged — Windows just
+shows working-set, not committed). The Memory backend's actual
+working footprint is the +605 MiB load number.
+
+### Findings
+
+- **Memory wins on speed by ~2×** but pays the most up-front: parses
+  the entire LDBC CSV directory at startup (3.96 s) and holds 605 MiB
+  resident. Once loaded, every query is page-fault-free, which is
+  why per-param median drops from ~8 s (Lazy/Disk) to ~4.65 s.
+- **Lazy and Disk are within ~10% of each other on speed** despite
+  Lazy having an in-process LRU page cache. On Windows + a small
+  enough dataset, the **OS page cache is doing most of the caching
+  anyway**, so Lazy's process-level cache adds bookkeeping without
+  much extra benefit.
+- **Lazy has the highest variance** (3.1 s spread) — first few params
+  are colder; the LRU cache fills up and warms up over the run.
+  Disk has the tightest spread (1.2 s) — it never has cache to warm,
+  so each query is roughly the same cost.
+- **Disk loads fastest** (1.74 s vs Lazy's 7.13 s) because it doesn't
+  build the label index in RAM at open time. Lazy pre-populates
+  topology + label index up front.
+- **Disk uses the least RAM** (+318 MiB), Lazy the most for steady
+  state (+399 MiB peak — index + topology + LRU cache).
+
+### Caveat on RSS measurement
+
+`sysinfo`'s `process.memory()` returns OS working-set on Windows,
+which includes mapped file pages. `LazyGraphStore` and
+`DiskGraphStore` likely use memory-mapped I/O, so part of the +392
+and +318 MiB deltas reflects mapped portions of the 1.4 GiB .gdb
+file rather than purely allocated heap. Treat the numbers as
+ordering and order-of-magnitude rather than exact private-bytes
+counts. The Memory backend's +605 MiB load delta is purely Rust
+heap and is the most reliable single number in the table.
+
+### Per-param times (Lazy backend, all 15 params)
+
+For completeness, here's what every param did under the default
+backend. The table reports a single iter; the per-param spread
+reflects mostly caller-degree variation (more friends → more join
+work) plus cache warmup on the first 1-2 params.
 
 | `Person.id`      | resolves to     | rows | wall time |
 |------------------|-----------------|------|-----------|
-| 19 791 209 300 143 | Bichang Li     | 20   | 101.1 s |
-| 10 995 116 278 647 | Ali Kountche   | 20   |  91.6 s |
-| 32 985 348 834 326 | Eduard Eduard  | 20   |  52.8 s |
-| 30 786 325 579 117 | Chunlai Wang   | 20   |  56.4 s |
-|              1 644 | Paul Roberts   | 20   |  64.5 s |
-|  6 597 069 766 983 | A. C. Bos      | 20   |  82.1 s |
-|  8 796 093 023 470 | Carlos Parra   | 20   |  87.3 s |
-|  2 199 023 256 520 | Lei Liu        | 20   |  79.7 s |
-| 26 388 279 067 159 | John Brown     | 20   |  82.1 s |
-| 28 587 302 323 283 | John Sharma    | 20   | 129.0 s |
-| 21 990 232 556 837 | Bing Li        | 20   | 146.9 s |
-| 28 587 302 322 755 | Wei Huang      | 20   |  78.7 s |
-| 26 388 279 067 442 | Lin Li         | 20   |  59.4 s |
-| 24 189 255 811 500 | Dominic Santos | 20   |  64.3 s |
-| 15 393 162 790 221 | Pierre Arnaud  | 20   |  68.7 s |
+| 19 791 209 300 143 | Bichang Li     | 20   |   7.77 s |
+| 10 995 116 278 647 | Ali Kountche   | 20   |   7.55 s |
+| 32 985 348 834 326 | Eduard Eduard  | 20   |   7.24 s |
+| 30 786 325 579 117 | Chunlai Wang   | 20   |   7.53 s |
+|              1 644 | Paul Roberts   | 20   |   7.73 s |
+|  6 597 069 766 983 | A. C. Bos      | 20   |  10.39 s |
+|  8 796 093 023 470 | Carlos Parra   | 20   |  10.11 s |
+|  2 199 023 256 520 | Lei Liu        | 20   |   9.45 s |
+| 26 388 279 067 159 | John Brown     | 20   |   9.31 s |
+| 28 587 302 323 283 | John Sharma    | 20   |   9.31 s |
+| 21 990 232 556 837 | Bing Li        | 20   |   8.62 s |
+| 28 587 302 322 755 | Wei Huang      | 20   |   9.02 s |
+| 26 388 279 067 442 | Lin Li         | 20   |   8.42 s |
+| 24 189 255 811 500 | Dominic Santos | 20   |   8.44 s |
+| 15 393 162 790 221 | Pierre Arnaud  | 20   |   7.76 s |
 
-Aggregates across all 15 params:
+All 15 params returned 20 rows (the LIMIT). Wall times are still
+far above LDBC's sub-second interactive target — root cause is the
+optimizer gap explained below ("Things this surfaces"), independent
+of which backend is used.
 
-| stat | wall time |
-|------|-----------|
-| min | 52.8 s |
-| median | 79.7 s |
-| mean | 83.0 s |
-| max | 146.9 s |
+### Earlier (cold-cache) numbers for context
 
-All 15 params returned 20 rows (the limit). Wall times are **far
-above** the LDBC interactive target of sub-second latency; cause
-is the optimizer gap explained below. The 3× spread between min
-and max comes from caller-degree variation (more friends → more
-join work) plus first-iter page-cache effects; it does **not**
-indicate noise in the bench. Re-running with `--iters 3` would
-tighten per-param numbers but won't change the order of magnitude.
+The very first SF0.1 run of this bench, before the OS file cache
+had any of the .gdb resident, showed per-param times of 53 – 147 s
+(median 79.7 s). The current numbers are with the OS file cache
+populated from prior runs. **Cold-cache cost is roughly 10× warm.**
+For papers that need cold-cache numbers, the bench should be run
+right after a machine restart or after dropping caches.
 
 ## Paper-tier disclosure (per `benchmark-checklist.tex`)
 
