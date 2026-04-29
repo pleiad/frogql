@@ -497,14 +497,20 @@ fn main() {
             .map(|q| q.id)
             .collect()
     } else {
-        ic_arg
+        match ic_arg
             .split(',')
-            .map(|s| {
-                s.trim()
-                    .parse::<u32>()
-                    .expect("--ic expects N or N,M,K or all|blocked")
-            })
-            .collect()
+            .map(|s| s.trim().parse::<u32>())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                eprintln!(
+                    "invalid --ic value {ic_arg:?}: {e}\n\
+                     expected: N, N,M,K, all, or blocked"
+                );
+                std::process::exit(1);
+            }
+        }
     };
 
     if target_ids.is_empty() {

@@ -48,10 +48,19 @@ fn main() {
     let mut rebuild = false;
     let mut skip_download = false;
     let mut i = 1;
+    // Helper: fail cleanly when a flag is missing its value rather
+    // than panicking with index-out-of-bounds.
+    let need_value = |i: usize, flag: &str| -> &str {
+        if i + 1 >= args.len() {
+            eprintln!("{flag} requires a value");
+            std::process::exit(1);
+        }
+        &args[i + 1]
+    };
     while i < args.len() {
         match args[i].as_str() {
             "--data-dir" => {
-                data_dir = PathBuf::from(&args[i + 1]);
+                data_dir = PathBuf::from(need_value(i, "--data-dir"));
                 i += 2;
             }
             "--rebuild" => {
@@ -81,7 +90,13 @@ fn main() {
     let dataset_archive = data_dir.join("ldbc-sf0.1.tar.zst");
     let dataset_dir = data_dir.join("ldbc-sf0.1");
     let csv_dir = dataset_dir.join("social_network-sf0.1-CsvBasic-LongDateFormatter");
-    if csv_dir.exists() {
+    // Idempotency check: a partially-extracted directory can exist if
+    // an earlier run was interrupted. Verifying a key sub-path that
+    // only appears post-extraction (the LDBC layout's `dynamic/` dir)
+    // rejects the partial-extract case where the top-level dir exists
+    // but is empty or incomplete.
+    let dataset_extracted = csv_dir.is_dir() && csv_dir.join("dynamic").is_dir();
+    if dataset_extracted {
         eprintln!("[skip] dataset already extracted at {}", csv_dir.display());
     } else {
         if !dataset_archive.exists() {
@@ -105,7 +120,11 @@ fn main() {
     let params_archive = data_dir.join("substitution_parameters-sf0.1.tar.zst");
     let params_dir = data_dir.join("substitution_parameters-sf0.1");
     let params_inner = params_dir.join("substitution_parameters-sf0.1");
-    if params_inner.exists() {
+    // Same partial-extract guard: check for a known file (IC2's param
+    // file is always there post-extract) instead of just the dir.
+    let params_extracted =
+        params_inner.is_dir() && params_inner.join("interactive_2_param.txt").is_file();
+    if params_extracted {
         eprintln!(
             "[skip] params already extracted at {}",
             params_inner.display()
