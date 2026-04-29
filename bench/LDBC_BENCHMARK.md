@@ -28,50 +28,39 @@ ORDER BY message.creationDate DESC, message.id ASC
 LIMIT 20
 ```
 
-gqlite query (this bench):
+gqlite query (this bench, post `loader/ldbc-id-property`):
 
 ```
 MATCH (p:Person)~[:knows]~(friend:Person)<-[:hasCreator]-(c:Comment)
     | (p:Person)~[:knows]~(friend:Person)<-[:hasCreator]-(c:Post)
-WHERE p.firstName = $firstName
-  AND p.lastName  = $lastName
+WHERE p.id = $personId
   AND c.creationDate <= $maxDate
-RETURN friend.firstName, friend.lastName, c.content, c.creationDate
+RETURN friend.id, friend.firstName, friend.lastName,
+       c.id, c.content, c.creationDate
 ```
 
-Matched faithfully:
+### Honest divergence audit
 
-- **`Message = Comment ∪ Post`** via path-pattern union (`|`). Both
-  arms tested in one query; `c` binds to whichever matched.
-- **`message.creationDate <= $maxDate`** — direct numeric WHERE
-  predicate.
-- **`LIMIT 20`** — passed via `Runtime::run_query`'s `limit`.
-- 3-node 2-edge shape with undirected KNOWS and reverse-direction
-  HAS_CREATOR.
+| # | Spec | gqlite (this bench) | Behavior diff | Cause |
+|---|---|---|---|---|
+| 1 | `(:Person {id: $personId})` | `WHERE p.id = $personId` | None — same predicate, different surface syntax | gqlite's descriptor-shorthand `{id: 933}` *does* parse, but using WHERE is consistent with the rest of the query. Pure stylistic. |
+| 2 | `[:KNOWS]` / `[:HAS_CREATOR]` | `[:knows]` / `[:hasCreator]` | None | LDBC CSV filenames use camelCase stems (`person_knows_person`, `comment_hasCreator_person`); the loader preserves that casing. The spec's all-caps Cypher convention isn't carried into the data. |
+| 3 | `(message:Message)` (union via Cypher label inheritance) | `(c: Comment) \| (c: Post)` (union via path-pattern alternation) | None — same set of bound rows | gqlite has no Cypher-style label inheritance. The path-union `\|` operator covers both Comment and Post in one query. |
+| 4 | `WHERE message.creationDate <= $maxDate` | `WHERE c.creationDate <= $maxDate` | None | LDBC's `LongDateFormatter` encodes dates as ms-since-epoch in a long integer; gqlite stores those as `Value::Int`; `<=` is the standard int comparison. *No date type required.* |
+| 5 | `LIMIT 20` (clause) | `Runtime::run_query(&q, 20)` (runtime arg) | Same row cap | gqlite parser doesn't have a `LIMIT` keyword yet; result-cap semantics are equivalent. |
+| 6 | `RETURN friend.id, ...firstName, ...lastName, message.id, coalesce(content, imageFile), creationDate` | `RETURN friend.id, ...firstName, ...lastName, c.id, c.content, c.creationDate` | **Differs** when a Post has empty `content` but non-empty `imageFile` — those rows return blank instead of the imageFile path. | gqlite has no `coalesce` builtin. |
+| 7 | `ORDER BY creationDate DESC, id ASC` | (no ordering) | **Differs** in *which* 20 rows are returned. The bench's 20 are not guaranteed to be the 20 most recent. **Wall time** is unaffected (sort would be a few ms over 20 rows). | gqlite parser doesn't have ORDER BY yet. |
+| 8 | `personId = 10995116278009` (spec example) | 5 real ids from SF0.1 | None — different parameter values, same lookup mechanism | Spec's example value doesn't exist in SF0.1 (keyed to a larger SF). Bench picks five real ids from SF0.1's Person table (see `PARAMS` in the binary). |
+| 9 | `maxDate = 1287230400000` (2010-10-16, spec example) | `1340000000000` (mid-2012) | None — same predicate semantics, different threshold | Spec's example threshold cuts every SF0.1 row (its dates start ~2010-12). Bench uses a threshold that retains a sizable fraction so the join still does work. |
 
-Divergences (all due to gqlite features not yet implemented):
+Of these:
 
-- **Anchor by `(firstName, lastName)` pair instead of `id`.** The
-  gqlite LDBC loader folds the LDBC `id` column into the internal
-  *node name*, not into a property, so `Person.id = $personId` is
-  not addressable. The 5 params used here are
-  `(firstName, lastName)` pairs that each map to *exactly one*
-  Person in SF0.1 — same per-query selectivity as `id`, just
-  spelled differently.
-- **No `ORDER BY` clause.** gqlite's parser doesn't have ORDER BY
-  yet. Output order is whatever the runtime emits. The 20 rows
-  returned per query aren't guaranteed to be the 20 *most recent*.
-  Wall time is unaffected by sort.
-- **Drop `friend.id` and `message.id` from RETURN.** Same loader
-  reason as above; both would render as `"NULL"`.
-- **`coalesce(message.content, message.imageFile)` collapsed to
-  `c.content`.** Posts in SF0.1 mostly have non-empty `content`;
-  the few image-only posts will return blank content. gqlite has
-  no `coalesce` builtin.
+- **#1, #2, #3, #4, #5, #8, #9** are surface-syntax or naming differences with **no semantic divergence**. Same query, just spelled to fit gqlite's grammar / data. These would block a verbatim copy-paste of the spec query, not the meaning.
+- **#6 and #7** are real semantic divergences:
+  - **#6 (`coalesce`)** affects *which content string* a Post-without-text-content returns. Falls back to blank instead of the imageFile path. Few rows in SF0.1 are affected.
+  - **#7 (no ORDER BY)** affects *which 20 rows* you see under LIMIT. The set of friend-message pairs is the same; the *prefix* of that set differs. Wall time is the same.
 
-In short: this bench is **IC2-shape-equivalent** with only
-projection / sort divergences. The lookup, the join structure,
-the message-union, and the date predicate are all faithful.
+Neither real divergence affects the per-query work or the bench's timing claim. The query exercises the spec's join structure, lookup pattern, message-union, and date predicate faithfully. Strictly: this is **IC2 with no `coalesce` and no ordering**.
 
 ## Setup
 
@@ -123,18 +112,17 @@ Output is two streams:
 ## Results
 
 Run on Windows (rustc 1.95.0, release profile), SF0.1 dataset
-(327k nodes, 1.48M edges), `limit=20`. Single iteration per param
+(327k nodes, 1.48M edges), `limit=20`, single iteration per param
 (LazyGraphStore page cache is cold on first iter, warm thereafter;
-3+ iters are recommended for stable median — single-iter numbers
-below are upper-bound order-of-magnitude):
+3+ iters are recommended for stable median):
 
-| Param           | result_count | wall time |
-|-----------------|--------------|-----------|
-| Mahinda Perera  | 20           |   96.4 s  |
-| Carmen Lepland  | 20           |  108.1 s  |
-| Bryn Davies     | 20           |   85.0 s  |
-| Cheng Yu        | 20           |  105.6 s  |
-| Hồ Chí Loan     | 20           |  110.7 s  |
+| `Person.id`      | resolves to    | rows | wall time |
+|------------------|----------------|------|-----------|
+| 933              | Mahinda Perera | 20   |  108.5 s  |
+| 1129             | Carmen Lepland | 20   |  100.6 s  |
+| 8 796 093 023 296  | Hồ Chí Loan    | 20   |   97.4 s  |
+| 21 990 232 555 524 | Bryn Davies    | 20   |   99.2 s  |
+| 32 985 348 833 865 | Cheng Yu       | 20   |  107.5 s  |
 
 All five params returned 20 rows (the limit). These are **far above**
 the LDBC interactive target of sub-second latency; cause is the
@@ -150,14 +138,14 @@ runtime is the *separate* typechecker benchmark.
 
 The current optimizer doesn't push down value-equality WHERE predicates
 into descriptors (only `attr is type` predicates push down per the
-optimizer doc). For `WHERE p.firstName = '...' AND p.lastName = '...'`,
+optimizer doc). For `WHERE p.id = $personId AND c.creationDate <= $maxDate`,
 this means:
 
 1. Enumerate every `Person~knows~Person` pair (14k undirected edges
    × 2 directions ≈ 28k base rows).
 2. Union-join each onto every `Comment-hasCreator->Person` (151k edges)
    and `Post-hasCreator->Person` (135k edges) — ~286k right side.
-3. *Then* filter by `(firstName, lastName)` and `creationDate`.
+3. *Then* filter by `p.id = ...` and `c.creationDate <= ...`.
 
 So per-query work scales with the join's cartesian intermediate,
 not the parameter's selectivity. This is what makes IC2 here run in
@@ -165,3 +153,12 @@ not the parameter's selectivity. This is what makes IC2 here run in
 a real finding for a future optimizer pass — predicate pushdown on
 `=` constants would collapse this into the (firstName, lastName)-
 anchored person (1 row), dropping the join's left side from 28k to 1.
+
+## Loader prerequisite
+
+The bench query uses `WHERE p.id = $personId` directly. This requires
+the LDBC loader to expose the LDBC `id` column as a queryable property
+(as well as as the internal node name). That fix lives on
+`loader/ldbc-id-property` and is in the parent commit of this branch;
+without it, every IC1-IC14 query that anchors by `id` is unexpressible
+against gqlite. See the loader's commit message for the rationale.
