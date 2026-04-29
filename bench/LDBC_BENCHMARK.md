@@ -117,39 +117,72 @@ For `--iters 3` with 15 IC2 params, you get 45 rows of CSV. Use this
 stream when you want to compute your own statistics (medians,
 percentiles, geomean across params, etc.) — it's the raw data.
 
-#### stderr — pre-computed summaries + progress
+#### stderr — human-readable progress, summaries, and memory tracking
 
-The bench computes per-row summaries from the same data and writes
-them human-readably:
+A complete stderr from `--ic 2 --iters 3` looks like:
 
 ```
+Loaded 14 IC definitions from bench/ldbc-queries (1 implemented, 13 blocked)
+RSS baseline: 9.9 MiB
+Loading bench/data/ldbc-sf0.1.gdb (LazyGraphStore)...
+  loaded 327588 nodes / 1477965 edges in 10.23s
+  RSS after open: 401.2 MiB (+391.3 MiB)
+
 === IC2: Recent messages by your friends (backend=lazy) ===
 Params: interactive_2_param.txt (15 rows, columns: personId, maxDate);  0+3 iters/param (warmup+measured);  limit=20
   IC2 row#0   (19791209300143|1354060800000) count=20  min= 7637.99ms  med= 7800.62ms  mean= 8316.74ms  max= 9511.62ms  (n=3)
   IC2 row#1   (10995116278647|1346112000000) count=20  min= 7858.60ms  med= 8418.31ms  mean= 8448.11ms  max= 9067.41ms  (n=3)
   ...
-Peak RSS during query loop: 407.4 MiB (+398.6 MiB over baseline)
-```
 
-Per-row breakdown:
-
-- `row#<N>` — same as the `row` column in the CSV (0-indexed line of the LDBC param file)
-- `(personId|maxDate)` in parens — the substitution-param values for this row (same as the CSV's `params` column)
-- `count=20` — `result_count`
-- `min/med/mean/max` — computed from the `--iters` measurements of this row, in milliseconds
-- `(n=3)` — sample size, here 3 because of `--iters 3`. When `n=1` the bench prints `wall=Xms` instead (with `n=1` the four stats collapse to one number, so the `min/med/mean/max` formatting would be misleading)
-
-After the last row of the last IC, the bench prints a final "done"
-summary aggregating per-IC across all rows:
-
-```
 ✓ done — 1 IC(s) ran to completion
   IC2: 15 rows × 3 iter(s) = 45 runs; across-row median 8420.34ms (range 7240.12-10380.55ms)
 Peak RSS during query loop: 407.4 MiB (+398.6 MiB over baseline)
 ```
 
-This confirms the run finished cleanly (vs got killed mid-row) and
-gives the headline number — across-row median — without grepping.
+Three sections:
+
+**Setup** (everything before the `===` line). What was loaded and how
+much RAM the backend's open call cost.
+
+**Per-row line** (`IC2 row#0  (...)  ...  (n=3)`):
+
+- `row#N` — same as the `row` column in the CSV (0-indexed line of the LDBC param file)
+- `(personId|maxDate)` in parens — substitution-param values for this row
+- `count=20` — `result_count` (rows the query returned, capped at `--limit`)
+- `min / med / mean / max` — the four stats computed from `--iters` runs of this row, in milliseconds
+- `(n=3)` — the sample size. When `--iters 1` (so n=1), the four stats collapse to the same number; the bench prints `wall=Xms` instead with a hint to raise `--iters`
+
+**Final summary** (after the last row):
+
+- `✓ done` — confirms the run reached the end (vs got killed mid-row)
+- The per-IC `× iter(s) = N runs` + `across-row median` line is the headline number; no grepping needed
+- `Peak RSS` — see below
+
+#### What RSS and "baseline" mean
+
+**RSS** ("resident set size") = how much physical RAM the bench
+process is using right now, as reported by the OS. Higher = more
+RAM in use. The bench reads it via `sysinfo` at three points:
+process start, just after the backend opens, and at the peak during
+the query loop.
+
+**Baseline** is just the RSS at process start — an almost-empty
+process before the backend has loaded anything. Reporting
+`+X MiB over baseline` makes the per-step cost readable:
+`+391 MiB` reads as "the backend's open used 391 MiB of RAM,"
+without you having to subtract the housekeeping the OS attributes
+to the process.
+
+Concretely on the example above:
+
+- `RSS baseline: 9.9 MiB` — process started, almost nothing loaded
+- `RSS after open: 401.2 MiB (+391.3 MiB)` — `LazyGraphStore::open` brought topology + label index + initial page cache into RAM
+- `Peak RSS during query loop: 407.4 MiB (+398.6 MiB)` — peak observed *during* the timed loop, ~7 MiB above the post-open figure (Lazy's in-process LRU page cache filling as queries fault new pages)
+
+For comparing backends (Lazy vs Disk), the **deltas** are what
+matters — how many extra MiB each backend's open and query loop
+add over the same baseline. Absolute numbers vary by OS / mmap
+behavior; deltas are honest.
 
 #### Cross-checking the two streams
 
