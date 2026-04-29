@@ -415,7 +415,10 @@ fn run_targets<G: GraphAccess>(
     rss_baseline: f64,
 ) {
     // CSV header for stdout — same shape regardless of which IC.
-    println!("query;backend;ic;param_idx;iter;result_count;elapsed_ns");
+    // The `params` column carries the substitution-param values for
+    // this row, joined by `|` (the same separator the LDBC param
+    // file uses). Column meanings documented in bench/LDBC_BENCHMARK.md.
+    println!("query;backend;params;param_idx;iter;result_count;elapsed_ns");
 
     let mut peak_rss = rss_baseline;
 

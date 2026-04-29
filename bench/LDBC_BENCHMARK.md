@@ -80,10 +80,76 @@ cargo build --release --bin ldbc_bench
 
 ### Output
 
-- **stdout**: CSV `query;backend;ic;param_idx;iter;result_count;elapsed_ns`.
-  Suitable for piping into `awk`/`pandas` for aggregation.
-- **stderr**: human-readable summary (per-row min / median / mean / max
-  in ms when `--iters >= 2`; `wall=` only when N=1).
+The bench writes to two streams on purpose, following the Unix
+convention that **stdout = data, stderr = chatter**:
+
+```bash
+./target/release/ldbc_bench db.gdb --ic 2 \
+    > runs.csv          # raw measurements only
+    2> summary.txt      # human-readable progress + per-row summaries
+```
+
+If you don't redirect, both go to your terminal interleaved.
+
+#### stdout — one row per `(param, iter)` measurement
+
+```csv
+query;backend;params;param_idx;iter;result_count;elapsed_ns
+IC2;lazy;19791209300143|1354060800000;0;0;20;7800623500
+IC2;lazy;19791209300143|1354060800000;0;1;20;9511623200
+IC2;lazy;19791209300143|1354060800000;0;2;20;7637990200
+IC2;lazy;10995116278647|1346112000000;1;0;20;8418309000
+...
+```
+
+| column | meaning |
+|---|---|
+| `query` | which IC ran (e.g. `IC2`) |
+| `backend` | `memory` / `lazy` / `disk` |
+| `params` | substitution-param values for this row, joined by `\|` (same separator as LDBC's param files). For IC2, that's `<personId>\|<maxDate>` |
+| `param_idx` | 0-indexed row of the LDBC param file (`interactive_<n>_param.txt`) |
+| `iter` | 0-indexed iteration of this same param row (0 to `--iters - 1`) |
+| `result_count` | how many rows the query returned (capped at `--limit`) |
+| `elapsed_ns` | wall time of one `Runtime::run_query` call, in **nanoseconds** |
+
+For `--iters 3` with 15 IC2 params, you get 45 rows. Use this stream
+when you want to compute your own statistics (medians, percentiles,
+geomean across params, etc.) — it's the raw data.
+
+#### stderr — pre-computed summaries + progress
+
+The bench computes per-row summaries from the same data and writes
+them human-readably:
+
+```
+=== IC2: Recent messages by your friends (backend=lazy) ===
+Params: interactive_2_param.txt (15 rows, columns: personId, maxDate);  3 iters/param;  limit=20
+  IC2 row#0   (19791209300143|1354060800000) count=20  min= 7637.99ms  med= 7800.62ms  mean= 8316.74ms  max= 9511.62ms  (n=3)
+  IC2 row#1   (10995116278647|1346112000000) count=20  min= 7858.60ms  med= 8418.31ms  mean= 8448.11ms  max= 9067.41ms  (n=3)
+  ...
+Peak RSS during query loop: 407.4 MiB (+398.6 MiB over baseline)
+```
+
+Per-row breakdown:
+
+- `row#<N>` — same as `param_idx` in the CSV
+- `(personId|maxDate)` in parens — the substitution-param values for this row (same as the CSV's `params` column)
+- `count=20` — `result_count`
+- `min/med/mean/max` — computed from the `--iters` measurements of this row, in milliseconds
+- `(n=3)` — sample size, here 3 because of `--iters 3`. When `n=1` the bench prints `wall=Xms` instead (with `n=1` the four stats collapse to one number, so the `min/med/mean/max` formatting would be misleading)
+
+#### Cross-checking the two streams
+
+The summary line above for `row#0` was computed from these three CSV rows:
+```
+IC2;lazy;19791209300143|1354060800000;0;0;20;7800623500   ← iter 0: 7.80 s
+IC2;lazy;19791209300143|1354060800000;0;1;20;9511623200   ← iter 1: 9.51 s
+IC2;lazy;19791209300143|1354060800000;0;2;20;7637990200   ← iter 2: 7.64 s
+```
+min = 7.64 s, median = 7.80 s, mean ≈ 8.32 s, max = 9.51 s — matches the stderr line.
+
+If you only need the headline numbers, skip the CSV entirely and read
+the `.txt`. The CSV is there for when you need raw data.
 
 ## Adding a new IC
 
