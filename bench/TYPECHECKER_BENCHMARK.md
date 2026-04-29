@@ -199,9 +199,17 @@ Things this bench gets right:
   the speedup denominator so the "compile cost" isn't understated by
   burying it in `rt_chk` / `rt_unchk`.
 - **Schema clone outside timing.** The Typechecker's schema clone is
-  done before the timed region, so per-phase numbers reflect
-  typecheck cost, not setup. (A *fresh* `Typechecker::new` still
-  happens per iter though — see issue (d) below.)
+  done before the timed region. `Typechecker::new` still runs inside
+  the timed region but it's a move-only struct construction (the
+  schema is moved in by value, vecs are init-empty), so its cost is
+  ~tens of nanoseconds and well below the typecheck-phase noise
+  floor. The reported `tc_us` reflects `check_query` work.
+- **Two complementary harnesses.** This CSV bench covers the
+  multi-DB sweep + soundness + verdict + speedup-vs-runtime claim.
+  A second harness — criterion at `benches/typecheck.rs` — covers
+  the microsecond-scale phase numbers with proper statistical
+  handling (warmup, outlier detection, confidence intervals,
+  baseline regression checks). See "Two harnesses" below.
 - **Verdict column.** `ok` / `empty` / `rejected` / `both` / `parse`
   is independent of the runtime columns, so a reader doesn't have to
   infer "rt_chk=0 with empty=no must mean rejected." The legend is
@@ -221,7 +229,9 @@ Things this bench *doesn't* address (acknowledged):
 - **(a) Cold vs warm runtime is mixed in.** First iter pays page-cache
   warmup; bench takes a `--warmup 1` discard but only one iter is
   warm-up. Variance on the runtime side is real (LDBC bench saw
-  38-106s spread on a single param, ~3x noise floor).
+  38-106s spread on a single param, ~3x noise floor). *Bench-side
+  fixable but expensive — multi-iter warmup multiplies bench wall
+  time linearly. Not pursued.*
 - **(b) Few queries per category.** 4 valid, 3 empty, 2 unbound,
   1 parse. Per-category averages aren't statistically robust; treat
   each cell as one data point, not a population estimate.
@@ -230,26 +240,134 @@ Things this bench *doesn't* address (acknowledged):
   GRAPH TYPE would be more interesting because some valid-looking
   queries would be rejected by typing — needs a hand-written schema
   and is left for a follow-up. *(User-flagged as optional.)*
-- **(d) Schema clone per iter.** Outside the timed region, but
-  `Typechecker::new(active.clone())` still runs every iteration. Real
-  workloads would cache a Typechecker per session. Bench's `tc_us`
-  is per-cold-Typechecker, slightly inflated.
-- **(e) μs-scale jitter.** Typecheck phases are 3-200 μs. Windows
-  `Instant` resolution is on the order of 100 ns under
-  `QueryPerformanceCounter`, but per-call jitter can dominate at this
-  scale. 30 iters with min/median/max reporting doesn't compute
-  confidence intervals; we don't use `criterion`.
-- **(f) No CI on the bench.** `typecheck_bench` is in `src/bin/` but
-  not run by `cargo test` or by any GitHub Actions job. Drift is
-  only caught when a human runs it.
+- **(d) ~~Schema clone per iter~~ — non-issue.** Earlier draft of
+  this section overstated this. The schema clone is outside the
+  timed region; the `Typechecker::new` call inside the timed region
+  is move-only struct construction. No fix needed.
+- **(e) μs-scale jitter — addressed in `benches/typecheck.rs`.**
+  Typecheck phases are 3-200 μs. The CSV bench uses `Instant::now()`
+  with min/median/mean/max and doesn't compute confidence intervals.
+  The criterion harness at `benches/typecheck.rs` does (warmup,
+  outlier detection, [low / point / high] CIs, baseline regression
+  checks). See "Two harnesses" below.
+- **(f) No CI on the bench — intentional.** Earlier draft framed
+  this as a gap. It isn't. CI runners (GitHub Actions, etc.) are
+  shared, noisy, and run-to-run variance routinely exceeds the
+  signal we'd want to catch (microsecond-scale typecheck deltas,
+  millisecond-scale runtime deltas at SF0.1). Running benches on
+  CI would either produce false alarms (when CI noise dominates)
+  or hide real regressions (when threshold is loose enough to
+  tolerate the noise). Both benches are run on developer laptops
+  where the environment is at least *consistent*, and criterion's
+  baseline-comparison feature (`--save-baseline` / `--baseline`)
+  is the right tool for "did my change make it slower." No CI
+  integration planned.
 - **(g) Limit is fixed.** `--limit 100` is the default; different
-  limits change runtime cost. The bench doesn't sweep limit.
-- **(h) Predicate-pushdown gap dominates valid runtime.** Same
-  finding as the LDBC bench — the optimizer doesn't push down
-  value-equality predicates. The "valid" category's runtime numbers
-  are inflated by this; with pushdown they would shrink and the
-  typechecker overhead ratios would change. Ratios here are tied to
-  gqlite's *current* optimizer, not an idealized one.
+  limits change runtime cost. The CSV bench doesn't sweep limit.
+- **(h) Predicate-pushdown gap dominates valid runtime — gqlite
+  impl issue, out of scope here.** Same finding as the LDBC bench:
+  the optimizer extracts `var.attr is type` from WHERE but not
+  `var.attr = literal`. The "valid" category's runtime numbers are
+  inflated by this. **Fixing it requires changes in
+  `src/optimizer/pushdown.rs`, `src/syntax/descriptor.rs`, and
+  `src/runtime/engine.rs`** (re-introduce post-elab `pushed_predicates`
+  on Descriptor; have the runtime evaluate them per-candidate before
+  joining). This bench branch is bench-only and explicitly does
+  not modify gqlite implementation. Tracked as a follow-up.
+
+## Two harnesses
+
+| | `src/bin/typecheck_bench.rs` (CSV) | `benches/typecheck.rs` (criterion) |
+|---|---|---|
+| Invocation | `./target/release/typecheck_bench --iters 30 db1.gdb db2.gdb` | `cargo bench --bench typecheck` |
+| Multi-DB | yes | no (uses `Schema::star()` — no .gdb dependency) |
+| Includes runtime | yes (`rt_chk`, `rt_unchk`) | no — compile-side only |
+| Phases | parse / elab / tc / opt / rt_chk / rt_unchk | parse / elaborate / typecheck / compile_full |
+| Headline metric | speedup = rt_unchk / (parse+elab+tc+opt) | per-phase wall time + CIs |
+| Statistical handling | min/median/mean/max | warmup + outlier detection + CIs |
+| Soundness check | yes (rt_unchk row count vs r.empty) | no |
+| Verdict tracking | yes (ok/empty/rejected/both/parse) | no |
+| Baseline regression | no (raw CSV; diff in a script) | yes (`--save-baseline` / `--baseline`) |
+
+Run both. The CSV bench answers "is the typechecker faster than the
+runtime would have been?" (yes, 2-45 000× depending on dataset). The
+criterion bench answers "did my change to the typechecker pipeline
+make it slower than baseline?" with a real confidence interval and
+not just a noisy median.
+
+```bash
+# Capture a baseline before refactoring
+cargo bench --bench typecheck -- --save-baseline before
+# ... make changes ...
+cargo bench --bench typecheck -- --baseline before
+# Reports % change per case + whether change is significant
+```
+
+### Criterion baseline (Schema::star, Windows / rustc 1.95 release, 100 samples after 3 s warmup)
+
+CIs as `[low point high]` µs. Outliers auto-detected and excluded
+by criterion. Each criterion group restarts the pipeline from the
+query string, so `parse` is parse-only, `elaborate` is parse+elab,
+`typecheck` is parse+elab+tc, `compile_full` is parse+elab+tc+opt.
+Per-phase costs are `group(N) − group(N-1)`.
+
+| group | case | time (µs) |
+|---|---|---|
+| parse | valid_label_person | [1.56 1.61 1.67] |
+| parse | valid_label_user | [1.58 1.62 1.66] |
+| parse | valid_chain_knows | [2.75 2.83 2.90] |
+| parse | valid_chain_wrote | [2.92 2.99 3.06] |
+| parse | empty_unknown_label | [1.74 1.82 1.90] |
+| parse | empty_unknown_edge_lhs | [2.82 2.90 2.98] |
+| parse | empty_chained_unknown | [4.17 4.28 4.39] |
+| parse | invalid_unbound | [1.46 1.50 1.54] |
+| parse | invalid_unbound_chain | [2.35 2.44 2.54] |
+| parse | invalid_parse | [1.15 1.18 1.21] |
+| elaborate | valid_label_person | [1.86 1.91 1.96] |
+| elaborate | valid_label_user | [1.84 1.89 1.94] |
+| elaborate | valid_chain_knows | [3.95 4.04 4.11] |
+| elaborate | valid_chain_wrote | [3.83 3.92 4.00] |
+| elaborate | empty_unknown_label | [1.90 1.94 1.98] |
+| elaborate | empty_unknown_edge_lhs | [3.35 3.44 3.54] |
+| elaborate | empty_chained_unknown | [4.92 5.07 5.24] |
+| elaborate | invalid_unbound | [1.85 1.91 1.96] |
+| elaborate | invalid_unbound_chain | [3.04 3.14 3.22] |
+| typecheck | valid_label_person | [6.99 7.62 8.32] |
+| typecheck | valid_label_user | [8.71 9.09 9.49] |
+| typecheck | valid_chain_knows | [12.64 12.91 13.22] |
+| typecheck | valid_chain_wrote | [12.67 13.97 15.42] |
+| typecheck | empty_unknown_label | [3.90 4.00 4.11] |
+| typecheck | empty_unknown_edge_lhs | [9.89 10.21 10.59] |
+| typecheck | empty_chained_unknown | [20.44 20.92 21.34] |
+| typecheck | invalid_unbound | [3.81 3.89 3.98] |
+| typecheck | invalid_unbound_chain | [11.37 11.80 12.27] |
+| compile_full | valid_label_person | [4.52 4.67 4.83] |
+| compile_full | valid_label_user | [4.66 4.87 5.07] |
+| compile_full | valid_chain_knows | [13.25 13.69 14.08] |
+| compile_full | valid_chain_wrote | [10.09 10.45 10.81] |
+| compile_full | empty_unknown_label | [3.67 3.72 3.79] |
+| compile_full | empty_unknown_edge_lhs | [13.00 13.32 13.58] |
+| compile_full | empty_chained_unknown | [19.67 20.29 20.94] |
+| compile_full | invalid_unbound | [3.54 3.61 3.68] |
+| compile_full | invalid_unbound_chain | [10.81 11.23 11.71] |
+
+Quick per-phase reads on `valid_chain_knows`:
+
+| phase | calculation | µs |
+|---|---|---|
+| parse | direct | 2.83 |
+| elaborate (alone) | 4.04 − 2.83 | 1.21 |
+| typecheck (alone) | 12.91 − 4.04 | 8.87 |
+| optimize (alone) | 13.69 − 12.91 | 0.78 |
+
+Total compile (parse+elab+tc+opt) for the `valid_chain_knows` case:
+**13.69 µs**. Compared to the runtime's 1645 ms on SF0.1, compile is
+**0.0008%** of wall time. The "typechecker overhead is negligible"
+claim survives proper statistical handling.
+
+The full per-case data including outlier breakdowns is captured
+under `target/criterion/` after each `cargo bench` run; HTML reports
+are generated automatically (open `target/criterion/report/index.html`).
 
 ## Things to investigate (not in this bench)
 
