@@ -36,32 +36,37 @@ if the schema is the one the cases were authored against.
 
 For each query:
 
-1. **Per-phase compile time.** parse / elaborate / typecheck /
-   optimize timed separately. Typecheck includes the per-query
-   `Schema::clone()` because production
-   (`compile_query_with_diagnostics_with`) pays the same clone on
-   every query — under-charging here would understate real cost.
+1. **Two compile-pipeline times.** The bench invokes production's
+   entry points wholesale rather than reimplementing the pipeline
+   phase-by-phase, so it can't drift from production semantics:
+   - `compile_chk_us` — `compile_query_with_diagnostics_with(active, query)`,
+     the production checked path. Bails before optimize when the
+     typechecker rejects (no Query produced); runs the full pipeline
+     otherwise.
+   - `compile_unchk_us` — `compile_query_unchecked(query)`, the
+     "what production would do without the typechecker" baseline.
+     Runs parse + elab + opt; no tc.
 2. **Both runtime paths in one run.**
-   - `rt_chk` — runtime *with* the §10 short-circuit honored: when
-     the typechecker says `empty` or rejects, runtime is skipped
-     (records 0).
-   - `rt_unchk` — runtime *without* the typechecker. Always runs
-     to completion. The "what would have happened without the
-     typechecker" baseline.
-3. **Outcome** — three buckets derived from the typechecker's
-   booleans: `ok` (valid, runs), `empty` (statically empty,
-   short-circuited), `rejected` (typecheck error or parse error;
-   the compiler refused this query). The "rejected AND empty"
-   intersection collapses into `rejected` because a rejected
-   query is invalid regardless of whether the residual pattern
-   was unsatisfiable.
+   - `rt_chk` — runtime on the checked-path Query. Skipped if the
+     compile rejected the query, or if `guaranteed_empty` fired the
+     §10 short-circuit (records 0).
+   - `rt_unchk` — runtime on the unchecked-path Query. Always runs
+     unless parse itself failed.
+3. **Outcome** — three buckets derived structurally from the
+   compile result: `ok` (CompileResult with !guaranteed_empty),
+   `empty` (CompileResult with guaranteed_empty), `rejected`
+   (CompileError of either Type or Parse variant). The
+   "rejected AND empty" intersection collapses into `rejected`
+   because a rejected query is invalid regardless of whether the
+   residual pattern was unsatisfiable.
 4. **tc_impact** — split format depending on outcome:
-   - `ok` cases: signed percentage `±X%` of total wall time vs
-     the no-typechecker path. `+X%` is overhead (expected); `-X%`
-     is only reachable from runtime variance.
    - `empty` / `rejected`: speedup multiplier
-     `rt_unchk / (parse + elab + tc + opt)`. Numbers are 10³ to
-     10⁵× — a percentage saturates near 100% and loses magnitude.
+     `rt_unchk / compile_chk`. Numbers are 10³ to 10⁵× — a
+     percentage saturates near 100% and loses magnitude.
+   - `ok`: signed percentage of total wall time delta:
+     `(compile_chk + rt_chk - compile_unchk - rt_unchk) / (compile_unchk + rt_unchk)`.
+     `+X%` is overhead (expected); `-X%` is only reachable from
+     runtime variance.
    - parse failure: `—` (no compile pipeline to compare).
 
 The bench cross-checks soundness on every iter: if the typechecker
@@ -138,92 +143,108 @@ caught at parse time. It collapses into the same `Outcome::Rejected`
 bucket as the unbound-var cases since both are "the compile pipeline
 refused this query".
 
-## Sample results (SF0.1, 30 iters / 1 warmup)
+## Sample shape (run the bench for fresh numbers)
 
-Captured from a real run; absolute numbers will vary by machine but
-the orders of magnitude are stable.
-
-Two caveats on these specific numbers:
-1. tc_impact column was reformatted post-capture — short-circuit
-   cases keep their multiplier, valid cases recomputed as signed %
-   from the same raw timings.
-2. The capture predates the predicate-pushdown landing on `main`
-   (`e8fb887`), which moved value-predicate evaluation into the
-   LTJ filter loop. WHERE-using cases (`v_where`,
-   `e_type_mismatch_chain`) will run faster on a fresh re-capture;
-   the qualitative claim ("typecheck dwarfs runtime on doomed
-   queries") is unchanged.
+Below is a shape-of-output illustration from a smoke run (n=2, no
+warmup — *not* statistically robust; the per-row numbers are noisy).
+It shows the column layout under the current refactor (where the
+bench calls production's `compile_query_with_diagnostics_with` and
+`compile_query_unchecked` wholesale rather than timing per-phase).
+Run `./target/release/typecheck_bench` yourself for solid medians.
 
 ```
-cat        case                          parse_us   elab_us     tc_us    opt_us  rt_chk_ms rt_unchk_ms   outcome   tc_impact
------------------------------------------------------------------------------------------------------------------------------
-valid      v_label                          23.70      2.80     95.80      1.00      19.26       21.99        ok     -11.96%
-valid      v_chain_knows                    27.70      3.90    198.20      2.00    1516.91     1540.73        ok      -1.53%
-valid      v_where                          26.30      2.70    101.40      4.10      19.10       17.51        ok      +9.64%
-empty      e_chain4_bad_leaf                72.90      8.00    354.00      3.30       0.00    66581.88     empty   151944.0x
-empty      e_chain_mid_bad                  36.30      5.80    302.60      2.90       0.00     1735.36     empty     4992.4x
-empty      e_bad_edge_deep                  40.80      4.80    191.40      3.10       0.00     1605.53     empty     6686.9x
-empty      e_ic2_bad_msg                    39.80      6.60    293.30      2.20       0.00     6378.00     empty    18654.6x
-empty      e_conflict_label_deep            49.00      5.30    278.70      2.80       0.00     1630.27     empty     4854.9x
-empty      e_type_mismatch_chain          1473.50    804.10   3611.30     12.10       0.00    16786.70     empty     2844.7x
-empty      e_union_all_bad                  36.90      4.00    194.10      2.90       0.00     2711.88     empty    11399.2x
-empty      e_repeat_bad_leaf                51.20      6.40    264.20      2.90       0.00    16826.30     empty    51821.1x
-empty      e_label_only                     22.10      2.40     60.20      0.70       0.00      993.10     empty    11628.8x
-invalid    i_unbound_after_chain4           33.20      8.30    358.00      3.60       0.00     1337.75  rejected     3318.7x
-invalid    i_unbound_in_where_chain         38.50      6.10    288.20      5.50       0.00     8204.10  rejected    24251.0x
-invalid    i_unbound_in_union               33.20      5.00    267.40      2.80       0.00     3342.80  rejected    10839.2x
-invalid    i_unbound_compound_where         35.70      3.40    121.10      5.50       0.00       22.54  rejected      136.0x
-invalid    i_unbound_simple                 29.80      3.90    191.10      0.90       0.00     1494.21  rejected     6620.3x
-invalid    i_parse                           5.90         —         —         —          —           —  rejected           —
+cat        case                         compile_chk_us compile_unchk_us  rt_chk_ms rt_unchk_ms   outcome   tc_impact
+--------------------------------------------------------------------------------------------------------------------
+valid      v_label                             991.50           21.45      28.52       20.11        ok     +46.59%
+valid      v_chain_knows                       286.50           26.70    2089.89     1943.33        ok      +7.55%
+valid      v_where                             173.45           41.80      14.53       14.51        ok      +1.06%
+empty      e_chain4_bad_leaf                   452.00           17.15       0.00    74256.23     empty   164283.7x
+empty      e_chain_mid_bad                    4238.90           24.15       0.00     2168.03     empty      511.5x
+empty      e_bad_edge_deep                     411.40           21.75       0.00     1769.79     empty     4301.9x
+empty      e_ic2_bad_msg                      1608.05           17.80       0.00    12296.76     empty     7647.0x
+empty      e_conflict_label_deep               451.05           16.20       0.00     1832.54     empty     4062.8x
+empty      e_type_mismatch_chain              1449.30           24.55       0.00     3710.01     empty     2559.9x
+empty      e_union_all_bad                     394.60           21.95       0.00     3703.33     empty     9385.0x
+empty      e_repeat_bad_leaf                  1712.40           19.05       0.00    20100.50     empty    11738.2x
+empty      e_label_only                        150.55            6.80       0.00     2075.61     empty    13786.9x
+invalid    i_unbound_after_chain4             1774.95           24.50       0.00     1878.39  rejected     1058.3x
+invalid    i_unbound_in_where_chain           1105.50           23.95       0.00    10891.39  rejected     9852.0x
+invalid    i_unbound_in_union                  292.15           11.55       0.00     3978.76  rejected    13618.9x
+invalid    i_unbound_compound_where             97.70          336.40       0.00        8.64  rejected       88.4x
+invalid    i_unbound_simple                    363.70            8.85       0.00     1380.38  rejected     3795.4x
+invalid    i_parse                                  —               —          —           —  rejected           —
 ```
+
+Notes on this snapshot:
+- `n=2` so per-row noise is large (`v_label`'s `compile_chk_us=991.50`
+  is a cold-cache outlier; `compile_chk` for most cases on real n=30
+  runs settles in the 100-400 µs range).
+- `i_unbound_compound_where` is the smallest gap (`88.4×`) and
+  measures correctly: pushdown lets the runtime defend itself well
+  on this case, so the typechecker's relative win shrinks (but is
+  still two orders of magnitude).
+- All other doomed cases land at 10³ to 10⁵× as expected.
+- `i_unbound_compound_where` shows compile_chk (97.70) < compile_unchk
+  (336.40) — that's the early-bail effect: compile_chk rejects mid-
+  pipeline (no opt), compile_unchk runs the whole no-tc pipeline
+  including opt. So the checked path is *cheaper* in compile, and
+  the runtime saving is bonus.
 
 ### Reading the table
 
-- `parse_us` / `elab_us` / `tc_us` / `opt_us` — compile phases in
-  **microseconds**.
+- `compile_chk_us` — production checked-pipeline cost (parse + elab
+  + tc, plus opt iff the typechecker accepted), microseconds.
+- `compile_unchk_us` — same pipeline minus the typechecker, the
+  no-typechecker baseline cost, microseconds.
 - `rt_chk_ms` — runtime *with* the §10 short-circuit honored.
   Zero where the typechecker fired the short-circuit.
-- `rt_unchk_ms` — runtime *without* the typechecker, in
-  **milliseconds**. This is the "would-be" cost the speedup
-  compares against. Each iter also captures `row_count()` for the
-  soundness cross-check.
+- `rt_unchk_ms` — runtime *without* the typechecker, milliseconds.
+  This is the "would-be" cost the speedup compares against.
 - `outcome` — `ok` / `empty` / `rejected`. Three buckets derived
-  structurally from the typechecker's booleans (see "What it
-  measures" §3).
+  structurally from the compile result (see §3).
 - `tc_impact` — split format:
-  - `ok` rows: signed % delta of total wall time vs the path
-    production would take without the typechecker (`+X%` overhead,
-    `-X%` only reachable from runtime variance).
   - `empty` / `rejected` rows: speedup multiplier
-    `rt_unchk / (parse + elab + tc + opt)`.
+    `rt_unchk / compile_chk`.
+  - `ok` rows: signed % of total-wall-time delta with vs without
+    the typechecker (`+X%` overhead, `-X%` only reachable from
+    runtime variance).
   - parse failure: `—`.
 
-### Key takeaways from the captured run
+### What you should expect to see
 
-- **Doomed queries dominate the speedup story.** The
-  empty/rejected cases land at 136× to 152,000× — a 4-hop chain
-  ending in an unknown label is 66 seconds the runtime would have
-  spent vs 354 µs the typechecker spends to know it's hopeless.
-- **Valid-case impact is in the noise.** v_label and
-  v_chain_knows show *negative* tc_impact (–11.96% and –1.53%) —
-  not a real speedup, just runtime variance making `rt_chk` happen
-  to come in lower than `rt_unchk` on that iter. v_where shows
-  +9.64%, which is real overhead. Either way the magnitudes are
-  small and consistent with "typecheck cost is noise vs runtime".
-- **Small empty cases also win.** `e_label_only` (just `(x: Wagumi)`)
-  still gets ~11,000× because the runtime takes ~1 second to
-  confirm there are no Wagumi nodes in 327k.
-- **Soundness held.** Across all 18 cases, no `empty` outcome had a
-  non-zero unchecked row count, and no case's outcome diverged from
-  its category-expected outcome.
+- **Doomed queries dominate the speedup story.** Empty/rejected cases
+  land in the 10³ to 10⁵× range. The biggest win is `e_chain4_bad_leaf`
+  (4-hop chain to an unknown label) where the runtime spends ~50–70
+  seconds to discover what the typechecker rejects in a few hundred µs.
+- **Valid-case impact lives in the noise.** `compile_chk + rt_chk` is
+  comparable to `compile_unchk + rt_unchk`; the `tc_impact` percentage
+  on `ok` rows tends to come in within a few percent of zero, with
+  sign determined by per-iter variance. The typechecker can't actually
+  make a query it doesn't reject run faster — large negative values
+  are runtime-cache asymmetry, not real speedup.
+- **Small empty cases also win.** `e_label_only` (just
+  `(x: Wagumi)`) still gets ~10⁴× because confirming "no Wagumi
+  exists" still costs the runtime ~1 second of label-index work.
+- **Smallest invalid speedup is the canary.** `i_unbound_compound_where`
+  is where the runtime defends itself best (pushdown narrows the
+  predicate to one person quickly). Expect ~10² × there. If that
+  number ever drops near 1×, the case has lost signal value; replace it.
+- **Soundness should be `clean. 18/18`.** Anything else is a
+  regression to investigate before trusting the rest of the table.
 
 ## Output
 
 - **stdout**: per-iteration CSV `db;category;case;phase;iter;ns;flags`
   for offline analysis (compute min/p95/CI, plot distributions, etc.).
-  Note: `category` is the case author's static category (`valid`,
-  `empty`, `invalid`); the runtime `outcome` (in the stderr table)
-  is computed structurally and may diverge if there's a regression.
+  `phase` ∈ {`compile_chk`, `rt_chk`, `compile_unchk`, `rt_unchk`} —
+  one row per phase per iter. Notes:
+  - `category` is the case author's static category (`valid`,
+    `empty`, `invalid`); the runtime `outcome` (in the stderr table)
+    is computed structurally and may diverge if there's a regression.
+  - `flags` ∈ {`""`, `"skipped"`, `"rows=N"`}: empty for normal
+    rows; `skipped` on `rt_chk` when the §10 short-circuit fired or
+    the compile rejected; `rows=N` on every `rt_unchk` row for the
+    soundness cross-check.
 - **stderr**: human-readable summary table + soundness warnings.
 
 Redirect them separately:

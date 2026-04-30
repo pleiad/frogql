@@ -38,13 +38,8 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-use gqlrust::elaborate;
-use gqlrust::optimizer;
-use gqlrust::parser;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::store::lazy::LazyGraphStore;
-use gqlrust::syntax::query::{MatchStatement, Query};
-use gqlrust::typing::checker::Typechecker;
 
 // ---------------------------------------------------------------------------
 // Hardcoded dataset path. The bench is paired with the LDBC SF0.1
@@ -413,21 +408,26 @@ fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
     let active = store.catalog().active_schema();
     let rt = Runtime::new(&store);
 
-    // Column width 10 for cat is enough now that categories fit
-    // (`valid`/`empty`/`invalid`, longest 7 chars). The body row
-    // formatter uses the same widths; TABLE_WIDTH below sums them
-    // (10+28+9+9+9+9+10+11+9+11) plus 9 separator spaces = 124.
-    const TABLE_WIDTH: usize = 124;
+    // Column widths: 10 (cat) + 28 (case) + 13 (compile_chk_us) +
+    // 15 (compile_unchk_us) + 10 (rt_chk_ms) + 11 (rt_unchk_ms) +
+    // 9 (outcome) + 11 (tc_impact) = 107, plus 7 separator spaces
+    // = 114.
+    const TABLE_WIDTH: usize = 114;
     eprintln!(
-        "{:<10} {:<28} {:>9} {:>9} {:>9} {:>9} {:>10} {:>11} {:>9} {:>11}",
-        "cat", "case", "parse_us", "elab_us", "tc_us", "opt_us",
-        "rt_chk_ms", "rt_unchk_ms", "outcome", "tc_impact",
+        "{:<10} {:<28} {:>13} {:>15} {:>10} {:>11} {:>9} {:>11}",
+        "cat", "case",
+        "compile_chk_us", "compile_unchk_us",
+        "rt_chk_ms", "rt_unchk_ms",
+        "outcome", "tc_impact",
     );
-    // tc_impact column has two formats by row outcome — inline legend
-    // so the table is self-documenting without flipping to the doc:
+    // tc_impact dual format — inline legend so the table is
+    // self-documenting without flipping to the doc:
     eprintln!(
-        "  (tc_impact: ±X% on ok rows = total-wall-time delta with vs without typecheck; \
-         Yx on empty/rejected = rt_unchk / compile speedup; — for parse failure)"
+        "  (compile_chk = production checked-pipeline cost; compile_unchk = same minus the typechecker)"
+    );
+    eprintln!(
+        "  (tc_impact: Yx on empty/rejected = rt_unchk / compile_chk speedup; \
+         ±X% on ok = (compile_chk+rt_chk - compile_unchk-rt_unchk) / (compile_unchk+rt_unchk); — for parse fail)"
     );
     eprintln!("{}", "-".repeat(TABLE_WIDTH));
 
@@ -469,10 +469,19 @@ fn run_case(
     iters: usize,
     warmup: usize,
 ) -> bool {
-    let mut parse_samples: Vec<u128> = Vec::with_capacity(iters);
-    let mut elab_samples: Vec<u128> = Vec::with_capacity(iters);
-    let mut tc_samples: Vec<u128> = Vec::with_capacity(iters);
-    let mut opt_samples: Vec<u128> = Vec::with_capacity(iters);
+    // Two compile-pipeline samples, two runtime samples. We invoke
+    // production's entry points wholesale (`compile_query_with_diagnostics_with`
+    // and `compile_query_unchecked`) rather than reimplementing the
+    // pipeline phase-by-phase: the entry points already encode the
+    // correct semantics — including "bail before optimize when the
+    // typechecker rejects" — and aligning with them prevents the
+    // bench from drifting from production cost as the pipeline
+    // evolves. Per-phase breakdown is gone; if you need it,
+    // `Typechecker::new + check_query` is the one phase that matters
+    // for the headline claim and you can isolate it via a separate
+    // micro-bench.
+    let mut compile_chk_samples: Vec<u128> = Vec::with_capacity(iters);
+    let mut compile_unchk_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut rt_chk_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut rt_unchk_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut empty_flag = false;
@@ -484,83 +493,48 @@ fn run_case(
     for n in 0..(iters + warmup) {
         let is_warmup = n < warmup;
 
-        // Parse.
+        // ---- Checked path: compile + (maybe) runtime ----
+        // Production's REPL/Python flow goes through this exact entry
+        // point with the active schema; we time the whole thing.
         let t = Instant::now();
-        let parsed = parser::parse_query(case.query);
-        let parse_ns = t.elapsed().as_nanos();
-        if !is_warmup {
-            parse_samples.push(parse_ns);
-            csv_row(db_path, case, "parse", n - warmup, parse_ns, "");
-        }
+        let chk_compile = gqlrust::compile_query_with_diagnostics_with(active, case.query);
+        let compile_chk_ns = t.elapsed().as_nanos();
 
-        let ast = match parsed {
-            Ok(a) => a,
-            Err(_) => {
+        // Re-derive the booleans every iter from the structured
+        // result; deterministic, but kept fresh so a per-iter
+        // soundness check has the right state.
+        empty_flag = false;
+        typecheck_rejected = false;
+        parse_failed = false;
+        let chk_query = match chk_compile {
+            Ok(c) => {
+                empty_flag = c.guaranteed_empty;
+                Some(c.query)
+            }
+            Err(gqlrust::CompileError::Parse(_)) => {
                 parse_failed = true;
-                if !is_warmup {
-                    elab_samples.push(0);
-                    tc_samples.push(0);
-                    opt_samples.push(0);
-                    rt_chk_samples.push(0);
-                    rt_unchk_samples.push(0);
-                    for phase in ["elab", "tc", "opt", "rt_chk", "rt_unchk"] {
-                        csv_row(db_path, case, phase, n - warmup, 0, "skipped");
-                    }
-                }
-                continue;
+                None
+            }
+            Err(gqlrust::CompileError::Type(_)) => {
+                typecheck_rejected = true;
+                None
             }
         };
-
-        // Elaborate.
-        let t = Instant::now();
-        let elab = elaborate::elaborate_query(ast);
-        let elab_ns = t.elapsed().as_nanos();
         if !is_warmup {
-            elab_samples.push(elab_ns);
-            csv_row(db_path, case, "elab", n - warmup, elab_ns, "");
+            compile_chk_samples.push(compile_chk_ns);
+            csv_row(db_path, case, "compile_chk", n - warmup, compile_chk_ns, "");
         }
 
-        // Typecheck. Schema clone is INSIDE the timed region:
-        // production (`compile_query_with_diagnostics_with`) does the
-        // same per-query clone, so the bench's per-query cost matches
-        // what real callers pay.
-        let t = Instant::now();
-        let mut tc = Typechecker::new(active.clone());
-        let r = tc.check_query(&elab);
-        let tc_ns = t.elapsed().as_nanos();
-        if !is_warmup {
-            tc_samples.push(tc_ns);
-            csv_row(db_path, case, "tc", n - warmup, tc_ns, "");
-        }
-        empty_flag = r.empty;
-        typecheck_rejected = !r.ok;
-
-        // Optimize. Runs unconditionally (both checked and unchecked
-        // paths optimize before running).
-        let t = Instant::now();
-        let optimized_pattern = optimizer::compile(elab.collapsed_pattern());
-        let opt_ns = t.elapsed().as_nanos();
-        if !is_warmup {
-            opt_samples.push(opt_ns);
-            csv_row(db_path, case, "opt", n - warmup, opt_ns, "");
-        }
-
-        let optimized = Query {
-            matches: vec![MatchStatement::Simple {
-                pattern: optimized_pattern,
-            }],
-            ..elab
-        };
-
-        // Checked runtime: §10 short-circuit honored. Computed once;
-        // the same boolean controls whether we time anything and what
-        // flag to emit on the CSV row.
-        let short_circuit = r.empty || typecheck_rejected;
+        // Runtime on the checked path. Skipped if the compile
+        // pipeline either rejected the query (no Query to run) or
+        // told the caller it's guaranteed-empty (§10 short-circuit).
+        let short_circuit = chk_query.is_none() || empty_flag;
         let rt_chk_ns = if short_circuit {
             0
         } else {
+            let q = chk_query.as_ref().unwrap();
             let t = Instant::now();
-            let _ = rt.run_query(&optimized, LIMIT);
+            let _ = rt.run_query(q, LIMIT);
             t.elapsed().as_nanos()
         };
         if !is_warmup {
@@ -569,18 +543,33 @@ fn run_case(
             csv_row(db_path, case, "rt_chk", n - warmup, rt_chk_ns, flag);
         }
 
-        // Unchecked runtime: the comparison baseline. Always runs.
-        // We cross-check row_count() on iter to catch the case where
-        // the typechecker says empty but the runtime would have
-        // returned rows (a soundness bug we'd otherwise quietly
-        // count as a great speedup).
+        // ---- Unchecked path: compile_unchecked + runtime ----
+        // The "what production would do without the typechecker"
+        // baseline. compile_query_unchecked runs parse + elab + opt
+        // (no tc), so its time naturally excludes the typechecker.
         let t = Instant::now();
-        let result = rt.run_query(&optimized, LIMIT);
-        let rt_unchk_ns = t.elapsed().as_nanos();
-        let rows = result.row_count();
+        let unchk_compile = gqlrust::compile_query_unchecked(case.query);
+        let compile_unchk_ns = t.elapsed().as_nanos();
+        if !is_warmup {
+            compile_unchk_samples.push(compile_unchk_ns);
+            csv_row(db_path, case, "compile_unchk", n - warmup, compile_unchk_ns, "");
+        }
+
+        // Runtime on the unchecked path. Always runs unless parse
+        // itself failed (in which case neither path has a query).
+        // We capture row_count() to cross-check empty soundness:
+        // typechecker said empty + runtime returned rows = unsound.
+        let (rt_unchk_ns, rows) = match unchk_compile {
+            Ok(q) => {
+                let t = Instant::now();
+                let result = rt.run_query(&q, LIMIT);
+                (t.elapsed().as_nanos(), result.row_count())
+            }
+            Err(_) => (0, 0),
+        };
         if !is_warmup {
             rt_unchk_samples.push(rt_unchk_ns);
-            if r.empty && rows != 0 {
+            if empty_flag && rows != 0 {
                 soundness_violations += 1;
                 max_violation_rows = max_violation_rows.max(rows);
             }
@@ -589,20 +578,11 @@ fn run_case(
         }
     }
 
-    let parse_med = median(&parse_samples);
-    let elab_med = median(&elab_samples);
-    let tc_med = median(&tc_samples);
-    let opt_med = median(&opt_samples);
+    let compile_chk_med = median(&compile_chk_samples);
+    let compile_unchk_med = median(&compile_unchk_samples);
     let rt_chk_med = median(&rt_chk_samples);
     let rt_unchk_med = median(&rt_unchk_samples);
 
-    let total_compile_ns = parse_med + elab_med + tc_med + opt_med;
-
-    // Outcome is the structural answer ("what did the typechecker
-    // actually decide?"), derived from the booleans set during the
-    // iter loop. We never go through a display string to make
-    // control-flow decisions — only the column rendering at the very
-    // end converts to a label.
     let outcome = Outcome::classify(empty_flag, typecheck_rejected, parse_failed);
     let expected = case.category.expected_outcome();
 
@@ -621,45 +601,37 @@ fn run_case(
         }
     };
 
-    // The tc_impact column has two regimes by outcome — different
-    // formats because they mean different things and one format
-    // doesn't read well for both:
+    // tc_impact: split-format column.
     //
-    //   - `Empty` / `Rejected`: the typechecker fired the §10
-    //     short-circuit, runtime was skipped (`rt_chk = 0`). Report
-    //     SPEEDUP MULTIPLIER — `rt_unchk / (parse+elab+tc+opt)`,
-    //     i.e. how many times the typechecker outran what the
-    //     runtime would have done. These numbers are 10³ to 10⁵×;
-    //     percentage formatting saturates near 100% and loses the
-    //     magnitude that matters here.
+    //   - Empty / Rejected: SPEEDUP MULTIPLIER `rt_unchk / compile_chk`.
+    //     The numerator is the runtime work the §10 short-circuit
+    //     spared; the denominator is the cost of the production
+    //     checked-path compile (which already correctly excludes
+    //     optimize when the typechecker rejects, because we time the
+    //     entry-point fn and it bails before opt on rejection).
     //
-    //   - `Ok` (valid case): both paths run the runtime. Report
-    //     SIGNED PERCENTAGE of the total-wall-time delta vs the path
-    //     production would have taken WITHOUT the typechecker (same
-    //     parse/elab/opt, no tc, then runtime). `+X%` means the
-    //     typechecker net-added wall time (overhead — expected in
-    //     steady state); `-X%` is only reachable from runtime
-    //     variance — the typechecker cannot actually make runtime
-    //     faster on a query it doesn't reject.
+    //   - Ok: SIGNED PERCENTAGE of total wall time delta. Compares
+    //     `compile_chk + rt_chk` (with-typechecker total) to
+    //     `compile_unchk + rt_unchk` (without-typechecker total).
+    //     `+X%` is overhead the typechecker added; `-X%` is only
+    //     reachable from runtime variance.
     //
-    //   - Parse failure (Outcome::Rejected with parse_failed=true):
-    //     no compile pipeline to compare against, dash.
+    //   - Parse failure: dash (no compile pipeline to compare).
     let impact_str = if parse_failed {
         "—".to_string()
     } else {
         match outcome {
             Outcome::Empty | Outcome::Rejected => {
-                if total_compile_ns > 0 && rt_unchk_med > 0 {
-                    let speedup = rt_unchk_med as f64 / total_compile_ns as f64;
+                if compile_chk_med > 0 && rt_unchk_med > 0 {
+                    let speedup = rt_unchk_med as f64 / compile_chk_med as f64;
                     format!("{speedup:.1}x")
                 } else {
                     "—".to_string()
                 }
             }
             Outcome::Ok => {
-                let chk_total = total_compile_ns as i128 + rt_chk_med as i128;
-                let unchk_total =
-                    (total_compile_ns as i128 - tc_med as i128) + rt_unchk_med as i128;
+                let chk_total = compile_chk_med as i128 + rt_chk_med as i128;
+                let unchk_total = compile_unchk_med as i128 + rt_unchk_med as i128;
                 if unchk_total > 0 {
                     let pct =
                         (chk_total - unchk_total) as f64 * 100.0 / unchk_total as f64;
@@ -672,13 +644,11 @@ fn run_case(
     };
 
     eprintln!(
-        "{:<10} {:<28} {:>9.2} {:>9} {:>9} {:>9} {:>10} {:>11} {:>9} {:>11}",
+        "{:<10} {:<28} {:>13} {:>15} {:>10} {:>11} {:>9} {:>11}",
         case.category.label(),
         case.id,
-        parse_med as f64 / 1_000.0,
-        us(elab_med),
-        us(tc_med),
-        us(opt_med),
+        us(compile_chk_med),
+        us(compile_unchk_med),
         ms(rt_chk_med),
         ms(rt_unchk_med),
         outcome.label(),
