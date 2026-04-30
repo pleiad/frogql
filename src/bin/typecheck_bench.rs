@@ -329,7 +329,7 @@ fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
         "outcome", "tc_impact",
     );
     eprintln!(
-        "  (tc_impact: Yx on empty/rejected = rt_unchk / compile_chk; \
+        "  (tc_impact: Yx on empty/rejected = (compile_unchk + rt_unchk) / compile_chk; \
          ±X% on ok = (compile_chk - compile_unchk) / (compile_unchk + rt_unchk); — for parse fail)"
     );
     eprintln!("{}", "-".repeat(TABLE_WIDTH));
@@ -464,20 +464,21 @@ fn run_case(
         }
     };
 
-    // tc_impact column. Empty/Rejected: speedup multiplier
-    // `rt_unchk / compile_chk` (the §10 short-circuit means the user
-    // pays only compile_chk where without the typechecker they'd pay
-    // compile_unchk + rt_unchk; for big rt_unchk the simplified ratio
-    // is essentially the full one). Ok: typecheck overhead as % of
-    // total wall time, `(compile_chk - compile_unchk) / (compile_unchk
-    // + rt_unchk)`. Parse failure: dash.
+    // tc_impact column. Empty/Rejected: ratio of total wall time
+    // without typechecker to total wall time with typechecker,
+    // `(compile_unchk + rt_unchk) / compile_chk` — the §10 short-
+    // circuit means the user pays only compile_chk on the checked
+    // path. Ok: typecheck overhead as fraction of total wall time
+    // without typechecker, `(compile_chk - compile_unchk) /
+    // (compile_unchk + rt_unchk)`. Parse failure: dash.
     let impact_str = if parse_failed {
         "—".to_string()
     } else {
         match outcome {
             Outcome::Empty | Outcome::Rejected => {
-                if compile_chk_med > 0 && rt_unchk_med > 0 {
-                    let speedup = rt_unchk_med as f64 / compile_chk_med as f64;
+                let unchk_total = compile_unchk_med + rt_unchk_med;
+                if compile_chk_med > 0 && unchk_total > 0 {
+                    let speedup = unchk_total as f64 / compile_chk_med as f64;
                     format!("{speedup:.1}x")
                 } else {
                     "—".to_string()

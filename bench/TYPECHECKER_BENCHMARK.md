@@ -103,7 +103,7 @@ it's the raw data.
 === bench/data/ldbc-sf0.1.gdb ===
   327588 nodes / 1477965 edges in 11.12s
 cat        case                         compile_chk_us compile_unchk_us rt_unchk_ms   outcome   tc_impact
-  (tc_impact: Yx on empty/rejected = rt_unchk / compile_chk; ±X% on ok = (compile_chk - compile_unchk) / (compile_unchk + rt_unchk); — for parse fail)
+  (tc_impact: Yx on empty/rejected = (compile_unchk + rt_unchk) / compile_chk; ±X% on ok = (compile_chk - compile_unchk) / (compile_unchk + rt_unchk); — for parse fail)
 ---------------------------------------------------------------------------------------------------------
 valid      v_label                             182.60           23.40       22.50        ok      +0.71%
 ...
@@ -124,8 +124,8 @@ Columns:
 
 `tc_impact` formulas (also shown in the inline legend):
 
-- empty/rejected: `rt_unchk / compile_chk` (the §10 short-circuit means the user's checked-path cost is just `compile_chk`; without the typechecker they'd pay `compile_unchk + rt_unchk`)
-- ok: `(compile_chk − compile_unchk) / (compile_unchk + rt_unchk)` (typecheck overhead as fraction of total wall time)
+- empty/rejected: `(compile_unchk + rt_unchk) / compile_chk` — ratio of total wall time without typechecker to with. The §10 short-circuit means the user's checked-path cost is just `compile_chk`; without the typechecker they'd pay the full `compile_unchk + rt_unchk`.
+- ok: `(compile_chk − compile_unchk) / (compile_unchk + rt_unchk)` — typecheck overhead as fraction of total wall time without typechecker.
 
 Sign convention on `ok` rows: `+X%` is overhead added by the
 typechecker; `-X%` only happens if `compile_chk < compile_unchk`,
