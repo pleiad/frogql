@@ -43,7 +43,7 @@ For each query:
    every query — under-charging here would understate real cost.
 2. **Both runtime paths in one run.**
    - `rt_chk` — runtime *with* the §10 short-circuit honored: when
-     the typechecker says `Empty` or rejects, runtime is skipped
+     the typechecker says `empty` or rejects, runtime is skipped
      (records 0).
    - `rt_unchk` — runtime *without* the typechecker. Always runs
      to completion. The "what would have happened without the
@@ -133,7 +133,7 @@ microseconds.
 - `i_unbound_simple` — short reproduction of the original
   wrong-NULL bug, kept as a small-pattern baseline within this bucket.
 
-The 5th invalid case is `i_parse` — `MATCH (p RETURN p.name`,
+The 6th case in this category is `i_parse` — `MATCH (p RETURN p.name`,
 caught at parse time. It collapses into the same `Outcome::Rejected`
 bucket as the unbound-var cases since both are "the compile pipeline
 refused this query".
@@ -141,9 +141,18 @@ refused this query".
 ## Sample results (SF0.1, 30 iters / 1 warmup)
 
 Captured from a real run; absolute numbers will vary by machine but
-the orders of magnitude are stable. tc_impact column reformatted
-post-capture: short-circuit cases keep multiplier, valid cases
-recomputed as signed % from the same raw timings.
+the orders of magnitude are stable.
+
+Two caveats on these specific numbers:
+1. tc_impact column was reformatted post-capture — short-circuit
+   cases keep their multiplier, valid cases recomputed as signed %
+   from the same raw timings.
+2. The capture predates the predicate-pushdown landing on `main`
+   (`e8fb887`), which moved value-predicate evaluation into the
+   LTJ filter loop. WHERE-using cases (`v_where`,
+   `e_type_mismatch_chain`) will run faster on a fresh re-capture;
+   the qualitative claim ("typecheck dwarfs runtime on doomed
+   queries") is unchanged.
 
 ```
 cat        case                          parse_us   elab_us     tc_us    opt_us  rt_chk_ms rt_unchk_ms   outcome   tc_impact
@@ -212,7 +221,10 @@ invalid    i_parse                           5.90         —         —       
 
 - **stdout**: per-iteration CSV `db;category;case;phase;iter;ns;flags`
   for offline analysis (compute min/p95/CI, plot distributions, etc.).
-- **stderr**: human-readable per-DB tables + soundness warnings.
+  Note: `category` is the case author's static category (`valid`,
+  `empty`, `invalid`); the runtime `outcome` (in the stderr table)
+  is computed structurally and may diverge if there's a regression.
+- **stderr**: human-readable summary table + soundness warnings.
 
 Redirect them separately:
 
@@ -234,10 +246,6 @@ Redirect them separately:
   bench at a different schema would silently turn most cases into
   the wrong measurement. Schema-flexible typecheck testing is the
   job of unit tests, not this bench.
-- **No predicate-pushdown investigation.** The "valid" runtime
-  numbers are inflated by a known gqlite optimizer gap (extracts
-  `var.attr is type` from WHERE but not `var.attr = literal`). Out
-  of scope here; tracked as a follow-up in the optimizer.
-- **No CI integration.** Bench machines are noisy; criterion's
-  per-developer-baseline workflow is the right shape if we ever
-  want regression detection, not CI thresholds.
+- **No CI integration.** Bench machines are noisy; per-developer
+  baseline-comparison is the right shape if we ever want regression
+  detection, not CI thresholds.

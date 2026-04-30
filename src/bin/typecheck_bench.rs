@@ -26,10 +26,10 @@
 //! that referenced them). SF0.1 alone is sufficient for the headline.
 //!
 //! No `.gdb` paths accepted: this bench is paired with the LDBC
-//! dataset by design. If you want schema-flexible micro-bench
-//! numbers on the typechecker in isolation, that's a different
-//! tool — without a runtime to compare against, those numbers
-//! can't make the claim this bench exists to make.
+//! dataset by design. Schema-flexible "typechecker in isolation"
+//! numbers aren't a thing we measure — without a runtime to compare
+//! against, those numbers can't make the claim this bench exists to
+//! make. (An earlier criterion harness tried; deleted.)
 //!
 //! See `bench/TYPECHECKER_BENCHMARK.md` for the discussion + reading
 //! the result tables.
@@ -52,13 +52,21 @@ use gqlrust::typing::checker::Typechecker;
 
 const SF01_GDB: &str = "bench/data/ldbc-sf0.1.gdb";
 
-// Defaults. `LIMIT` caps the runtime row output; doesn't affect
-// typecheck. Set high enough that the success cases don't artificially
-// terminate early but low enough that empty cases don't pay catastrophic
-// memory if the runtime allocates result buffers up front.
+// Defaults. `LIMIT` caps how many result rows the runtime materializes
+// per query — doesn't affect typecheck. 100 is enough for the valid
+// controls to produce stable timings without spending bench wall time
+// streaming millions of rows we don't read.
 const DEFAULT_ITERS: usize = 30;
 const DEFAULT_WARMUP: usize = 1;
 const LIMIT: usize = 100;
+
+// CSV stdout columns: db;category;case;phase;iter;ns;flags
+// `flags` vocabulary (used by downstream tooling that reads the CSV):
+//   - empty string  : phase ran successfully
+//   - "skipped"     : phase was bypassed (parse failed earlier in the
+//                     iter, OR §10 short-circuit suppressed `rt_chk`)
+//   - "rows=N"      : on `rt_unchk` rows, the result row count
+//                     (used for the empty-but-nonempty soundness check)
 
 // ---------------------------------------------------------------------------
 
@@ -145,10 +153,10 @@ struct Case {
 /// Cases are weighted toward "doomed query, expensive would-be
 /// runtime" — that's the case the typechecker most clearly justifies
 /// itself on. Three valid controls suffice to confirm typecheck is
-/// negligible overhead on success; the other ~14 cases are doomed
-/// queries shaped like real LDBC patterns where the runtime, without
-/// the typechecker, would do substantial work to confirm what the
-/// typechecker rejects in microseconds.
+/// negligible overhead on success; the other 15 cases are doomed
+/// queries (9 empty / 6 rejected) shaped like real LDBC patterns
+/// where the runtime, without the typechecker, would do substantial
+/// work to confirm what the typechecker rejects in microseconds.
 const CASES: &[Case] = &[
     // -------------------------------------------------------------------
     // Valid controls (3): demonstrate typecheck overhead vs successful runtime.
@@ -169,11 +177,13 @@ const CASES: &[Case] = &[
         query: "MATCH (p: Person) WHERE p.id = 933 RETURN p.firstName",
     },
     // -------------------------------------------------------------------
-    // Empty-by-typing on expensive realistic shapes (9). Each is a
-    // multi-hop or otherwise non-trivial pattern with exactly one
-    // element that makes the static analysis bottom out. The runtime
-    // (without typecheck) doesn't necessarily detect the same fact
-    // until it has done the enumeration.
+    // Empty-by-typing (9). Mostly multi-hop / realistic-shape queries
+    // where one element makes the static analysis bottom out — the
+    // runtime, without typecheck, has to do the enumeration to find
+    // out. One small-pattern control (`e_label_only`) at the end of
+    // the bucket gives a same-bucket reference for cases where the
+    // runtime can rule out emptiness cheaply, so we can compare
+    // small-pattern speedup against the deep-pattern speedups.
     // -------------------------------------------------------------------
 
     // 4-hop chain ending in an unknown label. Runtime walks
@@ -405,22 +415,24 @@ fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
 
     // Column width 10 for cat is enough now that categories fit
     // (`valid`/`empty`/`invalid`, longest 7 chars). The body row
-    // formatter uses the same width.
+    // formatter uses the same widths; TABLE_WIDTH below sums them
+    // (10+28+9+9+9+9+10+11+9+11) plus 9 separator spaces = 124.
+    const TABLE_WIDTH: usize = 124;
     eprintln!(
         "{:<10} {:<28} {:>9} {:>9} {:>9} {:>9} {:>10} {:>11} {:>9} {:>11}",
         "cat", "case", "parse_us", "elab_us", "tc_us", "opt_us",
         "rt_chk_ms", "rt_unchk_ms", "outcome", "tc_impact",
     );
-    eprintln!("{}", "-".repeat(127));
+    eprintln!("{}", "-".repeat(TABLE_WIDTH));
 
-    let mut mismatch_count = 0usize;
+    let mut warned_count = 0usize;
     for case in CASES {
         if run_case(&path_str, &active, &rt, case, iters, warmup) {
-            mismatch_count += 1;
+            warned_count += 1;
         }
     }
-    eprintln!("{}", "-".repeat(127));
-    if mismatch_count == 0 {
+    eprintln!("{}", "-".repeat(TABLE_WIDTH));
+    if warned_count == 0 {
         eprintln!(
             "Soundness: clean. {}/{} cases produced their expected outcome and no \
              empty case had a non-zero rt_unchk row count.",
@@ -430,9 +442,9 @@ fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
     } else {
         eprintln!(
             "⚠  Soundness: {}/{} cases tripped a SOUNDNESS warning (see ⚠ lines above). \
-             Each is a typechecker regression on the LDBC-paired case set, not a schema \
-             artifact — investigate before trusting the rest of the table.",
-            mismatch_count,
+             Each is a regression on the LDBC-paired case set (typechecker, parser, \
+             or schema inference) — investigate before trusting the rest of the table.",
+            warned_count,
             CASES.len(),
         );
     }
@@ -440,14 +452,13 @@ fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
 
 /// Run a single case for `iters + warmup` iterations, emitting per-iter
 /// CSV rows + a human summary line. Returns `true` if the case tripped
-/// a soundness warning (verdict ∉ expected, OR `verdict=empty` with a
+/// a soundness warning (outcome ≠ expected, OR `Outcome::Empty` with a
 /// non-zero rt_unchk row count). Caller tallies these for the per-DB
-/// summary at the bottom of the table.
-#[allow(clippy::too_many_arguments)]
-fn run_case<'g>(
+/// summary line at the bottom of the table.
+fn run_case(
     db_path: &str,
     active: &gqlrust::typing::variable_type::Schema,
-    rt: &Runtime<'g, LazyGraphStore>,
+    rt: &Runtime<'_, LazyGraphStore>,
     case: &Case,
     iters: usize,
     warmup: usize,
@@ -535,8 +546,11 @@ fn run_case<'g>(
             ..elab
         };
 
-        // Checked runtime: §10 short-circuit honored.
-        let rt_chk_ns = if r.empty || typecheck_rejected {
+        // Checked runtime: §10 short-circuit honored. Computed once;
+        // the same boolean controls whether we time anything and what
+        // flag to emit on the CSV row.
+        let short_circuit = r.empty || typecheck_rejected;
+        let rt_chk_ns = if short_circuit {
             0
         } else {
             let t = Instant::now();
@@ -545,7 +559,7 @@ fn run_case<'g>(
         };
         if !is_warmup {
             rt_chk_samples.push(rt_chk_ns);
-            let flag = if r.empty || typecheck_rejected { "skipped" } else { "" };
+            let flag = if short_circuit { "skipped" } else { "" };
             csv_row(db_path, case, "rt_chk", n - warmup, rt_chk_ns, flag);
         }
 
@@ -666,18 +680,22 @@ fn run_case<'g>(
     );
 
     // Two flavors of soundness anomaly, surfaced under one warning
-    // umbrella. Both are "the typechecker decided something the case
-    // set says it shouldn't have," so they tally together:
+    // umbrella so a reader scanning the table sees ⚠ once per
+    // problematic case:
     //
     //   1. Outcome mismatch — `outcome != expected`. On an
     //      LDBC-paired case set every case has a single expected
-    //      outcome; a mismatch is a typechecker regression, parser
-    //      change, or schema-inference shift.
+    //      outcome; a mismatch is a regression somewhere in the
+    //      compile pipeline (typechecker, parser, schema inference).
     //
     //   2. Empty-but-nonempty — typechecker asserted `Outcome::Empty`
     //      but the unchecked runtime returned rows. Straightforward
-    //      unsoundness — the §10 short-circuit would have discarded
-    //      real results.
+    //      typechecker unsoundness — the §10 short-circuit would
+    //      have discarded real results.
+    //
+    // Naming "SOUNDNESS" is the strict label for case 2; case 1 is
+    // strictly speaking a "regression" rather than an unsoundness,
+    // but we use a single umbrella so the tail count is one number.
     let outcome_mismatch = outcome != expected;
     let empty_unsound = soundness_violations > 0;
 
