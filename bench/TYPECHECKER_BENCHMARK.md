@@ -83,8 +83,9 @@ bench/data/ldbc-sf0.1.gdb;valid;v_label;rt_unchk;0;25310400;rows=1528
 There's no `rt_chk` phase: on `ok` queries the runtime would
 execute identical work to `rt_unchk` whether the typechecker fired
 or not, so measuring it twice would just add cache-warming variance
-without signal. On doomed queries (`empty` / `rejected`) the §10
-short-circuit means production never calls runtime — that's
+without signal. On doomed queries (`empty` / `rejected`) production
+never calls runtime — the typechecker's guaranteed-empty
+short-circuit (rules.md §10 Theorem 6.5) skips it — and that's
 validated structurally via the `outcome` column.
 
 `flags` vocabulary:
@@ -124,7 +125,7 @@ Columns:
 
 `tc_impact` formulas (also shown in the inline legend):
 
-- empty/rejected: `(compile_unchk + rt_unchk) / compile_chk` — ratio of total wall time without typechecker to with. The §10 short-circuit means the user's checked-path cost is just `compile_chk`; without the typechecker they'd pay the full `compile_unchk + rt_unchk`.
+- empty/rejected: `(compile_unchk + rt_unchk) / compile_chk` — ratio of total wall time without typechecker to with. The user's checked-path cost is just `compile_chk` because runtime is skipped (guaranteed-empty short-circuit fires, or compile rejected the query); without the typechecker they'd pay the full `compile_unchk + rt_unchk`.
 - ok: `(compile_chk − compile_unchk) / (compile_unchk + rt_unchk)` — typecheck overhead as fraction of total wall time without typechecker.
 
 Sign convention on `ok` rows: `+X%` is overhead added by the
@@ -140,8 +141,8 @@ Last line of stderr counts cases that tripped a warning. Two flavors:
   match the case author's expected category. A regression in the
   typechecker, parser, or schema inference.
 - **empty-but-nonempty** — the typechecker said `empty` but the
-  unchecked runtime returned a non-zero row count. The §10
-  short-circuit would have discarded real results.
+  unchecked runtime returned a non-zero row count. The
+  guaranteed-empty short-circuit would have discarded real results.
 
 Clean run reads `Soundness: clean. 18/18 ...`. Anything else is a
 regression — investigate before trusting the rest of the table.
@@ -165,8 +166,8 @@ for when you need raw data.
 
 ## Case set
 
-18 cases across 3 categories (`bench/TYPECHECKER_BENCHMARK.md`'s only
-source of truth is `src/bin/typecheck_bench.rs::CASES`).
+18 cases across 3 categories. Source of truth:
+`src/bin/typecheck_bench.rs::CASES`.
 
 **Valid (3)** — both paths run; controls for typecheck overhead.
 - `v_label`, `v_chain_knows`, `v_where`

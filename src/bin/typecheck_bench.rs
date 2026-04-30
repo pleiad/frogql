@@ -3,8 +3,9 @@
 //! Compares wall time of the LDBC SF0.1 case set with vs without the
 //! typechecker. The typechecker can short-circuit doomed queries
 //! (empty-by-typing, free variable, type mismatch) before the runtime
-//! ever runs; this bench measures both paths per case and reports
-//! the difference.
+//! ever runs — see rules.md §10 Theorem 6.5 for the soundness
+//! argument behind the guaranteed-empty short-circuit. This bench
+//! measures both paths per case and reports the difference.
 //!
 //! Usage:
 //!
@@ -29,11 +30,12 @@ use gqlrust::store::lazy::LazyGraphStore;
 
 const SF01_GDB: &str = "bench/data/ldbc-sf0.1.gdb";
 
-// LIMIT caps result rows per runtime call. Iters default to 3 (same
-// as the LDBC bench): slowest doomed cases take ~50s/iter on the
-// unchecked path, so 30 iters would be a ~1.5h run.
+// Default of 3 matches the LDBC bench. The slowest doomed cases
+// take ~50s/iter on the unchecked path, so 30 iters would be a
+// ~1.5h run; 3 keeps a default invocation under ~15 min.
 const DEFAULT_ITERS: usize = 3;
 const DEFAULT_WARMUP: usize = 1;
+// Result-row cap per runtime call.
 const LIMIT: usize = 100;
 
 // CSV stdout: db;category;case;phase;iter;ns;flags
@@ -74,10 +76,10 @@ impl Category {
 
 /// What actually happened in a run.
 ///
-/// - `Ok`: typecheck passed, not empty.
-/// - `Empty`: typecheck passed, statically empty.
-/// - `Rejected`: rejected by typechecker or by parser. (The "empty AND
-///   rejected" intersection collapses here.)
+/// - `Ok`: typecheck passed, not statically empty.
+/// - `Empty`: typecheck passed, statically empty (guaranteed-empty
+///   short-circuit applies — runtime is skipped in production).
+/// - `Rejected`: rejected by typechecker or by parser.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outcome {
     Ok,
@@ -86,15 +88,6 @@ enum Outcome {
 }
 
 impl Outcome {
-    fn classify(empty: bool, rejected: bool, parse_failed: bool) -> Self {
-        if rejected || parse_failed {
-            Outcome::Rejected
-        } else if empty {
-            Outcome::Empty
-        } else {
-            Outcome::Ok
-        }
-    }
     fn label(&self) -> &'static str {
         match self {
             Outcome::Ok => "ok",
@@ -374,17 +367,24 @@ fn run_case(
 ) -> bool {
     // Times two compile-pipeline calls + one runtime call per iter.
     // The runtime is only invoked on the unchecked path: on the
-    // checked path runtime is either skipped by the §10 short-circuit
-    // (empty/rejected) or would execute identical work to rt_unchk
-    // on a valid query — measuring it twice would just double the
-    // bench's wall time and add cache-warming variance without
-    // adding signal. To derive tc cost on `ok` rows from the CSV:
+    // checked path the runtime is either skipped by the
+    // guaranteed-empty short-circuit (rules.md §10 Theorem 6.5) when
+    // the typechecker proves the result is empty, or would execute
+    // identical work to rt_unchk on a valid query — measuring it
+    // twice would just add cache-warming variance without signal.
+    // To derive tc cost on `ok` rows from the CSV:
     // `compile_chk - compile_unchk` ≈ tc (parse + elab + opt cancel).
     let mut compile_chk_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut compile_unchk_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut rt_unchk_samples: Vec<u128> = Vec::with_capacity(iters);
-    let mut empty_flag = false;
-    let mut typecheck_rejected = false;
+    // Outcome of the LAST iter's checked compile. The compile is
+    // deterministic so this equals every iter's outcome; we just
+    // need one final value for the summary line + soundness check.
+    let mut outcome = Outcome::Ok;
+    // parse_failed is tracked separately from outcome because it
+    // also gates the table's display formatting (— vs numeric) for
+    // the no-real-measurement columns, and the iter loop's CSV emit
+    // for rt_unchk.
     let mut parse_failed = false;
     let mut soundness_violations = 0usize;
     let mut max_violation_rows = 0usize;
@@ -392,19 +392,21 @@ fn run_case(
     for n in 0..(iters + warmup) {
         let is_warmup = n < warmup;
 
-        // ---- Checked compile (no runtime — see the §10 note above) ----
+        // ---- Checked compile (no runtime call) ----
         let t = Instant::now();
         let chk_compile = gqlrust::compile_query_with_diagnostics_with(active, case.query);
         let compile_chk_ns = t.elapsed().as_nanos();
 
-        empty_flag = false;
-        typecheck_rejected = false;
         parse_failed = false;
-        match &chk_compile {
-            Ok(c) => empty_flag = c.guaranteed_empty,
-            Err(gqlrust::CompileError::Parse(_)) => parse_failed = true,
-            Err(gqlrust::CompileError::Type(_)) => typecheck_rejected = true,
-        }
+        outcome = match &chk_compile {
+            Ok(c) if c.guaranteed_empty => Outcome::Empty,
+            Ok(_) => Outcome::Ok,
+            Err(gqlrust::CompileError::Parse(_)) => {
+                parse_failed = true;
+                Outcome::Rejected
+            }
+            Err(gqlrust::CompileError::Type(_)) => Outcome::Rejected,
+        };
         if !is_warmup {
             compile_chk_samples.push(compile_chk_ns);
             csv_row(db_path, case, "compile_chk", n - warmup, compile_chk_ns, "");
@@ -434,7 +436,7 @@ fn run_case(
         };
         if !is_warmup {
             rt_unchk_samples.push(rt_unchk_ns);
-            if empty_flag && rows != 0 {
+            if outcome == Outcome::Empty && rows != 0 {
                 soundness_violations += 1;
                 max_violation_rows = max_violation_rows.max(rows);
             }
@@ -446,7 +448,6 @@ fn run_case(
     let compile_unchk_med = median(&compile_unchk_samples);
     let rt_unchk_med = median(&rt_unchk_samples);
 
-    let outcome = Outcome::classify(empty_flag, typecheck_rejected, parse_failed);
     let expected = case.category.expected_outcome();
 
     let us = |med: u128| -> String {
@@ -466,11 +467,13 @@ fn run_case(
 
     // tc_impact column. Empty/Rejected: ratio of total wall time
     // without typechecker to total wall time with typechecker,
-    // `(compile_unchk + rt_unchk) / compile_chk` — the §10 short-
-    // circuit means the user pays only compile_chk on the checked
-    // path. Ok: typecheck overhead as fraction of total wall time
-    // without typechecker, `(compile_chk - compile_unchk) /
-    // (compile_unchk + rt_unchk)`. Parse failure: dash.
+    // `(compile_unchk + rt_unchk) / compile_chk` — the user pays
+    // only compile_chk on the checked path because runtime is
+    // skipped (guaranteed-empty short-circuit fires, or compile
+    // rejected before reaching the runtime). Ok: typecheck overhead
+    // as fraction of total wall time without typechecker,
+    // `(compile_chk - compile_unchk) / (compile_unchk + rt_unchk)`.
+    // Parse failure: dash.
     let impact_str = if parse_failed {
         "—".to_string()
     } else {
