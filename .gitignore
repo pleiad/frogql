@@ -3,6 +3,9 @@
 !examples/*.gdb
 __pycache__/
 /bench/data/
+# Bench artifacts (timestamped per run; regenerate via the bench
+# scripts under bench/scripts/). Never useful to commit.
+/bench/results/
 /python/.venv/
 /python/foo.py
 *.swp
