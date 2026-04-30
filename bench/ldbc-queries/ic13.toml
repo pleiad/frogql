@@ -6,10 +6,9 @@ name = "Single shortest path"
 status = "blocked"
 
 blocked_reason = """
-Length of the shortest path between two specific Persons via :knows
-edges. Needs a shortest-path graph operation.
+Shortest path / hop distance between two Persons over :knows.
 """
 
 required_features = [
-    "shortest-path",
+    "shortest-path (single-pair distance or path)",
 ]

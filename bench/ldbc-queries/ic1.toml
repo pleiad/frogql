@@ -6,15 +6,12 @@ name = "Transitive friends with a certain name"
 status = "blocked"
 
 blocked_reason = """
-Needs variable-length paths (-[:knows*1..3]-) for the 1-3 hop friend search,
-plus distance computation (length of shortest path), plus OPTIONAL MATCH for
-the workplace/study summaries, plus ORDER BY on the (distance, lastName, id)
-tuple.
+Per-friend minimum hop distance for output and ORDER BY; OPTIONAL MATCH for
+work/study summaries. Multi-hop :knows can use `{1,3}` or unions.
 """
 
 required_features = [
-    "variable-length paths",
-    "shortest-path distance",
+    "per-friend shortest-path distance in results",
     "OPTIONAL MATCH",
     "ORDER BY",
 ]

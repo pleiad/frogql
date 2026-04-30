@@ -6,14 +6,10 @@ name = "Friends and friends of friends that have been to given countries"
 status = "blocked"
 
 blocked_reason = """
-Needs 1-2-hop friend traversal (-[:knows*1..2]-), date-range filter
-[startDate, startDate + durationDays), aggregation (count posts per
-country per person), and ORDER BY.
+COUNT/GROUP BY ok; LDBC times are ints (interval end may need param-side math).
+ORDER BY. No bench query wired.
 """
 
 required_features = [
-    "variable-length paths",
-    "date arithmetic",
-    "aggregation (COUNT)",
     "ORDER BY",
 ]

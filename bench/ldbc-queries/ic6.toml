@@ -6,12 +6,9 @@ name = "Tag co-occurrence"
 status = "blocked"
 
 blocked_reason = """
-Tags that co-occur with a given tag on posts authored by friends or
-friends of friends. Needs 1-2-hop paths, aggregation, ORDER BY.
+ORDER BY for ranked output. No bench query wired.
 """
 
 required_features = [
-    "variable-length paths",
-    "aggregation (COUNT)",
     "ORDER BY",
 ]

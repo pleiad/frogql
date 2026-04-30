@@ -6,11 +6,9 @@ name = "Job referral"
 status = "blocked"
 
 blocked_reason = """
-Friends-of-friends working at companies in a given country, who started
-work before $workFromYear. Needs 1-2-hop paths, ORDER BY.
+ORDER BY. No bench query wired.
 """
 
 required_features = [
-    "variable-length paths",
     "ORDER BY",
 ]

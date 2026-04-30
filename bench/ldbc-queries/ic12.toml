@@ -6,14 +6,11 @@ name = "Expert search"
 status = "blocked"
 
 blocked_reason = """
-Friends who replied to messages tagged with a given TagClass (or its
-sub-classes). Needs 1-hop friends, label-class hierarchy traversal
-(:Tag-[:hasType]->:TagClass + isSubclassOf*), aggregation, ORDER BY.
+COLLECT_LIST / multiset for `tagNames`; ORDER BY; TagClass / isSubclassOf hierarchy.
 """
 
 required_features = [
-    "variable-length paths (for isSubclassOf*)",
-    "label-class hierarchy",
-    "aggregation (COUNT)",
+    "COLLECT_LIST / multiset aggregate in RETURN",
     "ORDER BY",
+    "TagClass / isSubclassOf hierarchy",
 ]

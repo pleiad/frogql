@@ -6,11 +6,9 @@ name = "Recent messages by friends or friends of friends"
 status = "blocked"
 
 blocked_reason = """
-Like IC2 but with friends-or-friends-of-friends instead of just friends.
-Needs 1-2-hop paths and ORDER BY. Otherwise structurally similar to IC2.
+Like IC2 with an extra hop; ORDER BY. No bench query wired.
 """
 
 required_features = [
-    "variable-length paths",
     "ORDER BY",
 ]

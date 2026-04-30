@@ -6,14 +6,10 @@ name = "New groups"
 status = "blocked"
 
 blocked_reason = """
-Friends and friends of friends became members of forums after $minDate;
-count posts per (forum, otherPerson). Needs 1-2-hop paths, date filter,
-OPTIONAL MATCH (count may be 0), aggregation, ORDER BY.
+OPTIONAL MATCH for zero post counts per (forum, person); ORDER BY.
 """
 
 required_features = [
-    "variable-length paths",
     "OPTIONAL MATCH",
-    "aggregation (COUNT)",
     "ORDER BY",
 ]

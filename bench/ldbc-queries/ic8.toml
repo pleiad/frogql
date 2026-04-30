@@ -6,8 +6,7 @@ name = "Recent replies on a person's messages"
 status = "blocked"
 
 blocked_reason = """
-Most recent comments replying to the start person's messages. Needs
-ORDER BY on (comment.creationDate DESC, comment.id ASC).
+ORDER BY (creationDate DESC, id ASC).
 """
 
 required_features = [

@@ -6,14 +6,11 @@ name = "New topics"
 status = "blocked"
 
 blocked_reason = """
-Tags attached to posts in [startDate, startDate+durationDays) that were
-NEVER attached before that interval. Needs date arithmetic, anti-join
-("never attached before"), aggregation (postCount per tag), ORDER BY.
+Anti-join: tags on posts in the window that never appeared before—needs graph
+NOT EXISTS (boolean `not` is not enough). ORDER BY.
 """
 
 required_features = [
-    "date arithmetic",
-    "anti-join / NOT EXISTS",
-    "aggregation (COUNT)",
+    "graph NOT EXISTS / existential subquery",
     "ORDER BY",
 ]

@@ -7,12 +7,10 @@ name = "Trusted connection paths (v1)"
 status = "blocked"
 
 blocked_reason = """
-All shortest paths between two Persons via :knows edges, weighted by
-mutual interaction (replies, likes). Needs all-shortest-paths plus
-edge-weight aggregation along each path.
+All shortest paths on :knows with interaction weights and path-side aggregation.
 """
 
 required_features = [
     "all-shortest-paths",
-    "path-weight aggregation",
+    "weighted-path / path aggregation",
 ]
