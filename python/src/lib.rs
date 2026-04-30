@@ -401,6 +401,7 @@ fn import_csv(db_path: &str, csv_dir: &str) -> PyResult<()> {
 
 fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<PyObject> {
     Ok(match v {
+        Value::Null => py.None(),
         Value::Int(n) => n.into_py(py),
         Value::Float(x) => x.into_py(py),
         Value::Str(s) => s.into_py(py),
