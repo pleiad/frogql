@@ -4,7 +4,7 @@ use crate::model::value::Value;
 use crate::typing::simple_type::SimpleType;
 
 /// Binary operators.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
     Sub,

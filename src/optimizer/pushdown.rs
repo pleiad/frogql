@@ -1,22 +1,33 @@
-//! Predicate pushdown: extract type constraints from WHERE clauses and merge
-//! them into pattern descriptors.
+//! Predicate pushdown: extract WHERE conjuncts and merge them into pattern
+//! descriptors so they can prune candidates inside the join loop instead of
+//! filtering join output.
+//!
+//! Two flavours of conjunct are pushed:
+//!   - Type tests (`var.attr is T`) merge into the descriptor's property type
+//!     and feed the typechecker plus the LTJ NodeProperty filter.
+//!   - Value comparisons (`var.attr <op> literal`, op ∈ {=, ≠, <, ≤, >, ≥})
+//!     merge into the descriptor's `value_preds` and feed the LTJ
+//!     NodeAttrCmp filter, so a constant like `p.id = 30786325579101` reduces
+//!     `p` to a single candidate before the join expands.
 //!
 //! Transforms:
-//!   `(x)-[y]->(z) WHERE x.a bool and y.b str`
+//!   `(x)-[y]->(z) WHERE x.a bool and y.b str and x.k = 7`
 //! into:
-//!   `(x:{a bool})-[y:{b str}]->(z)`
+//!   `(x:{a bool, value_preds=[k = 7]})-[y:{b str}]->(z)`
 //!
 //! Only works for top-level AND conjuncts. OR expressions cannot be pushed down
-//! because neither side is guaranteed to hold.
+//! because neither side is guaranteed to hold. Value pushdown is restricted to
+//! node descriptors today; edges fall through to the residual WHERE.
 
 use std::collections::HashMap;
 
+use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
 use crate::typing::simple_type::SimpleType;
 
-/// A pushable constraint: variable.attr is type.
+/// A pushable type constraint: `var.attr is type`.
 #[derive(Debug, Clone)]
 struct TypeConstraint {
     var: String,
@@ -24,7 +35,28 @@ struct TypeConstraint {
     ty: SimpleType,
 }
 
-/// Optimize a path pattern by pushing WHERE type constraints into descriptors.
+/// A pushable value predicate: `var.attr <op> literal`.
+#[derive(Debug, Clone)]
+struct ValuePred {
+    var: String,
+    attr: String,
+    op: BinOp,
+    value: Value,
+}
+
+#[derive(Default)]
+struct Constraints {
+    types: HashMap<String, Vec<(String, SimpleType)>>,
+    values: HashMap<String, Vec<(String, BinOp, Value)>>,
+}
+
+impl Constraints {
+    fn is_empty(&self) -> bool {
+        self.types.is_empty() && self.values.is_empty()
+    }
+}
+
+/// Optimize a path pattern by pushing WHERE conjuncts into descriptors.
 pub fn optimize(pattern: PathPattern) -> PathPattern {
     rewrite(pattern)
 }
@@ -32,37 +64,47 @@ pub fn optimize(pattern: PathPattern) -> PathPattern {
 fn rewrite(p: PathPattern) -> PathPattern {
     match p {
         PathPattern::Filter(inner, expr) => {
-            // Flatten the AND-chain and separate pushable vs non-pushable
             let conjuncts = flatten_and(&expr);
-            let (pushable, remaining): (Vec<_>, Vec<_>) = conjuncts
-                .into_iter()
-                .partition(|c| extract_type_constraint(c).is_some());
+            let var_kinds = collect_var_kinds(&inner);
 
-            if pushable.is_empty() {
-                // Nothing to push — recurse into inner and keep filter
-                return PathPattern::Filter(Box::new(rewrite(*inner)), expr);
-            }
+            let mut constraints = Constraints::default();
+            let mut remaining: Vec<Expr> = Vec::new();
 
-            // Collect constraints per variable
-            let mut constraints: HashMap<String, Vec<(String, SimpleType)>> = HashMap::new();
-            for c in &pushable {
-                if let Some(tc) = extract_type_constraint(c) {
+            for c in conjuncts {
+                if let Some(tc) = extract_type_constraint(&c) {
                     constraints
+                        .types
                         .entry(tc.var)
                         .or_default()
                         .push((tc.attr, tc.ty));
+                } else if let Some(vp) = extract_value_pred(&c) {
+                    // Restrict value pushdown to node descriptors. Edge value
+                    // predicates need edge_props lookup at LTJ time, which is
+                    // a follow-up.
+                    if matches!(var_kinds.get(&vp.var), Some(VarKind::Node)) {
+                        constraints
+                            .values
+                            .entry(vp.var)
+                            .or_default()
+                            .push((vp.attr, vp.op, vp.value));
+                    } else {
+                        remaining.push(c);
+                    }
+                } else {
+                    remaining.push(c);
                 }
             }
 
-            // Rewrite the inner pattern with merged descriptors
+            if constraints.is_empty() {
+                return PathPattern::Filter(Box::new(rewrite(*inner)), expr);
+            }
+
             let rewritten = merge_constraints(*inner, &constraints);
 
-            // Rebuild remaining filter (if any non-pushable conjuncts remain)
             if remaining.is_empty() {
                 rewrite(rewritten)
             } else {
-                let remaining_expr = rebuild_and(remaining);
-                PathPattern::Filter(Box::new(rewrite(rewritten)), remaining_expr)
+                PathPattern::Filter(Box::new(rewrite(rewritten)), rebuild_and(remaining))
             }
         }
         // Recurse into structural patterns
@@ -141,68 +183,158 @@ fn extract_type_constraint(expr: &Expr) -> Option<TypeConstraint> {
     }
 }
 
-/// Walk the pattern tree and merge type constraints into descriptors.
-fn merge_constraints(
-    p: PathPattern,
-    constraints: &HashMap<String, Vec<(String, SimpleType)>>,
-) -> PathPattern {
+/// Try to extract a value predicate from `var.attr <op> literal` (or the
+/// symmetric `literal <op> var.attr`). Supports `=`, `!=`, `<`, `<=`, `>`,
+/// `>=` against `Const` literals.
+fn extract_value_pred(expr: &Expr) -> Option<ValuePred> {
+    let (op, left, right) = match expr {
+        Expr::Binop { op, left, right }
+            if matches!(
+                op,
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+            ) =>
+        {
+            (*op, left.as_ref(), right.as_ref())
+        }
+        _ => return None,
+    };
+
+    if let (Expr::AttrLookup { var, attr }, Expr::Const(v)) = (left, right) {
+        return Some(ValuePred {
+            var: var.clone(),
+            attr: attr.clone(),
+            op,
+            value: v.clone(),
+        });
+    }
+    if let (Expr::Const(v), Expr::AttrLookup { var, attr }) = (left, right) {
+        return Some(ValuePred {
+            var: var.clone(),
+            attr: attr.clone(),
+            op: flip_op(op),
+            value: v.clone(),
+        });
+    }
+    None
+}
+
+/// Flip a comparison so that the variable lives on the left of the operator.
+fn flip_op(op: BinOp) -> BinOp {
+    match op {
+        BinOp::Lt => BinOp::Gt,
+        BinOp::Le => BinOp::Ge,
+        BinOp::Gt => BinOp::Lt,
+        BinOp::Ge => BinOp::Le,
+        // Eq / Ne are symmetric.
+        other => other,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VarKind {
+    Node,
+    Edge,
+}
+
+/// Walk the pattern and record whether each named variable binds a node or an
+/// edge. Used to confine value-predicate pushdown to nodes.
+fn collect_var_kinds(p: &PathPattern) -> HashMap<String, VarKind> {
+    let mut acc = HashMap::new();
+    walk_kinds(p, &mut acc);
+    acc
+}
+
+fn walk_kinds(p: &PathPattern, acc: &mut HashMap<String, VarKind>) {
     match p {
-        PathPattern::Node(desc) => PathPattern::Node(merge_into_descriptor(desc, constraints)),
-        PathPattern::EdgeRight(desc) => {
-            PathPattern::EdgeRight(merge_into_descriptor(desc, constraints))
+        PathPattern::Node(Some(d)) => {
+            if let Some(v) = &d.var {
+                acc.insert(v.clone(), VarKind::Node);
+            }
         }
-        PathPattern::EdgeLeft(desc) => {
-            PathPattern::EdgeLeft(merge_into_descriptor(desc, constraints))
+        PathPattern::EdgeRight(Some(d))
+        | PathPattern::EdgeLeft(Some(d))
+        | PathPattern::EdgeUndirected(Some(d))
+        | PathPattern::EdgeAnyDirection(Some(d)) => {
+            if let Some(v) = &d.var {
+                acc.insert(v.clone(), VarKind::Edge);
+            }
         }
+        PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+            walk_kinds(a, acc);
+            walk_kinds(b, acc);
+        }
+        PathPattern::Filter(inner, _) | PathPattern::Questioned(inner) => walk_kinds(inner, acc),
+        PathPattern::Repeat { pattern, .. } => walk_kinds(pattern, acc),
+        _ => {}
+    }
+}
+
+/// Walk the pattern tree and merge type and value constraints into descriptors.
+fn merge_constraints(p: PathPattern, c: &Constraints) -> PathPattern {
+    match p {
+        PathPattern::Node(desc) => PathPattern::Node(merge_into_node_desc(desc, c)),
+        PathPattern::EdgeRight(desc) => PathPattern::EdgeRight(merge_into_edge_desc(desc, c)),
+        PathPattern::EdgeLeft(desc) => PathPattern::EdgeLeft(merge_into_edge_desc(desc, c)),
         PathPattern::EdgeUndirected(desc) => {
-            PathPattern::EdgeUndirected(merge_into_descriptor(desc, constraints))
+            PathPattern::EdgeUndirected(merge_into_edge_desc(desc, c))
         }
         PathPattern::EdgeAnyDirection(desc) => {
-            PathPattern::EdgeAnyDirection(merge_into_descriptor(desc, constraints))
+            PathPattern::EdgeAnyDirection(merge_into_edge_desc(desc, c))
         }
         PathPattern::Concat(p1, p2) => PathPattern::Concat(
-            Box::new(merge_constraints(*p1, constraints)),
-            Box::new(merge_constraints(*p2, constraints)),
+            Box::new(merge_constraints(*p1, c)),
+            Box::new(merge_constraints(*p2, c)),
         ),
         PathPattern::Union(p1, p2) => PathPattern::Union(
-            Box::new(merge_constraints(*p1, constraints)),
-            Box::new(merge_constraints(*p2, constraints)),
+            Box::new(merge_constraints(*p1, c)),
+            Box::new(merge_constraints(*p2, c)),
         ),
         PathPattern::Filter(inner, expr) => {
-            PathPattern::Filter(Box::new(merge_constraints(*inner, constraints)), expr)
+            PathPattern::Filter(Box::new(merge_constraints(*inner, c)), expr)
         }
         PathPattern::Repeat { pattern, lb, ub } => PathPattern::Repeat {
-            pattern: Box::new(merge_constraints(*pattern, constraints)),
+            pattern: Box::new(merge_constraints(*pattern, c)),
             lb,
             ub,
         },
         PathPattern::Questioned(inner) => {
-            PathPattern::Questioned(Box::new(merge_constraints(*inner, constraints)))
+            PathPattern::Questioned(Box::new(merge_constraints(*inner, c)))
         }
         PathPattern::Join(p1, p2) => PathPattern::Join(
-            Box::new(merge_constraints(*p1, constraints)),
-            Box::new(merge_constraints(*p2, constraints)),
+            Box::new(merge_constraints(*p1, c)),
+            Box::new(merge_constraints(*p2, c)),
         ),
     }
 }
 
-/// Merge constraints into a descriptor if the variable matches.
-fn merge_into_descriptor(
-    desc: Option<Descriptor>,
-    constraints: &HashMap<String, Vec<(String, SimpleType)>>,
-) -> Option<Descriptor> {
-    let d = desc?;
-    let var_name = d.var.as_ref()?;
+/// Merge type and value constraints into a node descriptor.
+fn merge_into_node_desc(desc: Option<Descriptor>, c: &Constraints) -> Option<Descriptor> {
+    let mut d = desc?;
+    let var_name = d.var.clone()?;
 
-    if let Some(attrs) = constraints.get(var_name) {
-        let mut new_dtype = d.dtype.clone();
+    if let Some(attrs) = c.types.get(&var_name) {
         for (attr, ty) in attrs {
-            new_dtype.props.extend(attr.clone(), ty.clone());
+            d.dtype.props.extend(attr.clone(), ty.clone());
         }
-        Some(Descriptor::new(d.var, new_dtype))
-    } else {
-        Some(d)
     }
+    if let Some(preds) = c.values.get(&var_name) {
+        d.value_preds.extend(preds.iter().cloned());
+    }
+    Some(d)
+}
+
+/// Merge only type constraints into an edge descriptor; value predicates on
+/// edges are left in the residual WHERE for now.
+fn merge_into_edge_desc(desc: Option<Descriptor>, c: &Constraints) -> Option<Descriptor> {
+    let mut d = desc?;
+    let var_name = d.var.clone()?;
+
+    if let Some(attrs) = c.types.get(&var_name) {
+        for (attr, ty) in attrs {
+            d.dtype.props.extend(attr.clone(), ty.clone());
+        }
+    }
+    Some(d)
 }
 
 #[cfg(test)]
@@ -283,6 +415,8 @@ mod tests {
             "(x WHERE x.isDummy bool)",
             "((x)-[y]->(z) WHERE x.isBlocked bool)",
             "(x)-[y WHERE y.amount int]->(z)",
+            "(x WHERE x.isBlocked = true)",
+            "(x WHERE x.isBlocked = false)",
         ];
 
         for q in queries {
@@ -297,5 +431,73 @@ mod tests {
                 "mismatch for '{q}': original={r_orig}, optimized={r_opt}"
             );
         }
+    }
+
+    fn first_node_value_preds(p: &PathPattern, var: &str) -> Vec<(String, BinOp, Value)> {
+        match p {
+            PathPattern::Node(Some(d)) if d.var.as_deref() == Some(var) => d.value_preds.clone(),
+            PathPattern::Concat(a, b)
+            | PathPattern::Union(a, b)
+            | PathPattern::Join(a, b) => {
+                let mut left = first_node_value_preds(a, var);
+                if !left.is_empty() {
+                    return left;
+                }
+                left.extend(first_node_value_preds(b, var));
+                left
+            }
+            PathPattern::Filter(inner, _) | PathPattern::Questioned(inner) => {
+                first_node_value_preds(inner, var)
+            }
+            PathPattern::Repeat { pattern, .. } => first_node_value_preds(pattern, var),
+            _ => vec![],
+        }
+    }
+
+    #[test]
+    fn test_pushdown_value_eq_on_node() {
+        // Equality literal pushes into the node descriptor; Filter is dropped.
+        let p = parse("(x WHERE x.id = 7)").unwrap();
+        let optimized = optimize(p);
+        assert!(
+            !matches!(&optimized, PathPattern::Filter(_, _)),
+            "expected no filter: {optimized}"
+        );
+        let preds = first_node_value_preds(&optimized, "x");
+        assert_eq!(preds.len(), 1);
+        assert_eq!(preds[0].0, "id");
+        assert_eq!(preds[0].1, BinOp::Eq);
+        assert_eq!(preds[0].2, Value::Int(7));
+    }
+
+    #[test]
+    fn test_pushdown_value_cmp_on_node() {
+        // Range comparison also pushes.
+        let p = parse("(c WHERE c.creationDate <= 1323302400000)").unwrap();
+        let optimized = optimize(p);
+        assert!(!matches!(&optimized, PathPattern::Filter(_, _)));
+        let preds = first_node_value_preds(&optimized, "c");
+        assert_eq!(preds.len(), 1);
+        assert_eq!(preds[0].1, BinOp::Le);
+    }
+
+    #[test]
+    fn test_pushdown_value_pred_on_edge_stays_in_filter() {
+        // Edge value predicates are not pushed (no edge_props lookup at LTJ
+        // time yet); Filter must remain.
+        let p = parse("((x)-[y]->(z) WHERE y.amount > 10)").unwrap();
+        let optimized = optimize(p);
+        assert!(matches!(&optimized, PathPattern::Filter(_, _)));
+    }
+
+    #[test]
+    fn test_pushdown_flipped_literal_lhs() {
+        // `7 = x.id` has the same effect as `x.id = 7` after flipping.
+        let p = parse("(x WHERE 7 = x.id)").unwrap();
+        let optimized = optimize(p);
+        assert!(!matches!(&optimized, PathPattern::Filter(_, _)));
+        let preds = first_node_value_preds(&optimized, "x");
+        assert_eq!(preds.len(), 1);
+        assert_eq!(preds[0].1, BinOp::Eq);
     }
 }

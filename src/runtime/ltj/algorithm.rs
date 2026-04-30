@@ -1,4 +1,7 @@
 use crate::model::graph_access::GraphAccess;
+use crate::model::value::Value;
+use crate::runtime::cmp_values;
+use crate::syntax::expr::BinOp;
 
 use super::iterator::{LtjIterator, SpoPos};
 use super::veo::Veo;
@@ -20,7 +23,15 @@ pub enum FilterKind {
     NodeLabel { var_id: u8, label: String },
     /// Node property: check that the node has a property of a given type
     NodeProperty { var_id: u8, prop: String },
-    // WHERE expressions would go here in future phases
+    /// Node attribute compared against a literal: `var.attr <op> value`.
+    /// Pushed down from WHERE conjuncts by the optimizer; evaluated at the
+    /// VEO level where `var_id` is bound, before descending further.
+    NodeAttrCmp {
+        var_id: u8,
+        attr: String,
+        op: BinOp,
+        value: Value,
+    },
 }
 
 /// A result tuple: variable bindings as (var_id, value).
@@ -313,6 +324,25 @@ impl<'a, G: GraphAccess> LtjRunner<'a, G> {
                         let props = self.graph.node_props(node_id);
                         if !props.contains_key(prop) {
                             return false;
+                        }
+                    }
+                }
+                FilterKind::NodeAttrCmp {
+                    var_id,
+                    attr,
+                    op,
+                    value,
+                } => {
+                    if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
+                        let props = self.graph.node_props(node_id);
+                        match props.get(attr) {
+                            Some(actual) => {
+                                if !cmp_values(actual, *op, value) {
+                                    return false;
+                                }
+                            }
+                            // Missing property → predicate is null → reject
+                            None => return false,
                         }
                     }
                 }

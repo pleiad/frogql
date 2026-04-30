@@ -1,12 +1,14 @@
 use std::fmt;
 
+use crate::model::value::Value;
 use crate::typing::descriptor_type::DescriptorType;
 
-use super::expr::Expr;
+use super::expr::{BinOp, Expr};
 
 /// A descriptor attached to a node or edge pattern.
-/// Has an optional variable name, a type constraint, and possibly raw
-/// value-equality filters that the elaboration pass lowers into WHERE.
+/// Has an optional variable name, a type constraint, possibly raw
+/// value-equality filters that the elaboration pass lowers into WHERE,
+/// and possibly value predicates that the optimizer pushed in from WHERE.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Descriptor {
     /// Optional variable binding (e.g., "x" in `(x: Account)`)
@@ -17,6 +19,11 @@ pub struct Descriptor {
     /// Always empty after the elaboration pass — it rewrites these into a
     /// surrounding `PathPattern::Filter(..., var.attr = value AND ...)`.
     pub value_filters: Vec<(String, Expr)>,
+    /// Value predicates pushed down by the optimizer from WHERE conjuncts of
+    /// the form `var.attr <op> literal`. Populated only by `optimizer::pushdown`
+    /// after typecheck, consumed by the LTJ filter loop. Always empty before
+    /// the optimizer runs.
+    pub value_preds: Vec<(String, BinOp, Value)>,
 }
 
 impl Descriptor {
@@ -25,6 +32,7 @@ impl Descriptor {
             var,
             dtype,
             value_filters: Vec::new(),
+            value_preds: Vec::new(),
         }
     }
 
@@ -37,6 +45,7 @@ impl Descriptor {
             var,
             dtype,
             value_filters,
+            value_preds: Vec::new(),
         }
     }
 
@@ -45,6 +54,7 @@ impl Descriptor {
             var: Some(name.to_string()),
             dtype: DescriptorType::star(),
             value_filters: Vec::new(),
+            value_preds: Vec::new(),
         }
     }
 
@@ -53,6 +63,7 @@ impl Descriptor {
             var: None,
             dtype,
             value_filters: Vec::new(),
+            value_preds: Vec::new(),
         }
     }
 }

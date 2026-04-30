@@ -659,7 +659,29 @@ fn test_match_where_return() {
         "MATCH (x) -[:Transfer]-> (y) WHERE x.amount > 100 RETURN x.name, y.name",
     )
     .unwrap();
-    assert!(matches!(q.collapsed_pattern(), PathPattern::Filter(_, _)));
+    // Pushdown absorbs `x.amount > 100` into the descriptor's `value_preds`,
+    // so no Filter wrapper survives. Verify the predicate landed on `x`.
+    let pat = q.collapsed_pattern();
+    assert!(!matches!(pat, PathPattern::Filter(_, _)));
+    let mut found = false;
+    fn scan(p: &PathPattern, found: &mut bool) {
+        match p {
+            PathPattern::Node(Some(d)) if d.var.as_deref() == Some("x") => {
+                *found = !d.value_preds.is_empty();
+            }
+            PathPattern::Concat(a, b)
+            | PathPattern::Union(a, b)
+            | PathPattern::Join(a, b) => {
+                scan(a, found);
+                scan(b, found);
+            }
+            PathPattern::Filter(inner, _) | PathPattern::Questioned(inner) => scan(inner, found),
+            PathPattern::Repeat { pattern, .. } => scan(pattern, found),
+            _ => {}
+        }
+    }
+    scan(&pat, &mut found);
+    assert!(found, "expected value_preds on x after pushdown");
     assert_eq!(q.returns.as_ref().unwrap().len(), 2);
     assert!(!q.distinct);
 }

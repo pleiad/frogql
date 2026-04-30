@@ -5,6 +5,7 @@ use crate::model::value::{Id, Path, PathValue};
 use crate::runtime::assignment::Assignment;
 use crate::runtime::result::{IntermediateResult, ResultRow};
 use crate::syntax::descriptor::Descriptor;
+use crate::syntax::expr::BinOp;
 use crate::syntax::path_pattern::PathPattern;
 
 use super::algorithm::{FilterKind, LtjAlgorithm, LtjRunner, PlacedFilter, ResultTuple};
@@ -98,7 +99,11 @@ pub fn try_ltj<G: GraphAccess>(
         }
     }
 
-    // Build VEO: non-lonely variables first, then lonely
+    // Build VEO with selectivity-aware weights. Variables with strong filters
+    // (equality on a constant, range comparison, label) bind early; the
+    // lonely / non-lonely flag survives only as a tiebreaker for variables
+    // with the same selectivity class.
+    let weights = estimate_var_weights(num_vars, &decomp.filters, index.len());
     let var_info: Vec<(u8, usize, bool)> = (0..num_vars)
         .map(|v| {
             let v_id = v as u8;
@@ -107,7 +112,7 @@ pub fn try_ltj<G: GraphAccess>(
             let weight = if iters.is_empty() {
                 usize::MAX
             } else {
-                index.len()
+                weights[v]
             };
             (v_id, weight, is_lonely)
         })
@@ -147,6 +152,60 @@ pub fn try_ltj<G: GraphAccess>(
     let tuples = runner.run(limit);
 
     Some(convert_results(graph, &tuples, &decomp))
+}
+
+// ---- Weight estimation for the VEO ----
+
+/// Estimate a per-variable weight for VEO ordering. Smaller weight binds
+/// earlier. The estimate uses the filters extracted from descriptors:
+///
+/// - `NodeAttrCmp` with `Eq` on a constant → point-lookup, weight 1.
+/// - `NodeAttrCmp` with a range op → ~10% of the index size.
+/// - `NodeLabel` → ~25% of the index size (label sets are typically a
+///   fraction of the total node space; without a real cardinality estimator
+///   this is a rough surrogate).
+/// - No filter → full index size (no narrowing).
+///
+/// The estimate is intentionally coarse: the goal is to lift a heavily
+/// filtered variable above an unfiltered one, not to compute an accurate
+/// cardinality. A future iteration can plug in real label-index sizes and
+/// per-attribute histograms.
+fn estimate_var_weights(num_vars: usize, filters: &[ExtractedFilter], total: usize) -> Vec<usize> {
+    let mut has_eq = vec![false; num_vars];
+    let mut has_cmp = vec![false; num_vars];
+    let mut has_label = vec![false; num_vars];
+
+    for f in filters {
+        match &f.kind {
+            FilterKind::NodeAttrCmp { var_id, op, .. } => {
+                let i = *var_id as usize;
+                match op {
+                    BinOp::Eq => has_eq[i] = true,
+                    BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                        has_cmp[i] = true;
+                    }
+                    _ => {}
+                }
+            }
+            FilterKind::NodeLabel { var_id, .. } => has_label[*var_id as usize] = true,
+            FilterKind::NodeProperty { .. } => {}
+        }
+    }
+
+    let total = total.max(1);
+    (0..num_vars)
+        .map(|v| {
+            if has_eq[v] {
+                1
+            } else if has_cmp[v] {
+                (total / 10).max(2)
+            } else if has_label[v] {
+                (total / 4).max(2)
+            } else {
+                total
+            }
+        })
+        .collect()
 }
 
 // ---- Flatten concat chains ----
@@ -484,6 +543,18 @@ fn node_var(
                 kind: FilterKind::NodeLabel {
                     var_id,
                     label: label.to_string(),
+                },
+            });
+        }
+        // Extract value predicates pushed down by the optimizer
+        for (attr, op, value) in &d.value_preds {
+            filters.push(ExtractedFilter {
+                depends_on: vec![var_id],
+                kind: FilterKind::NodeAttrCmp {
+                    var_id,
+                    attr: attr.clone(),
+                    op: *op,
+                    value: value.clone(),
                 },
             });
         }

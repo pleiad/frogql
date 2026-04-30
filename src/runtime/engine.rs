@@ -14,9 +14,19 @@ use crate::typing::property_type::PropertyType;
 use crate::typing::simple_type::SimpleType;
 
 use super::assignment::Assignment;
+use super::cmp_values;
 use super::ltj::pattern_extract;
 use super::ltj::triple_index::TripleIndex;
 use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
+
+/// Apply value predicates pushed down by the optimizer to raw graph properties.
+/// Missing key → predicate is null → reject.
+fn check_value_preds(preds: &[(String, BinOp, Value)], props: &Props) -> bool {
+    preds.iter().all(|(attr, op, expected)| match props.get(attr) {
+        Some(actual) => cmp_values(actual, *op, expected),
+        None => false,
+    })
+}
 
 /// Runtime engine for evaluating GQL path patterns on a graph.
 /// Generic over `GraphAccess` — works with both in-memory Graph and file-backed GraphStore.
@@ -856,10 +866,14 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         match desc {
             None => true,
             Some(d) => {
+                let raw_props = self.graph.node_props(id);
                 let actual_label = self.graph.node_labels(id);
-                let actual_props = Self::check_record(&self.graph.node_props(id));
+                let actual_props = Self::check_record(&raw_props);
                 let actual = DescriptorType::new(actual_label.clone(), actual_props);
-                DescriptorType::is_subtype(&actual, &d.dtype)
+                if !DescriptorType::is_subtype(&actual, &d.dtype) {
+                    return false;
+                }
+                check_value_preds(&d.value_preds, &raw_props)
             }
         }
     }
@@ -868,10 +882,14 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         match desc {
             None => true,
             Some(d) => {
+                let raw_props = self.graph.edge_props(id);
                 let actual_label = self.graph.edge_labels(id);
-                let actual_props = Self::check_record(&self.graph.edge_props(id));
+                let actual_props = Self::check_record(&raw_props);
                 let actual = DescriptorType::new(actual_label.clone(), actual_props);
-                DescriptorType::is_subtype(&actual, &d.dtype)
+                if !DescriptorType::is_subtype(&actual, &d.dtype) {
+                    return false;
+                }
+                check_value_preds(&d.value_preds, &raw_props)
             }
         }
     }
