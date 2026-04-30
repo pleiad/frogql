@@ -94,12 +94,14 @@ succeed.
 - `v_chain_knows` — `MATCH (p: Person)~[:knows]~(f: Person) RETURN f.firstName`
 - `v_where` — `MATCH (p: Person) WHERE p.id = 933 RETURN p.firstName`
 
-### Empty by typing on expensive shapes (9 cases)
+### Empty by typing (9 cases)
 
-Each is a multi-hop or otherwise non-trivial pattern with one
-element that makes the static analysis bottom out. The runtime
-without the typechecker doesn't necessarily detect the same fact
-until it has done substantial enumeration.
+Mostly multi-hop / realistic-shape patterns where one element
+makes the static analysis bottom out — the runtime, without
+typecheck, has to do the enumeration to find out. One small-
+pattern control (`e_label_only`) at the end of the bucket gives
+a same-bucket reference for cases where the runtime can rule
+out emptiness cheaply.
 
 - `e_chain4_bad_leaf` — 4-hop knows chain ending in unknown label
   (`Wagumi`). Runtime walks friend-of-friend³ before discovering
@@ -243,8 +245,10 @@ Notes on this snapshot:
     is computed structurally and may diverge if there's a regression.
   - `flags` ∈ {`""`, `"skipped"`, `"rows=N"`}: empty for normal
     rows; `skipped` on `rt_chk` when the §10 short-circuit fired or
-    the compile rejected; `rows=N` on every `rt_unchk` row for the
-    soundness cross-check.
+    the compile rejected, and on `rt_unchk` only when parse itself
+    failed; `rows=N` on every `rt_unchk` row that actually ran
+    (N=0 is meaningful — "ran, got 0 rows" — and distinct from
+    `skipped`). Used for the empty-but-nonempty soundness check.
 - **stderr**: human-readable summary table + soundness warnings.
 
 Redirect them separately:

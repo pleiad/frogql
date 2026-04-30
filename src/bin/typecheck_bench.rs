@@ -56,12 +56,31 @@ const DEFAULT_WARMUP: usize = 1;
 const LIMIT: usize = 100;
 
 // CSV stdout columns: db;category;case;phase;iter;ns;flags
-// `flags` vocabulary (used by downstream tooling that reads the CSV):
+//
+// `phase` vocabulary — four rows per iter, two compile + two runtime:
+//   - "compile_chk"  : gqlrust::compile_query_with_diagnostics_with()
+//   - "rt_chk"       : runtime call on the checked-path Query
+//                       (skipped if compile rejected or empty)
+//   - "compile_unchk": gqlrust::compile_query_unchecked()
+//   - "rt_unchk"     : runtime call on the unchecked-path Query
+//                       (skipped only if parse itself failed)
+//
+// `flags` vocabulary:
 //   - empty string  : phase ran successfully
-//   - "skipped"     : phase was bypassed (parse failed earlier in the
-//                     iter, OR §10 short-circuit suppressed `rt_chk`)
-//   - "rows=N"      : on `rt_unchk` rows, the result row count
-//                     (used for the empty-but-nonempty soundness check)
+//   - "skipped"     : phase was bypassed.
+//                     - on `rt_chk`: compile rejected, or §10
+//                       short-circuit fired on empty.
+//                     - on `rt_unchk`: parse failure prevented
+//                       the runtime from running at all.
+//                     "skipped" never appears on the two compile
+//                     phases — those always produce a measurement,
+//                     including for parse failures (the parse-fail
+//                     timing is the parse-only cost).
+//   - "rows=N"      : on `rt_unchk` rows that actually ran, the
+//                     result row count (N=0 means "ran and got 0
+//                     rows", which is meaningful and distinct from
+//                     "skipped"). Used for the empty-but-nonempty
+//                     soundness check.
 
 // ---------------------------------------------------------------------------
 
@@ -476,10 +495,13 @@ fn run_case(
     // correct semantics — including "bail before optimize when the
     // typechecker rejects" — and aligning with them prevents the
     // bench from drifting from production cost as the pipeline
-    // evolves. Per-phase breakdown is gone; if you need it,
-    // `Typechecker::new + check_query` is the one phase that matters
-    // for the headline claim and you can isolate it via a separate
-    // micro-bench.
+    // evolves.
+    //
+    // Per-phase breakdown (parse / elab / tc / opt as separate columns)
+    // is intentionally gone. If you need to attribute compile cost to
+    // a specific phase, derive it from the per-iter CSV: on `ok` rows,
+    // `compile_chk - compile_unchk` ≈ tc cost (parse / elab / opt
+    // cancel between the two pipelines).
     let mut compile_chk_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut compile_unchk_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut rt_chk_samples: Vec<u128> = Vec::with_capacity(iters);
@@ -559,13 +581,20 @@ fn run_case(
         // itself failed (in which case neither path has a query).
         // We capture row_count() to cross-check empty soundness:
         // typechecker said empty + runtime returned rows = unsound.
-        let (rt_unchk_ns, rows) = match unchk_compile {
+        // CSV flag: "rows=N" when the runtime actually ran (truthful
+        // count, including 0 on legitimately-empty results), or
+        // "skipped" when parse failure prevented the runtime from
+        // running at all (so a downstream CSV reader doesn't confuse
+        // "ran and got 0 rows" with "never ran").
+        let (rt_unchk_ns, flag, rows) = match unchk_compile {
             Ok(q) => {
                 let t = Instant::now();
                 let result = rt.run_query(&q, LIMIT);
-                (t.elapsed().as_nanos(), result.row_count())
+                let ns = t.elapsed().as_nanos();
+                let r = result.row_count();
+                (ns, format!("rows={r}"), r)
             }
-            Err(_) => (0, 0),
+            Err(_) => (0, "skipped".to_string(), 0),
         };
         if !is_warmup {
             rt_unchk_samples.push(rt_unchk_ns);
@@ -573,7 +602,6 @@ fn run_case(
                 soundness_violations += 1;
                 max_violation_rows = max_violation_rows.max(rows);
             }
-            let flag = format!("rows={rows}");
             csv_row(db_path, case, "rt_unchk", n - warmup, rt_unchk_ns, &flag);
         }
     }
