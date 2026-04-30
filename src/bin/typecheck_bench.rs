@@ -423,6 +423,12 @@ fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
         "cat", "case", "parse_us", "elab_us", "tc_us", "opt_us",
         "rt_chk_ms", "rt_unchk_ms", "outcome", "tc_impact",
     );
+    // tc_impact column has two formats by row outcome — inline legend
+    // so the table is self-documenting without flipping to the doc:
+    eprintln!(
+        "  (tc_impact: ±X% on ok rows = total-wall-time delta with vs without typecheck; \
+         Yx on empty/rejected = rt_unchk / compile speedup; — for parse failure)"
+    );
     eprintln!("{}", "-".repeat(TABLE_WIDTH));
 
     let mut warned_count = 0usize;
