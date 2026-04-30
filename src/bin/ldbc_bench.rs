@@ -13,10 +13,8 @@
 //!   `params_file` reference; the runner substitutes `{paramName}`
 //!   placeholders against the LDBC `substitution_parameters-sf0.1/
 //!   interactive_<n>_param.txt` file.
-//! - `status = "blocked"` queries carry a `blocked_reason` and
-//!   `required_features` listing the gqlite gaps. The runner skips
-//!   them silently when running other ICs; `--ic blocked` prints
-//!   the inventory and exits.
+//! - `status = "blocked"` queries carry `blocked_reason` + `required_features`.
+//!   The runner skips them; `--ic blocked` prints the inventory.
 //!
 //! ## Usage
 //!

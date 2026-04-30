@@ -6,12 +6,10 @@ name = "Recent likers of a person's messages"
 status = "blocked"
 
 blocked_reason = """
-Persons who liked the start person's messages, with the latest like.
-Needs ORDER BY on like.creationDate DESC and per-liker latest-like
-selection (typically a correlated subquery or window function).
+Latest like per liker: ORDER BY plus per-group pick (no windows/subqueries).
 """
 
 required_features = [
     "ORDER BY",
-    "per-group latest selection",
+    "per-group latest / windows",
 ]

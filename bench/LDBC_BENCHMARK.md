@@ -4,8 +4,9 @@
 
 - **Implemented**: IC2.
 - **Catalogued, not yet implemented**: IC1, IC3–IC14. Each has a
-  `bench/ldbc-queries/ic<n>.toml` listing the gqlite features that
-  would unblock it (`required_features`).
+  `bench/ldbc-queries/ic<n>.toml` with `blocked_reason` and
+  `required_features` (gaps vs spec-faithful LDBC; aggregates and int times
+  already exist in gqlite). No `LIMIT` in query text—use bench `--limit`.
 
 `./target/release/ldbc_bench placeholder --ic blocked` prints the
 inventory.

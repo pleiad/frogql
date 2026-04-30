@@ -6,14 +6,11 @@ name = "Friend recommendation"
 status = "blocked"
 
 blocked_reason = """
-Friends-of-friends scored by interest overlap. Needs 1-2-hop paths,
-aggregation (COUNT shared interests minus non-shared), OPTIONAL MATCH,
-ORDER BY on the score.
+Graph NOT EXISTS / anti-join (FoAF not direct friend; uncommon posts). ORDER BY.
+IC10 birthday window vs `$month` may need `* / %` or date builtins (WHERE has + - only) or bench-expanded predicates.
 """
 
 required_features = [
-    "variable-length paths",
-    "OPTIONAL MATCH",
-    "aggregation (COUNT)",
+    "graph NOT EXISTS / anti-join",
     "ORDER BY",
 ]
