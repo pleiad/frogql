@@ -9,15 +9,21 @@
 //!
 //! Setup is two commands. The first downloads + builds the LDBC SNB
 //! SF0.1 dataset (~17 MiB CSV → `bench/data/ldbc-sf0.1.gdb`); the
-//! second is this binary, which auto-builds an `ldbc-tiny.gdb`
-//! fixture (head -50 of every CSV, ~840× smaller) on first run if
-//! it isn't already there:
+//! second is this binary:
 //!
 //!     ./target/release/bench_setup
 //!     ./target/release/typecheck_bench
 //!
 //! No flags needed for normal use. `--iters N` / `--warmup N`
 //! available for someone tuning iteration count.
+//!
+//! An earlier version also auto-built an `ldbc-tiny.gdb` fixture
+//! (head-50-of-every-CSV) and ran every case against both. Dropped:
+//! the dataset-size axis it demonstrated (typecheck cost is schema-
+//! bound, runtime cost data-bound) is theoretically obvious and the
+//! truncation strategy was fragile (too aggressive a head dropped
+//! sparse edge types from the inferred schema, breaking the cases
+//! that referenced them). SF0.1 alone is sufficient for the headline.
 //!
 //! No `.gdb` paths accepted: this bench is paired with the LDBC
 //! dataset by design. If you want schema-flexible micro-bench
@@ -29,10 +35,7 @@
 //! the result tables.
 
 use std::env;
-use std::fs;
-use std::io::{self, BufRead, BufWriter, Write};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 use std::time::Instant;
 
 use gqlrust::elaborate;
@@ -44,15 +47,10 @@ use gqlrust::syntax::query::{MatchStatement, Query};
 use gqlrust::typing::checker::Typechecker;
 
 // ---------------------------------------------------------------------------
-// Hardcoded dataset paths. We own the bench and we own the dataset; the
-// flexibility to point this at arbitrary `.gdb` was fake. See module doc.
+// Hardcoded dataset path. The bench is paired with the LDBC SF0.1
+// dataset by design; accepting arbitrary `.gdb` was fake flexibility.
 
 const SF01_GDB: &str = "bench/data/ldbc-sf0.1.gdb";
-const TINY_GDB: &str = "bench/data/ldbc-tiny.gdb";
-const SF01_CSV_DIR: &str =
-    "bench/data/ldbc-sf0.1/social_network-sf0.1-CsvBasic-LongDateFormatter";
-const TINY_CSV_DIR: &str =
-    "bench/data/ldbc-tiny/social_network-sf0.1-CsvBasic-LongDateFormatter";
 
 // Defaults. `LIMIT` caps the runtime row output; doesn't affect
 // typecheck. Set high enough that the success cases don't artificially
@@ -64,6 +62,10 @@ const LIMIT: usize = 100;
 
 // ---------------------------------------------------------------------------
 
+/// What the case author claims the typechecker should produce
+/// against the LDBC schema. Drives both the per-DB summary
+/// grouping (`cat` column) and the soundness check (an actual
+/// outcome outside `expected_outcome()` is a regression).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Category {
     /// Control: typecheck-passes, runtime-runs. Used to show the
@@ -73,12 +75,13 @@ enum Category {
     /// On the unchecked path the runtime still runs and confirms
     /// zero rows after burning time.
     EmptyByTyping,
-    /// Typechecker rejects (free var, type mismatch caught as error).
-    /// On the unchecked path the runtime runs to completion and
-    /// produces wrong-but-not-empty results (e.g. NULL-joined rows).
-    InvalidUnbound,
-    /// Parse error — caught before any later phase.
-    InvalidParse,
+    /// Typechecker rejects: free var, type mismatch as error, or
+    /// parse failure (we don't separate "rejected by parser" from
+    /// "rejected by typechecker" at the outcome level — both are
+    /// "the compile pipeline refused this query"). On the
+    /// unchecked path the runtime runs to completion and produces
+    /// wrong-but-not-empty results (e.g. NULL-joined rows).
+    InvalidRejected,
 }
 
 impl Category {
@@ -86,8 +89,49 @@ impl Category {
         match self {
             Category::Valid => "valid",
             Category::EmptyByTyping => "empty",
-            Category::InvalidUnbound => "invalid_unbound",
-            Category::InvalidParse => "invalid_parse",
+            Category::InvalidRejected => "invalid",
+        }
+    }
+    fn expected_outcome(&self) -> Outcome {
+        match self {
+            Category::Valid => Outcome::Ok,
+            Category::EmptyByTyping => Outcome::Empty,
+            Category::InvalidRejected => Outcome::Rejected,
+        }
+    }
+}
+
+/// What actually happened in a run. Three buckets, derived from the
+/// stored typechecker state — no round-trip through display strings.
+///
+/// - `Ok`: !empty, !rejected, !parse_failed
+/// - `Empty`: empty, but not rejected (and parse succeeded)
+/// - `Rejected`: rejected by typechecker OR by parser. "rejected AND
+///   empty" (sometimes called "both") collapses here because a
+///   rejected query is invalid regardless of whether the residual
+///   pattern is also unsatisfiable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    Ok,
+    Empty,
+    Rejected,
+}
+
+impl Outcome {
+    fn classify(empty: bool, rejected: bool, parse_failed: bool) -> Self {
+        if rejected || parse_failed {
+            Outcome::Rejected
+        } else if empty {
+            Outcome::Empty
+        } else {
+            Outcome::Ok
+        }
+    }
+    fn label(&self) -> &'static str {
+        match self {
+            Outcome::Ok => "ok",
+            Outcome::Empty => "empty",
+            Outcome::Rejected => "rejected",
         }
     }
 }
@@ -218,7 +262,7 @@ const CASES: &[Case] = &[
     // Free var in RETURN after a 4-hop chain. Runtime does the
     // 4-hop join, projects q.id as NULL.
     Case {
-        category: Category::InvalidUnbound,
+        category: Category::InvalidRejected,
         id: "i_unbound_after_chain4",
         query: "MATCH (a: Person)~[:knows]~(b: Person)\
                 ~[:knows]~(c: Person)~[:knows]~(d: Person) \
@@ -227,7 +271,7 @@ const CASES: &[Case] = &[
     // Free var in WHERE on a multi-hop pattern. Different code path
     // (filter expression typecheck vs RETURN-clause typecheck).
     Case {
-        category: Category::InvalidUnbound,
+        category: Category::InvalidRejected,
         id: "i_unbound_in_where_chain",
         query: "MATCH (a: Person)~[:knows]~(b: Person)~[:knows]~(c: Person) \
                 WHERE q.id = 1 \
@@ -236,7 +280,7 @@ const CASES: &[Case] = &[
     // Free var in a union arm — the same wrong-NULL bug but
     // reachable from inside an alternation.
     Case {
-        category: Category::InvalidUnbound,
+        category: Category::InvalidRejected,
         id: "i_unbound_in_union",
         query: "MATCH (a: Person)<-[:hasCreator]-(c: Comment) | \
                 (a: Person)<-[:hasCreator]-(c: Post) \
@@ -245,7 +289,7 @@ const CASES: &[Case] = &[
     // Free var alongside a valid filter via AND. Tests that the
     // free-var detection survives compound predicates.
     Case {
-        category: Category::InvalidUnbound,
+        category: Category::InvalidRejected,
         id: "i_unbound_compound_where",
         query: "MATCH (p: Person) WHERE p.id = 933 AND q.id = 1 \
                 RETURN p.firstName",
@@ -254,7 +298,7 @@ const CASES: &[Case] = &[
     // the per-pattern-size comparison. Cheap baseline within the
     // invalid_unbound bucket.
     Case {
-        category: Category::InvalidUnbound,
+        category: Category::InvalidRejected,
         id: "i_unbound_simple",
         query: "MATCH (p) RETURN q.name",
     },
@@ -262,18 +306,16 @@ const CASES: &[Case] = &[
     // Parse error (1) — caught before any later phase.
     // -------------------------------------------------------------------
     Case {
-        category: Category::InvalidParse,
+        category: Category::InvalidRejected,
         id: "i_parse",
         query: "MATCH (p RETURN p.name",
     },
 ];
 
 // ---------------------------------------------------------------------------
-// Setup: dataset detection and tiny-fixture auto-build.
+// Setup + main.
 
-fn ensure_datasets() -> Vec<PathBuf> {
-    let mut dbs: Vec<PathBuf> = Vec::new();
-
+fn ensure_dataset() {
     if !Path::new(SF01_GDB).exists() {
         eprintln!(
             "Required dataset missing: {SF01_GDB}\n\
@@ -281,112 +323,7 @@ fn ensure_datasets() -> Vec<PathBuf> {
         );
         std::process::exit(1);
     }
-
-    if !Path::new(TINY_GDB).exists() {
-        eprintln!("=== One-time setup: building {TINY_GDB} ===");
-        if !Path::new(SF01_CSV_DIR).exists() {
-            eprintln!(
-                "  ! SF0.1 source CSVs not found at {SF01_CSV_DIR}.\n\
-                 ! `bench_setup` must have extracted them; re-run it if needed."
-            );
-            std::process::exit(1);
-        }
-        build_tiny_fixture().unwrap_or_else(|e| {
-            eprintln!("  ! tiny-fixture build failed: {e}");
-            std::process::exit(1);
-        });
-    }
-
-    // Order matters: tiny first (fast feedback), SF0.1 second.
-    dbs.push(PathBuf::from(TINY_GDB));
-    dbs.push(PathBuf::from(SF01_GDB));
-    dbs
 }
-
-/// Auto-truncate every CSV in SF0.1's tree to `head -50` (header +
-/// 49 data rows) and import the result via the gqlite binary. One-
-/// time operation — caches as `ldbc-tiny.gdb` on disk. Same loader
-/// path as SF0.1, so the resulting schema is a strict subset.
-fn build_tiny_fixture() -> io::Result<()> {
-    let head_n = 50usize;
-
-    fs::create_dir_all(format!("{TINY_CSV_DIR}/dynamic"))?;
-    fs::create_dir_all(format!("{TINY_CSV_DIR}/static"))?;
-
-    // Loader auxiliaries (e.g. spanner_import_config.json) live at
-    // the dataset root; copy them verbatim. The loader needs them.
-    for entry in fs::read_dir(SF01_CSV_DIR)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) != Some("csv") {
-            let dst = PathBuf::from(TINY_CSV_DIR).join(path.file_name().unwrap());
-            fs::copy(&path, dst)?;
-        }
-    }
-
-    let mut total_src_lines = 0usize;
-    let mut total_dst_lines = 0usize;
-    for sub in &["dynamic", "static"] {
-        let src_dir = format!("{SF01_CSV_DIR}/{sub}");
-        let dst_dir = format!("{TINY_CSV_DIR}/{sub}");
-        for entry in fs::read_dir(&src_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("csv") {
-                continue;
-            }
-            let name = path.file_name().unwrap();
-            let dst = PathBuf::from(&dst_dir).join(name);
-
-            let src_file = fs::File::open(&path)?;
-            let reader = io::BufReader::new(src_file);
-            let dst_file = fs::File::create(&dst)?;
-            let mut writer = BufWriter::new(dst_file);
-            let mut line_count = 0usize;
-            let mut full_count = 0usize;
-            for line in reader.lines() {
-                let line = line?;
-                full_count += 1;
-                if line_count < head_n {
-                    writeln!(writer, "{line}")?;
-                    line_count += 1;
-                }
-            }
-            total_src_lines += full_count;
-            total_dst_lines += line_count;
-        }
-    }
-
-    eprintln!(
-        "  truncated CSVs: {} → {} lines total (~{:.0}× smaller)",
-        total_src_lines,
-        total_dst_lines,
-        total_src_lines as f64 / total_dst_lines.max(1) as f64,
-    );
-
-    // Build the .gdb via the gqlite binary. We could call into the
-    // import API directly but shelling out keeps the loader's behavior
-    // identical to a normal user import.
-    eprintln!("  importing into {TINY_GDB}...");
-    let status = Command::new("./target/release/gqlite")
-        .args([
-            TINY_GDB,
-            "--import-ldbc-csv",
-            TINY_CSV_DIR,
-            "--no-typecheck",
-        ])
-        .status()?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "gqlite import returned non-zero status: {status}",
-        )));
-    }
-    eprintln!("  ✓ {TINY_GDB} built");
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Main + per-DB driver.
 
 fn print_usage(prog: &str) {
     eprintln!(
@@ -394,9 +331,8 @@ fn print_usage(prog: &str) {
          \n\
          Defaults: --iters {DEFAULT_ITERS}  --warmup {DEFAULT_WARMUP}\n\
          \n\
-         Datasets are auto-discovered at bench/data/ldbc-sf0.1.gdb\n\
-         and bench/data/ldbc-tiny.gdb (auto-built on first run).\n\
-         Run ./target/release/bench_setup first if SF0.1 is missing."
+         Dataset: bench/data/ldbc-sf0.1.gdb (run ./target/release/bench_setup\n\
+         once to build it)."
     );
 }
 
@@ -444,13 +380,10 @@ fn main() {
         std::process::exit(1);
     }
 
-    let dbs = ensure_datasets();
+    ensure_dataset();
 
     println!("db;category;case;phase;iter;ns;flags");
-
-    for db in &dbs {
-        bench_db(db, iters, warmup);
-    }
+    bench_db(Path::new(SF01_GDB), iters, warmup);
 }
 
 fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
@@ -470,18 +403,46 @@ fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
     let active = store.catalog().active_schema();
     let rt = Runtime::new(&store);
 
+    // Column width 10 for cat is enough now that categories fit
+    // (`valid`/`empty`/`invalid`, longest 7 chars). The body row
+    // formatter uses the same width.
     eprintln!(
-        "{:<16} {:<28} {:>9} {:>9} {:>9} {:>9} {:>10} {:>11} {:>9} {:>10}",
+        "{:<10} {:<28} {:>9} {:>9} {:>9} {:>9} {:>10} {:>11} {:>9} {:>11}",
         "cat", "case", "parse_us", "elab_us", "tc_us", "opt_us",
-        "rt_chk_ms", "rt_unchk_ms", "verdict", "speedup",
+        "rt_chk_ms", "rt_unchk_ms", "outcome", "tc_impact",
     );
-    eprintln!("{}", "-".repeat(132));
+    eprintln!("{}", "-".repeat(127));
 
+    let mut mismatch_count = 0usize;
     for case in CASES {
-        run_case(&path_str, &active, &rt, case, iters, warmup);
+        if run_case(&path_str, &active, &rt, case, iters, warmup) {
+            mismatch_count += 1;
+        }
+    }
+    eprintln!("{}", "-".repeat(127));
+    if mismatch_count == 0 {
+        eprintln!(
+            "Soundness: clean. {}/{} cases produced their expected outcome and no \
+             empty case had a non-zero rt_unchk row count.",
+            CASES.len(),
+            CASES.len(),
+        );
+    } else {
+        eprintln!(
+            "⚠  Soundness: {}/{} cases tripped a SOUNDNESS warning (see ⚠ lines above). \
+             Each is a typechecker regression on the LDBC-paired case set, not a schema \
+             artifact — investigate before trusting the rest of the table.",
+            mismatch_count,
+            CASES.len(),
+        );
     }
 }
 
+/// Run a single case for `iters + warmup` iterations, emitting per-iter
+/// CSV rows + a human summary line. Returns `true` if the case tripped
+/// a soundness warning (verdict ∉ expected, OR `verdict=empty` with a
+/// non-zero rt_unchk row count). Caller tallies these for the per-DB
+/// summary at the bottom of the table.
 #[allow(clippy::too_many_arguments)]
 fn run_case<'g>(
     db_path: &str,
@@ -490,7 +451,7 @@ fn run_case<'g>(
     case: &Case,
     iters: usize,
     warmup: usize,
-) {
+) -> bool {
     let mut parse_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut elab_samples: Vec<u128> = Vec::with_capacity(iters);
     let mut tc_samples: Vec<u128> = Vec::with_capacity(iters);
@@ -616,22 +577,14 @@ fn run_case<'g>(
     let rt_unchk_med = median(&rt_unchk_samples);
 
     let total_compile_ns = parse_med + elab_med + tc_med + opt_med;
-    let speedup = if total_compile_ns > 0 && rt_unchk_med > 0 {
-        rt_unchk_med as f64 / total_compile_ns as f64
-    } else {
-        0.0
-    };
 
-    let verdict = if parse_failed {
-        "parse"
-    } else {
-        match (empty_flag, typecheck_rejected) {
-            (false, false) => "ok",
-            (true, false) => "empty",
-            (false, true) => "rejected",
-            (true, true) => "both",
-        }
-    };
+    // Outcome is the structural answer ("what did the typechecker
+    // actually decide?"), derived from the booleans set during the
+    // iter loop. We never go through a display string to make
+    // control-flow decisions — only the column rendering at the very
+    // end converts to a label.
+    let outcome = Outcome::classify(empty_flag, typecheck_rejected, parse_failed);
+    let expected = case.category.expected_outcome();
 
     let us = |med: u128| -> String {
         if parse_failed {
@@ -647,14 +600,59 @@ fn run_case<'g>(
             format!("{:.2}", med as f64 / 1_000_000.0)
         }
     };
-    let speedup_str = if speedup > 0.0 {
-        format!("{speedup:>8.1}x")
-    } else {
+
+    // The tc_impact column has two regimes by outcome — different
+    // formats because they mean different things and one format
+    // doesn't read well for both:
+    //
+    //   - `Empty` / `Rejected`: the typechecker fired the §10
+    //     short-circuit, runtime was skipped (`rt_chk = 0`). Report
+    //     SPEEDUP MULTIPLIER — `rt_unchk / (parse+elab+tc+opt)`,
+    //     i.e. how many times the typechecker outran what the
+    //     runtime would have done. These numbers are 10³ to 10⁵×;
+    //     percentage formatting saturates near 100% and loses the
+    //     magnitude that matters here.
+    //
+    //   - `Ok` (valid case): both paths run the runtime. Report
+    //     SIGNED PERCENTAGE of the total-wall-time delta vs the path
+    //     production would have taken WITHOUT the typechecker (same
+    //     parse/elab/opt, no tc, then runtime). `+X%` means the
+    //     typechecker net-added wall time (overhead — expected in
+    //     steady state); `-X%` is only reachable from runtime
+    //     variance — the typechecker cannot actually make runtime
+    //     faster on a query it doesn't reject.
+    //
+    //   - Parse failure (Outcome::Rejected with parse_failed=true):
+    //     no compile pipeline to compare against, dash.
+    let impact_str = if parse_failed {
         "—".to_string()
+    } else {
+        match outcome {
+            Outcome::Empty | Outcome::Rejected => {
+                if total_compile_ns > 0 && rt_unchk_med > 0 {
+                    let speedup = rt_unchk_med as f64 / total_compile_ns as f64;
+                    format!("{speedup:.1}x")
+                } else {
+                    "—".to_string()
+                }
+            }
+            Outcome::Ok => {
+                let chk_total = total_compile_ns as i128 + rt_chk_med as i128;
+                let unchk_total =
+                    (total_compile_ns as i128 - tc_med as i128) + rt_unchk_med as i128;
+                if unchk_total > 0 {
+                    let pct =
+                        (chk_total - unchk_total) as f64 * 100.0 / unchk_total as f64;
+                    format!("{pct:+.2}%")
+                } else {
+                    "—".to_string()
+                }
+            }
+        }
     };
 
     eprintln!(
-        "{:<16} {:<28} {:>9.2} {:>9} {:>9} {:>9} {:>10} {:>11} {:>9} {:>10}",
+        "{:<10} {:<28} {:>9.2} {:>9} {:>9} {:>9} {:>10} {:>11} {:>9} {:>11}",
         case.category.label(),
         case.id,
         parse_med as f64 / 1_000.0,
@@ -663,17 +661,45 @@ fn run_case<'g>(
         us(opt_med),
         ms(rt_chk_med),
         ms(rt_unchk_med),
-        verdict,
-        speedup_str,
+        outcome.label(),
+        impact_str,
     );
 
-    if soundness_violations > 0 {
+    // Two flavors of soundness anomaly, surfaced under one warning
+    // umbrella. Both are "the typechecker decided something the case
+    // set says it shouldn't have," so they tally together:
+    //
+    //   1. Outcome mismatch — `outcome != expected`. On an
+    //      LDBC-paired case set every case has a single expected
+    //      outcome; a mismatch is a typechecker regression, parser
+    //      change, or schema-inference shift.
+    //
+    //   2. Empty-but-nonempty — typechecker asserted `Outcome::Empty`
+    //      but the unchecked runtime returned rows. Straightforward
+    //      unsoundness — the §10 short-circuit would have discarded
+    //      real results.
+    let outcome_mismatch = outcome != expected;
+    let empty_unsound = soundness_violations > 0;
+
+    if outcome_mismatch {
         eprintln!(
-            "  ⚠  SOUNDNESS: case {} verdict=empty but rt_unchk returned \
-             up to {} rows ({} of {} iters violated). Investigate.",
+            "  ⚠  SOUNDNESS: case {} outcome={} but expected {}. Likely a \
+             typechecker regression, parser change, or schema shift.",
+            case.id,
+            outcome.label(),
+            expected.label(),
+        );
+    }
+    if empty_unsound {
+        eprintln!(
+            "  ⚠  SOUNDNESS: case {} outcome=empty but rt_unchk returned \
+             up to {} rows ({} of {} iters violated). Typechecker is \
+             unsound on this case.",
             case.id, max_violation_rows, soundness_violations, iters,
         );
     }
+
+    outcome_mismatch || empty_unsound
 }
 
 fn csv_row(db: &str, case: &Case, phase: &str, iter: usize, ns: u128, flag: &str) {
