@@ -144,6 +144,13 @@ pub enum Expr {
         op: UnOp,
         operand: Box<Expr>,
     },
+    /// SQL-style null test: `expr IS NULL` (negated=false) or
+    /// `expr IS NOT NULL` (negated=true). Returns Bool. Distinct from
+    /// `expr = null`, which would silently produce false under 3VL.
+    IsNull {
+        operand: Box<Expr>,
+        negated: bool,
+    },
     /// Right-hand side of `is`/`as` operators — a type, not a value.
     Type(SimpleType),
 }
@@ -182,6 +189,13 @@ impl fmt::Display for Expr {
             Expr::FieldAccess { base, field } => write!(f, "{base}.{field}"),
             Expr::Binop { op, left, right } => write!(f, "({left} {op} {right})"),
             Expr::Unop { op, operand } => write!(f, "{op} {operand}"),
+            Expr::IsNull { operand, negated } => {
+                if *negated {
+                    write!(f, "({operand} IS NOT NULL)")
+                } else {
+                    write!(f, "({operand} IS NULL)")
+                }
+            }
             Expr::Type(t) => write!(f, "{t}"),
         }
     }

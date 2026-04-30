@@ -412,6 +412,7 @@ impl LazyGraphStore {
 
     fn prop_to_value(&self, pv: &PropValue) -> Value {
         match pv {
+            PropValue::Null => Value::Null,
             PropValue::Int(n) => Value::Int(*n),
             PropValue::Float(x) => Value::Float(*x),
             PropValue::Str(sid) => Value::Str(self.strings.resolve(*sid).unwrap().to_string()),

@@ -253,15 +253,11 @@ fn encode_props(
 
 fn value_to_prop(v: &Value, st: &mut StringTable, pager: &mut Pager) -> io::Result<PropValue> {
     Ok(match v {
-        // Top-level Null is filtered out by `encode_props`; reaching here
-        // means a Null nested inside a list or record. The on-disk format
-        // does not yet have a Null tag, so reject explicitly.
-        Value::Null => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "cannot encode Value::Null inside a list or record",
-            ));
-        }
+        // Top-level Null is filtered out by `encode_props` (the key is
+        // omitted entirely); reaching here means a Null nested inside a
+        // list or record. The wire format reserves `VALUE_TYPE_NULL` for
+        // this case so positional alignment is preserved.
+        Value::Null => PropValue::Null,
         Value::Int(n) => PropValue::Int(*n),
         Value::Float(x) => PropValue::Float(*x),
         Value::Str(s) => PropValue::Str(st.intern(s, pager)?),
@@ -295,6 +291,7 @@ fn decode_props(encoded: &[(u32, PropValue)], strings: &StringTable) -> Props {
 
 fn prop_to_value(pv: &PropValue, strings: &StringTable) -> Value {
     match pv {
+        PropValue::Null => Value::Null,
         PropValue::Int(n) => Value::Int(*n),
         PropValue::Float(x) => Value::Float(*x),
         PropValue::Str(sid) => Value::Str(strings.resolve(*sid).unwrap().to_string()),

@@ -1041,6 +1041,18 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 }
             }
 
+            Expr::IsNull { operand, negated } => {
+                let is_null = match self.run_expr(mu, operand) {
+                    ExprResult::Success(Value::Null) => true,
+                    ExprResult::Success(_) => false,
+                    // Failure (missing attribute, unbound variable) is
+                    // treated as null — the same convention as the rest
+                    // of the engine.
+                    ExprResult::Failure(_) => true,
+                };
+                ExprResult::Success(Value::Bool(if *negated { !is_null } else { is_null }))
+            }
+
             Expr::Type(_) => ExprResult::Failure("bare type in expression".into()),
         }
     }

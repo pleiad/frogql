@@ -10,6 +10,7 @@ pub enum Token {
     // Keywords
     True,
     False,
+    Null,
     Where,
     And,
     Or,
@@ -399,12 +400,18 @@ impl Lexer {
                     let tok = match name.as_str() {
                         "true" => Token::True,
                         "false" => Token::False,
+                        "null" | "NULL" => Token::Null,
                         "where" | "WHERE" => Token::Where,
                         "and" | "AND" => Token::And,
                         "or" | "OR" => Token::Or,
                         "not" | "NOT" => Token::Not,
                         "as" | "AS" => Token::As,
-                        "typed" | "TYPED" => Token::Typed,
+                        // `IS` is the ISO-39075 spelling of the type
+                        // predicate; `TYPED` is the legacy alias kept for
+                        // backward compatibility. Both produce the same
+                        // token so `IS NULL` / `IS NOT NULL` and the
+                        // typed-of operator share the same lookahead path.
+                        "typed" | "TYPED" | "is" | "IS" => Token::Typed,
                         "in" | "IN" => Token::In,
                         "MATCH" | "match" => Token::Match,
                         "RETURN" | "return" => Token::Return,

@@ -91,6 +91,34 @@ impl Parser {
         self.peek() == tok
     }
 
+    /// Look ahead for `IS NULL` or `IS NOT NULL`. On match, consume the
+    /// tokens and return the original `left` operand together with the
+    /// negation flag. Otherwise the parser state is untouched.
+    fn try_is_null(&mut self, left: &Expr) -> Option<(Expr, bool)> {
+        if !matches!(self.peek(), Token::Typed) {
+            return None;
+        }
+        let next = self.peek_at(1)?;
+        match next {
+            Token::Null => {
+                self.advance(); // is
+                self.advance(); // null
+                Some((left.clone(), false))
+            }
+            Token::Not => {
+                if matches!(self.peek_at(2), Some(Token::Null)) {
+                    self.advance(); // is
+                    self.advance(); // not
+                    self.advance(); // null
+                    Some((left.clone(), true))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn eat(&mut self, tok: &Token) -> bool {
         if self.check(tok) {
             self.advance();
@@ -270,6 +298,13 @@ impl Parser {
     fn return_comparison(&mut self) -> Result<Expr, String> {
         let mut left = self.term()?;
         loop {
+            if let Some((operand, negated)) = self.try_is_null(&left) {
+                left = Expr::IsNull {
+                    operand: Box::new(operand),
+                    negated,
+                };
+                continue;
+            }
             let op = match self.peek() {
                 Token::Lt => BinOp::Lt,
                 Token::Gt => BinOp::Gt,
@@ -876,6 +911,16 @@ impl Parser {
     fn comparison(&mut self) -> Result<Expr, String> {
         let mut left = self.term()?;
         loop {
+            // SQL-style null tests: `is null` / `is not null`. Detected
+            // before the generic `is type` branch so `null` is not parsed
+            // as an ordinary type expression.
+            if let Some((operand, negated)) = self.try_is_null(&left) {
+                left = Expr::IsNull {
+                    operand: Box::new(operand),
+                    negated,
+                };
+                continue;
+            }
             let op = match self.peek() {
                 Token::Lt => BinOp::Lt,
                 Token::Gt => BinOp::Gt,
@@ -1077,6 +1122,10 @@ impl Parser {
             Token::False => {
                 self.advance();
                 Ok(Expr::Const(Value::Bool(false)))
+            }
+            Token::Null => {
+                self.advance();
+                Ok(Expr::Const(Value::Null))
             }
             Token::Int => {
                 self.advance();

@@ -349,6 +349,14 @@ impl Typechecker {
                     SimpleType::Zero
                 }
             }
+
+            Expr::IsNull { operand, .. } => {
+                // The operand can be of any type — the test merely checks
+                // for absence. Type-check it for diagnostics, then return
+                // Bool.
+                let _ = self.check_expr(operand, env);
+                SimpleType::B
+            }
         }
     }
 
@@ -504,7 +512,11 @@ fn create_context(desc: &Option<Descriptor>, t: VariableType) -> TypeEnvironment
 /// `docs/typechecker_migration.md` as a phase-1 punt.
 fn simple_type_of_value(v: &Value) -> SimpleType {
     match v {
-        Value::Null => SimpleType::Zero,
+        // Null literal is the SQL untyped null: it inhabits every type for
+        // the purpose of static checks. Mapping to `Star` keeps comparisons
+        // like `x.attr = null` from collapsing the surrounding type
+        // derivation to bottom; the runtime still drops the row via 3VL.
+        Value::Null => SimpleType::Star,
         Value::Int(_) => SimpleType::Z,
         Value::Float(_) => SimpleType::F,
         Value::Str(_) => SimpleType::S,

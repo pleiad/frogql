@@ -8,12 +8,14 @@
 /// [prop_count: u16 LE]
 /// [properties...]
 ///   each: [name_str_id: u32 LE][value_type: u8][value_data: variable]
-///     value_type 0 = Int:   [i64 LE, 8 bytes]
-///     value_type 1 = Str:   [str_id: u32 LE]
-///     value_type 2 = Bool:  [u8: 0 or 1]
-///     value_type 3 = Float: [f64 LE, 8 bytes]
+///     value_type 0 = Int:    [i64 LE, 8 bytes]
+///     value_type 1 = Str:    [str_id: u32 LE]
+///     value_type 2 = Bool:   [u8: 0 or 1]
+///     value_type 3 = Float:  [f64 LE, 8 bytes]
 ///     value_type 4 = List:   [length: u32 LE][element] × length
 ///     value_type 5 = Record: [field_count: u32 LE][name_str_id: u32 LE, value] × field_count
+///     value_type 6 = Null:   no payload (used inside lists / records;
+///                            top-level null is encoded as key absence)
 /// ```
 ///
 /// Edge cell format = Node cell format + :
@@ -28,6 +30,7 @@ pub const VALUE_TYPE_BOOL: u8 = 2;
 pub const VALUE_TYPE_FLOAT: u8 = 3;
 pub const VALUE_TYPE_LIST: u8 = 4;
 pub const VALUE_TYPE_RECORD: u8 = 5;
+pub const VALUE_TYPE_NULL: u8 = 6;
 
 pub const DIR_DIRECTED: u8 = 0;
 pub const DIR_UNDIRECTED: u8 = 1;
@@ -85,10 +88,18 @@ pub enum PropValue {
     Float(f64),
     List(Vec<PropValue>),
     Record(Vec<(u32, PropValue)>), // (name_str_id, value); sorted by key for deterministic encoding
+    /// SQL-style null. Top-level nulls are encoded by omitting the
+    /// property entirely; this variant only appears inside `List` /
+    /// `Record` payloads where positional alignment forces an explicit
+    /// marker.
+    Null,
 }
 
 fn encode_prop_value(buf: &mut Vec<u8>, val: &PropValue) {
     match val {
+        PropValue::Null => {
+            buf.push(VALUE_TYPE_NULL);
+        }
         PropValue::Int(n) => {
             buf.push(VALUE_TYPE_INT);
             buf.extend_from_slice(&n.to_le_bytes());
@@ -188,6 +199,7 @@ fn decode_prop_value(data: &[u8], pos: &mut usize) -> PropValue {
     let vtype = data[*pos];
     *pos += 1;
     match vtype {
+        VALUE_TYPE_NULL => PropValue::Null,
         VALUE_TYPE_INT => {
             let n = i64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
             *pos += 8;
@@ -288,5 +300,23 @@ mod tests {
         assert!(!decoded.directed);
         assert_eq!(decoded.src_internal_id, 5);
         assert_eq!(decoded.tgt_internal_id, 6);
+    }
+
+    #[test]
+    fn test_nested_null_roundtrip() {
+        // Null inside a list and inside a record both round-trip via the
+        // VALUE_TYPE_NULL tag; positional alignment is preserved.
+        let inner_record = PropValue::Record(vec![
+            (40, PropValue::Int(1)),
+            (41, PropValue::Null),
+            (42, PropValue::Int(3)),
+        ]);
+        let props = vec![(
+            30,
+            PropValue::List(vec![PropValue::Int(7), PropValue::Null, inner_record]),
+        )];
+        let encoded = encode_node(1, &[], &props);
+        let (decoded, _) = decode_node(&encoded);
+        assert_eq!(decoded.props, props);
     }
 }
