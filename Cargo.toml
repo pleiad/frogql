@@ -25,6 +25,17 @@ tar = "0.4"
 
 [dev-dependencies]
 proptest = "1"
+# criterion: statistically rigorous benchmark harness for the
+# microsecond-scale typechecker phases. The hand-rolled CSV bench
+# in `src/bin/typecheck_bench.rs` complements this — it's better
+# at multi-DB sweeps and emitting raw per-iter CSV; criterion is
+# better at confidence intervals, outlier detection, and
+# regression checks against a saved baseline. Both stay.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "typecheck"
+harness = false
 
 [workspace]
 members = [".", "python"]
