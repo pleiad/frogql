@@ -193,6 +193,7 @@ fn props_to_simple(
 
 fn value_to_simple_type(v: &Value) -> SimpleType {
     match v {
+        Value::Null => SimpleType::Zero,
         Value::Int(_) => SimpleType::Z,
         Value::Float(_) => SimpleType::F,
         Value::Bool(_) => SimpleType::B,

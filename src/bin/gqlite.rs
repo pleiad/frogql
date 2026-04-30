@@ -598,6 +598,7 @@ impl NodeType {
         let mut props = std::collections::BTreeMap::new();
         for (k, v) in &raw_props {
             let t = match v {
+                gqlrust::model::value::Value::Null => "null",
                 gqlrust::model::value::Value::Int(_) => "int",
                 gqlrust::model::value::Value::Float(_) => "float",
                 gqlrust::model::value::Value::Str(_) => "str",
@@ -661,6 +662,7 @@ fn print_schema(store: &LazyGraphStore) {
         let mut props = std::collections::BTreeMap::new();
         for (k, v) in &raw_props {
             let t = match v {
+                gqlrust::model::value::Value::Null => "null",
                 gqlrust::model::value::Value::Int(_) => "int",
                 gqlrust::model::value::Value::Float(_) => "float",
                 gqlrust::model::value::Value::Str(_) => "str",
@@ -751,6 +753,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
         let mut prop_types: BTreeMap<String, &'static str> = BTreeMap::new();
         for (k, v) in &raw_props {
             let t = match v {
+                gqlrust::model::value::Value::Null => "null",
                 gqlrust::model::value::Value::Int(_) => "int",
                 gqlrust::model::value::Value::Float(_) => "float",
                 gqlrust::model::value::Value::Str(_) => "str",
@@ -824,6 +827,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
         let mut prop_types: BTreeMap<String, &'static str> = BTreeMap::new();
         for (k, v) in &raw_props {
             let t = match v {
+                gqlrust::model::value::Value::Null => "null",
                 gqlrust::model::value::Value::Int(_) => "int",
                 gqlrust::model::value::Value::Float(_) => "float",
                 gqlrust::model::value::Value::Str(_) => "str",

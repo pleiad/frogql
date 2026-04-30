@@ -263,7 +263,7 @@ fn test_sum_empty_emits_null() {
     let g = graph_three_users();
     assert_eq!(
         run(&g, "MATCH (x: ImpossibleLabel) RETURN SUM(x.age)"),
-        vec![vec![Value::Str("NULL".into())]]
+        vec![vec![Value::Null]]
     );
 }
 
@@ -284,7 +284,7 @@ fn test_avg_empty_emits_null() {
     let g = graph_three_users();
     assert_eq!(
         run(&g, "MATCH (x: ImpossibleLabel) RETURN AVG(x.age)"),
-        vec![vec![Value::Str("NULL".into())]]
+        vec![vec![Value::Null]]
     );
 }
 
@@ -326,11 +326,11 @@ fn test_min_max_empty_emits_null() {
     let g = graph_three_users();
     assert_eq!(
         run(&g, "MATCH (x: ImpossibleLabel) RETURN MIN(x.age)"),
-        vec![vec![Value::Str("NULL".into())]]
+        vec![vec![Value::Null]]
     );
     assert_eq!(
         run(&g, "MATCH (x: ImpossibleLabel) RETURN MAX(x.age)"),
-        vec![vec![Value::Str("NULL".into())]]
+        vec![vec![Value::Null]]
     );
 }
 

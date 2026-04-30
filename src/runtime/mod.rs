@@ -8,11 +8,15 @@ use crate::model::value::Value;
 use crate::syntax::expr::BinOp;
 
 /// Evaluate `lhs <op> rhs` with GQL-leaning semantics for pushed value
-/// predicates: incompatible kinds yield false (predicate is null → row drops),
-/// numeric comparison promotes Int→Float, and Eq/Ne across kinds is false.
-/// Shared between the LTJ filter loop and the standard node/edge scan.
+/// predicates. Null on either side yields false (3VL: predicate is null →
+/// row drops). Numeric comparison promotes Int→Float; comparison across
+/// incompatible kinds yields false. Shared between the LTJ filter loop and
+/// the standard node/edge scan.
 pub fn cmp_values(lhs: &Value, op: BinOp, rhs: &Value) -> bool {
     use std::cmp::Ordering;
+    if lhs.is_null() || rhs.is_null() {
+        return false;
+    }
     let ord = match (lhs, rhs) {
         (Value::Int(a), Value::Int(b)) => a.cmp(b),
         (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
@@ -20,7 +24,7 @@ pub fn cmp_values(lhs: &Value, op: BinOp, rhs: &Value) -> bool {
         (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal),
         (Value::Str(a), Value::Str(b)) => a.cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-        _ => return matches!(op, BinOp::Ne),
+        _ => return false,
     };
     match op {
         BinOp::Eq => ord == Ordering::Equal,

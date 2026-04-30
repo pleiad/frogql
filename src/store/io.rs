@@ -237,6 +237,13 @@ fn encode_props(
 ) -> io::Result<Vec<(u32, PropValue)>> {
     let mut result = Vec::new();
     for (k, v) in props {
+        // Null is encoded as absence: skip the key entirely so the on-disk
+        // record does not carry a sentinel value for it. Loading the same
+        // record back yields a `Props` without that key, which the engine
+        // already treats as null.
+        if v.is_null() {
+            continue;
+        }
         let name_sid = st.intern(k, pager)?;
         let pv = value_to_prop(v, st, pager)?;
         result.push((name_sid, pv));
@@ -246,6 +253,15 @@ fn encode_props(
 
 fn value_to_prop(v: &Value, st: &mut StringTable, pager: &mut Pager) -> io::Result<PropValue> {
     Ok(match v {
+        // Top-level Null is filtered out by `encode_props`; reaching here
+        // means a Null nested inside a list or record. The on-disk format
+        // does not yet have a Null tag, so reject explicitly.
+        Value::Null => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cannot encode Value::Null inside a list or record",
+            ));
+        }
         Value::Int(n) => PropValue::Int(*n),
         Value::Float(x) => PropValue::Float(*x),
         Value::Str(s) => PropValue::Str(st.intern(s, pager)?),

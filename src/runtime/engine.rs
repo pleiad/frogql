@@ -116,7 +116,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         match item {
             ReturnItem::Expr { expr, .. } => match self.run_expr(mu, expr) {
                 ExprResult::Success(v) => v,
-                ExprResult::Failure(_) => Value::Str("NULL".into()),
+                ExprResult::Failure(_) => Value::Null,
             },
             ReturnItem::Aggregate { .. } => {
                 unreachable!("aggregate items must be projected via run_aggregated")
@@ -143,7 +143,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     .iter()
                     .map(|e| match self.run_expr(&row.assignment, e) {
                         ExprResult::Success(v) => v,
-                        ExprResult::Failure(_) => Value::Str("NULL".into()),
+                        ExprResult::Failure(_) => Value::Null,
                     })
                     .collect(),
                 None => items
@@ -177,11 +177,11 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     ReturnItem::Expr { expr, .. } => {
                         let mu = match row_idxs.first() {
                             Some(&i) => &rows[i].assignment,
-                            None => return Value::Str("NULL".into()),
+                            None => return Value::Null,
                         };
                         match self.run_expr(mu, expr) {
                             ExprResult::Success(v) => v,
-                            ExprResult::Failure(_) => Value::Str("NULL".into()),
+                            ExprResult::Failure(_) => Value::Null,
                         }
                     }
                     ReturnItem::Aggregate { agg, .. } => self.apply_aggregator(agg, row_idxs, rows),
@@ -226,6 +226,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let mut seen: HashSet<GroupKey> = HashSet::new();
         for &idx in row_idxs {
             let v = match self.run_expr(&rows[idx].assignment, expr) {
+                ExprResult::Success(Value::Null) => continue, // null-eliminated
                 ExprResult::Success(v) => v,
                 ExprResult::Failure(_) => continue, // null-eliminated
             };
@@ -906,6 +907,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// since the element type is unobservable.
     fn value_type(v: &Value) -> SimpleType {
         match v {
+            Value::Null => SimpleType::Zero,
             Value::Int(_) => SimpleType::Z,
             Value::Float(_) => SimpleType::F,
             Value::Str(_) => SimpleType::S,
@@ -1117,11 +1119,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
 // Aggregate reducers (ISO §20.9 GR 7a-iii..vi). Inputs already passed
 // null-elimination and optional DISTINCT in collect_aggregate_values.
-// Empty input → null sentinel (`Value::Str("NULL")` until a real
-// `Value::Null` lands; deferred — touches ~30 sites).
+// Empty input → `Value::Null`.
 
 fn null_value() -> Value {
-    Value::Str("NULL".into())
+    Value::Null
 }
 
 /// Int-preserving when all inputs are Int; promotes to Float on any
@@ -1235,6 +1236,7 @@ struct GroupKey(Vec<Value>);
 fn hash_value<H: Hasher>(v: &Value, state: &mut H) {
     std::mem::discriminant(v).hash(state);
     match v {
+        Value::Null => {} // discriminant alone identifies the variant
         Value::Int(n) => n.hash(state),
         Value::Float(f) => normalize_float_bits(*f).hash(state),
         Value::Str(s) => s.hash(state),

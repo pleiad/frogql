@@ -1,9 +1,13 @@
 use std::fmt;
 
-/// A property value. Scalars (Int/Float/Str/Bool) plus the GQL constructed
-/// types List (ordered collection) and Record (named fields, can nest).
+/// A property value. Scalars (Int/Float/Str/Bool/Null) plus the GQL
+/// constructed types List (ordered collection) and Record (named fields, can
+/// nest). `Null` is the SQL-style absent value: comparisons with it produce
+/// false (predicate-is-null → row drops), aggregators skip it, and it is
+/// distinct from any string, including `"NULL"`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
+    Null,
     Int(i64),
     Float(f64),
     Str(String),
@@ -12,9 +16,16 @@ pub enum Value {
     Record(std::collections::BTreeMap<String, Value>),
 }
 
+impl Value {
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Value::Null => write!(f, "NULL"),
             Value::Int(n) => write!(f, "{n}"),
             Value::Float(x) => {
                 if x.is_finite() && x.fract() == 0.0 {

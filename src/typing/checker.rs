@@ -504,6 +504,7 @@ fn create_context(desc: &Option<Descriptor>, t: VariableType) -> TypeEnvironment
 /// `docs/typechecker_migration.md` as a phase-1 punt.
 fn simple_type_of_value(v: &Value) -> SimpleType {
     match v {
+        Value::Null => SimpleType::Zero,
         Value::Int(_) => SimpleType::Z,
         Value::Float(_) => SimpleType::F,
         Value::Str(_) => SimpleType::S,
