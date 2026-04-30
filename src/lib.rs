@@ -13,21 +13,37 @@ use syntax::query::{MatchStatement, Query};
 use typing::checker::Typechecker;
 use typing::variable_type::Schema;
 
-/// Optimize a Query: collapse the match chain into a single PathPattern,
-/// run the optimizer over that, and rebuild the Query with the result
-/// stored as one `MatchStatement::Simple`.
+/// Optimize a Query. Two cases:
 ///
-/// Consistent with the typechecker and runtime, both of which also call
-/// `Query::collapsed_pattern()` before processing. Sound while every
-/// match is `Simple` (§14.4 GR 1 = natural join, which is what
-/// `PathPattern::Join` already encodes). When `OPTIONAL MATCH` lands all
-/// three phases will switch to walking `q.matches` per element together.
+/// - All-Simple: collapse the chain into one `PathPattern::Join`, optimize
+///   it, and store as a single `MatchStatement::Simple`. Sound because
+///   §14.4 GR 1 makes MATCH a natural join, which is exactly
+///   `PathPattern::Join`'s semantics.
+///
+/// - Has-Optional: collapse is unsound (OPTIONAL is a left-outer-join).
+///   Optimize each match's pattern in place and preserve the chain
+///   structure for the typechecker and runtime to walk per match.
 fn optimize_query(q: Query) -> Query {
-    let pattern = optimizer::compile(q.collapsed_pattern());
-    Query {
-        matches: vec![MatchStatement::Simple { pattern }],
-        ..q
+    if !q.has_any_optional() {
+        let pattern = optimizer::compile(q.collapsed_pattern());
+        return Query {
+            matches: vec![MatchStatement::Simple { pattern }],
+            ..q
+        };
     }
+    let matches = q
+        .matches
+        .into_iter()
+        .map(|m| match m {
+            MatchStatement::Simple { pattern } => MatchStatement::Simple {
+                pattern: optimizer::compile(pattern),
+            },
+            MatchStatement::Optional { pattern } => MatchStatement::Optional {
+                pattern: optimizer::compile(pattern),
+            },
+        })
+        .collect();
+    Query { matches, ..q }
 }
 
 /// Phase-tagged compile failure.

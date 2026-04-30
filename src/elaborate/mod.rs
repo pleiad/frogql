@@ -29,6 +29,9 @@ pub fn elaborate_query(q: Query) -> Query {
             MatchStatement::Simple { pattern } => MatchStatement::Simple {
                 pattern: elaborate_pattern(pattern, &fresh),
             },
+            MatchStatement::Optional { pattern } => MatchStatement::Optional {
+                pattern: elaborate_pattern(pattern, &fresh),
+            },
         })
         .collect();
     Query { matches, ..q }
