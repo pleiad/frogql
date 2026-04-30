@@ -165,10 +165,10 @@ Los filtros (labels de nodos como `(x: Person)`, constraints de properties) se c
 
 LTJ se activa automáticamente en `run_join` y `run_concat_pattern` si el pattern es descomponible en triples:
 
-- **Sí**: cadenas de aristas dirigidas, comma-joins de aristas dirigidas, combinaciones de ambos, aristas con o sin label
-- **No**: aristas no dirigidas (`~[e]~`), aristas en dirección izquierda (`<-[e]-`), uniones (`|`), repeticiones (`{n,m}`), filtros WHERE complejos
+- **Sí**: cadenas y comma-joins de aristas dirigidas (`-[]->`), izquierda (`<-[]-`) y no dirigidas (`~[e]~`), con o sin label. Las aristas izquierdas se normalizan en extracción intercambiando los endpoints del triple emitido. Las aristas no dirigidas se normalizan al construir el `TripleIndex`: cada arista se guarda como `(s,p,t)` y `(t,p,s)` con el mismo `edge_id`, de modo que un lookup forward las captura desde cualquiera de sus endpoints.
+- **No**: aristas any-direction (`-[e]-` sin tilde), uniones (`|`), repeticiones (`{n,m}`), filtros WHERE con expresiones complejas (los filtros de label sí se integran).
 
-Si la descomposición falla, el runtime usa el fallback (hash-join pairwise para joins, adjacency-driven concat para concatenaciones). Esto garantiza cero regresión.
+Si la descomposición falla, el runtime usa el fallback (hash-join pairwise tanto para joins como para concatenaciones). Esto garantiza cero regresión.
 
 #### Limitaciones actuales
 

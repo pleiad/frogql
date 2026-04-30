@@ -81,7 +81,7 @@ impl PathType {
                 PathType::from_variable(t1, dir),
                 PathType::from_variable(t2, dir),
             ),
-            VariableType::Group(_) | VariableType::Zero => PathType::Zero,
+            VariableType::Group(_) | VariableType::Null | VariableType::Zero => PathType::Zero,
         }
     }
 

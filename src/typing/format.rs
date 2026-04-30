@@ -66,6 +66,7 @@ pub fn format_variable(vt: &VariableType) -> String {
         // Render best-effort so SHOW never blanks out.
         VariableType::Union(a, b) => format!("({}) | ({})", format_variable(a), format_variable(b)),
         VariableType::Group(t) => format!("group<{}>", format_variable(t)),
+        VariableType::Null => "Null".to_string(),
         VariableType::Zero => "⊥".to_string(),
     }
 }

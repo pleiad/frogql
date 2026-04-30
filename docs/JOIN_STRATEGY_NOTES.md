@@ -352,10 +352,18 @@ pairwise hash-join.
 - Labeled edges: `(a)-[:Transfer]->(b)` (label becomes a constant)
 - Unlabeled edges: `(a)->(b)` (label becomes a free variable)
 - Anonymous nodes: `()-[]->()-[]->()` (fresh internal variables)
+- Left-direction edges: `(a)<-[e]-(b)` — the extractor swaps endpoints
+  so the emitted triple is `(b, p, a)` (forward).
+- Undirected edges: `(a)~[e]~(b)` — the `TripleIndex` stores each
+  undirected edge as both `(s,p,t)` and `(t,p,s)` with the same
+  `edge_id`, so a forward lookup catches it from either endpoint.
+  Result reconstruction recovers the `EdgeUndirectional` variant
+  via `graph.edge_path_value(eid)`.
 
 **LTJ does NOT handle (falls back to hash-join):**
-- Undirected edges: `(a)~[e]~(b)`
-- Left-direction edges: `(a)<-[e]-(b)`
+- Any-direction edges (no tilde): `(a)-[e]-(b)` — distinct from
+  undirected; matches both directed senses without the schema
+  guarantee of an undirected edge.
 - Unions: `(a)->(b) | (a)->(c)`
 - Repetitions: `(a)->(b){1,3}`
 - WHERE expressions with property comparisons (labels ARE handled)
@@ -441,8 +449,9 @@ engine.rs          Integration: run_join() and run_concat_pattern() call
 3. **Unroll fixed repetitions**: `{1,m}` can be decomposed into m separate
    LTJ runs (see section 7).
 
-4. **Handle undirected/left edges**: model as two directed triples or add
-   separate index.
-
-5. **Compact tries**: replace sorted Vec with LOUDS bitvectors for space
+4. **Compact tries**: replace sorted Vec with LOUDS bitvectors for space
    efficiency on very large graphs (billions of edges).
+
+5. **Handle any-direction edges (`-[e]-`)**: currently the only edge form
+   that still falls back to hash-join. Could be modelled as a union of
+   forward/reverse triples at extraction time.

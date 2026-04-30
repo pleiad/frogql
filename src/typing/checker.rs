@@ -644,6 +644,7 @@ fn short_var_type(t: &VariableType) -> String {
         VariableType::EdgeNonDirectional { desc, .. } => format!("~[:{}]~", desc.label),
         VariableType::Union(a, b) => format!("{} or {}", short_var_type(a), short_var_type(b)),
         VariableType::Group(inner) => format!("group<{}>", short_var_type(inner)),
+        VariableType::Null => "Null".to_string(),
         VariableType::Zero => "⊥".to_string(),
     }
 }

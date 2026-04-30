@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::syntax::descriptor::Descriptor;
 
@@ -42,12 +42,20 @@ impl TypeEnvironment {
     }
 
     /// Pointwise join (least upper bound) of two environments.
+    ///
+    /// For keys present in both sides, the result binds the join of the two
+    /// types. For keys present in only one side, the result binds the type
+    /// joined with `Null` — the variable may be absent in the other branch.
+    /// This matches the rule `Γ₁ ⊔ Γ₂` in the paper.
     pub fn union(a: &TypeEnvironment, b: &TypeEnvironment) -> TypeEnvironment {
-        let mut result = a.bindings.clone();
-        for (key, other) in &b.bindings {
-            let merged = match result.get(key) {
-                Some(self_t) => VariableType::join(self_t, other),
-                None => other.clone(),
+        let keys: HashSet<&String> = a.bindings.keys().chain(b.bindings.keys()).collect();
+        let mut result = HashMap::with_capacity(keys.len());
+        for key in keys {
+            let merged = match (a.bindings.get(key), b.bindings.get(key)) {
+                (Some(ta), Some(tb)) => VariableType::join(ta, tb),
+                (Some(ta), None) => VariableType::join(ta, &VariableType::Null),
+                (None, Some(tb)) => VariableType::join(&VariableType::Null, tb),
+                (None, None) => unreachable!(),
             };
             result.insert(key.clone(), merged);
         }
@@ -100,5 +108,55 @@ impl TypeEnvironment {
                 .map(|(k, v)| (k.clone(), VariableType::Group(Box::new(v.clone()))))
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nstar() -> VariableType {
+        VariableType::node_star()
+    }
+
+    #[test]
+    fn test_union_shared_key_joins_pointwise() {
+        let mut a = TypeEnvironment::new();
+        let mut b = TypeEnvironment::new();
+        a.set("x", nstar());
+        b.set("x", nstar());
+        let u = TypeEnvironment::union(&a, &b);
+        // Equal types collapse under join.
+        assert_eq!(u.get("x"), Some(&nstar()));
+    }
+
+    #[test]
+    fn test_union_key_only_in_left_joins_with_null() {
+        let mut a = TypeEnvironment::new();
+        let b = TypeEnvironment::new();
+        a.set("x", nstar());
+        let u = TypeEnvironment::union(&a, &b);
+        assert_eq!(
+            u.get("x"),
+            Some(&VariableType::Union(
+                Box::new(nstar()),
+                Box::new(VariableType::Null),
+            )),
+        );
+    }
+
+    #[test]
+    fn test_union_key_only_in_right_joins_with_null() {
+        let a = TypeEnvironment::new();
+        let mut b = TypeEnvironment::new();
+        b.set("y", nstar());
+        let u = TypeEnvironment::union(&a, &b);
+        assert_eq!(
+            u.get("y"),
+            Some(&VariableType::Union(
+                Box::new(VariableType::Null),
+                Box::new(nstar()),
+            )),
+        );
     }
 }

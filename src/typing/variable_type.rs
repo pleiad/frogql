@@ -21,6 +21,10 @@ pub enum VariableType {
     },
     Union(Box<VariableType>, Box<VariableType>),
     Group(Box<VariableType>),
+    /// The singleton type for the null value. Introduced when a variable
+    /// appears in only one branch of a `TypeEnvironment` join, per the rule
+    /// `Γ₁ ⊔ Γ₂` for keys present on a single side.
+    Null,
     Zero,
 }
 
@@ -65,6 +69,7 @@ impl VariableType {
                 SimpleType::union(&t1.get_attribute(attr), &t2.get_attribute(attr))
             }
             VariableType::Group(t) => SimpleType::Group(Box::new(t.get_attribute(attr))),
+            VariableType::Null => SimpleType::Zero,
             VariableType::Zero => SimpleType::Zero,
         }
     }
@@ -165,6 +170,8 @@ impl VariableType {
                 VariableType::join(&r1, &r2)
             }
             (_, VariableType::Union(_, _)) => VariableType::meet(b, a),
+            (VariableType::Null, VariableType::Null) => VariableType::Null,
+            (VariableType::Null, _) | (_, VariableType::Null) => VariableType::Zero,
             (VariableType::Zero, _) | (_, VariableType::Zero) => VariableType::Zero,
             _ => VariableType::Zero,
         }
@@ -200,6 +207,7 @@ impl VariableType {
     pub fn is_subtype(t1: &VariableType, t2: &VariableType) -> bool {
         match (t1, t2) {
             (VariableType::Zero, _) => true,
+            (VariableType::Null, VariableType::Null) => true,
             (VariableType::Node(a), VariableType::Node(b)) => DescriptorType::is_subtype(a, b),
             (
                 VariableType::EdgeDirectional {
@@ -317,6 +325,7 @@ impl VariableType {
             VariableType::Group(t) => {
                 VariableType::Group(Box::new(VariableType::refine(schema, t)))
             }
+            VariableType::Null => VariableType::Null,
             VariableType::Zero => VariableType::Zero,
         }
     }
@@ -333,6 +342,7 @@ impl VariableType {
             }
             VariableType::Union(t1, t2) => t1.is_empty() && t2.is_empty(),
             VariableType::Group(t) => t.is_empty(),
+            VariableType::Null => false,
         }
     }
 }
@@ -349,6 +359,7 @@ impl fmt::Display for VariableType {
             }
             VariableType::Union(t1, t2) => write!(f, "{t1} + {t2}"),
             VariableType::Group(t) => write!(f, "group<{t}>"),
+            VariableType::Null => write!(f, "Null"),
             VariableType::Zero => write!(f, "⊥"),
         }
     }

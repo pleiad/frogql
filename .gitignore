@@ -19,3 +19,4 @@ examples/books.gdb
 examples/ldbc-sf01.gdb
 # LDBC SNB benchmark inputs (~100 MB at SF=0.1; rebuild with `gqlite ... --import-ldbc-csv`)
 /bench/social_network-*
+latex

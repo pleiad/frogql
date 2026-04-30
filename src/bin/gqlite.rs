@@ -1154,6 +1154,7 @@ fn color_variable(vt: &VariableType) -> String {
             format!("({}) | ({})", color_variable(a), color_variable(b))
         }
         VariableType::Group(t) => format!("group<{}>", color_variable(t)),
+        VariableType::Null => "Null".to_string(),
         VariableType::Zero => "⊥".to_string(),
     }
 }
