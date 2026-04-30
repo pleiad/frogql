@@ -10,12 +10,26 @@ use crate::syntax::expr::BinOp;
 /// Evaluate `lhs <op> rhs` with GQL-leaning semantics for pushed value
 /// predicates. Null on either side yields false (3VL: predicate is null →
 /// row drops). Numeric comparison promotes Int→Float; comparison across
-/// incompatible kinds yields false. Shared between the LTJ filter loop and
-/// the standard node/edge scan.
+/// incompatible kinds yields false. Records and lists support structural
+/// `Eq`/`Ne` only — ordering on composite values is not defined here and
+/// returns false. Shared between the LTJ filter loop and the standard
+/// node/edge scan.
 pub fn cmp_values(lhs: &Value, op: BinOp, rhs: &Value) -> bool {
     use std::cmp::Ordering;
     if lhs.is_null() || rhs.is_null() {
         return false;
+    }
+    // Composite values: structural equality via the derived `PartialEq`.
+    // Ordering is undefined and yields false for `<`, `<=`, `>`, `>=`.
+    match (lhs, rhs) {
+        (Value::Record(_), Value::Record(_)) | (Value::List(_), Value::List(_)) => {
+            return match op {
+                BinOp::Eq => lhs == rhs,
+                BinOp::Ne => lhs != rhs,
+                _ => false,
+            };
+        }
+        _ => {}
     }
     let ord = match (lhs, rhs) {
         (Value::Int(a), Value::Int(b)) => a.cmp(b),
