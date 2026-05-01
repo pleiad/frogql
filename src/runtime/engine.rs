@@ -249,11 +249,11 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     fn run_path_pattern(&self, p: &PathPattern, limit: usize) -> IntermediateResult {
         match p {
-            PathPattern::Node(_) => self.run_node_pattern(p),
+            PathPattern::Node(_) => self.run_node_pattern(p, limit),
             PathPattern::EdgeRight(_)
             | PathPattern::EdgeLeft(_)
             | PathPattern::EdgeUndirected(_)
-            | PathPattern::EdgeAnyDirection(_) => self.run_edge_pattern(p),
+            | PathPattern::EdgeAnyDirection(_) => self.run_edge_pattern(p, limit),
             PathPattern::Concat(p1, p2) => self.run_concat_pattern(p1, p2, limit),
             PathPattern::Union(p1, p2) => {
                 let ir1 = self.run_path_pattern(p1, limit);
@@ -317,19 +317,25 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     // --- Optimized node pattern: uses label index when available ---
 
-    fn run_node_pattern(&self, p: &PathPattern) -> IntermediateResult {
+    fn run_node_pattern(&self, p: &PathPattern, limit: usize) -> IntermediateResult {
         let desc = p.descriptor();
         let candidates = self.get_candidate_nodes(desc);
         let var = desc.and_then(|d| d.var.as_deref());
 
-        let rows: Vec<ResultRow> = candidates
-            .iter()
-            .filter(|id| self.filter_node(**id, desc))
-            .map(|&id| {
-                let pv = PathValue::Node(id);
-                ResultRow::new(Path(vec![pv.clone()]), Assignment::from_optional(var, pv))
-            })
-            .collect();
+        let mut rows: Vec<ResultRow> = Vec::new();
+        for &id in &candidates {
+            if !self.filter_node(id, desc) {
+                continue;
+            }
+            let pv = PathValue::Node(id);
+            rows.push(ResultRow::new(
+                Path(vec![pv.clone()]),
+                Assignment::from_optional(var, pv),
+            ));
+            if self.limit_reached(&rows, limit) {
+                break;
+            }
+        }
         IntermediateResult::new(rows)
     }
 
@@ -347,12 +353,24 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     // --- Optimized edge pattern: uses label index when available ---
 
-    fn run_edge_pattern(&self, p: &PathPattern) -> IntermediateResult {
+    fn run_edge_pattern(&self, p: &PathPattern, limit: usize) -> IntermediateResult {
         match p {
             PathPattern::EdgeAnyDirection(d) => {
-                let right = self.run_edge_pattern(&PathPattern::EdgeRight(d.clone()));
-                let left = self.run_edge_pattern(&PathPattern::EdgeLeft(d.clone()));
-                let undirected = self.run_edge_pattern(&PathPattern::EdgeUndirected(d.clone()));
+                let right = self.run_edge_pattern(&PathPattern::EdgeRight(d.clone()), limit);
+                let remaining = if limit > 0 {
+                    limit.saturating_sub(right.rows.len())
+                } else {
+                    0
+                };
+                let left = self.run_edge_pattern(&PathPattern::EdgeLeft(d.clone()), remaining);
+                let after_left_len = right.rows.len() + left.rows.len();
+                let remaining = if limit > 0 {
+                    limit.saturating_sub(after_left_len)
+                } else {
+                    0
+                };
+                let undirected =
+                    self.run_edge_pattern(&PathPattern::EdgeUndirected(d.clone()), remaining);
                 right.union(left).union(undirected)
             }
             PathPattern::EdgeRight(desc) | PathPattern::EdgeLeft(desc) => {
@@ -360,28 +378,31 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 let is_right = matches!(p, PathPattern::EdgeRight(_));
                 let var = desc.as_ref().and_then(|d| d.var.as_deref());
 
-                let rows: Vec<ResultRow> = candidates
-                    .iter()
-                    .filter(|id| self.filter_edge(**id, desc.as_ref()))
-                    .map(|&eid| {
-                        let edge_pv = PathValue::EdgeDirectional(eid);
-                        let (first, last) = if is_right {
-                            (
-                                PathValue::Node(self.graph.src(eid)),
-                                PathValue::Node(self.graph.tgt(eid)),
-                            )
-                        } else {
-                            (
-                                PathValue::Node(self.graph.tgt(eid)),
-                                PathValue::Node(self.graph.src(eid)),
-                            )
-                        };
-                        ResultRow::new(
-                            Path(vec![first, edge_pv.clone(), last]),
-                            Assignment::from_optional(var, edge_pv),
+                let mut rows: Vec<ResultRow> = Vec::new();
+                for &eid in &candidates {
+                    if !self.filter_edge(eid, desc.as_ref()) {
+                        continue;
+                    }
+                    let edge_pv = PathValue::EdgeDirectional(eid);
+                    let (first, last) = if is_right {
+                        (
+                            PathValue::Node(self.graph.src(eid)),
+                            PathValue::Node(self.graph.tgt(eid)),
                         )
-                    })
-                    .collect();
+                    } else {
+                        (
+                            PathValue::Node(self.graph.tgt(eid)),
+                            PathValue::Node(self.graph.src(eid)),
+                        )
+                    };
+                    rows.push(ResultRow::new(
+                        Path(vec![first, edge_pv.clone(), last]),
+                        Assignment::from_optional(var, edge_pv),
+                    ));
+                    if self.limit_reached(&rows, limit) {
+                        break;
+                    }
+                }
                 IntermediateResult::new(rows)
             }
             PathPattern::EdgeUndirected(desc) => {
@@ -404,6 +425,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                         ]),
                         Assignment::from_optional(var, edge_pv.clone()),
                     ));
+                    if self.limit_reached(&rows, limit) {
+                        break;
+                    }
                     rows.push(ResultRow::new(
                         Path(vec![
                             PathValue::Node(ep1),
@@ -412,6 +436,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                         ]),
                         Assignment::from_optional(var, edge_pv),
                     ));
+                    if self.limit_reached(&rows, limit) {
+                        break;
+                    }
                 }
                 IntermediateResult::new(rows)
             }

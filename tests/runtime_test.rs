@@ -695,3 +695,19 @@ fn test_join_star_any_label() {
     let p = gqlrust::compile("(x) -[]-> (y), (x) -[]-> (z)").unwrap();
     assert_eq!(r.run(&p).rows.len(), 7);
 }
+
+/// A node-only RETURN query with a row budget of N must return
+/// at most N rows. fraud_graph has 4 Account nodes; capped at 2,
+/// the caller must not see all 4.
+#[test]
+fn test_node_match_with_cap_returns_no_more_than_cap() {
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let q = gqlrust::compile_query("MATCH (x: Account) RETURN x.owner").unwrap();
+    let result = r.run_query(&q, 2);
+    assert!(
+        result.row_count() <= 2,
+        "cap=2 but got {} rows",
+        result.row_count()
+    );
+}
