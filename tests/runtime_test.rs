@@ -796,3 +796,25 @@ fn test_query_limit_zero_overrides_runtime_cap() {
     let result = r.run_query(&q, 100);
     assert_eq!(result.row_count(), 0);
 }
+
+/// DISTINCT + a row cap must dedup before truncating, not after.
+/// Without the fix, `input_limit = limit` truncates the scan to 2 duplicate
+/// Alices before dedup, yielding 1 row instead of 2.
+#[test]
+fn test_distinct_limit_does_not_truncate_input_before_dedup() {
+    let g = Graph::from_json_str(
+        r#"{
+            "nodes": [
+                {"id": "a", "labels": ["Person"], "props": {"name": "Alice"}},
+                {"id": "b", "labels": ["Person"], "props": {"name": "Alice"}},
+                {"id": "c", "labels": ["Person"], "props": {"name": "Bob"}}
+            ],
+            "edges": []
+        }"#,
+    )
+    .unwrap();
+    let r = Runtime::new(&g);
+    let q = gqlrust::compile_query("MATCH (x: Person) RETURN DISTINCT x.name").unwrap();
+    let result = r.run_query(&q, 2);
+    assert_eq!(result.row_count(), 2);
+}
