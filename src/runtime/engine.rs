@@ -94,7 +94,8 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         };
 
         let has_aggs = return_items.iter().any(|i| i.is_aggregate());
-        let input_limit = if has_aggs { 0 } else { limit };
+        let needs_full_input = has_aggs || query.distinct;
+        let input_limit = if needs_full_input { 0 } else { limit };
         let ir = self.run_match_chain(query, input_limit);
 
         let projected = if has_aggs {
@@ -107,7 +108,11 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
             p
         } else {
-            self.run_row_by_row(return_items, &ir.rows, query.distinct)
+            let mut p = self.run_row_by_row(return_items, &ir.rows, query.distinct);
+            if limit > 0 && p.len() > limit {
+                p.truncate(limit);
+            }
+            p
         };
 
         QueryResult::Projected(projected)
