@@ -746,3 +746,52 @@ fn test_query_limit_no_return_caps_raw() {
         _ => panic!("expected Raw"),
     }
 }
+
+#[test]
+fn test_query_limit_zero_returns_empty_projected() {
+    // ISO/IEC 39075:2024: `LIMIT 0` is valid and returns an empty
+    // binding table. Without the short-circuit in run_query, the
+    // runtime's `0 = unbounded` convention would silently swallow the
+    // cap and return all rows — this test guards against that bug.
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let q = gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 0").unwrap();
+    let result = r.run_query(&q, 0);
+    assert_eq!(result.row_count(), 0);
+    match result {
+        gqlrust::runtime::result::QueryResult::Projected(rows) => {
+            assert!(rows.is_empty());
+        }
+        _ => panic!("expected Projected (LIMIT 0 with RETURN)"),
+    }
+}
+
+#[test]
+fn test_query_limit_zero_returns_empty_raw() {
+    // Same guard for the no-RETURN path: LIMIT 0 must produce an empty
+    // Raw result, not the unbounded "all 4 Accounts" the runtime would
+    // produce if `0 = unbounded` leaked through.
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let q = gqlrust::compile_query_unchecked("MATCH (x: Account) LIMIT 0").unwrap();
+    let result = r.run_query(&q, 0);
+    match result {
+        gqlrust::runtime::result::QueryResult::Raw(ir) => {
+            assert_eq!(ir.rows.len(), 0);
+        }
+        _ => panic!("expected Raw"),
+    }
+}
+
+#[test]
+fn test_query_limit_zero_overrides_runtime_cap() {
+    // If the user wrote `LIMIT 0` in the query, no caller-supplied
+    // runtime cap should override it — the user explicitly asked for
+    // zero rows. Pass a runtime cap of 100 (which would normally
+    // return 4 rows from this query) and verify we still get 0.
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let q = gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 0").unwrap();
+    let result = r.run_query(&q, 100);
+    assert_eq!(result.row_count(), 0);
+}

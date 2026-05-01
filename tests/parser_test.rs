@@ -924,9 +924,10 @@ fn test_limit_without_return() {
 
 #[test]
 fn test_limit_zero_parses() {
-    // `LIMIT 0` is syntactically valid; the runtime is allowed to treat
-    // it the same as "no cap" per the `0 = unbounded` convention. The
-    // parser's job is only to refuse negatives.
+    // `LIMIT 0` is syntactically valid — ISO 39075:2024 explicitly
+    // permits it ("select first 0 records, return empty binding
+    // table"). The execution semantics are checked separately by a
+    // runtime test; here we only assert the AST shape.
     let q = gqlrust::compile_query("MATCH (x) RETURN x.name LIMIT 0").unwrap();
     assert_eq!(q.limit, Some(0));
 }

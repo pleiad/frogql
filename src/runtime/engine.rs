@@ -36,6 +36,16 @@ fn check_value_preds(preds: &[(String, BinOp, Value)], props: &Props) -> bool {
 /// caller-provided `runtime_limit: usize`, both honoring the runtime's
 /// `0 = unbounded` convention. When both are set, the smaller cap wins
 /// (a stricter cap is always a valid implementation of a looser one).
+///
+/// `Query.limit == Some(0)` is **not** the caller's responsibility to
+/// translate here — the spec says LIMIT 0 returns an empty binding
+/// table, and `Runtime::run_query` short-circuits on that case before
+/// calling this function. So `Some(0)` should never reach the body
+/// in normal flow; the branch below would treat it as "return 0 rows"
+/// (i.e., yield `0` to the runtime, which the runtime would interpret
+/// as unbounded — the wrong answer). The defensive `Some(0)` arms
+/// are kept for hypothetical reuse but the upstream short-circuit is
+/// the actual semantics-preserving boundary.
 fn combine_limits(query_limit: Option<u32>, runtime_limit: usize) -> usize {
     match (query_limit, runtime_limit) {
         (None, n) => n,
@@ -75,12 +85,32 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// output rows after grouping (truncating input would corrupt counts).
     ///
     /// When the parsed `query.limit` is also set (from a `LIMIT N` clause
-    /// in the source query), both caps apply; the smaller wins. The
-    /// runtime's `0 = unbounded` convention is preserved at the boundary
-    /// — passing `0` here means "no caller-imposed cap, defer entirely
-    /// to the in-query LIMIT if one exists." If neither is set, the
-    /// query runs unbounded.
+    /// in the source query), it interacts with the caller-supplied
+    /// `limit` parameter as follows:
+    ///
+    /// - `query.limit == Some(0)` short-circuits to an empty binding
+    ///   table (matching ISO/IEC 39075:2024's `<limit clause>` semantics:
+    ///   "selecting only the first 0 records"). The runtime's
+    ///   `0 = unbounded` convention applies only to the bare integer
+    ///   parameter; `Some(0)` at the AST level is a real "return zero
+    ///   rows" request and is honored before any pattern work runs.
+    /// - Otherwise both caps apply via `combine_limits` (smaller wins),
+    ///   honoring the runtime's `0 = unbounded` convention at the
+    ///   boundary.
     pub fn run_query(&self, query: &Query, limit: usize) -> QueryResult {
+        // ISO `LIMIT 0` short-circuit. Distinct from "no cap": the user
+        // wrote `LIMIT 0`, the spec says return an empty binding table,
+        // we honor that without invoking the pattern runtime at all.
+        // The shape of the empty result mirrors what a normal run with
+        // the same query would have returned — Raw if no RETURN, an
+        // empty Projected vector otherwise — so callers don't have to
+        // special-case `Some(0)` themselves.
+        if query.limit == Some(0) {
+            return match &query.returns {
+                None => QueryResult::Raw(IntermediateResult::empty()),
+                Some(_) => QueryResult::Projected(Vec::new()),
+            };
+        }
         let limit = combine_limits(query.limit, limit);
         let return_items = match &query.returns {
             None => {

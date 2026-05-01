@@ -98,12 +98,30 @@ pub struct Query {
     pub group_by: Option<Vec<Expr>>,
     pub returns: Option<Vec<ReturnItem>>,
     pub distinct: bool,
-    /// ISO §16.x `LIMIT <integer>`. None → no in-query cap (callers may
-    /// still pass a runtime cap via `Runtime::run_query(_, cap)`); when
-    /// both are present, the smaller wins. `Some(0)` means "return zero
-    /// rows" — distinct from `None` because the runtime conventionally
-    /// uses `0` to mean "unlimited" at the boundary; the lib.rs entry
-    /// points translate accordingly.
+    /// ISO/IEC 39075:2024 `<limit clause>` (feature GQ13). `None` means
+    /// "no LIMIT clause was written"; callers may still pass a runtime
+    /// cap via `Runtime::run_query(_, cap)` and it will apply. `Some(N)`
+    /// means the user wrote `LIMIT N` — when both an in-query LIMIT
+    /// and a runtime cap are set, the smaller wins.
+    ///
+    /// `Some(0)` is semantically distinct from `None`: per the spec,
+    /// `LIMIT 0` returns an empty binding table (the user explicitly
+    /// asked for zero rows). `Runtime::run_query` short-circuits on
+    /// `Some(0)` before any pattern work runs, so the runtime's
+    /// `0 = unbounded` convention at the integer-parameter boundary
+    /// doesn't accidentally swallow it.
+    ///
+    /// Spec divergence: the spec defines `LIMIT N` as part of an
+    /// `<order by and page statement>`, with the implicit-ordering
+    /// clause "the implementation must first sort the collection of
+    /// all records into a new ordered binding table using an
+    /// implementation-dependent order before applying the limit." We
+    /// don't sort: rows are returned in whatever order the runtime
+    /// produces (LTJ VEO, candidate-list iteration order, etc.), which
+    /// is stable in practice but unspecified. The spec's Optimization
+    /// Note explicitly allows this when the implementation does not
+    /// claim the result is ordered. We don't. ORDER BY is the other
+    /// half of GQ13 and lands in a separate change.
     pub limit: Option<u32>,
 }
 

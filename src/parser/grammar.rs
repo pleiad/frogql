@@ -203,9 +203,11 @@ impl Parser {
     /// Number, so the underlying `expect_number` already rejects the
     /// minus sign — we just rewrite the error to mention LIMIT so the
     /// reason isn't buried in a generic "expected number" message).
-    /// `LIMIT 0` is allowed at the parser level; the runtime treats it
-    /// the same as "no cap" per the `0 = unbounded` convention. The
-    /// integer is bounded to u32; out-of-range values are a parse error.
+    /// `LIMIT 0` is valid per ISO/IEC 39075:2024 — it means "return zero
+    /// rows" (the spec's "select first 0 records") and is honored as
+    /// such by the runtime via a short-circuit in `Runtime::run_query`.
+    /// The integer is bounded to u32; out-of-range values are a parse
+    /// error.
     fn parse_optional_limit(&mut self) -> Result<Option<u32>, String> {
         if !self.eat(&Token::Limit) {
             return Ok(None);
