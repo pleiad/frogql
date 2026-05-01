@@ -91,7 +91,7 @@ fn main() {
         Some(name) => eprintln!("Active GRAPH TYPE: {name}."),
         None => eprintln!("Active GRAPH TYPE: (none — schema-permissive)."),
     }
-    eprintln!("Type a GQL query or 'quit'. Try 'schema' to see labels.");
+    eprintln!("Type a GQL query, '.help' for meta-commands, or '.quit' to exit.");
     eprintln!();
 
     let rt = Runtime::new(&store);
@@ -114,24 +114,32 @@ fn main() {
 
         rl.add_history_entry(line).ok();
 
-        if line == "quit" || line == "exit" {
+        // SQLite-style dot-commands. All REPL meta-commands start with `.`
+        // so they don't collide with valid GQL syntax. `quit`/`exit` without
+        // the dot also work because they're nearly universal.
+        if line == ".quit" || line == ".exit" || line == "quit" || line == "exit" {
             break;
         }
 
-        if let Some(rest) = line.strip_prefix("schema") {
+        if line == ".help" {
+            print_help();
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix(".schema") {
             let arg = rest.trim();
             match arg {
-                // Bare `schema` aliases `SHOW GRAPH TYPE DEFAULT`: print the
-                // auto-derived schema entry from the catalog with active
-                // markers and validation status.
+                // Bare `.schema` aliases `SHOW GRAPH TYPE DEFAULT`: prints the
+                // auto-derived schema entry from the catalog with active markers
+                // and validation status.
                 "" => handle_show(&store, "DEFAULT"),
                 "simple" => print_schema_simple(&store),
-                _ => eprintln!("Unknown schema command. Use 'schema' or 'schema simple'."),
+                _ => eprintln!("Unknown .schema arg. Use '.schema' or '.schema simple'."),
             }
             continue;
         }
 
-        if line == ":graph-types" {
+        if line == ".graph-types" {
             print_graph_types(&store);
             continue;
         }
@@ -744,7 +752,7 @@ fn print_schema(store: &LazyGraphStore) {
 /// Simplified schema: group by labels, intersect properties across all instances.
 /// Properties common to all instances of a label combo are shown; optional ones become `*`.
 fn print_schema_simple(store: &LazyGraphStore) {
-    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::collections::{BTreeMap, HashMap};
 
     // --- Node types: group by labels, intersect props ---
 
@@ -898,26 +906,18 @@ fn print_schema_simple(store: &LazyGraphStore) {
             color_node(labels, &color_props_with_star(common, has_opt))
         };
 
-    // --- Collect endpoint label combos that appear in edges ---
-
-    let mut endpoint_label_combos: BTreeSet<Vec<String>> = BTreeSet::new();
-    for key in edge_groups.keys() {
-        endpoint_label_combos.insert(key.src_labels.clone());
-        endpoint_label_combos.insert(key.tgt_labels.clone());
-    }
-
     // --- Print ---
 
-    // Standalone node types (not in any edge)
-    let mut standalone: Vec<_> = node_groups
-        .iter()
-        .filter(|(labels, _)| !endpoint_label_combos.contains(*labels))
-        .collect();
-    standalone.sort_by_key(|(labels, _)| (*labels).clone());
+    // Always list every node type, even when it appears as an edge endpoint.
+    // The redundancy with the endpoint descriptors below is intentional: it
+    // gives parity with `.schema` (which lists all node types unconditionally)
+    // and with the DEFAULT catalog entry, which is built from the same source.
+    let mut all_nodes: Vec<_> = node_groups.iter().collect();
+    all_nodes.sort_by_key(|(labels, _)| (*labels).clone());
 
-    if !standalone.is_empty() {
+    if !all_nodes.is_empty() {
         println!("{C_BOLD}Node types:{C_RESET}");
-        for (labels, (common, count)) in &standalone {
+        for (labels, (common, count)) in &all_nodes {
             let has_opt = node_has_optional.get(*labels).copied().unwrap_or(false);
             println!(
                 "  {} {}",
@@ -929,7 +929,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
 
     // Edge types
     if !edge_groups.is_empty() {
-        if !standalone.is_empty() {
+        if !all_nodes.is_empty() {
             println!();
         }
         println!("{C_BOLD}Edge types:{C_RESET}");
@@ -1058,6 +1058,28 @@ fn handle_drop(store: &LazyGraphStore, name: &str) {
         return;
     }
     println!("GRAPH TYPE '{name}' dropped.");
+}
+
+fn print_help() {
+    println!("REPL meta-commands (sqlite-style, all start with '.'):");
+    println!("  .schema             show DEFAULT GRAPH TYPE (alias for SHOW GRAPH TYPE DEFAULT)");
+    println!("  .schema simple      grouped by-label renderer of the inferred schema");
+    println!("  .graph-types        list all GRAPH TYPEs (alias for SHOW GRAPH TYPES)");
+    println!("  .help               this message");
+    println!("  .quit / .exit       exit the REPL");
+    println!();
+    println!("Catalog DDL (full ISO statements, terminated by ';' optional in REPL):");
+    println!("  CREATE GRAPH TYPE <name> AS {{ <type-elements> }}");
+    println!("  USE GRAPH TYPE <name>            (USE GRAPH TYPE DEFAULT re-infers from data)");
+    println!("  DROP GRAPH TYPE <name>           (DEFAULT cannot be dropped)");
+    println!("  SHOW GRAPH TYPES");
+    println!("  SHOW GRAPH TYPE <name>");
+    println!("  SHOW CURRENT GRAPH TYPE");
+    println!("  VALIDATE GRAPH TYPE <name>       (walks the graph, O(N+E), result cached)");
+    println!();
+    println!("Queries: MATCH? <pattern> [WHERE <expr>] [RETURN <items>]");
+    println!("         OPTIONAL MATCH ...        left-join semantics");
+    println!("         WHERE x.attr IS NULL      / IS NOT NULL");
 }
 
 fn print_graph_types(store: &LazyGraphStore) {
