@@ -93,6 +93,40 @@ impl TypeEnvironment {
         Ok(TypeEnvironment { bindings: result })
     }
 
+    /// Left outer join — the typing operator `Γ₁ ⋈ Γ₂` for OPTIONAL MATCH.
+    ///
+    /// Definition (from the paper / TOpt rule):
+    ///
+    /// ```text
+    /// Γ₁ ⋈ Γ₂ = (Γ₁ ∪ {x ↦ Null | x ∈ dom(Γ₂) \ dom(Γ₁)}) ⊔ (Γ₁ ⊓ Γ₂)
+    ///            └── unsuccess branch ──────────────┘     └ success ┘
+    /// ```
+    ///
+    /// The unsuccess branch keeps `Γ₁` as-is and gives every variable
+    /// introduced only by the optional pattern the type `Null`. The success
+    /// branch is the regular meet. The pointwise join (`union`) of the two
+    /// captures both possibilities.
+    ///
+    /// If `meet` fails (shared variable types are irreconcilable), the
+    /// optional pattern can never match, so the result reduces to the
+    /// unsuccess branch alone.
+    pub fn outer_join(
+        schema: &Schema,
+        a: &TypeEnvironment,
+        b: &TypeEnvironment,
+    ) -> TypeEnvironment {
+        let mut unsuccess = a.clone();
+        for key in b.bindings.keys() {
+            if !a.bindings.contains_key(key) {
+                unsuccess.bindings.insert(key.clone(), VariableType::Null);
+            }
+        }
+        match TypeEnvironment::meet(schema, a, b) {
+            Ok(success) => TypeEnvironment::union(&unsuccess, &success),
+            Err(_) => unsuccess,
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.bindings.values().any(VariableType::is_empty)
     }
@@ -158,5 +192,79 @@ mod tests {
                 Box::new(nstar()),
             )),
         );
+    }
+
+    /// `Γ₁ ⋈ {} = Γ₁`: optional with no new bindings is identity. The
+    /// success branch (meet) and unsuccess branch are both Γ₁, so their
+    /// join collapses back to Γ₁.
+    #[test]
+    fn test_outer_join_empty_right_is_identity() {
+        let mut a = TypeEnvironment::new();
+        a.set("x", nstar());
+        let r = TypeEnvironment::outer_join(&Schema::star(), &a, &TypeEnvironment::new());
+        assert_eq!(r.get("x"), Some(&nstar()));
+        assert_eq!(r.keys().len(), 1);
+    }
+
+    /// New variable in the optional side gets `Null` (unsuccess) joined
+    /// with its real type (success). Pin: `y ↦ T ⊔ Null`.
+    #[test]
+    fn test_outer_join_new_var_gains_null() {
+        let mut a = TypeEnvironment::new();
+        a.set("x", nstar());
+        let mut b = TypeEnvironment::new();
+        b.set("y", nstar());
+        let r = TypeEnvironment::outer_join(&Schema::star(), &a, &b);
+        assert_eq!(r.get("x"), Some(&nstar()));
+        assert_eq!(
+            r.get("y"),
+            Some(&VariableType::Union(
+                Box::new(VariableType::Null),
+                Box::new(nstar()),
+            )),
+        );
+    }
+
+    /// Variable shared between left and optional: unsuccess keeps the left
+    /// type unchanged; success refines (meet under schema). Star schema
+    /// makes meet a no-op, so the result collapses to Γ₁'s type.
+    #[test]
+    fn test_outer_join_shared_var_unchanged_under_star_schema() {
+        let mut a = TypeEnvironment::new();
+        a.set("x", nstar());
+        let mut b = TypeEnvironment::new();
+        b.set("x", nstar());
+        let r = TypeEnvironment::outer_join(&Schema::star(), &a, &b);
+        assert_eq!(r.get("x"), Some(&nstar()));
+    }
+
+    /// When the meet on a shared variable collapses to Zero (irreconcilable
+    /// types), the success branch is impossible — the optional cannot
+    /// match. The result reduces to the unsuccess branch alone.
+    #[test]
+    fn test_outer_join_irreconcilable_meet_falls_back_to_unsuccess() {
+        use crate::typing::descriptor_type::DescriptorType;
+        use crate::typing::label_type::LabelType;
+        use crate::typing::property_type::PropertyType;
+
+        let person = VariableType::Node(DescriptorType::new(
+            LabelType::Label("Person".into()),
+            PropertyType::open_empty(),
+        ));
+        let edge = VariableType::edge_directional(DescriptorType::new(
+            LabelType::Label("Transfer".into()),
+            PropertyType::open_empty(),
+        ));
+
+        let mut a = TypeEnvironment::new();
+        a.set("x", person.clone());
+        let mut b = TypeEnvironment::new();
+        b.set("x", edge);
+        b.set("y", nstar());
+
+        let r = TypeEnvironment::outer_join(&Schema::star(), &a, &b);
+        // Unsuccess branch dominates: x stays as Person (left side), y is Null.
+        assert_eq!(r.get("x"), Some(&person));
+        assert_eq!(r.get("y"), Some(&VariableType::Null));
     }
 }

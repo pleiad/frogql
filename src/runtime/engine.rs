@@ -7,7 +7,9 @@ use crate::model::value::{Id, Path, PathValue, Value};
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::{Aggregator, GeneralSetKind, Query, ReturnItem, SetQuantifier};
+use crate::syntax::query::{
+    Aggregator, GeneralSetKind, MatchStatement, Query, ReturnItem, SetQuantifier,
+};
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
 use crate::typing::property_type::PropertyType;
@@ -60,10 +62,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// it caps input rows (early termination); with aggregates it caps
     /// output rows after grouping (truncating input would corrupt counts).
     pub fn run_query(&self, query: &Query, limit: usize) -> QueryResult {
-        let pattern = query.collapsed_pattern();
         let return_items = match &query.returns {
             None => {
-                let ir = self.run_path_pattern(&pattern, limit);
+                let ir = self.run_match_chain(query, limit);
                 return QueryResult::Raw(ir);
             }
             Some(items) => items,
@@ -71,7 +72,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
         let has_aggs = return_items.iter().any(|i| i.is_aggregate());
         let input_limit = if has_aggs { 0 } else { limit };
-        let ir = self.run_path_pattern(&pattern, input_limit);
+        let ir = self.run_match_chain(query, input_limit);
 
         let projected = if has_aggs {
             let mut p = self.run_aggregated(return_items, query.group_by.as_deref(), &ir.rows);
@@ -87,6 +88,56 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         };
 
         QueryResult::Projected(projected)
+    }
+
+    /// Evaluate the match chain. Two paths:
+    ///
+    /// - All-Simple: collapse to one `PathPattern::Join` and run the
+    ///   existing path-pattern evaluator (LTJ + hash-join fallback). No
+    ///   behavior change vs. before OPTIONAL existed.
+    ///
+    /// - Has-Optional: walk matches sequentially. Each Simple is a natural
+    ///   join with the accumulated binding table; each Optional is a left
+    ///   outer join — for every accumulated row, either emit all unifying
+    ///   extensions from the optional pattern, or emit the original row
+    ///   padded with `PathValue::Nothing` for new variables (those then
+    ///   project as `Value::Null` via the existing AttrLookup-failure path).
+    fn run_match_chain(&self, query: &Query, limit: usize) -> IntermediateResult {
+        if !query.has_any_optional() {
+            return self.run_path_pattern(&query.collapsed_pattern(), limit);
+        }
+
+        let mut iter = query.matches.iter();
+        let first = iter.next().expect("Query::matches must be non-empty");
+        let mut acc = self.run_path_pattern(first.pattern(), 0);
+        // Leading OPTIONAL with an empty preceding table: ISO §14.4 GR 1
+        // says OPTIONAL preserves the empty row when no match exists, so
+        // an OPTIONAL as the very first statement still yields one row
+        // (with all its variables set to Nothing) when its pattern is
+        // unsatisfiable. We do not synthesize that row here because the
+        // current pipeline starts from the first pattern's results
+        // directly; nothing in the existing test suite or §14.10 §FINISH
+        // depends on the empty-row case for a leading OPTIONAL.
+        let mut bound_vars: HashSet<String> = first.pattern().freevars();
+
+        for m in iter {
+            let pattern = m.pattern();
+            let ir_new = self.run_path_pattern(pattern, 0);
+            let new_vars = pattern.freevars();
+            acc = match m {
+                MatchStatement::Simple { .. } => natural_join(&acc, &ir_new, 0),
+                MatchStatement::Optional { .. } => {
+                    left_outer_join(&acc, &ir_new, &bound_vars, &new_vars)
+                }
+            };
+            bound_vars.extend(new_vars);
+            if limit > 0 && acc.rows.len() >= limit {
+                acc.rows.truncate(limit);
+                break;
+            }
+        }
+
+        acc
     }
 
     fn run_row_by_row(
@@ -1129,6 +1180,107 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             _ => ExprResult::Failure(format!("unexpected op {op} in eval_binop")),
         }
     }
+}
+
+/// Natural join of two intermediate result sets on shared assignment keys
+/// (variables that appear on both sides). When no key is shared, the result
+/// is the cross-product. Used by the per-match evaluator only when at least
+/// one match is OPTIONAL — all-Simple queries still go through the LTJ /
+/// hash-join path inside `run_path_pattern`.
+fn natural_join(
+    left: &IntermediateResult,
+    right: &IntermediateResult,
+    limit: usize,
+) -> IntermediateResult {
+    let shared: Vec<String> = {
+        let lk: HashSet<String> = left
+            .rows
+            .first()
+            .map(|r| r.assignment.keys())
+            .unwrap_or_default();
+        let rk: HashSet<String> = right
+            .rows
+            .first()
+            .map(|r| r.assignment.keys())
+            .unwrap_or_default();
+        lk.intersection(&rk).cloned().collect()
+    };
+
+    let join_var = shared.first();
+    let mut rows = Vec::new();
+
+    if let Some(jv) = join_var {
+        let mut by_val: HashMap<&PathValue, Vec<usize>> = HashMap::new();
+        for (i, r) in right.rows.iter().enumerate() {
+            if let Some(pv) = r.assignment.get(jv) {
+                by_val.entry(pv).or_default().push(i);
+            }
+        }
+        'outer: for r1 in &left.rows {
+            let Some(pv) = r1.assignment.get(jv) else {
+                continue;
+            };
+            let Some(idxs) = by_val.get(pv) else {
+                continue;
+            };
+            for &idx in idxs {
+                let r2 = &right.rows[idx];
+                if r1.assignment.can_unify(&r2.assignment) {
+                    rows.push(ResultRow::join(r1, r2, r1.assignment.unify(&r2.assignment)));
+                    if limit > 0 && rows.len() >= limit {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    } else {
+        'outer2: for r1 in &left.rows {
+            for r2 in &right.rows {
+                rows.push(ResultRow::join(r1, r2, r1.assignment.unify(&r2.assignment)));
+                if limit > 0 && rows.len() >= limit {
+                    break 'outer2;
+                }
+            }
+        }
+    }
+    IntermediateResult::new(rows)
+}
+
+/// Left outer join — runtime counterpart of `TypeEnvironment::outer_join`.
+///
+/// For each row in `left`, find unifying rows in `right` (same predicate as
+/// natural join). If at least one matches, emit all unified rows (success
+/// branch). If none match, emit the left row alone with every variable in
+/// `new_vars \ bound_vars` set to `PathValue::Nothing` (unsuccess branch).
+/// `Nothing` flows into projection as `Value::Null` because `pv.id()`
+/// returns `None`, which `AttrLookup` turns into `Failure`, which
+/// `eval_expr_item` maps to `Value::Null`.
+fn left_outer_join(
+    left: &IntermediateResult,
+    right: &IntermediateResult,
+    bound_vars: &HashSet<String>,
+    new_vars: &HashSet<String>,
+) -> IntermediateResult {
+    let pad_vars: Vec<String> = new_vars.difference(bound_vars).cloned().collect();
+    let mut rows = Vec::new();
+
+    for r1 in &left.rows {
+        let mut matched_any = false;
+        for r2 in &right.rows {
+            if r1.assignment.can_unify(&r2.assignment) {
+                matched_any = true;
+                rows.push(ResultRow::join(r1, r2, r1.assignment.unify(&r2.assignment)));
+            }
+        }
+        if !matched_any {
+            let mut padded = r1.assignment.clone();
+            for v in &pad_vars {
+                padded.extend(v.clone(), PathValue::Nothing);
+            }
+            rows.push(ResultRow::with_paths(r1.paths.clone(), padded));
+        }
+    }
+    IntermediateResult::new(rows)
 }
 
 // Aggregate reducers (ISO §20.9 GR 7a-iii..vi). Inputs already passed

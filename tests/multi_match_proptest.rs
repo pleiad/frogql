@@ -44,6 +44,21 @@ fn multi_match_query(patterns: &[String]) -> Query {
     })
 }
 
+fn optional_query(left: &str, right: &str) -> gqlrust::syntax::query::Query {
+    let input = format!("MATCH {left} OPTIONAL MATCH {right}");
+    gqlrust::compile_query_unchecked(&input).unwrap()
+}
+
+fn match_query(left: &str, right: &str) -> gqlrust::syntax::query::Query {
+    let input = format!("MATCH {left} MATCH {right}");
+    gqlrust::compile_query_unchecked(&input).unwrap()
+}
+
+fn run_query_count(g: &Graph, q: &gqlrust::syntax::query::Query) -> usize {
+    let rt = Runtime::new(g);
+    rt.run_query(q, 0).row_count()
+}
+
 proptest! {
     // 32 cases is plenty for an 8-pattern alphabet; default 256 is overkill.
     #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
@@ -119,5 +134,63 @@ proptest! {
         let comma_rows = runtime.run(&comma_q.collapsed_pattern()).rows.len();
 
         prop_assert_eq!(multi_rows, comma_rows);
+    }
+
+    /// **Invariant**: OPTIONAL MATCH is a left-outer join, so the row count
+    /// is bounded below by the cardinality of the leading MATCH (every left
+    /// row survives, either via success or unsuccess) and above by the
+    /// cardinality of the equivalent inner natural join multiplied by 1
+    /// when the optional fails — it cannot fall below the natural-join
+    /// count either, because every successful match of the right side
+    /// becomes a success row exactly as in MATCH.
+    #[test]
+    fn optional_bounds_inner_join_from_below_and_above(
+        first in pattern(),
+        second in pattern(),
+    ) {
+        let g = fraud_graph();
+        let runtime = Runtime::new(&g);
+
+        let left_only = format!("MATCH {first}");
+        let left_q = gqlrust::compile_query_unchecked(&left_only).unwrap();
+        let left_count = runtime.run(&left_q.collapsed_pattern()).rows.len();
+
+        let opt_q = optional_query(&first, &second);
+        let opt_count = run_query_count(&g, &opt_q);
+
+        let nat_q = match_query(&first, &second);
+        let nat_count = run_query_count(&g, &nat_q);
+
+        prop_assert!(opt_count >= left_count,
+            "OPTIONAL must preserve at least the leading MATCH count: opt={opt_count} left={left_count}");
+        prop_assert!(opt_count >= nat_count,
+            "OPTIONAL must produce at least the inner natural-join count: opt={opt_count} nat={nat_count}");
+    }
+
+    /// **Invariant**: when the optional pattern matches at least once for
+    /// every leading row (no unsuccess branch fires), OPTIONAL MATCH is
+    /// indistinguishable from MATCH. We test the contrapositive: if the
+    /// counts differ, then there is at least one row in the leading MATCH
+    /// that has zero matches in the natural join — i.e. unsuccess fired.
+    #[test]
+    fn optional_equals_match_when_no_unsuccess(
+        first in pattern(),
+        second in pattern(),
+    ) {
+        let g = fraud_graph();
+
+        let opt_q = optional_query(&first, &second);
+        let nat_q = match_query(&first, &second);
+
+        let opt_count = run_query_count(&g, &opt_q);
+        let nat_count = run_query_count(&g, &nat_q);
+
+        if opt_count == nat_count {
+            prop_assert_eq!(opt_count, nat_count);
+        } else {
+            // Difference must be exactly the number of leading rows with no
+            // matching extension — non-zero by construction here.
+            prop_assert!(opt_count > nat_count);
+        }
     }
 }

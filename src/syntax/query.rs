@@ -61,21 +61,25 @@ impl ReturnItem {
     }
 }
 
-/// ISO 39075 §14.4 `<match statement>`. Today only `Simple` is exposed
-/// (parser produces a single Simple wrapping the whole pattern); the enum
-/// shape is in place so `OPTIONAL MATCH` (Feature GQ21) can land without
-/// another structural refactor of `Query`.
+/// ISO 39075 §14.4 `<match statement>`. `Simple` is `MATCH`,
+/// `Optional` is `OPTIONAL MATCH` (Feature GQ21 nested-block form is
+/// not yet exposed; a single optional pattern is enough for the
+/// formalism described in the OOPSLA paper rule TOpt).
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchStatement {
     Simple { pattern: PathPattern },
-    // Future (Feature GQ21): Optional { block: Vec<MatchStatement> }
+    Optional { pattern: PathPattern },
 }
 
 impl MatchStatement {
     pub fn pattern(&self) -> &PathPattern {
         match self {
-            MatchStatement::Simple { pattern } => pattern,
+            MatchStatement::Simple { pattern } | MatchStatement::Optional { pattern } => pattern,
         }
+    }
+
+    pub fn is_optional(&self) -> bool {
+        matches!(self, MatchStatement::Optional { .. })
     }
 }
 
@@ -108,15 +112,21 @@ impl Query {
 
     /// Collapse the match chain into a single `PathPattern` by joining
     /// adjacent matches with `PathPattern::Join` (the comma-join). Sound
-    /// while every match is `Simple`: ISO §14.4 General Rule 1 specifies
-    /// MATCH expands the working table by the new binding table, which
-    /// for non-OPTIONAL matches matches the natural-join semantics of
-    /// gqlite's existing comma-join.
+    /// only when every match is `Simple`: ISO §14.4 General Rule 1
+    /// specifies MATCH expands the working table by the new binding
+    /// table, which for non-OPTIONAL matches matches the natural-join
+    /// semantics of gqlite's existing comma-join.
     ///
-    /// When `OPTIONAL MATCH` lands the collapse is no longer sound
-    /// (OPTIONAL is a left-join, not a natural join) and the affected
-    /// phases will need to walk `matches` directly.
+    /// `OPTIONAL MATCH` is a left-outer-join, not a natural join, and
+    /// cannot be collapsed this way. Callers must check
+    /// `has_any_optional()` first; mixed queries are evaluated by
+    /// walking `matches` directly in the typechecker and runtime.
     pub fn collapsed_pattern(&self) -> PathPattern {
+        debug_assert!(
+            !self.has_any_optional(),
+            "collapsed_pattern() is unsound when any match is OPTIONAL — \
+             callers must dispatch on has_any_optional()"
+        );
         let mut iter = self.matches.iter().map(|m| m.pattern().clone());
         let first = iter
             .next()
@@ -124,6 +134,10 @@ impl Query {
         iter.fold(first, |acc, p| {
             PathPattern::Join(Box::new(acc), Box::new(p))
         })
+    }
+
+    pub fn has_any_optional(&self) -> bool {
+        self.matches.iter().any(|m| m.is_optional())
     }
 }
 
@@ -188,6 +202,7 @@ impl fmt::Display for Query {
             first = false;
             match m {
                 MatchStatement::Simple { pattern } => write!(f, "MATCH {pattern}")?,
+                MatchStatement::Optional { pattern } => write!(f, "OPTIONAL MATCH {pattern}")?,
             }
         }
         if let Some(gb) = &self.group_by {

@@ -8,7 +8,7 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::{Aggregator, Query, ReturnItem};
+use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem};
 
 use super::descriptor_type::DescriptorType;
 use super::label_type::LabelType;
@@ -71,7 +71,11 @@ impl Typechecker {
         self.errors.clear();
         self.warnings.clear();
 
-        let mut r = self.check_path_pattern(&q.collapsed_pattern());
+        let mut r = if q.has_any_optional() {
+            self.check_match_chain(&q.matches)
+        } else {
+            self.check_path_pattern(&q.collapsed_pattern())
+        };
         r.empty = r.path.is_unsatisfiable() || r.env.is_empty();
 
         if let Some(group_by) = &q.group_by {
@@ -89,6 +93,54 @@ impl Typechecker {
             r.ok = false;
         }
         r
+    }
+
+    /// Sequential walk of the match chain when at least one is OPTIONAL.
+    /// Implements TSeq composed with TMatch / TOpt: each Simple meets, each
+    /// Optional outer-joins. The resulting `PathType` is the meet of the
+    /// individual patterns (the path-shape part is unaffected by OPTIONAL —
+    /// only the env tracks which variables can be Null).
+    fn check_match_chain(&mut self, matches: &[MatchStatement]) -> TypecheckResult {
+        let mut iter = matches.iter();
+        let first = iter
+            .next()
+            .expect("Query::matches must contain at least one match statement");
+        let first_r = self.check_path_pattern(first.pattern());
+        // The first statement's environment is what we accumulate from. For
+        // a leading OPTIONAL, every variable it introduces gains Null per
+        // TOpt with Γ₁ = ∅.
+        let (mut env, mut path) = if first.is_optional() {
+            let acc =
+                TypeEnvironment::outer_join(&self.schema, &TypeEnvironment::new(), &first_r.env);
+            (acc, first_r.path)
+        } else {
+            (first_r.env, first_r.path)
+        };
+
+        for m in iter {
+            let r = self.check_path_pattern(m.pattern());
+            env = match m {
+                MatchStatement::Simple { .. } => {
+                    match TypeEnvironment::meet(&self.schema, &env, &r.env) {
+                        Ok(e) => {
+                            self.warn_for_collapsed_bindings(&e, &env, &r.env);
+                            e
+                        }
+                        Err(e) => {
+                            self.errors
+                                .push(format!("Concatenation of contexts failed: {}", e));
+                            env
+                        }
+                    }
+                }
+                MatchStatement::Optional { .. } => {
+                    TypeEnvironment::outer_join(&self.schema, &env, &r.env)
+                }
+            };
+            path = PathType::meet(&self.schema, &path, &r.path);
+        }
+
+        TypecheckResult::new(path, env)
     }
 
     /// ISO §16.15: mixing aggregates with non-aggregate items requires

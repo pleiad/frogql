@@ -130,18 +130,41 @@ impl Parser {
 
     // full_query   = match_clause+ ("GROUP BY" expr (, expr)*)?
     //                ("RETURN" ("DISTINCT")? return_list)?
-    // match_clause = "MATCH"? query ("WHERE" expr)?
+    // match_clause = ("OPTIONAL" "MATCH" | "MATCH"?) query ("WHERE" expr)?
     //
-    // ISO §14.3-14.4. MATCH is optional only on the first clause for
-    // back-compat with bare-pattern queries (`(x)-[]->(y)`).
+    // ISO §14.3-14.4. The `MATCH` keyword is optional only on the first
+    // clause for back-compat with bare-pattern queries (`(x)-[]->(y)`);
+    // an `OPTIONAL` always requires the explicit `MATCH` after it.
     fn full_query(&mut self) -> Result<Query, String> {
-        self.eat(&Token::Match);
-        let first = self.match_clause_body()?;
-        let mut matches = vec![MatchStatement::Simple { pattern: first }];
+        let first_optional = self.eat(&Token::Optional);
+        if first_optional {
+            self.expect(&Token::Match)?;
+        } else {
+            self.eat(&Token::Match);
+        }
+        let first_pattern = self.match_clause_body()?;
+        let first_stmt = if first_optional {
+            MatchStatement::Optional {
+                pattern: first_pattern,
+            }
+        } else {
+            MatchStatement::Simple {
+                pattern: first_pattern,
+            }
+        };
+        let mut matches = vec![first_stmt];
 
-        while self.eat(&Token::Match) {
-            let pattern = self.match_clause_body()?;
-            matches.push(MatchStatement::Simple { pattern });
+        loop {
+            if self.eat(&Token::Optional) {
+                self.expect(&Token::Match)?;
+                let pattern = self.match_clause_body()?;
+                matches.push(MatchStatement::Optional { pattern });
+            } else if self.eat(&Token::Match) {
+                let pattern = self.match_clause_body()?;
+                matches.push(MatchStatement::Simple { pattern });
+            } else {
+                break;
+            }
         }
 
         let group_by = if self.eat(&Token::GroupBy) {
