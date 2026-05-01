@@ -86,6 +86,9 @@ pub fn try_ltj<G: GraphAccess>(
             FoldOutcome::Pinned(p) => p,
         }
     };
+    if std::env::var("GQLITE_DISABLE_INDEX_FOLD").is_err() {
+        fold_range_filters(graph, &mut decomp);
+    }
     if !pinned.is_empty() && std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
         eprintln!(
             "ltj: pinned {} variable(s) via secondary index: {:?}",
@@ -297,6 +300,66 @@ fn fold_indexed_constants<G: GraphAccess>(
     FoldOutcome::Pinned(pinned.into_iter().collect())
 }
 
+/// Walk the extracted filters and, for each `NodeAttrCmp` with a range
+/// operator (`<`, `<=`, `>`, `>=`) whose `(label, attr)` is btree-indexed,
+/// pre-compute the matching set via the btree and replace the filter with a
+/// `NodeInSet`. Set membership is O(log n) and avoids reading the bound
+/// node's property from the page cache for every candidate.
+///
+/// Multiple range predicates on the same variable would ideally intersect;
+/// for v1 we just substitute each one independently. The runner evaluates
+/// every filter, so two `NodeInSet` filters compose correctly (both must
+/// pass), they're just less efficient than a single intersected set.
+fn fold_range_filters<G: GraphAccess>(graph: &G, decomp: &mut Decomposition) {
+    use std::ops::Bound;
+
+    let mut var_to_labels: HashMap<u8, Vec<String>> = HashMap::new();
+    for f in decomp.filters.iter() {
+        if let FilterKind::NodeLabel { var_id, label } = &f.kind {
+            var_to_labels
+                .entry(*var_id)
+                .or_default()
+                .push(label.clone());
+        }
+    }
+
+    for f in decomp.filters.iter_mut() {
+        let FilterKind::NodeAttrCmp {
+            var_id,
+            attr,
+            op,
+            value,
+        } = &f.kind
+        else {
+            continue;
+        };
+        let (lo, hi) = match op {
+            BinOp::Lt => (Bound::Unbounded, Bound::Excluded(value.clone())),
+            BinOp::Le => (Bound::Unbounded, Bound::Included(value.clone())),
+            BinOp::Gt => (Bound::Excluded(value.clone()), Bound::Unbounded),
+            BinOp::Ge => (Bound::Included(value.clone()), Bound::Unbounded),
+            _ => continue,
+        };
+        let Some(labels) = var_to_labels.get(var_id) else {
+            continue;
+        };
+        let mut hits = None;
+        for label in labels {
+            if let Some(h) = graph.lookup_node_range(label, attr, lo.clone(), hi.clone()) {
+                hits = Some(h);
+                break;
+            }
+        }
+        let Some(mut hits) = hits else { continue };
+        hits.sort_unstable();
+        hits.dedup();
+        f.kind = FilterKind::NodeInSet {
+            var_id: *var_id,
+            set: std::sync::Arc::new(hits),
+        };
+    }
+}
+
 // ---- Weight estimation for the VEO ----
 
 /// Estimate a per-variable weight for VEO ordering. Smaller weight binds
@@ -332,6 +395,10 @@ fn estimate_var_weights(num_vars: usize, filters: &[ExtractedFilter], total: usi
             }
             FilterKind::NodeLabel { var_id, .. } => has_label[*var_id as usize] = true,
             FilterKind::NodeProperty { .. } => {}
+            // A precomputed set is the most selective predicate available —
+            // treat it as the strongest equality (weight 1) so the variable
+            // binds early and rejects non-members before recursion.
+            FilterKind::NodeInSet { var_id, .. } => has_eq[*var_id as usize] = true,
         }
     }
 

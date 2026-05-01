@@ -5,7 +5,7 @@ use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::{
     Aggregator, GeneralSetKind, MatchStatement, Query, ReturnItem, SetQuantifier,
 };
-use crate::syntax::statement::{Statement, TypeElement};
+use crate::syntax::statement::{IndexKindStmt, Statement, TypeElement};
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
 use crate::typing::property_type::PropertyType;
@@ -1228,15 +1228,62 @@ impl Parser {
 
     fn statement(&mut self) -> Result<Statement, String> {
         match self.peek() {
-            Token::Create => self.create_graph_type(),
+            Token::Create => self.create_statement(),
             Token::Use => self.use_graph_type(),
-            Token::Drop => self.drop_graph_type(),
-            Token::Show => self.show_graph_type(),
+            Token::Drop => self.drop_statement(),
+            Token::Show => self.show_statement(),
             Token::Validate => self.validate_graph_type(),
             _ => {
                 let q = self.full_query()?;
                 Ok(Statement::Query(q))
             }
+        }
+    }
+
+    /// Dispatch CREATE → GRAPH TYPE or [HASH|BTREE] INDEX. The lookahead
+    /// after CREATE determines which: `GRAPH`, an explicit kind keyword
+    /// (`HASH` / `BTREE`), or `INDEX` directly.
+    fn create_statement(&mut self) -> Result<Statement, String> {
+        // Tokens consumed inside the helpers; we only peek here.
+        let pos = self.pos; // remember in case we need to rewind
+        self.expect(&Token::Create)?;
+        let after = self.peek().clone();
+        // Restore — the helpers expect to see CREATE first.
+        self.pos = pos;
+        match after {
+            Token::Graph => self.create_graph_type(),
+            Token::Hash | Token::BTree | Token::Index => self.create_index(),
+            t => Err(format!(
+                "after CREATE, expected GRAPH or INDEX (with optional HASH/BTREE), got {t:?}"
+            )),
+        }
+    }
+
+    fn drop_statement(&mut self) -> Result<Statement, String> {
+        let pos = self.pos;
+        self.expect(&Token::Drop)?;
+        let after = self.peek().clone();
+        self.pos = pos;
+        match after {
+            Token::Graph => self.drop_graph_type(),
+            Token::Index => self.drop_index(),
+            t => Err(format!("after DROP, expected GRAPH or INDEX, got {t:?}")),
+        }
+    }
+
+    fn show_statement(&mut self) -> Result<Statement, String> {
+        // Peek past SHOW to dispatch.
+        let pos = self.pos;
+        self.expect(&Token::Show)?;
+        let after = self.peek().clone();
+        self.pos = pos;
+        match after {
+            Token::Indexes => {
+                self.expect(&Token::Show)?;
+                self.expect(&Token::Indexes)?;
+                Ok(Statement::ShowIndexes)
+            }
+            _ => self.show_graph_type(),
         }
     }
 
@@ -1307,6 +1354,89 @@ impl Parser {
             return Err("DEFAULT is a reserved graph type and cannot be dropped".into());
         }
         Ok(Statement::DropGraphType { name })
+    }
+
+    /// `CREATE [HASH | BTREE] INDEX [<name>] ON :Label(prop) [USING HASH | BTREE]`
+    ///
+    /// Both prefix (`CREATE BTREE INDEX foo ON :Label(prop)`) and suffix
+    /// (`CREATE INDEX foo ON :Label(prop) USING BTREE`) syntaxes are
+    /// accepted; if both are given they must agree. `name` is optional
+    /// (the handler auto-generates `<label>_<prop>_<kind>` if omitted).
+    fn create_index(&mut self) -> Result<Statement, String> {
+        self.expect(&Token::Create)?;
+        // Prefix kind keyword.
+        let prefix_kind = match self.peek() {
+            Token::Hash => {
+                self.advance();
+                Some(IndexKindStmt::Hash)
+            }
+            Token::BTree => {
+                self.advance();
+                Some(IndexKindStmt::BTree)
+            }
+            _ => None,
+        };
+        self.expect(&Token::Index)?;
+
+        // Optional bare name. We tell name from `ON` by token type.
+        let name = match self.peek() {
+            Token::Name(_) => match self.advance() {
+                Token::Name(n) => Some(n),
+                _ => unreachable!(),
+            },
+            _ => None,
+        };
+
+        self.expect(&Token::On)?;
+        // `:Label(prop)`
+        self.expect(&Token::Colon)?;
+        let label = match self.advance() {
+            Token::Name(n) => n,
+            t => return Err(format!("expected label name, got {t:?}")),
+        };
+        self.expect(&Token::LParen)?;
+        let prop = match self.advance() {
+            Token::Name(n) => n,
+            t => return Err(format!("expected property name, got {t:?}")),
+        };
+        self.expect(&Token::RParen)?;
+
+        // Optional `USING <kind>` suffix.
+        let suffix_kind = if self.eat(&Token::Using) {
+            match self.advance() {
+                Token::Hash => Some(IndexKindStmt::Hash),
+                Token::BTree => Some(IndexKindStmt::BTree),
+                t => return Err(format!("expected HASH or BTREE after USING, got {t:?}")),
+            }
+        } else {
+            None
+        };
+
+        let kind = match (prefix_kind, suffix_kind) {
+            (Some(a), Some(b)) if a != b => {
+                return Err("conflicting index kinds: prefix says one, USING says another".into());
+            }
+            (Some(k), _) | (_, Some(k)) => k,
+            (None, None) => IndexKindStmt::Hash,
+        };
+
+        Ok(Statement::CreateIndex {
+            name,
+            label,
+            prop,
+            kind,
+        })
+    }
+
+    /// `DROP INDEX <name>`
+    fn drop_index(&mut self) -> Result<Statement, String> {
+        self.expect(&Token::Drop)?;
+        self.expect(&Token::Index)?;
+        let name = match self.advance() {
+            Token::Name(n) => n,
+            t => return Err(format!("expected index name, got {t:?}")),
+        };
+        Ok(Statement::DropIndex { name })
     }
 
     /// Bare graph-type name in a CREATE position. Rejects the reserved

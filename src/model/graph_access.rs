@@ -75,4 +75,17 @@ pub trait GraphAccess {
     fn lookup_node_eq(&self, _label: &str, _prop: &str, _value: &Value) -> Option<Vec<Id>> {
         None
     }
+
+    /// Range lookup against a btree secondary index. Returns Some(matching
+    /// node IDs) when a btree exists for `(label, prop)`, None otherwise.
+    /// Bounds follow `std::ops::Bound` semantics. Default impl: no indexes.
+    fn lookup_node_range(
+        &self,
+        _label: &str,
+        _prop: &str,
+        _lo: std::ops::Bound<Value>,
+        _hi: std::ops::Bound<Value>,
+    ) -> Option<Vec<Id>> {
+        None
+    }
 }

@@ -32,6 +32,16 @@ pub enum FilterKind {
         op: BinOp,
         value: Value,
     },
+    /// Node membership in a precomputed set. Built by the optimizer from a
+    /// BTree secondary-index range query: the original `var.attr <op> literal`
+    /// predicate is replaced by membership in the set of node IDs the btree
+    /// returned, which is O(log N) per candidate and avoids reading the
+    /// node's property from the page cache. The set is sorted ascending.
+    NodeInSet {
+        var_id: u8,
+        /// Sorted ascending so membership is a binary search.
+        set: std::sync::Arc<Vec<u32>>,
+    },
 }
 
 /// A result tuple: variable bindings as (var_id, value).
@@ -360,6 +370,13 @@ impl<'a, G: GraphAccess> LtjRunner<'a, G> {
                             }
                             // Missing property → predicate is null → reject
                             None => return false,
+                        }
+                    }
+                }
+                FilterKind::NodeInSet { var_id, set } => {
+                    if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
+                        if set.binary_search(&node_id).is_err() {
+                            return false;
                         }
                     }
                 }

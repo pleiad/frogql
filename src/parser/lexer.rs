@@ -42,6 +42,13 @@ pub enum Token {
     Current,
     Types,
     Validate,
+    /// Secondary-index DDL (uppercase only).
+    Index,
+    Indexes,
+    On,
+    Using,
+    Hash,
+    BTree,
     /// `LIST` keyword for `LIST<T>` type-expression form.
     List,
     /// Compound: `group` and `by` stay valid as record/property names.
@@ -469,6 +476,12 @@ impl Lexer {
                         "SHOW" => Token::Show,
                         "CURRENT" => Token::Current,
                         "VALIDATE" => Token::Validate,
+                        "INDEX" => Token::Index,
+                        "INDEXES" => Token::Indexes,
+                        "ON" => Token::On,
+                        "USING" => Token::Using,
+                        "HASH" => Token::Hash,
+                        "BTREE" => Token::BTree,
                         _ => Token::Name(name),
                     };
                     self.tokens.push(tok);

@@ -57,6 +57,14 @@ impl Connection {
             Statement::ShowGraphType { name } => self.exec_show_graph_type(py, &name),
             Statement::ShowCurrentGraphType => self.exec_show_current(py),
             Statement::ValidateGraphType { name } => self.exec_validate(py, &name),
+            Statement::CreateIndex {
+                name,
+                label,
+                prop,
+                kind,
+            } => self.exec_create_index(py, name, &label, &prop, kind),
+            Statement::DropIndex { name } => self.exec_drop_index(py, &name),
+            Statement::ShowIndexes => self.exec_show_indexes(py),
             Statement::Query(_) => self.exec_query(py, query, limit),
         }
     }
@@ -335,6 +343,83 @@ impl Connection {
         }
         d.set_item("samples", samples)?;
         Ok(d.into_py(py))
+    }
+
+    fn exec_create_index<'py>(
+        &self,
+        py: Python<'py>,
+        name: Option<String>,
+        label: &str,
+        prop: &str,
+        kind: gqlrust::syntax::statement::IndexKindStmt,
+    ) -> PyResult<PyObject> {
+        use gqlrust::store::secondary_index::IndexKind;
+        let store_kind = match kind {
+            gqlrust::syntax::statement::IndexKindStmt::Hash => IndexKind::Hash,
+            gqlrust::syntax::statement::IndexKindStmt::BTree => IndexKind::BTree,
+        };
+        let final_name = name.unwrap_or_else(|| {
+            let suffix = match store_kind {
+                IndexKind::Hash => "hash",
+                IndexKind::BTree => "btree",
+            };
+            format!("{label}_{prop}_{suffix}")
+        });
+        let spec = self
+            .store
+            .secondary_indexes_mut()
+            .build_declared(&self.store, final_name, label, prop, store_kind)
+            .map_err(PyValueError::new_err)?;
+        let d = PyDict::new_bound(py);
+        d.set_item("ok", true)?;
+        d.set_item("kind", "index")?;
+        d.set_item("name", spec.name.as_str())?;
+        d.set_item("label", spec.label.as_str())?;
+        d.set_item("prop", spec.prop.as_str())?;
+        d.set_item(
+            "index_kind",
+            match spec.kind {
+                IndexKind::Hash => "HASH",
+                IndexKind::BTree => "BTREE",
+            },
+        )?;
+        d.set_item("entries", spec.entries)?;
+        Ok(d.into_py(py))
+    }
+
+    fn exec_drop_index<'py>(&self, py: Python<'py>, name: &str) -> PyResult<PyObject> {
+        let dropped = self.store.secondary_indexes_mut().drop_named(name);
+        let d = PyDict::new_bound(py);
+        d.set_item("ok", dropped)?;
+        d.set_item("kind", "index")?;
+        d.set_item("name", name)?;
+        if !dropped {
+            d.set_item("error", "index not found")?;
+        }
+        Ok(d.into_py(py))
+    }
+
+    fn exec_show_indexes<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+        use gqlrust::store::secondary_index::IndexKind;
+        let idx = self.store.secondary_indexes();
+        let out = PyList::empty_bound(py);
+        for spec in idx.list() {
+            let d = PyDict::new_bound(py);
+            d.set_item("name", spec.name.as_str())?;
+            d.set_item("label", spec.label.as_str())?;
+            d.set_item("prop", spec.prop.as_str())?;
+            d.set_item(
+                "kind",
+                match spec.kind {
+                    IndexKind::Hash => "HASH",
+                    IndexKind::BTree => "BTREE",
+                },
+            )?;
+            d.set_item("auto", spec.auto)?;
+            d.set_item("entries", spec.entries)?;
+            out.append(d)?;
+        }
+        Ok(out.into_py(py))
     }
 }
 

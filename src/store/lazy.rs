@@ -169,6 +169,12 @@ impl LazyGraphStore {
         self.secondary.borrow()
     }
 
+    /// Mutable borrow of the secondary indexes — used by `CREATE / DROP
+    /// INDEX` handlers in the REPL and Python bindings.
+    pub fn secondary_indexes_mut(&self) -> RefMut<'_, SecondaryIndex> {
+        self.secondary.borrow_mut()
+    }
+
     // ---- Graph-type catalog ----
 
     /// Read-only borrow of the active catalog.
@@ -568,6 +574,16 @@ impl GraphAccess for LazyGraphStore {
 
     fn lookup_node_eq(&self, label: &str, prop: &str, value: &Value) -> Option<Vec<Id>> {
         self.secondary.borrow().lookup_eq(label, prop, value)
+    }
+
+    fn lookup_node_range(
+        &self,
+        label: &str,
+        prop: &str,
+        lo: std::ops::Bound<Value>,
+        hi: std::ops::Bound<Value>,
+    ) -> Option<Vec<Id>> {
+        self.secondary.borrow().lookup_range(label, prop, lo, hi)
     }
 
     fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {

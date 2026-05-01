@@ -144,6 +144,11 @@ fn main() {
             continue;
         }
 
+        if line == ".indexes" {
+            print_indexes(&store);
+            continue;
+        }
+
         // Parse top-level statement: query or DDL.
         let stmt = match parse_statement(line) {
             Ok(s) => s,
@@ -183,6 +188,23 @@ fn main() {
             }
             Statement::ValidateGraphType { name } => {
                 handle_validate(&store, &name);
+                continue;
+            }
+            Statement::CreateIndex {
+                name,
+                label,
+                prop,
+                kind,
+            } => {
+                handle_create_index(&store, name, &label, &prop, kind);
+                continue;
+            }
+            Statement::DropIndex { name } => {
+                handle_drop_index(&store, &name);
+                continue;
+            }
+            Statement::ShowIndexes => {
+                print_indexes(&store);
                 continue;
             }
             Statement::Query(q) => {
@@ -1065,6 +1087,7 @@ fn print_help() {
     println!("  .schema             show DEFAULT GRAPH TYPE (alias for SHOW GRAPH TYPE DEFAULT)");
     println!("  .schema simple      grouped by-label renderer of the inferred schema");
     println!("  .graph-types        list all GRAPH TYPEs (alias for SHOW GRAPH TYPES)");
+    println!("  .indexes            list secondary indexes (alias for SHOW INDEXES)");
     println!("  .help               this message");
     println!("  .quit / .exit       exit the REPL");
     println!();
@@ -1076,6 +1099,11 @@ fn print_help() {
     println!("  SHOW GRAPH TYPE <name>");
     println!("  SHOW CURRENT GRAPH TYPE");
     println!("  VALIDATE GRAPH TYPE <name>       (walks the graph, O(N+E), result cached)");
+    println!();
+    println!("Index DDL:");
+    println!("  CREATE [HASH | BTREE] INDEX [<name>] ON :Label(prop) [USING HASH | BTREE]");
+    println!("  DROP INDEX <name>                (auto-inferred indexes cannot be dropped)");
+    println!("  SHOW INDEXES                     (kind, label, prop, entry count)");
     println!();
     println!("Queries: MATCH? <pattern> [WHERE <expr>] [RETURN <items>]");
     println!("         OPTIONAL MATCH ...        left-join semantics");
@@ -1302,6 +1330,84 @@ fn color_simple_type_atom(t: &SimpleType) -> String {
     match t {
         SimpleType::Union(_, _) => format!("({})", color_simple_type(t)),
         _ => color_simple_type(t),
+    }
+}
+
+fn handle_create_index(
+    store: &LazyGraphStore,
+    name: Option<String>,
+    label: &str,
+    prop: &str,
+    kind: gqlrust::syntax::statement::IndexKindStmt,
+) {
+    use gqlrust::store::secondary_index::IndexKind;
+    let store_kind = match kind {
+        gqlrust::syntax::statement::IndexKindStmt::Hash => IndexKind::Hash,
+        gqlrust::syntax::statement::IndexKindStmt::BTree => IndexKind::BTree,
+    };
+    let final_name = name.unwrap_or_else(|| {
+        let suffix = match store_kind {
+            IndexKind::Hash => "hash",
+            IndexKind::BTree => "btree",
+        };
+        format!("{label}_{prop}_{suffix}")
+    });
+    let start = Instant::now();
+    let result = store.secondary_indexes_mut().build_declared(
+        store, final_name, label, prop, store_kind,
+    );
+    let elapsed = start.elapsed();
+    match result {
+        Ok(spec) => {
+            let kind_str = match spec.kind {
+                IndexKind::Hash => "HASH",
+                IndexKind::BTree => "BTREE",
+            };
+            println!(
+                "INDEX '{}' created ({} on (:{} {{{}}}), {} entries) in {:.3}s.",
+                spec.name, kind_str, spec.label, spec.prop, spec.entries,
+                elapsed.as_secs_f64(),
+            );
+        }
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+fn handle_drop_index(store: &LazyGraphStore, name: &str) {
+    let dropped = store.secondary_indexes_mut().drop_named(name);
+    if dropped {
+        println!("INDEX '{name}' dropped.");
+    } else {
+        eprintln!("error: index '{name}' not found");
+    }
+}
+
+fn print_indexes(store: &LazyGraphStore) {
+    let idx = store.secondary_indexes();
+    let specs = idx.list();
+    if specs.is_empty() {
+        println!("(no secondary indexes)");
+        return;
+    }
+    use gqlrust::store::secondary_index::IndexKind;
+    println!(
+        "{:<40}  {:<6}  {:<22}  {:<14}  origin",
+        "name", "kind", "label", "entries"
+    );
+    println!("{}", "-".repeat(100));
+    for spec in specs {
+        let kind = match spec.kind {
+            IndexKind::Hash => "HASH",
+            IndexKind::BTree => "BTREE",
+        };
+        let origin = if spec.auto { "auto" } else { "declared" };
+        println!(
+            "{:<40}  {:<6}  :{:<21}  {:>14}  {origin}",
+            spec.name,
+            kind,
+            format!("{} {{{}}}", spec.label, spec.prop),
+            spec.entries,
+        );
     }
 }
 

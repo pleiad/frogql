@@ -271,13 +271,26 @@ When LTJ cannot decompose a join (unions, repetitions, any-direction edges), the
 
 ### Secondary indexes
 
-`LazyGraphStore` owns a `RefCell<SecondaryIndex>` (`src/store/secondary_index.rs`) populated at open by a single O(N) pass over nodes. Today the only flavour is **hash on (label, prop) pairs whose values are unique within the label**, auto-inferred — which captures the LDBC IC start lookups (`Person.id`, `Tag.name`, `Country.name`, `TagClass.name`, plus every other `*_id` column the loader produced) without requiring DDL. Floats / lists / records / nulls are not indexable (`IndexKey` covers `Int`, `Str`, `Bool` only). The store exposes the index via the `GraphAccess::lookup_node_eq(label, prop, value) -> Option<Vec<Id>>` trait method; in-memory `Graph` returns `None` and falls back to scan.
+`LazyGraphStore` owns a `RefCell<SecondaryIndex>` (`src/store/secondary_index.rs`) populated at open by a single O(N) pass over nodes. Two flavours coexist on the same `(label, prop)` pair:
 
-Memory-only for now (rebuilt every open). DDL-declared indexes (`CREATE / DROP / SHOW INDEX`), btree variant for range lookups (IC2/3/4/9 temporal filters), and persistence in the .gdb file header chain are tracked as follow-up work.
+- **Hash** for equality (`x.attr = literal`).
+- **BTree** for range filters (`<`, `<=`, `>`, `>=`).
+
+Auto-inference builds both kinds for every `(label, prop)` whose values are unique within the label — captures the LDBC IC start lookups (`Person.id`, `Tag.name`, `Country.name`, `TagClass.name`, plus every other `*_id` column) AND the IC2/3/4/9 temporal range filters (`Comment.creationDate`, `Post.creationDate`, `Forum.creationDate`) without any DDL. Floats / lists / records / nulls are not indexable (`IndexKey` covers `Int`, `Str`, `Bool` only).
+
+DDL: `CREATE [HASH | BTREE] INDEX [<name>] ON :Label(prop) [USING HASH | BTREE]`, `DROP INDEX <name>`, `SHOW INDEXES` (or the REPL meta-command `.indexes`). Both prefix (`CREATE BTREE INDEX foo`) and suffix (`USING BTREE`) syntaxes work; HASH is the default kind. HASH and BTREE coexist; re-declaring the same kind on the same `(label, prop)` is the only conflict.
+
+The store exposes two trait methods: `GraphAccess::lookup_node_eq(label, prop, value) -> Option<Vec<Id>>` and `lookup_node_range(label, prop, lo, hi) -> Option<Vec<Id>>`. The in-memory `Graph` returns `None` from both and falls back to scan.
+
+LTJ wiring (`pattern_extract::fold_indexed_constants` and `fold_range_filters`):
+- Eq predicates that hit a hash index → constant-fold the variable everywhere (drops the filter, removes the var from VEO, pre-binds it in the result tuple). An empty index hit short-circuits to zero rows.
+- Range predicates that hit a btree → precompute the matching sorted set, replace the `NodeAttrCmp` with `FilterKind::NodeInSet { var, set }`. The runner does an O(log n) binary search instead of reading the candidate's property from the page cache.
+
+Memory-only for now (rebuilt every open). Persistence in the .gdb file header chain — so DDL-declared indexes survive close/reopen — is the next roadmap item.
 
 Diagnostic env vars: `GQLITE_DEBUG_INDEXES=1` prints the auto-built indexes and pinned variables; `GQLITE_DISABLE_INDEX_FOLD=1` disables the LTJ pre-pass for A/B benchmarking.
 
-Measured impact on LDBC IC2 over `bench/data/ldbc-sf0.1.gdb` (15 params × 3 iters, lazy backend, `--limit 20`): across-row median **2417 ms → 1377 ms (1.76×)**. The IC2 query uses a top-level `Comment | Post` union that falls back to hash-join, but each branch independently calls `try_ltj` and benefits from constant-folding the `Person {id: ...}` start.
+Measured impact on LDBC IC2 over `bench/data/ldbc-sf0.1.gdb` (15 params × 3 iters, lazy backend, `--limit 20`): across-row median **2417 ms → 1377 ms (1.76×)**. The IC2 query uses a top-level `Comment | Post` union that falls back to hash-join, but each branch independently calls `try_ltj` and benefits from constant-folding the `Person {id: ...}` start. The BTree path doesn't move the needle on IC2 specifically because `c.creationDate <= maxDate` matches the bulk of the dataset (low selectivity); it shines on more selective range queries.
 
 ## Key conventions
 

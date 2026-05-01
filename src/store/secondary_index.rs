@@ -1,20 +1,19 @@
 //! Secondary indexes on node properties.
 //!
-//! Today: hash indexes on (label, prop) pairs whose values are unique within
-//! the label, auto-inferred at store open. The LDBC IC workload starts every
-//! query with `Person {id = $personId}` (and similar constant-resolved name
-//! lookups for Tag/Country/TagClass), all of which become O(1) hash lookups
-//! once the index is in place — without these, the LTJ runner would scan
-//! every node of the label and read its `id` from the page cache to compare.
+//! Two kinds:
+//! - **Hash** for equality (`x.attr = literal`). Auto-inferred at store open
+//!   for `(label, prop)` pairs whose values are unique within the label —
+//!   captures the LDBC IC start lookups (`Person.id`, `Tag.name`, etc.)
+//!   without any DDL.
+//! - **BTree** for range filters (`<`, `<=`, `>`, `>=`). Declared by the user
+//!   via `CREATE BTREE INDEX foo ON :Label(prop)`. Targets the LDBC IC2/3/4/9
+//!   `Message.creationDate <= $maxDate` style predicates.
 //!
-//! Roadmap (separate commit):
-//! - `CREATE / DROP / SHOW INDEX` DDL so the user can declare hash or btree
-//!   indexes on arbitrary (label, prop) pairs.
-//! - BTree variant + range lookups for IC2 / IC3 / IC4 / IC9 temporal filters.
-//! - Persist declared indexes in the .gdb file header chain (auto-inferred
-//!   ones can keep being rebuilt on open).
+//! Both kinds are in-memory (rebuilt every open). Persistence in the .gdb
+//! file header chain is on the roadmap.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ops::Bound;
 
 use crate::model::graph::Graph;
 use crate::model::graph_access::GraphAccess;
@@ -41,9 +40,20 @@ impl IndexKey {
     }
 }
 
+/// Convert a `Bound<Value>` to a `Bound<IndexKey>` for BTree range queries.
+/// Returns None if the bound's value is not indexable (e.g. Float, Null).
+fn bound_to_key(b: Bound<Value>) -> Option<Bound<IndexKey>> {
+    match b {
+        Bound::Included(v) => Some(Bound::Included(IndexKey::from_value(&v)?)),
+        Bound::Excluded(v) => Some(Bound::Excluded(IndexKey::from_value(&v)?)),
+        Bound::Unbounded => Some(Bound::Unbounded),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexKind {
     Hash,
+    BTree,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +72,7 @@ pub struct IndexSpec {
 #[derive(Debug, Default)]
 pub struct SecondaryIndex {
     hashes: HashMap<(String, String), HashMap<IndexKey, Vec<Id>>>,
+    btrees: HashMap<(String, String), BTreeMap<IndexKey, Vec<Id>>>,
     specs: Vec<IndexSpec>,
 }
 
@@ -79,18 +90,157 @@ impl SecondaryIndex {
     }
 
     /// Equality lookup. Returns Some(matching node IDs) when the (label, prop)
-    /// is indexed, None otherwise. The returned vector is empty when the
-    /// index exists but no node has that value.
+    /// is indexed (hash or btree both support point lookup), None otherwise.
+    /// The returned vector is empty when the index exists but no node has
+    /// that value.
     pub fn lookup_eq(&self, label: &str, prop: &str, value: &Value) -> Option<Vec<Id>> {
         let key = IndexKey::from_value(value)?;
-        let bucket = self.hashes.get(&(label.to_string(), prop.to_string()))?;
-        Some(bucket.get(&key).cloned().unwrap_or_default())
+        let lp = (label.to_string(), prop.to_string());
+        if let Some(bucket) = self.hashes.get(&lp) {
+            return Some(bucket.get(&key).cloned().unwrap_or_default());
+        }
+        if let Some(bucket) = self.btrees.get(&lp) {
+            return Some(bucket.get(&key).cloned().unwrap_or_default());
+        }
+        None
     }
 
-    /// True when an index exists for the given (label, prop) pair.
+    /// Range lookup. Walks the BTree for `(label, prop)` between `lo` and
+    /// `hi` and returns the union of matching node IDs. Returns None when
+    /// no btree exists for this (label, prop) — caller must fall back to a
+    /// scan + filter.
+    pub fn lookup_range(
+        &self,
+        label: &str,
+        prop: &str,
+        lo: Bound<Value>,
+        hi: Bound<Value>,
+    ) -> Option<Vec<Id>> {
+        let bucket = self
+            .btrees
+            .get(&(label.to_string(), prop.to_string()))?;
+        let lo_k = bound_to_key(lo)?;
+        let hi_k = bound_to_key(hi)?;
+        let mut out = Vec::new();
+        for (_, ids) in bucket.range((lo_k, hi_k)) {
+            out.extend_from_slice(ids);
+        }
+        Some(out)
+    }
+
+    /// True when *any* index (hash or btree) exists for the given
+    /// (label, prop) pair.
     pub fn has(&self, label: &str, prop: &str) -> bool {
-        self.hashes
-            .contains_key(&(label.to_string(), prop.to_string()))
+        let lp = (label.to_string(), prop.to_string());
+        self.hashes.contains_key(&lp) || self.btrees.contains_key(&lp)
+    }
+
+    /// Build a declared (DDL) hash or btree index. Scans every node carrying
+    /// `label`. HASH and BTREE coexist on the same (label, prop) — they serve
+    /// different query patterns (equality vs range) and the LTJ optimizer
+    /// picks the right one per filter. Re-declaring the same kind is the
+    /// only conflict.
+    pub fn build_declared<G: GraphAccess>(
+        &mut self,
+        store: &G,
+        name: String,
+        label: &str,
+        prop: &str,
+        kind: IndexKind,
+    ) -> Result<IndexSpec, String> {
+        let lp = (label.to_string(), prop.to_string());
+        let already_same_kind = match kind {
+            IndexKind::Hash => self.hashes.contains_key(&lp),
+            IndexKind::BTree => self.btrees.contains_key(&lp),
+        };
+        if already_same_kind {
+            return Err(format!(
+                "a {:?} index already exists on (:{label} {{{prop}}}); drop it first",
+                kind
+            ));
+        }
+        // Use the label index when available; else fall back to a full scan
+        // and skip nodes that don't carry the requested label.
+        let candidates: Vec<Id> = match store.nodes_with_label(label) {
+            Some(v) => v,
+            None => store
+                .nodes()
+                .into_iter()
+                .filter(|&nid| {
+                    Graph::label_strings(&store.node_labels(nid))
+                        .iter()
+                        .any(|l| l == label)
+                })
+                .collect(),
+        };
+
+        match kind {
+            IndexKind::Hash => {
+                let mut bucket: HashMap<IndexKey, Vec<Id>> = HashMap::new();
+                for nid in candidates {
+                    let props = store.node_props(nid);
+                    if let Some(v) = props.get(prop) {
+                        if let Some(k) = IndexKey::from_value(v) {
+                            bucket.entry(k).or_default().push(nid);
+                        }
+                    }
+                }
+                let entries = bucket.len();
+                let spec = IndexSpec {
+                    name: name.clone(),
+                    label: lp.0.clone(),
+                    prop: lp.1.clone(),
+                    kind,
+                    auto: false,
+                    entries,
+                };
+                self.hashes.insert(lp, bucket);
+                self.specs.push(spec.clone());
+                Ok(spec)
+            }
+            IndexKind::BTree => {
+                let mut bucket: BTreeMap<IndexKey, Vec<Id>> = BTreeMap::new();
+                for nid in candidates {
+                    let props = store.node_props(nid);
+                    if let Some(v) = props.get(prop) {
+                        if let Some(k) = IndexKey::from_value(v) {
+                            bucket.entry(k).or_default().push(nid);
+                        }
+                    }
+                }
+                let entries = bucket.len();
+                let spec = IndexSpec {
+                    name: name.clone(),
+                    label: lp.0.clone(),
+                    prop: lp.1.clone(),
+                    kind,
+                    auto: false,
+                    entries,
+                };
+                self.btrees.insert(lp, bucket);
+                self.specs.push(spec.clone());
+                Ok(spec)
+            }
+        }
+    }
+
+    /// Drop an index by its declared (or auto-generated) name. Returns true
+    /// if the index existed and was removed, false otherwise.
+    pub fn drop_named(&mut self, name: &str) -> bool {
+        let Some(idx) = self.specs.iter().position(|s| s.name == name) else {
+            return false;
+        };
+        let spec = self.specs.remove(idx);
+        let lp = (spec.label, spec.prop);
+        match spec.kind {
+            IndexKind::Hash => {
+                self.hashes.remove(&lp);
+            }
+            IndexKind::BTree => {
+                self.btrees.remove(&lp);
+            }
+        }
+        true
     }
 
     /// Auto-build hash indexes for every (label, prop) where the property is
@@ -124,23 +274,44 @@ impl SecondaryIndex {
 
         // Keep only the (label, prop) entries where every value bucket is a
         // singleton AND the total count equals the label count (rules out
-        // properties that are absent on some nodes).
+        // properties that are absent on some nodes). Build BOTH hash and
+        // btree for these — hash for `=` (1 lookup), btree for `<`/`<=`/
+        // `>`/`>=` range queries (LDBC IC2/3/4/9 temporal filters). Memory
+        // overhead is bounded because we only do this for unique-valued
+        // columns; the BTree on Comment.creationDate at SF0.1 is ~3MB.
         for ((label, prop), bucket) in per_label_prop {
             let label_count = *per_label_count.get(&label).unwrap_or(&0);
             let total_present: usize = bucket.values().map(|v| v.len()).sum();
             let unique = bucket.values().all(|v| v.len() == 1);
             if unique && total_present == label_count && label_count > 0 {
                 let entries = bucket.len();
-                let name = format!("{}_{}_auto", label, prop);
+                // Hash auto-index.
+                let hash_name = format!("{}_{}_auto_hash", label, prop);
                 self.specs.push(IndexSpec {
-                    name,
+                    name: hash_name,
                     label: label.clone(),
                     prop: prop.clone(),
                     kind: IndexKind::Hash,
                     auto: true,
                     entries,
                 });
-                self.hashes.insert((label, prop), bucket);
+                // Mirror the same buckets into a BTree so range filters can
+                // skip the per-row property read. Same NodeIds, different
+                // structure — tiny duplication for a meaningful speedup on
+                // temporal range predicates.
+                let btree: BTreeMap<IndexKey, Vec<Id>> =
+                    bucket.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let btree_name = format!("{}_{}_auto_btree", label, prop);
+                self.specs.push(IndexSpec {
+                    name: btree_name,
+                    label: label.clone(),
+                    prop: prop.clone(),
+                    kind: IndexKind::BTree,
+                    auto: true,
+                    entries,
+                });
+                self.hashes.insert((label.clone(), prop.clone()), bucket);
+                self.btrees.insert((label, prop), btree);
             }
         }
     }

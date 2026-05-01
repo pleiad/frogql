@@ -34,6 +34,31 @@ pub enum Statement {
     /// every node and edge satisfies a type in the named schema.
     /// Caches the verdict on the catalog entry.
     ValidateGraphType { name: String },
+    /// `CREATE [HASH|BTREE] INDEX [<name>] ON :Label(prop) [USING HASH|BTREE];`
+    /// Declares a secondary index on a node property. Auto-named
+    /// `<label>_<prop>_<kind>` when `name` is omitted. `kind` defaults to
+    /// `Hash` when neither `BTREE` nor `USING BTREE` is supplied.
+    CreateIndex {
+        name: Option<String>,
+        label: String,
+        prop: String,
+        kind: IndexKindStmt,
+    },
+    /// `DROP INDEX <name>;` — remove a declared index. Auto-inferred
+    /// indexes cannot be dropped (re-built every open).
+    DropIndex { name: String },
+    /// `SHOW INDEXES;` — list all indexes (auto + declared) with kind +
+    /// entry counts.
+    ShowIndexes,
+}
+
+/// Index flavour used in DDL. Stays separate from
+/// `store::secondary_index::IndexKind` so the syntax layer doesn't depend
+/// on the store internals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexKindStmt {
+    Hash,
+    BTree,
 }
 
 /// A single element inside a `CREATE GRAPH TYPE` body.
