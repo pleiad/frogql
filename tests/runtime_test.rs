@@ -714,7 +714,8 @@ fn test_query_limit_smaller_than_results_no_op() {
     // LIMIT bigger than the natural result size has no effect.
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 1000").unwrap();
+    let q =
+        gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 1000").unwrap();
     let result = r.run_query(&q, 0);
     assert_eq!(result.row_count(), 4);
 }

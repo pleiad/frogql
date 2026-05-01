@@ -955,10 +955,9 @@ fn test_limit_after_where() {
 
 #[test]
 fn test_limit_with_group_by_aggregate() {
-    let q = gqlrust::compile_query(
-        "MATCH (x) GROUP BY x.country RETURN x.country, COUNT(*) LIMIT 10",
-    )
-    .unwrap();
+    let q =
+        gqlrust::compile_query("MATCH (x) GROUP BY x.country RETURN x.country, COUNT(*) LIMIT 10")
+            .unwrap();
     assert_eq!(q.limit, Some(10));
     assert!(q.group_by.is_some());
 }

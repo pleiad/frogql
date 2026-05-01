@@ -198,16 +198,8 @@ impl Parser {
         })
     }
 
-    /// Parse an optional trailing `LIMIT <integer>` clause. Negatives
-    /// are rejected at parse time (the lexer splits `-3` into Minus +
-    /// Number, so the underlying `expect_number` already rejects the
-    /// minus sign — we just rewrite the error to mention LIMIT so the
-    /// reason isn't buried in a generic "expected number" message).
-    /// `LIMIT 0` is valid per ISO/IEC 39075:2024 — it means "return zero
-    /// rows" (the spec's "select first 0 records") and is honored as
-    /// such by the runtime via a short-circuit in `Runtime::run_query`.
-    /// The integer is bounded to u32; out-of-range values are a parse
-    /// error.
+    /// Optional trailing `LIMIT N`. Returns `None` if absent.
+    /// Negative or out-of-u32-range integers are parse errors.
     fn parse_optional_limit(&mut self) -> Result<Option<u32>, String> {
         if !self.eat(&Token::Limit) {
             return Ok(None);
