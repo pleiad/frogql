@@ -15,14 +15,16 @@ cargo build --release
 ```
 
 ```
-gql> schema
-Node labels:
-  :Person (133 nodes)
-  :Movie (38 nodes)
-Edge labels:
-  :ACTED_IN (172 edges)
-  :DIRECTED (44 edges)
-  ...
+gql> .schema
+GRAPH TYPE DEFAULT (active)
+Node types:
+    (:Movie  {released INT, title STRING, votes INT, *})
+    (:Person {name STRING, *})
+Edge types:
+    (:Person)-[:ACTED_IN {roles LIST<STRING>}]->(:Movie)
+    (:Person)-[:DIRECTED]->(:Movie)
+    (:Person)-[:REVIEWED {rating INT, summary STRING}]->(:Movie)
+    ...
 
 gql> MATCH (p: Person) -[:ACTED_IN]-> (m: Movie) WHERE m.released = 1999 RETURN p.name, m.title
 p.name | m.title
@@ -33,6 +35,20 @@ p.name | m.title
 
 gql> MATCH (a: Person) -[:ACTED_IN]-> (m: Movie), (d: Person) -[:DIRECTED]-> (m) RETURN a.name, d.name
 ```
+
+### REPL meta-commands
+
+The REPL follows the SQLite convention: every meta-command starts with `.`.
+
+| Command | Effect |
+|---------|--------|
+| `.schema` | alias for `SHOW GRAPH TYPE DEFAULT` (the auto-inferred schema) |
+| `.schema simple` | grouped by-label renderer of the inferred schema |
+| `.graph-types` | alias for `SHOW GRAPH TYPES` |
+| `.help` | list meta-commands and quick query syntax |
+| `.quit` / `.exit` | exit (bare `quit` / `exit` also work) |
+
+Everything else is parsed as either a GQL query or a catalog DDL statement (see [Graph Types](#graph-types) below).
 
 ## Example Databases
 
@@ -48,14 +64,30 @@ Regenerate from CSV: `./target/release/gqlite examples/movies.gdb --import-csv <
 
 ## Data Import
 
-GQLite reads graph data from three formats:
+GQLite reads graph data from three formats. Every import path also runs
+`infer_simple_schema` and persists the result as the `DEFAULT` GRAPH TYPE,
+so the typechecker is useful immediately after the first open.
 
 **CSV with config** (Text2GQL / Cypher datasets):
 ```bash
 gqlite mydb.gdb --import-csv path/to/Spanner_Instance/
-# Reads spanner_import_config.json + CSV files
-# Node CSVs: id column + property columns
-# Edge CSVs: SRC_ID, DST_ID + property columns
+# Reads spanner_import_config.json + CSV files.
+# Node CSVs: detected as files without SRC_ID/DST_ID columns; ID column
+#   resolved by trying `vid`, `<Label>_id`, any `*_id`, then column 0.
+# Edge CSVs: SRC_ID, DST_ID + property columns; edge label inferred from
+#   the config `label` field with known node-type prefixes stripped.
+# All column lookups are case-insensitive.
+```
+
+**LDBC SNB CSV-Basic**:
+```bash
+gqlite mydb.gdb --import-ldbc-csv path/to/social_network-sf0.1-CsvBasic-LongDateFormatter/
+# Three-pass loader:
+#   1. nodes — each LDBC entity owns its id space (Place id 0 ≠ Organisation id 0),
+#      so the loader keys node ids by (entity_label, external_id).
+#   2. multi-valued attributes — files like Person_email_emailaddress.csv
+#      collapse onto the owning node as a Value::List.
+#   3. edges — directed by default, with property columns preserved.
 ```
 
 **JSON**:
@@ -74,17 +106,31 @@ gqlite mydb.gdb --import-json graph.json
 }
 ```
 
-After import, the `.gdb` file contains everything. No need for the source files.
+After import, the `.gdb` file contains everything — graph data, string
+table, label index, adjacency, and the `DEFAULT` GRAPH TYPE. The original
+source files are no longer needed.
 
 ## Query Language
 
 ### Full queries
 
 ```
-MATCH <pattern> WHERE <condition> RETURN <expressions>
+MATCH <pattern> [WHERE <condition>] [RETURN <expressions>]
+OPTIONAL MATCH <pattern> [WHERE <condition>]
 ```
 
-All clauses except the pattern are optional. `MATCH` keyword is also optional.
+`MATCH` is optional on the first clause (bare patterns parse). `OPTIONAL MATCH`
+is supported as a top-level clause and follows ISO left-join semantics: rows
+from the previous match are preserved even when the optional pattern fails to
+bind, and the unbound variables become `null`.
+
+```
+gql> MATCH (p: Person)
+     OPTIONAL MATCH (p)-[:DIRECTED]->(m: Movie)
+     RETURN p.name, m.title
+"Alice"   | null            -- Alice never directed
+"Lana W." | "The Matrix"
+```
 
 ### Path patterns
 
@@ -114,7 +160,15 @@ MATCH (x: Account) WHERE x.amount > 1000 and x.active = true
 MATCH (x) WHERE x.name = 'Alice'
 MATCH (x) WHERE x.age is int              -- type test
 MATCH (x) WHERE not x.blocked
+MATCH (x) WHERE x.deleted_at IS NULL      -- absent properties read as null
+MATCH (x) WHERE x.email IS NOT NULL
 ```
+
+`null` is a first-class value with three-valued logic in comparisons (a
+predicate involving `null` returns false and the row is dropped).
+Aggregates skip `null` and empty aggregates emit `null`. Equality and
+range pushdowns (`= != < <= > >=`) on node properties are evaluated
+inside the LTJ loop when present.
 
 ### RETURN projection
 
@@ -174,11 +228,14 @@ gql> DROP GRAPH TYPE strict;
 GRAPH TYPE 'strict' dropped.
 ```
 
-`:graph-types` (REPL meta-command) is a shorthand for `SHOW GRAPH TYPES`.
+The REPL meta-commands `.schema` and `.graph-types` are shorthands for
+`SHOW GRAPH TYPE DEFAULT` and `SHOW GRAPH TYPES` respectively (see
+[REPL meta-commands](#repl-meta-commands)).
 
 While a type is active the typechecker rejects (or empties out) queries
 whose labels and properties don't fit. With no active type the checker
-stays permissive (`Schema::star()`).
+stays permissive (`Schema::star()`). To open the REPL with the
+typechecker disabled, pass `--no-typecheck`.
 
 `DEFAULT` is reserved. It always represents the schema inferred from the
 current graph data, refreshed on demand:
@@ -188,9 +245,9 @@ gql> USE GRAPH TYPE DEFAULT;
 GRAPH TYPE 'DEFAULT' refreshed (4 node types, 6 edge types) and activated.
 ```
 
-`gqlite db.gdb --import-csv ...` and `--import-json ...` populate and
-activate `DEFAULT` automatically. `CREATE GRAPH TYPE DEFAULT` and
-`DROP GRAPH TYPE DEFAULT` are rejected.
+All three import modes (`--import-csv`, `--import-ldbc-csv`,
+`--import-json`) populate and activate `DEFAULT` automatically.
+`CREATE GRAPH TYPE DEFAULT` and `DROP GRAPH TYPE DEFAULT` are rejected.
 
 ### Validating data against a type
 
@@ -268,27 +325,62 @@ conn.graph_types()
 
 GQLite uses a single `.gdb` file with 4KB pages:
 - All node/edge IDs are `u32` internally (no string overhead at query time)
-- Three storage backends: in-memory `Graph`, `LazyGraphStore` (topology in RAM, data on disk), `DiskGraphStore` (minimal RAM)
+- Three storage backends: in-memory `Graph`, `LazyGraphStore` (topology in RAM, labels/props from disk via LRU page cache), `DiskGraphStore` (minimal RAM)
 - The REPL uses `LazyGraphStore` for efficient memory usage on large graphs
+- The GRAPH TYPE catalog persists in its own page chain, so `CREATE / USE / DROP GRAPH TYPE` survive close/reopen
 
 See `docs/storage-architecture.md` for the full format specification.
+
+## Join strategy
+
+Comma-joins and chains of directed/undirected edges are executed with
+**Leapfrog Triejoin** (LTJ), a worst-case-optimal multi-way join that
+binds variables one at a time across all participating patterns
+simultaneously, with no intermediate materialisation. Each directed edge
+is modelled as a triple `(src, label, tgt)` indexed in six sorted
+orderings. LTJ activates automatically when the pattern decomposes into
+triples; non-decomposable shapes (unions, repetitions, any-direction
+edges) fall back to pairwise hash-join. Speedups on
+`soc-LiveJournal1-100k` (limit 1000) range from **14× (3-clique) to
+4097× (4-path)**, with a 4-clique going from "hung" to 43 ms. See
+`docs/JOIN_STRATEGY_NOTES.md` and `gqlrust/CLAUDE.md` for the algorithm
+in detail.
 
 ## Building and Testing
 
 ```bash
 cargo build --release                    # build all binaries
-cargo test                               # run all 129 tests
 
-# Specific test suites
-cargo test --test parser_test            # 42 parser tests
-cargo test --test runtime_test           # 38 runtime tests
-cargo test --test store_runtime_test     # 31 store tests
-cargo test --test text2gql_test          # 18 integration tests on Movies dataset
+# Strict clippy (run before every commit)
+cargo clippy --workspace --all-targets -- -D clippy::all
+
+# Lib + integration sweep (~320 tests; bench_test is excluded — pre-existing failures)
+cargo test --lib                         # 152 unit tests
+cargo test --test parser_test --test runtime_test --test store_runtime_test \
+           --test text2gql_test --test parse_and_run_test --test count_test \
+           --test null_test --test record_test --test list_test \
+           --test compile_diagnostics --test elaborate_test --test float_test \
+           --test graph_type_test --test typecheck_smoke --test typecheck_test \
+           --test optional_match_test --test multi_match_test \
+           --test aggregates_proptest --test lattice_proptest --test multi_match_proptest
+
+# Single test
+cargo test --test runtime_test test_join_star_any_label -- --exact
 ```
+
+Other binaries in `src/bin/`:
+- `bench_queries` — generic benchmark runner
+- `bench_setup` — downloads + extracts LDBC datasets (`bench/data/` is gitignored)
+- `ldbc_bench` — LDBC interactive-complete driver, queries in `bench/ldbc-queries/*.toml`
+- `typecheck_bench` — typechecker microbench
+- `convert_edgelist` — edge-list format converter
 
 ## Documentation
 
-- `docs/storage-architecture.md` — File format, page layout, storage backends
-- `docs/implemented-optimizations.md` — u32 IDs, hash-join, label index, early termination
-- `docs/possible-optimizations.md` — Fixed-length cells, sorted adjacency, LTJ
-- `bench/JOIN_STRATEGY_NOTES.md` — Join strategy analysis and LTJ comparison
+- `docs/storage-architecture.md` — File format, page layout, storage backends, catalog persistence
+- `docs/JOIN_STRATEGY_NOTES.md` — LTJ algorithm, triple decomposition, benchmark numbers
+- `docs/implemented-optimizations.md` — u32 IDs, hash-join, label index, early termination, predicate pushdown
+- `docs/possible-optimizations.md` — Fixed-length cells, sorted adjacency, future LTJ work
+- `docs/iso-gql-gaps.md` — Tracked deviations from ISO GQL
+- `docs/graph-type-catalog-plan.md` — Catalog design rationale
+- `CLAUDE.md` — Internal architecture notes (compiler pipeline, typechecker, LTJ details)

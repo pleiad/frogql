@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-GQLite — a Rust graph database implementing ISO GQL path pattern matching with single-file storage. Part of a research project; the Python reference implementation is in `../pygql/`.
+GQLite — a Rust graph database implementing ISO GQL path pattern matching with single-file storage. Built around an interactive REPL (`gqlite`, modelled on `sqlite3`), an embeddable library, and PyO3 Python bindings. Part of an academic research project (test names occasionally reference paper sections, e.g. `test_paper_example_s2_4`); a separate Python reference interpreter exists in a sister project but is not required to develop or use this crate.
 
 ## Commands
 
@@ -15,7 +15,9 @@ cargo test --test parser_test --test runtime_test --test store_runtime_test \
            --test text2gql_test --test parse_and_run_test --test count_test \
            --test null_test --test record_test --test list_test \
            --test compile_diagnostics --test elaborate_test --test float_test \
-           --test graph_type_test --test typecheck_smoke --test aggregates_proptest
+           --test graph_type_test --test typecheck_smoke --test typecheck_test \
+           --test optional_match_test --test multi_match_test \
+           --test aggregates_proptest --test lattice_proptest --test multi_match_proptest
 
 # Single test
 cargo test --test runtime_test test_join_star_any_label -- --exact
@@ -31,16 +33,35 @@ cargo build --release
 ./target/release/gqlite movies.gdb                                 # open existing
 
 # Python bindings (builds cdylib, installs `gqlite` into the active venv)
-cd python && source ../../pygql/.venv/bin/activate && maturin develop --release
+cd python && source <your-venv>/bin/activate && pip install maturin && maturin develop --release
+# For wheels to ship to other machines:
+cd python && maturin build --release   # output in target/wheels/
 ```
 
 ## Workspace layout
 
-`gqlrust/` is a Cargo workspace with two members:
-- `.` (root) — the `gqlrust` library crate + CLI binaries (`gqlite`, `bench_queries`, `convert_edgelist`)
-- `python/` — the `gqlite-py` crate: a `cdylib` exposing a PyO3 extension module named `gqlite`. Depends on `gqlrust` via path. Built and installed with maturin (`maturin develop` for local dev, `maturin build --release` for wheels). Maturin installs into whichever venv is active; defaults to `.venv` in the package dir if present.
+Cargo workspace with two members:
+- `.` (root) — the `gqlrust` library crate + CLI binaries under `src/bin/`:
+  - `gqlite` — interactive REPL with line editing (rustyline)
+  - `bench_queries` — generic benchmark runner
+  - `bench_setup` — downloads + extracts LDBC datasets via ureq + zstd + tar
+  - `ldbc_bench` — LDBC interactive-complete benchmark driver (queries in `bench/ldbc-queries/*.toml`)
+  - `typecheck_bench` — typechecker microbench
+  - `convert_edgelist` — edge-list format converter
+- `python/` — the `gqlite-py` crate: a `cdylib` exposing a PyO3 extension module named `gqlite`. Depends on `gqlrust` via path. Built and installed with maturin (`maturin develop` for local dev, `maturin build --release` for wheels). Maturin installs into whichever venv is active.
+
+Other top-level directories:
+- `src/` — library crate (`parser/`, `elaborate/`, `typing/`, `optimizer/`, `runtime/`, `model/`, `store/`, `lib.rs`)
+- `tests/` — integration tests (one file per concern; see test list above)
+- `examples/` — pre-built `.gdb` databases (movies, fraud_detection, bom, ldbc-sf01, etc.) plus matching `*_queries.json` query bundles
+- `docs/` — `storage-architecture.md`, `JOIN_STRATEGY_NOTES.md`, `implemented-optimizations.md`, `iso-gql-gaps.md`, `graph-type-catalog-plan.md`, `typechecker_migration.md`, `rules.md`
+- `bench/` — benchmark scaffolding: `BENCHMARK_PLAN.md`, `LDBC_BENCH_PLAN.md`, `TYPECHECKER_BENCHMARK.md`, `ldbc-queries/*.toml`, `queries/`, `scripts/`, `results/` (benchmark datasets in `bench/data/` are gitignored and downloaded via `bench_setup`)
 
 Python API surface (`python/src/lib.rs`): `gqlite.open(path)`, `gqlite.import_json(db, json)`, `gqlite.import_csv(db, dir)`, and a `Connection` class with `execute(query, limit)`, `schema()`, `node_count`, `edge_count`. `execute` returns a list of dicts: RETURN clauses produce `{alias: value}` rows; queries without RETURN produce raw `{var: {kind, id, labels, props}}` dicts. `Connection` is `unsendable` (not thread-safe across Python threads).
+
+## Dependencies
+
+Runtime: `serde` + `serde_json` (model serialization), `thiserror` (error types), `rustyline` (REPL line editing). Bench-only: `sysinfo` (RSS reporting for Memory/Lazy/Disk RAM-cost comparison), `toml` (LDBC query specs), `ureq` + `zstd` + `tar` (LDBC dataset download). Dev: `proptest` (used by `aggregates_proptest`, `lattice_proptest`, `multi_match_proptest`).
 
 ## Architecture
 
@@ -53,7 +74,9 @@ Python API surface (`python/src/lib.rs`): `gqlite.open(path)`, `gqlite.import_js
 - `compile(query) → PathPattern` — parse + elaborate + typecheck + optimize a path pattern string
 - `compile_query(input) → Query` — parse a full `MATCH ... WHERE ... RETURN` query
 - `compile_query_with(&Schema, input) → Query` — same, but typechecks against a custom schema (used by REPL/Python bindings to honor the active GRAPH TYPE)
-- `parser::parse_statement(input) → Statement` — top-level parser that distinguishes a query from catalog DDL (`CREATE` / `USE` / `DROP GRAPH TYPE`)
+- `compile_query_with_diagnostics(input) → CompileResult` and `compile_query_with_diagnostics_with(&Schema, input)` — same as above but return structured `CompileError` with span info; used by tooling that wants more than a `String`
+- `compile_unchecked` / `compile_query_unchecked` — skip the typechecker (escape hatch for bench/test scaffolding)
+- `parser::parse_statement(input) → Statement` — top-level parser that distinguishes a query from catalog DDL (`CREATE` / `USE` / `DROP / SHOW / VALIDATE GRAPH TYPE`)
 - `Runtime::new(graph).run(&pattern)` — execute against any `GraphAccess` backend
 - `Runtime::run_query(&query, limit)` — execute with RETURN projection
 - `Runtime::run_with_limit(&pattern, limit)` — early termination after N results
@@ -110,7 +133,7 @@ The `refine` operation (the `S ⊢ T ▷ T'` judgment) is `VariableType::refine(
 
 ### Join strategy: Leapfrog Triejoin (LTJ)
 
-The runtime uses Leapfrog Triejoin (LTJ) as its primary strategy for joins and concatenations of directed/undirected edges. LTJ is a worst-case-optimal multi-way join algorithm: it binds variables one at a time by intersecting candidate lists across all participating patterns simultaneously, with no intermediate materialisation. The implementation follows the CompactLTJ paper (Arroyuelo et al., VLDBJ 2025); the C++ reference is in `../cltj/`.
+The runtime uses Leapfrog Triejoin (LTJ) as its primary strategy for joins and concatenations of directed/undirected edges. LTJ is a worst-case-optimal multi-way join algorithm: it binds variables one at a time by intersecting candidate lists across all participating patterns simultaneously, with no intermediate materialisation. The implementation follows the CompactLTJ paper (Arroyuelo et al., VLDBJ 2025).
 
 **The problem it solves.** The previous strategy (pairwise hash-join) materialised both sides of every join before unifying them. For multi-way joins like a 4-clique with 6 sub-queries, intermediate tables grew exponentially (a node of degree 100 produces 10K pairs at the first join, 1M triples at the second, etc.) and most rows were discarded later. LTJ removes this blowup.
 
@@ -247,7 +270,7 @@ When LTJ cannot decompose a join (unions, repetitions, any-direction edges), the
 
 - Labels in patterns require the `:` prefix: `-[:Transfer]->`, not `-[Transfer]->`.
 - Run `cargo clippy --workspace --all-targets -- -D clippy::all` before every commit.
-- The `bench_test` target has pre-existing failures — exclude it from regular runs.
-- `bench/data/` is gitignored (large datasets, downloaded via scripts).
+- The `bench_test` integration target has pre-existing failures — exclude it from regular runs.
+- `bench/data/` is gitignored (large datasets, downloaded via `cargo run --bin bench_setup`).
 - Example databases in `examples/*.gdb` ARE committed (small, useful for testing).
-- The parent `../CLAUDE.md` covers the full monorepo (pygql, playground, gqlrust).
+- Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6); changing the order is a breaking on-disk format change.
