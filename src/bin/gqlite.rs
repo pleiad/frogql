@@ -95,6 +95,12 @@ fn main() {
     eprintln!();
 
     let rt = Runtime::new(&store);
+    // Build the LTJ TripleIndex up-front so the first user query doesn't
+    // pay the ~700ms (SF0.1) / multi-second (SF1) cold-build cost. The
+    // load-time line below covers it.
+    let t_idx = Instant::now();
+    rt.warm_triple_index();
+    eprintln!("LTJ TripleIndex built in {:.2}s", t_idx.elapsed().as_secs_f64());
     let mut rl = DefaultEditor::new().expect("failed to init readline");
 
     loop {

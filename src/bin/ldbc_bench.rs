@@ -811,6 +811,15 @@ fn run_one_ic<G: GraphAccess>(
     );
 
     let rt = Runtime::new(graph);
+    // Pre-build the LTJ index so it doesn't poison the first row's iter#0
+    // measurement. Cost is reported separately and excluded from the per-
+    // row stats.
+    let t_idx = std::time::Instant::now();
+    rt.warm_triple_index();
+    eprintln!(
+        "  LTJ TripleIndex built in {:.2}s (excluded from per-row timings)",
+        t_idx.elapsed().as_secs_f64()
+    );
     let mut row_medians_ns: Vec<u128> = Vec::with_capacity(rows.len());
     let mut failed_rows = 0usize;
 

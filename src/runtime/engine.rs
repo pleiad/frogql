@@ -1,6 +1,7 @@
-use std::cell::{Ref, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use crate::model::graph::Props;
 use crate::model::graph_access::GraphAccess;
@@ -53,14 +54,14 @@ fn combine_limits(query_limit: Option<u32>, runtime_limit: usize) -> usize {
 /// - Adjacency-driven concat: uses adjacency lists when right side is an edge/node pattern
 pub struct Runtime<'g, G: GraphAccess> {
     pub graph: &'g G,
-    /// Cached six-ordering edge index for LTJ. Built lazily on the first
-    /// query that needs it (any concat/comma-join over directed/undirected
-    /// edges). Subsequent queries on the same `Runtime` reuse it. The graph
-    /// is read-only over a `Runtime`'s lifetime, so the index never goes
-    /// stale. Building it from scratch costs O(E log E) and is the dominant
-    /// per-query cost on large graphs (~500ms for SF0.1's 1.5M edges) when
-    /// not cached — caching brings warm-query latency from ~700ms to ~5ms.
-    triple_index: RefCell<Option<TripleIndex>>,
+    /// Shared LTJ TripleIndex. Built lazily on the first query that needs
+    /// it; held as an Arc so callers (REPL, Python `Connection`, benches)
+    /// can pre-build at open time and pass the same instance into every
+    /// fresh Runtime they spawn — without rebuilding the ~700ms (SF0.1) /
+    /// multi-second (SF1) six-ordering sort each time. Wrapped in a
+    /// RefCell so internal lazy initialization stays an immutable-self
+    /// API for callers.
+    triple_index: RefCell<Option<Arc<TripleIndex>>>,
 }
 
 impl<'g, G: GraphAccess> Runtime<'g, G> {
@@ -71,17 +72,38 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
     }
 
+    /// Construct a Runtime that already knows about a pre-built LTJ
+    /// TripleIndex — typically built once when the database is opened and
+    /// shared (via Arc) across every Runtime spawned for that connection.
+    /// Cheap: the Arc clone is one atomic increment.
+    pub fn with_triple_index(graph: &'g G, idx: Arc<TripleIndex>) -> Self {
+        Self {
+            graph,
+            triple_index: RefCell::new(Some(idx)),
+        }
+    }
+
+    /// Build the LTJ TripleIndex now (if not already cached) and return the
+    /// shared Arc. Use it in long-lived sessions (REPL, Python Connection,
+    /// benchmarks) at open time to amortize the build cost — every Runtime
+    /// constructed afterwards via `with_triple_index` is instant.
+    pub fn warm_triple_index(&self) -> Arc<TripleIndex> {
+        self.triple_index().clone()
+    }
+
     /// Lazily build (or return) the cached LTJ TripleIndex. Idempotent —
     /// called from every `run_join` / `run_concat_pattern` site that needs
-    /// the index, but the build only runs once per `Runtime`.
-    fn triple_index(&self) -> Ref<'_, TripleIndex> {
+    /// the index, but the build only runs once per `Runtime` instance
+    /// (and never if `with_triple_index` already provided one).
+    fn triple_index(&self) -> Arc<TripleIndex> {
         if self.triple_index.borrow().is_none() {
-            let idx = TripleIndex::from_graph(self.graph);
+            let idx = Arc::new(TripleIndex::from_graph(self.graph));
             *self.triple_index.borrow_mut() = Some(idx);
         }
-        Ref::map(self.triple_index.borrow(), |opt| {
-            opt.as_ref().expect("triple index just built")
-        })
+        self.triple_index
+            .borrow()
+            .clone()
+            .expect("triple index just built")
     }
 
     pub fn run(&self, pattern: &PathPattern) -> IntermediateResult {
@@ -556,14 +578,14 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     // --- Join: Q1, Q2 — cross-product with assignment unification ---
 
     fn run_join(&self, q1: &PathPattern, q2: &PathPattern, limit: usize) -> IntermediateResult {
-        // Try LTJ for multi-way joins. The TripleIndex is built once per
-        // Runtime and cached; subsequent queries reuse it.
+        // Try LTJ for multi-way joins. The TripleIndex is shared via Arc;
+        // built once per Runtime (or supplied by the connection that built
+        // it at open) and reused across every subsequent query.
         let join_pattern = PathPattern::Join(Box::new(q1.clone()), Box::new(q2.clone()));
         let index = self.triple_index();
         if let Some(result) = pattern_extract::try_ltj(self.graph, &join_pattern, &index, limit) {
             return result;
         }
-        drop(index);
 
         // Fallback to pairwise hash-join
         let ir1 = self.run_path_pattern(q1, 0);
@@ -628,13 +650,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         p2: &PathPattern,
         limit: usize,
     ) -> IntermediateResult {
-        // Try LTJ for chains of directed edges. Cached TripleIndex.
+        // Try LTJ for chains of directed edges. Cached TripleIndex via Arc.
         let concat_pattern = PathPattern::Concat(Box::new(p1.clone()), Box::new(p2.clone()));
         let index = self.triple_index();
         if let Some(result) = pattern_extract::try_ltj(self.graph, &concat_pattern, &index, limit) {
             return result;
         }
-        drop(index);
 
         let ir1 = self.run_path_pattern(p1, 0);
 

@@ -3,7 +3,9 @@
 // level rather than tagging every function.
 #![allow(clippy::useless_conversion)]
 
+use std::cell::RefCell;
 use std::path::Path;
+use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -16,6 +18,7 @@ use gqlrust::model::value::{PathValue, Value};
 use gqlrust::parser::parse_statement;
 use gqlrust::runtime::catalog::ValidationStatus;
 use gqlrust::runtime::engine::Runtime;
+use gqlrust::runtime::ltj::triple_index::TripleIndex;
 use gqlrust::runtime::result::{IntermediateResult, QueryResult};
 use gqlrust::store::lazy::LazyGraphStore;
 use gqlrust::syntax::statement::{Statement, TypeElement};
@@ -27,6 +30,11 @@ use gqlrust::typing::variable_type::{Schema, VariableType};
 #[pyclass(unsendable)]
 struct Connection {
     store: LazyGraphStore,
+    /// Shared LTJ TripleIndex. Built lazily on the first `execute()` that
+    /// needs it; reused across every subsequent call. Without this every
+    /// `execute()` would rebuild the six-ordering edge index from scratch
+    /// (~700ms on SF0.1, multi-second on SF1) and cap warm-query latency.
+    triple_index: RefCell<Option<Arc<TripleIndex>>>,
 }
 
 #[pymethods]
@@ -119,6 +127,23 @@ impl Connection {
 
 // Connection helpers (no #[pymethods]; called from execute()).
 impl Connection {
+    /// Build a Runtime that already knows about the cached LTJ TripleIndex.
+    /// First call after `open()` builds the index (~700ms on SF0.1) and
+    /// stores it on the Connection; subsequent calls hand the same Arc to
+    /// every Runtime cheaply (one atomic increment).
+    fn runtime(&self) -> Runtime<'_, LazyGraphStore> {
+        if self.triple_index.borrow().is_none() {
+            let scratch = Runtime::new(&self.store);
+            *self.triple_index.borrow_mut() = Some(scratch.warm_triple_index());
+        }
+        let idx = self
+            .triple_index
+            .borrow()
+            .clone()
+            .expect("triple index just built");
+        Runtime::with_triple_index(&self.store, idx)
+    }
+
     fn exec_query<'py>(&self, py: Python<'py>, query: &str, limit: usize) -> PyResult<PyObject> {
         let active = self.store.catalog().active_schema();
         let result = gqlrust::compile_query_with_diagnostics_with(&active, query)
@@ -136,7 +161,7 @@ impl Connection {
             return Ok(PyList::empty_bound(py).into_py(py));
         }
 
-        let rt = Runtime::new(&self.store);
+        let rt = self.runtime();
         let result = rt.run_query(&q, limit);
 
         match result {
@@ -463,7 +488,20 @@ fn ddl_response(py: Python<'_>, message: &str) -> PyResult<PyObject> {
 fn open(path: &str) -> PyResult<Connection> {
     let store = LazyGraphStore::open(Path::new(path))
         .map_err(|e| PyRuntimeError::new_err(format!("open failed: {e}")))?;
-    Ok(Connection { store })
+    // Eagerly build the LTJ TripleIndex so the first user `execute()` runs
+    // at warm-cache speed instead of paying the ~700ms cold build. The
+    // total time spent in `gqlite.open()` is unchanged in spirit — we
+    // shift the work out of the per-query critical path. Callers that want
+    // the lazy behaviour can construct a Connection in Rust and skip the
+    // warm step.
+    let index = {
+        let scratch = Runtime::new(&store);
+        scratch.warm_triple_index()
+    };
+    Ok(Connection {
+        store,
+        triple_index: RefCell::new(Some(index)),
+    })
 }
 
 #[pyfunction]
