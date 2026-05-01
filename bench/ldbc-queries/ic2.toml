@@ -18,13 +18,8 @@ param_columns = ["personId", "maxDate"]
 # runner replaces with the param values from the file.
 #
 # `LIMIT 20` is the spec-faithful cap (LDBC IC2 spec: "LIMIT 20").
-# Now that gqlite's parser accepts LIMIT, the cap lives in the query
-# rather than via `bench_queries`'s `--limit` flag. The runtime
-# combines both caps via `min`, so passing `--limit N` for a smaller
-# ad-hoc budget still works without touching this file.
 query = """
-MATCH (p: Person {id: {personId}})~[:knows]~(friend: Person)<-[:hasCreator]-(c: Comment) \
-    | (p: Person {id: {personId}})~[:knows]~(friend: Person)<-[:hasCreator]-(c: Post) \
+MATCH (p: Person {id: {personId}})~[:knows]~(friend: Person)<-[:hasCreator]-(c: Comment | Post) \
 WHERE c.creationDate <= {maxDate} \
 RETURN friend.id, friend.firstName, friend.lastName, c.id, c.content, c.creationDate \
 LIMIT 20
@@ -38,6 +33,16 @@ return_columns = [
     "friend.id", "friend.firstName", "friend.lastName",
     "c.id", "c.content", "c.creationDate",
 ]
+
+# Expected per-column types in the RETURN list. One entry per
+# column; multiple type letters separated by `/` mean the column is
+# a union (e.g. `n/s` = nullable string). Type letters: i=Int s=Str
+# n=Null b=Bool f=Float l=List r=Record. Each runner computes the
+# actual shape from its results and verifies `actual ⊆ expected` per
+# column position; mismatches are logged as a query-translation bug.
+# `c.content` is `n/s` because the LDBC schema permits a Post to have
+# a null `content` field (e.g. when only `imageFile` is set).
+expected_shape = "i,s,s,i,n/s,i"
 
 [divergences]
 no-coalesce  = "spec returns coalesce(message.content, message.imageFile); we return c.content"

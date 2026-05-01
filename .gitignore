@@ -6,6 +6,11 @@ __pycache__/
 # Bench artifacts (timestamped per run; regenerate via the bench
 # scripts under bench/scripts/). Never useful to commit.
 /bench/results/
+# Cross-system bench artifacts: timestamped run outputs and external-
+# system loaded data (each system imports LDBC CSVs into its native
+# format under bench/data/cross-system/<system>/).
+/bench/cross-system/results/
+/bench/data/cross-system/
 /python/.venv/
 /python/foo.py
 *.swp
