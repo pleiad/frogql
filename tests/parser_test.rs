@@ -889,3 +889,87 @@ fn test_count_as_field_name_still_works() {
         gqlrust::compile_query("MATCH (x) WHERE x.id = 1 RETURN {name: 'ok', count: 1}").unwrap();
     assert_eq!(parsed.returns.unwrap().len(), 1);
 }
+
+// ----------------------------- LIMIT clause -------------------------------
+
+#[test]
+fn test_limit_after_return() {
+    let q = gqlrust::compile_query("MATCH (x) RETURN x.name LIMIT 20").unwrap();
+    assert_eq!(q.limit, Some(20));
+}
+
+#[test]
+fn test_limit_lowercase() {
+    // The lexer accepts both casings (matches the existing convention
+    // for MATCH/RETURN/WHERE).
+    let q = gqlrust::compile_query("MATCH (x) RETURN x.name limit 5").unwrap();
+    assert_eq!(q.limit, Some(5));
+}
+
+#[test]
+fn test_limit_absent_is_none() {
+    let q = gqlrust::compile_query("MATCH (x) RETURN x.name").unwrap();
+    assert_eq!(q.limit, None);
+}
+
+#[test]
+fn test_limit_without_return() {
+    // LIMIT is independent of RETURN — the runtime applies it to whatever
+    // the query produces. `compile_query_unchecked` skips typechecking so
+    // we can exercise just the parser shape.
+    let q = gqlrust::compile_query_unchecked("MATCH (x) LIMIT 7").unwrap();
+    assert_eq!(q.limit, Some(7));
+    assert!(q.returns.is_none());
+}
+
+#[test]
+fn test_limit_zero_parses() {
+    // `LIMIT 0` is syntactically valid; the runtime is allowed to treat
+    // it the same as "no cap" per the `0 = unbounded` convention. The
+    // parser's job is only to refuse negatives.
+    let q = gqlrust::compile_query("MATCH (x) RETURN x.name LIMIT 0").unwrap();
+    assert_eq!(q.limit, Some(0));
+}
+
+#[test]
+fn test_limit_negative_rejected() {
+    let err = gqlrust::compile_query("MATCH (x) RETURN x.name LIMIT -3").unwrap_err();
+    assert!(
+        err.to_lowercase().contains("limit"),
+        "error should mention LIMIT, got {err:?}"
+    );
+}
+
+#[test]
+fn test_limit_after_where() {
+    let q = gqlrust::compile_query(
+        "MATCH (x) -[:Transfer]-> (y) WHERE x.amount > 100 RETURN y.name LIMIT 50",
+    )
+    .unwrap();
+    assert_eq!(q.limit, Some(50));
+    // Sanity: the WHERE-driven pushdown still happened — LIMIT didn't
+    // disturb the surrounding parse.
+    assert!(q.returns.is_some());
+}
+
+#[test]
+fn test_limit_with_group_by_aggregate() {
+    let q = gqlrust::compile_query(
+        "MATCH (x) GROUP BY x.country RETURN x.country, COUNT(*) LIMIT 10",
+    )
+    .unwrap();
+    assert_eq!(q.limit, Some(10));
+    assert!(q.group_by.is_some());
+}
+
+#[test]
+fn test_limit_displays_back() {
+    // Round-trip Display: a parsed query renders LIMIT N back into its
+    // string form, so REPL/error messages stay readable.
+    let q = gqlrust::compile_query("MATCH (x) RETURN x.name LIMIT 25").unwrap();
+    assert!(
+        q.to_string().contains("LIMIT 25"),
+        "Display should include LIMIT clause, got {}",
+        q
+    );
+}

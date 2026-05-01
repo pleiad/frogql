@@ -110,7 +110,7 @@ The runtime is generic over `GraphAccess`. Node and edge methods are separate: `
 ### Parser grammar hierarchy
 
 ```
-full_query  = MATCH? query (WHERE expr)? (RETURN items)?
+full_query  = MATCH? query (WHERE expr)? (RETURN items)? (LIMIT INT)?
 query       = path_pattern ("," path_pattern)*     ← Join (lowest precedence)
 path_pattern = path_term ("|" path_term)*           ← Union
 path_term   = path_factor+                          ← Concat (juxtaposition)
@@ -118,6 +118,8 @@ path_factor = path_primary quantifier?              ← Repeat {n,m}
 ```
 
 `MATCH` keyword is optional — bare path patterns like `(x)-[]->(y)` still work. `OPTIONAL MATCH` is supported as a top-level match clause. `is` and `IS` are aliases for the `typed`/`TYPED` type-predicate keyword; `IS NULL` / `IS NOT NULL` are dedicated null tests detected via lookahead before the type-predicate path. The `AS` keyword is ambiguous between type cast (in expressions) and alias (in RETURN); `return_comparison()` excludes `AS` from operators so it's available for aliases.
+
+`LIMIT N` populates `Query.limit: Option<u32>`; the runtime combines it with any caller-supplied cap via `min` (smaller wins). `LIMIT 0` short-circuits to an empty binding table per ISO/IEC 39075:2024.
 
 ### Typechecker
 

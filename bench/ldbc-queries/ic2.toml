@@ -17,15 +17,17 @@ param_columns = ["personId", "maxDate"]
 # Query template. {personId} and {maxDate} are placeholders the
 # runner replaces with the param values from the file.
 #
-# Note: spec's `LIMIT 20` is enforced via the bench's --limit flag
-# (Runtime::run_query's row cap), since gqlite's parser doesn't have
-# a LIMIT keyword yet. When parser support lands, append `LIMIT 20`
-# to the query below and drop --limit from the bench CLI.
+# `LIMIT 20` is the spec-faithful cap (LDBC IC2 spec: "LIMIT 20").
+# Now that gqlite's parser accepts LIMIT, the cap lives in the query
+# rather than via `bench_queries`'s `--limit` flag. The runtime
+# combines both caps via `min`, so passing `--limit N` for a smaller
+# ad-hoc budget still works without touching this file.
 query = """
 MATCH (p: Person {id: {personId}})~[:knows]~(friend: Person)<-[:hasCreator]-(c: Comment) \
     | (p: Person {id: {personId}})~[:knows]~(friend: Person)<-[:hasCreator]-(c: Post) \
 WHERE c.creationDate <= {maxDate} \
-RETURN friend.id, friend.firstName, friend.lastName, c.id, c.content, c.creationDate
+RETURN friend.id, friend.firstName, friend.lastName, c.id, c.content, c.creationDate \
+LIMIT 20
 """
 
 # What the spec asks the query to return, in order. For documentation

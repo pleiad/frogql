@@ -695,3 +695,54 @@ fn test_join_star_any_label() {
     let p = gqlrust::compile("(x) -[]-> (y), (x) -[]-> (z)").unwrap();
     assert_eq!(r.run(&p).rows.len(), 7);
 }
+
+// ==================== LIMIT runtime tests ============================
+
+#[test]
+fn test_query_limit_caps_rows() {
+    // Without LIMIT, this returns 4 rows (one per outgoing Transfer);
+    // LIMIT 2 in the query should cap that to 2.
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let q = gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 2").unwrap();
+    let result = r.run_query(&q, 0);
+    assert_eq!(result.row_count(), 2);
+}
+
+#[test]
+fn test_query_limit_smaller_than_results_no_op() {
+    // LIMIT bigger than the natural result size has no effect.
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let q = gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 1000").unwrap();
+    let result = r.run_query(&q, 0);
+    assert_eq!(result.row_count(), 4);
+}
+
+#[test]
+fn test_query_limit_min_with_runtime_cap() {
+    // When both an in-query LIMIT and a runtime cap are set, the smaller wins.
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let q = gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 3").unwrap();
+    // runtime cap=1 is stricter than query LIMIT 3 → expect 1 row
+    let result = r.run_query(&q, 1);
+    assert_eq!(result.row_count(), 1);
+}
+
+#[test]
+fn test_query_limit_no_return_caps_raw() {
+    // LIMIT without RETURN produces a Raw result truncated to LIMIT
+    // rows. fraud_graph has 4 Account nodes; LIMIT 2 caps to 2.
+    let g = fraud_graph();
+    let r = Runtime::new(&g);
+    let q = gqlrust::compile_query_unchecked("MATCH (x: Account) LIMIT 2").unwrap();
+    assert_eq!(q.limit, Some(2));
+    let result = r.run_query(&q, 0);
+    match result {
+        gqlrust::runtime::result::QueryResult::Raw(ir) => {
+            assert_eq!(ir.rows.len(), 2);
+        }
+        _ => panic!("expected Raw"),
+    }
+}

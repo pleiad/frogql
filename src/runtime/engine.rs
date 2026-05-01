@@ -32,6 +32,18 @@ fn check_value_preds(preds: &[(String, BinOp, Value)], props: &Props) -> bool {
         })
 }
 
+/// Reconcile an in-query `LIMIT N` (parsed into `Query.limit`) with a
+/// caller-provided `runtime_limit: usize`, both honoring the runtime's
+/// `0 = unbounded` convention. When both are set, the smaller cap wins
+/// (a stricter cap is always a valid implementation of a looser one).
+fn combine_limits(query_limit: Option<u32>, runtime_limit: usize) -> usize {
+    match (query_limit, runtime_limit) {
+        (None, n) => n,
+        (Some(q), 0) => q as usize,
+        (Some(q), n) => (q as usize).min(n),
+    }
+}
+
 /// Runtime engine for evaluating GQL path patterns on a graph.
 /// Generic over `GraphAccess` — works with both in-memory Graph and file-backed GraphStore.
 ///
@@ -56,12 +68,20 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         self.run_path_pattern(pattern, limit)
     }
 
-    /// Run a full Query (MATCH ... WHERE ... RETURN).
+    /// Run a full Query (MATCH ... WHERE ... RETURN [LIMIT N]).
     ///
     /// `limit` semantics differ between the two paths: with no aggregates
     /// it caps input rows (early termination); with aggregates it caps
     /// output rows after grouping (truncating input would corrupt counts).
+    ///
+    /// When the parsed `query.limit` is also set (from a `LIMIT N` clause
+    /// in the source query), both caps apply; the smaller wins. The
+    /// runtime's `0 = unbounded` convention is preserved at the boundary
+    /// — passing `0` here means "no caller-imposed cap, defer entirely
+    /// to the in-query LIMIT if one exists." If neither is set, the
+    /// query runs unbounded.
     pub fn run_query(&self, query: &Query, limit: usize) -> QueryResult {
+        let limit = combine_limits(query.limit, limit);
         let return_items = match &query.returns {
             None => {
                 let ir = self.run_match_chain(query, limit);
@@ -300,7 +320,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     fn run_path_pattern(&self, p: &PathPattern, limit: usize) -> IntermediateResult {
         match p {
-            PathPattern::Node(_) => self.run_node_pattern(p),
+            PathPattern::Node(_) => self.run_node_pattern(p, limit),
             PathPattern::EdgeRight(_)
             | PathPattern::EdgeLeft(_)
             | PathPattern::EdgeUndirected(_)
@@ -368,19 +388,31 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     // --- Optimized node pattern: uses label index when available ---
 
-    fn run_node_pattern(&self, p: &PathPattern) -> IntermediateResult {
+    fn run_node_pattern(&self, p: &PathPattern, limit: usize) -> IntermediateResult {
         let desc = p.descriptor();
         let candidates = self.get_candidate_nodes(desc);
         let var = desc.and_then(|d| d.var.as_deref());
 
-        let rows: Vec<ResultRow> = candidates
-            .iter()
-            .filter(|id| self.filter_node(**id, desc))
-            .map(|&id| {
-                let pv = PathValue::Node(id);
-                ResultRow::new(Path(vec![pv.clone()]), Assignment::from_optional(var, pv))
-            })
-            .collect();
+        // Honor the limit at scan time so a `LIMIT 20` against a million-
+        // node label doesn't enumerate the full label set first. `limit=0`
+        // means unbounded per the runtime convention. Built imperatively
+        // (rather than `.take(n)`) because the upstream filter is not
+        // pure-trivial — early-exit on hitting `limit` matches the
+        // pattern of every other branch in `run_path_pattern`.
+        let mut rows: Vec<ResultRow> = Vec::new();
+        for &id in &candidates {
+            if !self.filter_node(id, desc) {
+                continue;
+            }
+            let pv = PathValue::Node(id);
+            rows.push(ResultRow::new(
+                Path(vec![pv.clone()]),
+                Assignment::from_optional(var, pv),
+            ));
+            if limit > 0 && rows.len() >= limit {
+                break;
+            }
+        }
         IntermediateResult::new(rows)
     }
 

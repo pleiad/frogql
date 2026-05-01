@@ -98,6 +98,13 @@ pub struct Query {
     pub group_by: Option<Vec<Expr>>,
     pub returns: Option<Vec<ReturnItem>>,
     pub distinct: bool,
+    /// ISO §16.x `LIMIT <integer>`. None → no in-query cap (callers may
+    /// still pass a runtime cap via `Runtime::run_query(_, cap)`); when
+    /// both are present, the smaller wins. `Some(0)` means "return zero
+    /// rows" — distinct from `None` because the runtime conventionally
+    /// uses `0` to mean "unlimited" at the boundary; the lib.rs entry
+    /// points translate accordingly.
+    pub limit: Option<u32>,
 }
 
 impl Query {
@@ -107,6 +114,7 @@ impl Query {
             group_by: None,
             returns: None,
             distinct: false,
+            limit: None,
         }
     }
 
@@ -216,6 +224,9 @@ impl fmt::Display for Query {
             }
             let items: Vec<String> = returns.iter().map(|r| r.to_string()).collect();
             write!(f, "{}", items.join(", "))?;
+        }
+        if let Some(n) = self.limit {
+            write!(f, " LIMIT {n}")?;
         }
         Ok(())
     }
