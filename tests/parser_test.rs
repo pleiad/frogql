@@ -669,9 +669,7 @@ fn test_match_where_return() {
             PathPattern::Node(Some(d)) if d.var.as_deref() == Some("x") => {
                 *found = !d.value_preds.is_empty();
             }
-            PathPattern::Concat(a, b)
-            | PathPattern::Union(a, b)
-            | PathPattern::Join(a, b) => {
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
                 scan(a, found);
                 scan(b, found);
             }
