@@ -92,6 +92,63 @@ pub fn read_adjacency_root(pager: &mut Pager, root_page: u32) -> io::Result<Vec<
     read_pair_list(pager, root_page)
 }
 
+/// CSR adjacency: write three direction-buckets in one shot. Returns the
+/// root page that catalogues the six sub-chain roots
+/// `[out_offsets, out_flat, in_offsets, in_flat, und_offsets, und_flat]`.
+///
+/// On-disk this is dramatically cheaper to read than the per-node chain
+/// format (`write_adjacency_index`): the existing format spends one page
+/// per node on average and forces ~N small reads at open time, whereas
+/// the CSR format reads each direction's offsets+flat as one big sequential
+/// chain and slices in O(1) at query time.
+pub fn write_adjacency_csr(
+    pager: &mut Pager,
+    out_offsets: &[u32],
+    out_flat: &[u32],
+    in_offsets: &[u32],
+    in_flat: &[u32],
+    und_offsets: &[u32],
+    und_flat: &[u32],
+) -> io::Result<u32> {
+    let r0 = write_u32_list(pager, out_offsets)?;
+    let r1 = write_u32_list(pager, out_flat)?;
+    let r2 = write_u32_list(pager, in_offsets)?;
+    let r3 = write_u32_list(pager, in_flat)?;
+    let r4 = write_u32_list(pager, und_offsets)?;
+    let r5 = write_u32_list(pager, und_flat)?;
+    write_u32_list(pager, &[r0, r1, r2, r3, r4, r5])
+}
+
+/// CSR adjacency reader. Returns `(outgoing, incoming, undirected)` as
+/// `((offsets, flat), (offsets, flat), (offsets, flat))`.
+#[allow(clippy::type_complexity)]
+pub fn read_adjacency_csr(
+    pager: &mut Pager,
+    root: u32,
+) -> io::Result<(
+    (Vec<u32>, Vec<u32>),
+    (Vec<u32>, Vec<u32>),
+    (Vec<u32>, Vec<u32>),
+)> {
+    let sub_roots = read_u32_chain(pager, root)?;
+    if sub_roots.len() != 6 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "CSR adjacency root expected 6 sub-chains, got {}",
+                sub_roots.len()
+            ),
+        ));
+    }
+    let out_off = read_u32_chain(pager, sub_roots[0])?;
+    let out_fl = read_u32_chain(pager, sub_roots[1])?;
+    let in_off = read_u32_chain(pager, sub_roots[2])?;
+    let in_fl = read_u32_chain(pager, sub_roots[3])?;
+    let und_off = read_u32_chain(pager, sub_roots[4])?;
+    let und_fl = read_u32_chain(pager, sub_roots[5])?;
+    Ok(((out_off, out_fl), (in_off, in_fl), (und_off, und_fl)))
+}
+
 /// Read adjacency triples from a page chain: (edge_iid, other_node_iid, kind).
 pub fn read_triple_chain(pager: &mut Pager, first_page: u32) -> io::Result<Vec<(u32, u32, u8)>> {
     let mut result = Vec::new();

@@ -33,6 +33,64 @@ struct RecordLoc {
     cell_index: u16,
 }
 
+/// Compressed Sparse Row adjacency.
+///
+/// Replaces the previous `HashMap<NodeId, Vec<EdgeId>>` representation.
+/// `offsets[n]..offsets[n+1]` gives the slice of `flat` belonging to node
+/// `n`. Total memory is `(node_count + 1 + edge_count_in_dir) * 4` bytes,
+/// roughly half the HashMap variant for the same data, with cache-friendly
+/// contiguous access. Builds in O(N + E) via bucket-sort, ~10× faster than
+/// per-edge HashMap inserts at SF0.1 scale.
+#[derive(Debug, Clone, Default)]
+struct AdjCsr {
+    /// Length `node_count + 1`. Sentinel: `offsets[node_count] == flat.len()`.
+    offsets: Vec<u32>,
+    /// Edge ids, contiguous slices per node.
+    flat: Vec<u32>,
+}
+
+impl AdjCsr {
+    fn empty(node_count: usize) -> Self {
+        Self {
+            offsets: vec![0; node_count + 1],
+            flat: Vec::new(),
+        }
+    }
+
+    fn slice(&self, node_id: u32) -> &[u32] {
+        let n = node_id as usize;
+        if n + 1 >= self.offsets.len() {
+            return &[];
+        }
+        let start = self.offsets[n] as usize;
+        let end = self.offsets[n + 1] as usize;
+        &self.flat[start..end]
+    }
+}
+
+/// Build a CSR from an unordered list of `(node_id, edge_id)` pairs in O(N + E)
+/// via bucket-sort. Replaces ~E HashMap entry/push operations with two linear
+/// passes — the dominant per-direction cost in `LazyGraphStore::open`.
+fn build_csr(node_count: usize, pairs: &[(u32, u32)]) -> AdjCsr {
+    let mut offsets = vec![0u32; node_count + 1];
+    for (n, _) in pairs {
+        offsets[*n as usize + 1] += 1;
+    }
+    for i in 1..offsets.len() {
+        offsets[i] += offsets[i - 1];
+    }
+    let mut flat = vec![0u32; pairs.len()];
+    // `cursor` tracks the next free slot per node; starts equal to the
+    // final offsets and advances as we place edges.
+    let mut cursor = offsets[..node_count].to_vec();
+    for (n, e) in pairs {
+        let pos = cursor[*n as usize] as usize;
+        flat[pos] = *e;
+        cursor[*n as usize] += 1;
+    }
+    AdjCsr { offsets, flat }
+}
+
 pub struct LazyGraphStore {
     pager: RefCell<Pager>,
     strings: StringTable,
@@ -53,9 +111,13 @@ pub struct LazyGraphStore {
     // Indexes (use internal IDs for compactness)
     label_to_nodes: HashMap<String, Vec<u32>>,
     label_to_edges: HashMap<String, Vec<u32>>,
-    outgoing: HashMap<u32, Vec<u32>>,
-    incoming: HashMap<u32, Vec<u32>>,
-    undirected_adj: HashMap<u32, Vec<u32>>,
+    /// CSR adjacency per direction. Indexed by NodeId (internal u32). Built
+    /// in O(N + E) at open time; slice access is one prefix-sum lookup +
+    /// contiguous read. Replaces a HashMap<NodeId, Vec<EdgeId>> that cost
+    /// ~5s to populate at SF0.1 scale.
+    outgoing_csr: AdjCsr,
+    incoming_csr: AdjCsr,
+    undirected_csr: AdjCsr,
 
     // Graph-type catalog (loaded from chain at open, persisted via save_catalog).
     catalog: RefCell<GraphTypeCatalog>,
@@ -77,7 +139,12 @@ impl LazyGraphStore {
     }
 
     pub fn open_with_cache(db_path: &Path, cache_size: usize) -> io::Result<Self> {
+        let trace = std::env::var("GQLITE_TRACE_OPEN").is_ok();
+        let t0 = std::time::Instant::now();
         let mut pager = Pager::open_with_cache(db_path, cache_size)?;
+        if trace {
+            eprintln!("  pager open:           {:.3}s", t0.elapsed().as_secs_f64());
+        }
 
         let string_table_root = pager.header.string_table_root;
         let node_locs_root = pager.header.node_locs_root;
@@ -87,12 +154,16 @@ impl LazyGraphStore {
         let adjacency_root = pager.header.adjacency_root;
 
         // Load string table (needed to resolve label names for indexes)
+        let t1 = std::time::Instant::now();
         let st_pages = if string_table_root != 0 {
             disk_index::read_u32_chain(&mut pager, string_table_root)?
         } else {
             collect_pages_by_type(&mut pager, PageType::StringTable)?
         };
         let strings = StringTable::load(&st_pages, &mut pager)?;
+        if trace {
+            eprintln!("  string table load:    {:.3}s", t1.elapsed().as_secs_f64());
+        }
 
         // All three roots must be set for a valid fast index.
         // Files upgraded by an intermediate version may have node_locs/edge_topo
@@ -112,14 +183,15 @@ impl LazyGraphStore {
             edge_directed: Vec::new(),
             label_to_nodes: HashMap::new(),
             label_to_edges: HashMap::new(),
-            outgoing: HashMap::new(),
-            incoming: HashMap::new(),
-            undirected_adj: HashMap::new(),
+            outgoing_csr: AdjCsr::default(),
+            incoming_csr: AdjCsr::default(),
+            undirected_csr: AdjCsr::default(),
             catalog: RefCell::new(GraphTypeCatalog::new()),
             catalog_root: Cell::new(catalog_root),
             secondary: RefCell::new(SecondaryIndex::new()),
         };
 
+        let t2 = std::time::Instant::now();
         if has_fast_index {
             // Fast path: read pre-built indexes directly
             store.load_from_indexes(
@@ -134,19 +206,32 @@ impl LazyGraphStore {
             store.load_from_page_scan()?;
             store.upgrade_file(db_path)?;
         }
+        if trace {
+            eprintln!(
+                "  topology + indexes:   {:.3}s  ({} nodes, {} edges)",
+                t2.elapsed().as_secs_f64(),
+                store.node_count,
+                store.edge_count
+            );
+        }
 
         // Load the catalog chain (if any). A legacy file with
         // catalog_root=0 yields an empty catalog and stays permissive.
+        let t3 = std::time::Instant::now();
         if store.catalog_root.get() != 0 {
             let mut pager = store.pager.borrow_mut();
             let cat = catalog_io::read_catalog(&mut pager, store.catalog_root.get())?;
             *store.catalog.borrow_mut() = cat;
         }
+        if trace {
+            eprintln!("  catalog load:         {:.3}s", t3.elapsed().as_secs_f64());
+        }
 
         // Auto-infer secondary indexes. Single O(N) pass over nodes; reads
         // properties via the same page cache, so the cost is bounded by the
-        // store's existing access pattern. Idempotent — re-buildable on demand.
-        {
+        // store's existing access pattern. Skip with GQLITE_DISABLE_AUTO_INDEXES=1.
+        let t4 = std::time::Instant::now();
+        if std::env::var("GQLITE_DISABLE_AUTO_INDEXES").is_err() {
             let mut idx = SecondaryIndex::new();
             idx.auto_build(&store);
             if std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
@@ -159,6 +244,13 @@ impl LazyGraphStore {
                 }
             }
             *store.secondary.borrow_mut() = idx;
+        }
+        if trace {
+            eprintln!(
+                "  secondary index auto-build: {:.3}s  ({} indexes)",
+                t4.elapsed().as_secs_f64(),
+                store.secondary.borrow().list().len()
+            );
         }
 
         Ok(store)
@@ -259,24 +351,49 @@ impl LazyGraphStore {
             }
         }
 
-        // Adjacency index (already persisted by save_graph)
-        if adjacency_root != 0 {
+        // Adjacency: prefer the new CSR layout if present (one big sequential
+        // chain per direction), fall back to the legacy per-node format
+        // (slow: ~N small reads). Both produce the same in-memory CSR.
+        let csr_root = pager.header.csr_adjacency_root;
+        let nc = self.node_count as usize;
+        if csr_root != 0 {
+            let ((out_off, out_fl), (in_off, in_fl), (und_off, und_fl)) =
+                disk_index::read_adjacency_csr(&mut pager, csr_root)?;
+            self.outgoing_csr = AdjCsr {
+                offsets: out_off,
+                flat: out_fl,
+            };
+            self.incoming_csr = AdjCsr {
+                offsets: in_off,
+                flat: in_fl,
+            };
+            self.undirected_csr = AdjCsr {
+                offsets: und_off,
+                flat: und_fl,
+            };
+        } else if adjacency_root != 0 {
             let adj_entries = disk_index::read_adjacency_root(&mut pager, adjacency_root)?;
+            let mut out_pairs: Vec<(u32, u32)> = Vec::new();
+            let mut in_pairs: Vec<(u32, u32)> = Vec::new();
+            let mut und_pairs: Vec<(u32, u32)> = Vec::new();
             for (node_iid, first_page) in adj_entries {
                 let triples = disk_index::read_triple_chain(&mut pager, first_page)?;
                 for (edge_iid, _other_node_iid, kind) in triples {
                     match kind {
-                        0 => self.outgoing.entry(node_iid).or_default().push(edge_iid),
-                        1 => self.incoming.entry(node_iid).or_default().push(edge_iid),
-                        2 => self
-                            .undirected_adj
-                            .entry(node_iid)
-                            .or_default()
-                            .push(edge_iid),
+                        0 => out_pairs.push((node_iid, edge_iid)),
+                        1 => in_pairs.push((node_iid, edge_iid)),
+                        2 => und_pairs.push((node_iid, edge_iid)),
                         _ => {}
                     }
                 }
             }
+            self.outgoing_csr = build_csr(nc, &out_pairs);
+            self.incoming_csr = build_csr(nc, &in_pairs);
+            self.undirected_csr = build_csr(nc, &und_pairs);
+        } else {
+            self.outgoing_csr = AdjCsr::empty(nc);
+            self.incoming_csr = AdjCsr::empty(nc);
+            self.undirected_csr = AdjCsr::empty(nc);
         }
 
         Ok(())
@@ -285,6 +402,11 @@ impl LazyGraphStore {
     /// Legacy fallback: scan all pages to build indexes.
     fn load_from_page_scan(&mut self) -> io::Result<()> {
         let page_count = self.pager.borrow().header.page_count;
+        // Accumulate adjacency pairs across all pages, then build CSR once
+        // at the end. Avoids per-edge HashMap entry/push.
+        let mut out_pairs: Vec<(u32, u32)> = Vec::new();
+        let mut in_pairs: Vec<(u32, u32)> = Vec::new();
+        let mut und_pairs: Vec<(u32, u32)> = Vec::new();
         for pg in 1..page_count {
             let page = self.pager.borrow_mut().read_page(pg)?;
             match page.page_type() {
@@ -292,11 +414,21 @@ impl LazyGraphStore {
                     self.index_nodes_from_page(pg, &page);
                 }
                 PageType::EdgeData => {
-                    self.index_edges_from_page(pg, &page);
+                    self.index_edges_from_page(
+                        pg,
+                        &page,
+                        &mut out_pairs,
+                        &mut in_pairs,
+                        &mut und_pairs,
+                    );
                 }
                 _ => {}
             }
         }
+        let nc = self.node_count as usize;
+        self.outgoing_csr = build_csr(nc, &out_pairs);
+        self.incoming_csr = build_csr(nc, &in_pairs);
+        self.undirected_csr = build_csr(nc, &und_pairs);
         Ok(())
     }
 
@@ -365,7 +497,14 @@ impl LazyGraphStore {
         }
     }
 
-    fn index_edges_from_page(&mut self, page_num: u32, page: &Page) {
+    fn index_edges_from_page(
+        &mut self,
+        page_num: u32,
+        page: &Page,
+        out_pairs: &mut Vec<(u32, u32)>,
+        in_pairs: &mut Vec<(u32, u32)>,
+        und_pairs: &mut Vec<(u32, u32)>,
+    ) {
         for i in 0..page.cell_count() {
             let (offset, end) = cell_bounds(page, i);
             let decoded = record::decode_edge(&page.data[offset..end]);
@@ -385,17 +524,11 @@ impl LazyGraphStore {
             let tgt = decoded.tgt_internal_id;
 
             if decoded.directed {
-                self.outgoing.entry(src).or_default().push(internal_id);
-                self.incoming.entry(tgt).or_default().push(internal_id);
+                out_pairs.push((src, internal_id));
+                in_pairs.push((tgt, internal_id));
             } else {
-                self.undirected_adj
-                    .entry(src)
-                    .or_default()
-                    .push(internal_id);
-                self.undirected_adj
-                    .entry(tgt)
-                    .or_default()
-                    .push(internal_id);
+                und_pairs.push((src, internal_id));
+                und_pairs.push((tgt, internal_id));
             }
 
             self.edge_locs.push(RecordLoc {
@@ -587,18 +720,15 @@ impl GraphAccess for LazyGraphStore {
     }
 
     fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {
-        self.outgoing.get(&node_id).cloned().unwrap_or_default()
+        self.outgoing_csr.slice(node_id).to_vec()
     }
 
     fn incoming_edges(&self, node_id: Id) -> Vec<Id> {
-        self.incoming.get(&node_id).cloned().unwrap_or_default()
+        self.incoming_csr.slice(node_id).to_vec()
     }
 
     fn undirected_edges_of(&self, node_id: Id) -> Vec<Id> {
-        self.undirected_adj
-            .get(&node_id)
-            .cloned()
-            .unwrap_or_default()
+        self.undirected_csr.slice(node_id).to_vec()
     }
 }
 

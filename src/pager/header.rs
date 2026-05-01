@@ -27,7 +27,8 @@ pub const FORMAT_VERSION: u16 = 1;
 /// bytes 56-59: edge topology index root (u32 LE, 0 = legacy file without fast index)
 /// bytes 60-63: graph-type catalog root page (u32 LE, 0 = no catalog)
 /// bytes 64-95: active graph-type name (u8[32], null-padded UTF-8; empty = none)
-/// bytes 96+:   reserved (zeroed)
+/// bytes 96-99: CSR adjacency root page (u32 LE, 0 = legacy adjacency_root only)
+/// bytes 100+:  reserved (zeroed)
 /// ```
 ///
 /// Note: page 0 does NOT use the standard slotted-page cell machinery.
@@ -54,6 +55,11 @@ pub struct FileHeader {
     /// Active graph-type name. Capped at 31 bytes UTF-8 plus a null
     /// terminator in the header. `None` ⇔ "no active type".
     pub active_type_name: Option<String>,
+    /// Root page of the CSR adjacency catalog (0 = absent; loader falls
+    /// back to the per-node `adjacency_root` chain). The CSR layout stores
+    /// 6 sub-chains (per-direction offsets + flat edge_id arrays) and
+    /// reads in O(N + E) total instead of N small per-node reads.
+    pub csr_adjacency_root: u32,
 }
 
 impl Default for FileHeader {
@@ -75,6 +81,7 @@ impl Default for FileHeader {
             edge_topo_root: 0,
             catalog_root: 0,
             active_type_name: None,
+            csr_adjacency_root: 0,
         }
     }
 }
@@ -134,6 +141,7 @@ impl FileHeader {
         d[56..60].copy_from_slice(&self.edge_topo_root.to_le_bytes());
         d[60..64].copy_from_slice(&self.catalog_root.to_le_bytes());
         d[64..96].copy_from_slice(&encode_active_name(self.active_type_name.as_deref()));
+        d[96..100].copy_from_slice(&self.csr_adjacency_root.to_le_bytes());
 
         page
     }
@@ -163,6 +171,7 @@ impl FileHeader {
             edge_topo_root: u32::from_le_bytes([d[56], d[57], d[58], d[59]]),
             catalog_root: u32::from_le_bytes([d[60], d[61], d[62], d[63]]),
             active_type_name: decode_active_name(&d[64..96]),
+            csr_adjacency_root: u32::from_le_bytes([d[96], d[97], d[98], d[99]]),
         })
     }
 }

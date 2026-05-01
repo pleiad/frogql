@@ -80,7 +80,14 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
     let node_label_root = disk_index::write_label_index(&mut pager, &node_label_entries)?;
     let edge_label_root = disk_index::write_label_index(&mut pager, &edge_label_entries)?;
 
-    // Adjacency index
+    // Adjacency: build CSR (offsets + flat per direction) AND the legacy
+    // per-node format. Old readers see `adjacency_root`; new readers prefer
+    // `csr_adjacency_root`. Both consume the same source data, so they stay
+    // in sync.
+    let node_count = graph.node_names.len();
+    let mut out_pairs: Vec<(u32, u32)> = Vec::new();
+    let mut in_pairs: Vec<(u32, u32)> = Vec::new();
+    let mut und_pairs: Vec<(u32, u32)> = Vec::new();
     let mut adj: HashMap<u32, Vec<(u32, u32, u8)>> = HashMap::new();
     for (eid, _) in graph.edge_names.iter().enumerate() {
         let eid32 = eid as u32;
@@ -89,15 +96,45 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
         if graph.edge_directed[eid] {
             adj.entry(src).or_default().push((eid32, tgt, 0));
             adj.entry(tgt).or_default().push((eid32, src, 1));
+            out_pairs.push((src, eid32));
+            in_pairs.push((tgt, eid32));
         } else {
             adj.entry(src).or_default().push((eid32, tgt, 2));
             adj.entry(tgt).or_default().push((eid32, src, 2));
+            und_pairs.push((src, eid32));
+            und_pairs.push((tgt, eid32));
         }
     }
     // Matches disk_index::write_adjacency_index's parameter shape (file format).
     #[allow(clippy::type_complexity)]
     let adj_entries: Vec<(u32, Vec<(u32, u32, u8)>)> = adj.into_iter().collect();
     let adj_root = disk_index::write_adjacency_index(&mut pager, &adj_entries)?;
+
+    // Build CSR offsets+flat arrays for each direction. Bucket-sort: count,
+    // prefix-sum, then place using a cursor.
+    let csr = |pairs: &[(u32, u32)]| -> (Vec<u32>, Vec<u32>) {
+        let mut offsets = vec![0u32; node_count + 1];
+        for (n, _) in pairs {
+            offsets[*n as usize + 1] += 1;
+        }
+        for i in 1..offsets.len() {
+            offsets[i] += offsets[i - 1];
+        }
+        let mut flat = vec![0u32; pairs.len()];
+        let mut cursor = offsets[..node_count].to_vec();
+        for (n, e) in pairs {
+            let pos = cursor[*n as usize] as usize;
+            flat[pos] = *e;
+            cursor[*n as usize] += 1;
+        }
+        (offsets, flat)
+    };
+    let (out_off, out_fl) = csr(&out_pairs);
+    let (in_off, in_fl) = csr(&in_pairs);
+    let (und_off, und_fl) = csr(&und_pairs);
+    let csr_adj_root = disk_index::write_adjacency_csr(
+        &mut pager, &out_off, &out_fl, &in_off, &in_fl, &und_off, &und_fl,
+    )?;
 
     // --- Write string table page directory ---
     let st_page_list = strings.page_numbers().to_vec();
@@ -119,6 +156,7 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
     pager.header.label_index_root = node_label_root;
     pager.header.edge_label_index_root = edge_label_root;
     pager.header.adjacency_root = adj_root;
+    pager.header.csr_adjacency_root = csr_adj_root;
     pager.header.string_table_root = st_root;
     pager.header.node_locs_root = node_locs_root;
     pager.header.edge_topo_root = edge_topo_root;
