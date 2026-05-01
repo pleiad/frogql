@@ -22,8 +22,11 @@
 //!                         [--backend memory|lazy|disk]
 //!                         [--params-dir <dir>]
 //!                         [--queries-dir <dir>]
-//!                         [--iters N] [--warmup N] [--limit N]
+//!                         [--iters N] [--warmup N]
 //!                         [--csv-dir <dir>]      # required for --backend memory
+//!
+//! Row caps live in each `bench/ldbc-queries/ic<n>.toml`'s query (the
+//! spec-faithful `LIMIT N`); there is no `--limit` flag to override.
 //!
 //! Three GraphAccess backends:
 //!   - **memory** — `Graph` from `csv_loader::load_from_ldbc_csv_dir`.
@@ -45,9 +48,92 @@ use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 use gqlrust::compile_query_unchecked;
 use gqlrust::model::csv_loader;
 use gqlrust::model::graph_access::GraphAccess;
+use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
+use gqlrust::runtime::result::QueryResult;
 use gqlrust::store::disk::DiskGraphStore;
 use gqlrust::store::lazy::LazyGraphStore;
+
+// ----------------------------------------------------------- Result shape ---
+
+/// One-letter type code per column position.
+fn shape_of_value(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "n",
+        Value::Int(_) => "i",
+        Value::Str(_) => "s",
+        Value::Bool(_) => "b",
+        Value::Float(_) => "f",
+        Value::List(_) => "l",
+        Value::Record(_) => "r",
+    }
+}
+
+/// Per-column type-set across all rows, joined by `/` within a column
+/// and `,` between columns. Example: `i,s,s,i,n/s,i` means columns 0
+/// 1, 2, 3, 5 carry exactly one type each (Int, Str, Str, Int, Int)
+/// and column 4 carries both Null and Str across the row set.
+///
+/// This accommodates a sometimes-null column without making the shape
+/// dependent on which N rows a system chose under LIMIT-without-ORDER-BY:
+/// gqlite picking 20 rows that include null `c.content` and graphqlite
+/// picking 20 rows that don't would still both expose Str at that
+/// column; only one would expose Null. The per-column-set form lets
+/// the comparison flag genuine type disagreement (e.g. column 1 being
+/// Int on one system and Str on another) without false-positiving
+/// nullability variation.
+fn shape_of_result(result: &QueryResult) -> String {
+    use std::collections::BTreeSet;
+    let rows = match result {
+        QueryResult::Projected(rs) => rs,
+        QueryResult::Raw(_) => return "raw".to_string(),
+    };
+    if rows.is_empty() {
+        return "empty".to_string();
+    }
+    let n_cols = rows[0].len();
+    let mut cols: Vec<BTreeSet<&str>> = vec![BTreeSet::new(); n_cols];
+    for row in rows {
+        for (i, v) in row.iter().take(n_cols).enumerate() {
+            cols[i].insert(shape_of_value(v));
+        }
+    }
+    cols.iter()
+        .map(|set| set.iter().copied().collect::<Vec<_>>().join("/"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Per-column subset check: each column's actual type-set must be ⊆
+/// its expected type-set (so `expected="n/s"` accepts both `s` and
+/// `n/s`). Python mirror at `bench/cross-system/graphqlite/run.py` —
+/// keep in sync.
+fn verify_shape(actual: &str, expected: &str) -> Result<(), String> {
+    use std::collections::HashSet;
+    let parse = |s: &str| -> Vec<HashSet<String>> {
+        s.split(',')
+            .map(|c| c.split('/').map(str::to_string).collect())
+            .collect()
+    };
+    let a = parse(actual);
+    let e = parse(expected);
+    if a.len() != e.len() {
+        return Err(format!(
+            "column count: actual={}, expected={}",
+            a.len(),
+            e.len()
+        ));
+    }
+    for (i, (ac, ec)) in a.iter().zip(e.iter()).enumerate() {
+        if !ac.is_subset(ec) {
+            let extras: Vec<&str> = ac.difference(ec).map(String::as_str).collect();
+            return Err(format!(
+                "col {i}: actual {ac:?} not ⊆ expected {ec:?} (extra: {extras:?})"
+            ));
+        }
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------- Backend ---
 
@@ -107,6 +193,11 @@ struct IcQuery {
     query: Option<String>,
     #[allow(dead_code)]
     return_columns: Option<Vec<String>>,
+    /// Per-column type signature the result must satisfy. See the
+    /// header comment in `bench/ldbc-queries/ic2.toml` for the format.
+    /// Optional — when absent, the runner emits the actual shape on
+    /// stderr but performs no verification.
+    expected_shape: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     divergences: HashMap<String, String>,
@@ -355,9 +446,11 @@ fn print_usage(prog: &str) {
     eprintln!(
         "Usage: {prog} <db.gdb> [--ic <n>|all|blocked]\n\
          \t[--backend memory|lazy|disk] [--params-dir <dir>] [--queries-dir <dir>]\n\
-         \t[--iters N] [--warmup N] [--limit N] [--csv-dir <dir>]\n\
+         \t[--iters N] [--warmup N] [--csv-dir <dir>]\n\
          \n\
-         Defaults: --ic 2  --backend lazy  --iters 3  --warmup 0  --limit 20\n\
+         Defaults: --ic 2  --backend lazy  --iters 3  --warmup 0\n\
+         Row caps are spec-faithful and live in each ic<n>.toml's query\n\
+         (e.g. IC2 has `LIMIT 20`); no CLI override.\n\
          --warmup N runs N extra iters per row before the timed ones; their\n\
          measurements are discarded. Whether this helps depends on OS / RAM /\n\
          storage: on a warm machine with free RAM >= dataset size it usually\n\
@@ -387,7 +480,6 @@ fn main() {
 
     let mut iters: usize = 3;
     let mut warmup: usize = 0;
-    let mut limit: usize = 20;
     let mut backend = Backend::Lazy;
     let mut csv_dir: Option<String> = None;
     let mut params_dir: Option<String> = None;
@@ -416,13 +508,6 @@ fn main() {
             "--warmup" => {
                 warmup = need_value(i, "--warmup").parse().unwrap_or_else(|e| {
                     eprintln!("invalid --warmup value: {e}");
-                    std::process::exit(1);
-                });
-                i += 2;
-            }
-            "--limit" => {
-                limit = need_value(i, "--limit").parse().unwrap_or_else(|e| {
-                    eprintln!("invalid --limit value: {e}");
                     std::process::exit(1);
                 });
                 i += 2;
@@ -574,7 +659,6 @@ fn main() {
                 &params_dir,
                 iters,
                 warmup,
-                limit,
                 &mut sys,
                 rss_baseline,
             );
@@ -601,7 +685,6 @@ fn main() {
                 &params_dir,
                 iters,
                 warmup,
-                limit,
                 &mut sys,
                 rss_baseline,
             );
@@ -628,7 +711,6 @@ fn main() {
                 &params_dir,
                 iters,
                 warmup,
-                limit,
                 &mut sys,
                 rss_baseline,
             );
@@ -653,7 +735,6 @@ fn run_targets<G: GraphAccess>(
     params_dir: &Path,
     iters: usize,
     warmup: usize,
-    limit: usize,
     sys: &mut System,
     rss_baseline: f64,
 ) {
@@ -689,7 +770,6 @@ fn run_targets<G: GraphAccess>(
             params_dir,
             iters,
             warmup,
-            limit,
             sys,
             &mut peak_rss,
         ));
@@ -779,7 +859,6 @@ fn run_one_ic<G: GraphAccess>(
     params_dir: &Path,
     iters: usize,
     warmup: usize,
-    limit: usize,
     sys: &mut System,
     peak_rss: &mut f64,
 ) -> IcSummary {
@@ -804,7 +883,7 @@ fn run_one_ic<G: GraphAccess>(
         backend.label()
     );
     eprintln!(
-        "Params: {} ({} rows, columns: {});  {warmup}+{iters} iters/param (warmup+measured);  limit={limit}",
+        "Params: {} ({} rows, columns: {});  {warmup}+{iters} iters/param (warmup+measured)",
         params_file_name,
         rows.len(),
         header.join(", "),
@@ -858,11 +937,13 @@ fn run_one_ic<G: GraphAccess>(
         // it can absorb a real first-iter penalty. Default 0; raise
         // via --warmup if the per-row summary shows iter 0 dominant.
         for _ in 0..warmup {
-            let _ = rt.run_query(&parsed, limit);
+            let _ = rt.run_query(&parsed, 0);
         }
+        // Shape work runs after the iter loop, never between timed iters.
+        let mut iter0_result: Option<QueryResult> = None;
         for n in 0..iters {
             let start = Instant::now();
-            let result = rt.run_query(&parsed, limit);
+            let result = rt.run_query(&parsed, 0);
             let elapsed = start.elapsed();
             samples.push(elapsed);
             last_count = result.row_count();
@@ -874,7 +955,26 @@ fn run_one_ic<G: GraphAccess>(
                 last_count,
                 elapsed.as_nanos()
             );
+            if n == 0 {
+                iter0_result = Some(result);
+            }
         }
+        // Pin both shape and count to iter 0; if a non-determinism bug
+        // ever appears, both fields move together rather than just one.
+        let (actual_shape, actual_count) = match &iter0_result {
+            Some(r) => (shape_of_result(r), r.row_count()),
+            None => (String::new(), 0),
+        };
+        let status = match q.expected_shape.as_deref() {
+            Some(exp) => match verify_shape(&actual_shape, exp) {
+                Ok(()) => "ok".to_string(),
+                Err(why) => format!("fail reason=\"{why}\""),
+            },
+            None => "no-expected".to_string(),
+        };
+        eprintln!(
+            "  SHAPE row={row_idx} count={actual_count} shape={actual_shape} status={status}"
+        );
         let cur_rss = rss_mb(sys);
         if cur_rss > *peak_rss {
             *peak_rss = cur_rss;
