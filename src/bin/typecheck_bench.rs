@@ -316,10 +316,7 @@ fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
     const TABLE_WIDTH: usize = 103; // sum of the format widths below + separators
     eprintln!(
         "{:<10} {:<28} {:>13} {:>15} {:>11} {:>9} {:>11}",
-        "cat", "case",
-        "compile_chk_us", "compile_unchk_us",
-        "rt_unchk_ms",
-        "outcome", "tc_impact",
+        "cat", "case", "compile_chk_us", "compile_unchk_us", "rt_unchk_ms", "outcome", "tc_impact",
     );
     eprintln!(
         "  (tc_impact: Yx on empty/rejected = (compile_unchk + rt_unchk) / compile_chk; \
@@ -418,7 +415,14 @@ fn run_case(
         let compile_unchk_ns = t.elapsed().as_nanos();
         if !is_warmup {
             compile_unchk_samples.push(compile_unchk_ns);
-            csv_row(db_path, case, "compile_unchk", n - warmup, compile_unchk_ns, "");
+            csv_row(
+                db_path,
+                case,
+                "compile_unchk",
+                n - warmup,
+                compile_unchk_ns,
+                "",
+            );
         }
 
         // Runtime on the unchecked path. Skipped only if parse failed

@@ -110,11 +110,8 @@ impl Typechecker {
         // a leading OPTIONAL, every variable it introduces gains Null per
         // TOpt with Γ₁ = ∅.
         let (mut env, mut path) = if first.is_optional() {
-            let acc = TypeEnvironment::outer_join(
-                &self.schema,
-                &TypeEnvironment::new(),
-                &first_r.env,
-            );
+            let acc =
+                TypeEnvironment::outer_join(&self.schema, &TypeEnvironment::new(), &first_r.env);
             (acc, first_r.path)
         } else {
             (first_r.env, first_r.path)
@@ -123,19 +120,19 @@ impl Typechecker {
         for m in iter {
             let r = self.check_path_pattern(m.pattern());
             env = match m {
-                MatchStatement::Simple { .. } => match TypeEnvironment::meet(
-                    &self.schema, &env, &r.env,
-                ) {
-                    Ok(e) => {
-                        self.warn_for_collapsed_bindings(&e, &env, &r.env);
-                        e
+                MatchStatement::Simple { .. } => {
+                    match TypeEnvironment::meet(&self.schema, &env, &r.env) {
+                        Ok(e) => {
+                            self.warn_for_collapsed_bindings(&e, &env, &r.env);
+                            e
+                        }
+                        Err(e) => {
+                            self.errors
+                                .push(format!("Concatenation of contexts failed: {}", e));
+                            env
+                        }
                     }
-                    Err(e) => {
-                        self.errors
-                            .push(format!("Concatenation of contexts failed: {}", e));
-                        env
-                    }
-                },
+                }
                 MatchStatement::Optional { .. } => {
                     TypeEnvironment::outer_join(&self.schema, &env, &r.env)
                 }

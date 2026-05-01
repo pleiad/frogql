@@ -79,18 +79,15 @@ fn parser_match_then_optional_preserves_order() {
 
 #[test]
 fn parser_optional_match_with_per_clause_where() {
-    let q = compile_query_unchecked(
-        "MATCH (x: User) OPTIONAL MATCH (y: Pet) WHERE y.name = 'Rex'",
-    )
-    .unwrap();
+    let q = compile_query_unchecked("MATCH (x: User) OPTIONAL MATCH (y: Pet) WHERE y.name = 'Rex'")
+        .unwrap();
     assert_eq!(q.matches.len(), 2);
     assert!(matches!(&q.matches[1], MatchStatement::Optional { .. }));
 }
 
 #[test]
 fn parser_three_match_chain_with_two_optionals() {
-    let q =
-        compile_query_unchecked("MATCH (x) OPTIONAL MATCH (y) OPTIONAL MATCH (z)").unwrap();
+    let q = compile_query_unchecked("MATCH (x) OPTIONAL MATCH (y) OPTIONAL MATCH (z)").unwrap();
     assert_eq!(q.matches.len(), 3);
     assert!(matches!(&q.matches[0], MatchStatement::Simple { .. }));
     assert!(matches!(&q.matches[1], MatchStatement::Optional { .. }));
@@ -235,10 +232,7 @@ fn runtime_optional_always_matches_equals_natural_join() {
         &g,
         "MATCH (a: Account) OPTIONAL MATCH (a)-[:Transfer]->(b: Account)",
     );
-    let nat = run_raw_count(
-        &g,
-        "MATCH (a: Account) MATCH (a)-[:Transfer]->(b: Account)",
-    );
+    let nat = run_raw_count(&g, "MATCH (a: Account) MATCH (a)-[:Transfer]->(b: Account)");
     // Every Account has at least one outgoing Transfer in fraud.json,
     // so the unsuccess branch fires zero times → counts must agree.
     assert_eq!(opt, nat);
@@ -337,7 +331,8 @@ fn runtime_optional_where_runs_before_outer_join() {
     assert_eq!(rows.len(), 2, "outer table preserved despite filter");
     for r in &rows {
         assert_eq!(
-            r[1], Value::Null,
+            r[1],
+            Value::Null,
             "no pet named Garfield exists → every row falls into unsuccess",
         );
     }

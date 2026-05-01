@@ -144,9 +144,13 @@ impl Parser {
         }
         let first_pattern = self.match_clause_body()?;
         let first_stmt = if first_optional {
-            MatchStatement::Optional { pattern: first_pattern }
+            MatchStatement::Optional {
+                pattern: first_pattern,
+            }
         } else {
-            MatchStatement::Simple { pattern: first_pattern }
+            MatchStatement::Simple {
+                pattern: first_pattern,
+            }
         };
         let mut matches = vec![first_stmt];
 

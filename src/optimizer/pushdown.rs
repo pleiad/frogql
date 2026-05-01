@@ -436,9 +436,7 @@ mod tests {
     fn first_node_value_preds(p: &PathPattern, var: &str) -> Vec<(String, BinOp, Value)> {
         match p {
             PathPattern::Node(Some(d)) if d.var.as_deref() == Some(var) => d.value_preds.clone(),
-            PathPattern::Concat(a, b)
-            | PathPattern::Union(a, b)
-            | PathPattern::Join(a, b) => {
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
                 let mut left = first_node_value_preds(a, var);
                 if !left.is_empty() {
                     return left;

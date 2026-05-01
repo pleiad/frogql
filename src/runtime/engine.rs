@@ -24,10 +24,12 @@ use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
 /// Apply value predicates pushed down by the optimizer to raw graph properties.
 /// Missing key → predicate is null → reject.
 fn check_value_preds(preds: &[(String, BinOp, Value)], props: &Props) -> bool {
-    preds.iter().all(|(attr, op, expected)| match props.get(attr) {
-        Some(actual) => cmp_values(actual, *op, expected),
-        None => false,
-    })
+    preds
+        .iter()
+        .all(|(attr, op, expected)| match props.get(attr) {
+            Some(actual) => cmp_values(actual, *op, expected),
+            None => false,
+        })
 }
 
 /// Runtime engine for evaluating GQL path patterns on a graph.
@@ -1224,11 +1226,7 @@ fn natural_join(
             for &idx in idxs {
                 let r2 = &right.rows[idx];
                 if r1.assignment.can_unify(&r2.assignment) {
-                    rows.push(ResultRow::join(
-                        r1,
-                        r2,
-                        r1.assignment.unify(&r2.assignment),
-                    ));
+                    rows.push(ResultRow::join(r1, r2, r1.assignment.unify(&r2.assignment)));
                     if limit > 0 && rows.len() >= limit {
                         break 'outer;
                     }
@@ -1238,11 +1236,7 @@ fn natural_join(
     } else {
         'outer2: for r1 in &left.rows {
             for r2 in &right.rows {
-                rows.push(ResultRow::join(
-                    r1,
-                    r2,
-                    r1.assignment.unify(&r2.assignment),
-                ));
+                rows.push(ResultRow::join(r1, r2, r1.assignment.unify(&r2.assignment)));
                 if limit > 0 && rows.len() >= limit {
                     break 'outer2;
                 }
@@ -1275,11 +1269,7 @@ fn left_outer_join(
         for r2 in &right.rows {
             if r1.assignment.can_unify(&r2.assignment) {
                 matched_any = true;
-                rows.push(ResultRow::join(
-                    r1,
-                    r2,
-                    r1.assignment.unify(&r2.assignment),
-                ));
+                rows.push(ResultRow::join(r1, r2, r1.assignment.unify(&r2.assignment)));
             }
         }
         if !matched_any {
