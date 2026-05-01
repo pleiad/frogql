@@ -121,7 +121,10 @@ fn main() {
         if let Some(rest) = line.strip_prefix("schema") {
             let arg = rest.trim();
             match arg {
-                "" => print_schema(&store),
+                // Bare `schema` aliases `SHOW GRAPH TYPE DEFAULT`: print the
+                // auto-derived schema entry from the catalog with active
+                // markers and validation status.
+                "" => handle_show(&store, "DEFAULT"),
                 "simple" => print_schema_simple(&store),
                 _ => eprintln!("Unknown schema command. Use 'schema' or 'schema simple'."),
             }
@@ -518,6 +521,7 @@ fn color_label(labels: &[String]) -> String {
     }
 }
 
+#[allow(dead_code)] // kept for `schema` legacy renderer; reintroduced if needed
 fn color_props(props: &std::collections::BTreeMap<String, &str>) -> String {
     if props.is_empty() {
         return String::new();
@@ -571,6 +575,7 @@ struct NodeType {
 }
 
 /// An edge type: label + props + src/tgt node types + directed?
+#[allow(dead_code)] // kept for `schema` legacy renderer; reintroduced if needed
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct EdgeType {
     labels: Vec<String>,
@@ -581,6 +586,7 @@ struct EdgeType {
 }
 
 impl NodeType {
+    #[allow(dead_code)] // kept for `schema` legacy renderer; reintroduced if needed
     fn from_graph_element(store: &LazyGraphStore, id: u32, is_node: bool) -> Self {
         let lt = if is_node {
             store.node_labels(id)
@@ -633,6 +639,8 @@ impl NodeType {
     }
 }
 
+#[allow(dead_code)] // bare `schema` now aliases `SHOW GRAPH TYPE DEFAULT`; this
+                    // legacy renderer is preserved for future re-binding
 fn print_schema(store: &LazyGraphStore) {
     use std::collections::{BTreeSet, HashMap};
 
