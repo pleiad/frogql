@@ -13,6 +13,7 @@ gqlite ya implementa:
 - Operadores: `+`, `-`, comparaciones, `=`, `!=`, `AND`, `OR`, `NOT` (sobre booleanos), `IS`, `AS`, `IN`.
 - Storage: formato `.gdb` de una sola página-file, embedded.
 - Optimizer: predicate pushdown, label index selection, Leapfrog Triejoin.
+- `Value::Null`, lecturas de propiedad ausente como null en `AttrLookup`, y lógica trivalente en expresiones generales de `WHERE` (`run_expr` / `eval_binop`). Los predicados empujados al scan/LTJ siguen usando `cmp_values` (null → false), no la misma 3VL que el `WHERE` residual.
 
 ## Tier 1: expresividad que rompe cosas si falta
 
@@ -70,15 +71,14 @@ Cambios necesarios:
 
 ### 1.4 NULL y lógica trivalente
 
-El `Value` actual no tiene NULL. Atributos faltantes producen `ExprResult::Failure` y la fila se descarta. GQL y SQL usan lógica trivalente (`TRUE`/`FALSE`/`UNKNOWN`).
+**Parcialmente cubierto:** hay `Value::Null`, propiedades ausentes en entidades ligadas leen como null (no `Failure`), y `AND`/`OR`/`NOT`/comparaciones aritméticas siguen 3VL tipo SQL en el evaluador de expresiones del `WHERE` residual.
 
-Sin NULL, OPTIONAL MATCH y las comparaciones con datos faltantes quedan inconsistentes.
+Siguen fuera (features / alineación ISO futura):
 
-Cambios necesarios:
+- Predicado `<property exists>` (ISO 19.13): sintaxis y runtime propios; no es el mismo tubo que `x.p`.
+- **Follow-up de corrección:** unificar o justificar pushdown (`cmp_values`) vs 3VL del `WHERE` residual cuando el efecto observable del filtro pueda diferir.
 
-- `Value::Null`.
-- Reescribir `eval_binop` para propagar NULL (cualquier op con NULL da NULL, excepto `IS NULL`/`IS NOT NULL`).
-- `Value::Null` se trata como FALSE en contexto booleano (WHERE).
+OPTIONAL MATCH sigue dependiendo de semántica de variables opcionales además del null en expresiones.
 
 ## Tier 2: útiles, hay workaround
 

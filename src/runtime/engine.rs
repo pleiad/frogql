@@ -22,7 +22,6 @@ use super::ltj::triple_index::TripleIndex;
 use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
 
 /// Apply value predicates pushed down by the optimizer to raw graph properties.
-/// Missing key → predicate is null → reject.
 fn check_value_preds(preds: &[(String, BinOp, Value)], props: &Props) -> bool {
     preds
         .iter()
@@ -128,8 +127,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     ///   join with the accumulated binding table; each Optional is a left
     ///   outer join — for every accumulated row, either emit all unifying
     ///   extensions from the optional pattern, or emit the original row
-    ///   padded with `PathValue::Nothing` for new variables (those then
-    ///   project as `Value::Null` via the existing AttrLookup-failure path).
+    ///   padded with `PathValue::Nothing` for new variables (they project as null).
     fn run_match_chain(&self, query: &Query, limit: usize) -> IntermediateResult {
         if !query.has_any_optional() {
             return self.run_path_pattern(&query.collapsed_pattern(), limit);
@@ -294,8 +292,8 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
     }
 
-    /// Evaluate inner expr per row, drop ISO nulls (Failure), optionally
-    /// dedup via HashSet when quantifier is DISTINCT.
+    /// Evaluate the aggregate argument per row; skip null and failed evaluations.
+    /// Optionally deduplicate when the quantifier is DISTINCT.
     fn collect_aggregate_values(
         &self,
         expr: &Expr,
@@ -307,9 +305,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let mut seen: HashSet<GroupKey> = HashSet::new();
         for &idx in row_idxs {
             let v = match self.run_expr(&rows[idx].assignment, expr) {
-                ExprResult::Success(Value::Null) => continue, // null-eliminated
+                ExprResult::Success(Value::Null) => continue,
                 ExprResult::Success(v) => v,
-                ExprResult::Failure(_) => continue, // null-eliminated
+                ExprResult::Failure(_) => continue,
             };
             if matches!(quantifier, SetQuantifier::Distinct) {
                 let key = GroupKey::from_values(vec![v.clone()]);
@@ -1042,7 +1040,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 };
                 match props.get(attr) {
                     Some(v) => ExprResult::Success(v.clone()),
-                    None => ExprResult::Failure(format!("attribute '{attr}' not found")),
+                    None => ExprResult::Success(Value::Null),
                 }
             }
 
@@ -1072,7 +1070,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     let l = self.run_expr(mu, left);
                     match (&l, right.as_ref()) {
                         (ExprResult::Success(val), Expr::Type(ty)) => {
-                            if Expr::value_is_type(val, ty) {
+                            if val.is_null() {
+                                ExprResult::Success(Value::Null)
+                            } else if Expr::value_is_type(val, ty) {
                                 ExprResult::Success(val.clone())
                             } else {
                                 ExprResult::Failure(format!("cannot cast {val} to {ty}"))
@@ -1119,11 +1119,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                         UnOp::Neg => match val {
                             Value::Int(n) => ExprResult::Success(Value::Int(-n)),
                             Value::Float(x) => ExprResult::Success(Value::Float(-x)),
-                            _ => ExprResult::Failure("neg requires int or float".into()),
+                            Value::Null => ExprResult::Success(Value::Null),
+                            _ => ExprResult::Failure("invalid operand for unary -".into()),
                         },
                         UnOp::Not => match val {
                             Value::Bool(b) => ExprResult::Success(Value::Bool(!b)),
-                            _ => ExprResult::Failure("not requires bool".into()),
+                            Value::Null => ExprResult::Success(Value::Null),
+                            _ => ExprResult::Failure("invalid operand for NOT".into()),
                         },
                     },
                     ExprResult::Failure(_) => r,
@@ -1134,9 +1136,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 let is_null = match self.run_expr(mu, operand) {
                     ExprResult::Success(Value::Null) => true,
                     ExprResult::Success(_) => false,
-                    // Failure (missing attribute, unbound variable) is
-                    // treated as null — the same convention as the rest
-                    // of the engine.
+                    // Failure (e.g. unbound variable): treat as null for this test.
                     ExprResult::Failure(_) => true,
                 };
                 ExprResult::Success(Value::Bool(if *negated { !is_null } else { is_null }))
@@ -1159,59 +1159,132 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
         }
         match op {
-            BinOp::Add => match as_num_pair(lv, rv) {
-                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Int(a + b)),
-                Some((Value::Float(a), Value::Float(b))) => {
-                    ExprResult::Success(Value::Float(a + b))
+            BinOp::Add => {
+                if lv.is_null() || rv.is_null() {
+                    return ExprResult::Success(Value::Null);
                 }
-                _ => ExprResult::Failure("+ requires numeric operands".into()),
-            },
-            BinOp::Sub => match as_num_pair(lv, rv) {
-                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Int(a - b)),
-                Some((Value::Float(a), Value::Float(b))) => {
-                    ExprResult::Success(Value::Float(a - b))
+                match as_num_pair(lv, rv) {
+                    Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Int(a + b)),
+                    Some((Value::Float(a), Value::Float(b))) => {
+                        ExprResult::Success(Value::Float(a + b))
+                    }
+                    _ => ExprResult::Failure("invalid operands for +".into()),
                 }
-                _ => ExprResult::Failure("- requires numeric operands".into()),
-            },
-            BinOp::Gt => match as_num_pair(lv, rv) {
-                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a > b)),
-                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Bool(a > b)),
-                _ => ExprResult::Failure("> requires numeric operands".into()),
-            },
-            BinOp::Lt => match as_num_pair(lv, rv) {
-                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a < b)),
-                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Bool(a < b)),
-                _ => ExprResult::Failure("< requires numeric operands".into()),
-            },
-            BinOp::Ge => match as_num_pair(lv, rv) {
-                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a >= b)),
-                Some((Value::Float(a), Value::Float(b))) => {
-                    ExprResult::Success(Value::Bool(a >= b))
+            }
+            BinOp::Sub => {
+                if lv.is_null() || rv.is_null() {
+                    return ExprResult::Success(Value::Null);
                 }
-                _ => ExprResult::Failure(">= requires numeric operands".into()),
-            },
-            BinOp::Le => match as_num_pair(lv, rv) {
-                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a <= b)),
-                Some((Value::Float(a), Value::Float(b))) => {
-                    ExprResult::Success(Value::Bool(a <= b))
+                match as_num_pair(lv, rv) {
+                    Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Int(a - b)),
+                    Some((Value::Float(a), Value::Float(b))) => {
+                        ExprResult::Success(Value::Float(a - b))
+                    }
+                    _ => ExprResult::Failure("invalid operands for -".into()),
                 }
-                _ => ExprResult::Failure("<= requires numeric operands".into()),
-            },
-            BinOp::Eq => ExprResult::Success(Value::Bool(lv == rv)),
-            BinOp::Ne => ExprResult::Success(Value::Bool(lv != rv)),
+            }
+            BinOp::Gt => {
+                if lv.is_null() || rv.is_null() {
+                    return ExprResult::Success(Value::Null);
+                }
+                match as_num_pair(lv, rv) {
+                    Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a > b)),
+                    Some((Value::Float(a), Value::Float(b))) => {
+                        ExprResult::Success(Value::Bool(a > b))
+                    }
+                    _ => ExprResult::Failure("invalid operands for >".into()),
+                }
+            }
+            BinOp::Lt => {
+                if lv.is_null() || rv.is_null() {
+                    return ExprResult::Success(Value::Null);
+                }
+                match as_num_pair(lv, rv) {
+                    Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a < b)),
+                    Some((Value::Float(a), Value::Float(b))) => {
+                        ExprResult::Success(Value::Bool(a < b))
+                    }
+                    _ => ExprResult::Failure("invalid operands for <".into()),
+                }
+            }
+            BinOp::Ge => {
+                if lv.is_null() || rv.is_null() {
+                    return ExprResult::Success(Value::Null);
+                }
+                match as_num_pair(lv, rv) {
+                    Some((Value::Int(a), Value::Int(b))) => {
+                        ExprResult::Success(Value::Bool(a >= b))
+                    }
+                    Some((Value::Float(a), Value::Float(b))) => {
+                        ExprResult::Success(Value::Bool(a >= b))
+                    }
+                    _ => ExprResult::Failure("invalid operands for >=".into()),
+                }
+            }
+            BinOp::Le => {
+                if lv.is_null() || rv.is_null() {
+                    return ExprResult::Success(Value::Null);
+                }
+                match as_num_pair(lv, rv) {
+                    Some((Value::Int(a), Value::Int(b))) => {
+                        ExprResult::Success(Value::Bool(a <= b))
+                    }
+                    Some((Value::Float(a), Value::Float(b))) => {
+                        ExprResult::Success(Value::Bool(a <= b))
+                    }
+                    _ => ExprResult::Failure("invalid operands for <=".into()),
+                }
+            }
+            BinOp::Eq => {
+                if lv.is_null() || rv.is_null() {
+                    ExprResult::Success(Value::Null)
+                } else {
+                    ExprResult::Success(Value::Bool(lv == rv))
+                }
+            }
+            BinOp::Ne => {
+                if lv.is_null() || rv.is_null() {
+                    ExprResult::Success(Value::Null)
+                } else {
+                    ExprResult::Success(Value::Bool(lv != rv))
+                }
+            }
             BinOp::In => match rv {
                 Value::List(items) => {
-                    ExprResult::Success(Value::Bool(items.iter().any(|x| x == lv)))
+                    if lv.is_null() {
+                        return ExprResult::Success(Value::Null);
+                    }
+                    let has_null = items.iter().any(Value::is_null);
+                    let found = items.iter().any(|x| x == lv);
+                    if found {
+                        ExprResult::Success(Value::Bool(true))
+                    } else if has_null {
+                        ExprResult::Success(Value::Null)
+                    } else {
+                        ExprResult::Success(Value::Bool(false))
+                    }
                 }
-                _ => ExprResult::Failure("'in' requires a list on the right".into()),
+                _ => ExprResult::Failure("invalid right-hand side for IN (expected list)".into()),
             },
             BinOp::And => match (lv, rv) {
-                (Value::Bool(a), Value::Bool(b)) => ExprResult::Success(Value::Bool(*a && *b)),
-                _ => ExprResult::Failure("and requires bools".into()),
+                (Value::Bool(false), _) | (_, Value::Bool(false)) => {
+                    ExprResult::Success(Value::Bool(false))
+                }
+                (Value::Bool(true), Value::Bool(true)) => ExprResult::Success(Value::Bool(true)),
+                (Value::Null, Value::Bool(true))
+                | (Value::Bool(true), Value::Null)
+                | (Value::Null, Value::Null) => ExprResult::Success(Value::Null),
+                _ => ExprResult::Failure("invalid operands for AND".into()),
             },
             BinOp::Or => match (lv, rv) {
-                (Value::Bool(a), Value::Bool(b)) => ExprResult::Success(Value::Bool(*a || *b)),
-                _ => ExprResult::Failure("or requires bools".into()),
+                (Value::Bool(true), _) | (_, Value::Bool(true)) => {
+                    ExprResult::Success(Value::Bool(true))
+                }
+                (Value::Bool(false), Value::Bool(false)) => ExprResult::Success(Value::Bool(false)),
+                (Value::Null, Value::Bool(false))
+                | (Value::Bool(false), Value::Null)
+                | (Value::Null, Value::Null) => ExprResult::Success(Value::Null),
+                _ => ExprResult::Failure("invalid operands for OR".into()),
             },
             _ => ExprResult::Failure(format!("unexpected op {op} in eval_binop")),
         }
@@ -1288,9 +1361,7 @@ fn natural_join(
 /// natural join). If at least one matches, emit all unified rows (success
 /// branch). If none match, emit the left row alone with every variable in
 /// `new_vars \ bound_vars` set to `PathValue::Nothing` (unsuccess branch).
-/// `Nothing` flows into projection as `Value::Null` because `pv.id()`
-/// returns `None`, which `AttrLookup` turns into `Failure`, which
-/// `eval_expr_item` maps to `Value::Null`.
+/// `Nothing` pads variables from an unmatched optional arm; they project as null.
 fn left_outer_join(
     left: &IntermediateResult,
     right: &IntermediateResult,

@@ -7,13 +7,9 @@ pub mod result;
 use crate::model::value::Value;
 use crate::syntax::expr::BinOp;
 
-/// Evaluate `lhs <op> rhs` with GQL-leaning semantics for pushed value
-/// predicates. Null on either side yields false (3VL: predicate is null →
-/// row drops). Numeric comparison promotes Int→Float; comparison across
-/// incompatible kinds yields false. Records and lists support structural
-/// `Eq`/`Ne` only — ordering on composite values is not defined here and
-/// returns false. Shared between the LTJ filter loop and the standard
-/// node/edge scan.
+/// Compare two values under `op` for pushed predicates (scans / LTJ filters).
+/// Null on either side yields false. Numeric operands widen mixed int/float.
+/// Records and lists: `Eq`/`Ne` only; ordering ops yield false.
 pub fn cmp_values(lhs: &Value, op: BinOp, rhs: &Value) -> bool {
     use std::cmp::Ordering;
     if lhs.is_null() || rhs.is_null() {

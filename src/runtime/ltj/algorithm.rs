@@ -341,7 +341,7 @@ impl<'a, G: GraphAccess> LtjRunner<'a, G> {
                                     return false;
                                 }
                             }
-                            // Missing property → predicate is null → reject
+                            // Missing property
                             None => return false,
                         }
                     }

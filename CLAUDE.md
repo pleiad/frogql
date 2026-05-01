@@ -245,12 +245,17 @@ When LTJ cannot decompose a join (unions, repetitions, any-direction edges), the
 
 ### Null semantics
 
-`Value::Null` is a first-class variant. Properties that are absent from a node/edge map are treated as null at query time, and explicit nulls round-trip through the on-disk format.
+`Value::Null` is a first-class variant. For a **bound** graph variable, **missing property keys** are read as `Success(Value::Null)` in `AttrLookup` (`engine.rs` `run_expr`) — FPPC-style `ok null` / ISO default-nullable missing-property behavior. Explicit nulls round-trip through the on-disk format.
 
-- **3VL in `cmp_values`** (`runtime/mod.rs`): null on either side yields `false`, so a predicate involving null is dropped from the result. Used by both the LTJ filter loop (`NodeAttrCmp`) and the standard scan (`filter_node`/`filter_edge`).
+- **Residual `WHERE` and general expressions** (`engine.rs` `run_expr`, `eval_binop`): SQL/GQL-style **three-valued logic** — e.g. null comparisons yield unknown (success value `Null`), `AND`/`OR`/`NOT` follow SQL truth tables, `WHERE` keeps a binding only when the condition is definite `Bool(true)`. `BinOp::As` passes `Null` through so casts do not turn missing reads back into `Failure`.
+- **Pushed-down value predicates** (`cmp_values` in `runtime/mod.rs`, `check_value_preds` in `engine.rs`): null on either side yields **`false`** (not full 3VL). Used by LTJ `NodeAttrCmp` and standard `filter_node`/`filter_edge`; arbitrary residual `WHERE` uses the path above.
 - **Aggregate null elimination** (`engine.rs` `collect_aggregate_values`): both `ExprResult::Failure` and `Success(Value::Null)` are dropped before the reducer runs. Empty aggregates emit `Value::Null`.
 - **Wire format**: `PropValue::Null` carries tag byte 6 (no payload). Nested nulls inside lists / records survive the round-trip. Top-level nulls are encoded as key absence — the property is omitted from the on-disk record.
-- **Surface syntax**: the lexer accepts `null` / `NULL`. The parser emits `Expr::Const(Value::Null)`. The typechecker maps the literal to `SimpleType::Star` so `WHERE x = null` does not collapse the surrounding type derivation. `IS NULL` and `IS NOT NULL` (parsed via `try_is_null` lookahead) produce an `Expr::IsNull { operand, negated }` that returns `Value::Bool` regardless of operand type; missing-attribute and unbound-variable failures are treated as null.
+- **Surface syntax**: the lexer accepts `null` / `NULL`. The parser emits `Expr::Const(Value::Null)`. The typechecker maps the literal to `SimpleType::Star` so `WHERE x = null` does not collapse the surrounding type derivation. `IS NULL` / `IS NOT NULL` → `Expr::IsNull`; operand `Failure` is still treated as null for the test (unchecked queries).
+
+**Follow-up (separate workstream):** pushed-down predicates (`cmp_values`, node scans, LTJ `NodeAttrCmp`) treat null comparisons as **false**, while residual `WHERE` uses full **3VL**. That split can change observable row sets for the same logical filter depending on optimization. Next step is to unify semantics or document proveably ISO-safe shortcuts (cf. ISO/IEC 39075:2024 subclause 5.3.2.4 observable effect).
+
+**Not modeled yet:** `<property exists>` as a value predicate (ISO 19.13 — distinct syntax / feature). Descriptor typing covers some “must have shape” cases at match time — see `docs/iso-gql-gaps.md`.
 
 ### CSV loader
 

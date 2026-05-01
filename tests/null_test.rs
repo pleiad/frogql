@@ -36,6 +36,18 @@ fn run(g: &Graph, q: &str) -> Vec<Vec<Value>> {
     }
 }
 
+fn sorted_names(rows: Vec<Vec<Value>>) -> Vec<String> {
+    let mut names: Vec<String> = rows
+        .into_iter()
+        .map(|row| match &row[0] {
+            Value::Str(s) => s.clone(),
+            other => panic!("expected Str, got {other:?}"),
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 #[test]
 fn test_is_null_matches_missing_property() {
     let g = graph_with_optional_email();
@@ -62,11 +74,122 @@ fn test_is_not_null_matches_present_property() {
 
 #[test]
 fn test_eq_null_drops_all_rows_under_3vl() {
-    // Comparison against null literal yields false → predicate is null →
-    // no row passes. This is SQL behavior; users must use IS NULL.
     let g = graph_with_optional_email();
     let rows = run(&g, "MATCH (x: User) WHERE x.email = null RETURN x.name");
     assert!(rows.is_empty(), "expected no rows, got {rows:?}");
+}
+
+#[test]
+fn test_missing_property_or_true_keeps_all_rows() {
+    let g = graph_with_optional_email();
+    assert_eq!(
+        sorted_names(run(
+            &g,
+            "MATCH (x: User) WHERE (x.email = 'nobody@x.test') OR (1 = 1) RETURN x.name",
+        )),
+        vec!["Alice", "Bob", "Carol"]
+    );
+}
+
+#[test]
+fn test_where_null_eq_null_no_rows() {
+    let g = graph_with_optional_email();
+    let rows = run(&g, "MATCH (x: User) WHERE null = null RETURN x.name");
+    assert!(rows.is_empty(), "expected no rows, got {rows:?}");
+}
+
+#[test]
+fn test_return_null_eq_null_is_null() {
+    let g = graph_with_optional_email();
+    let rows = run(&g, "MATCH (x: User) RETURN null = null");
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|r| r == &vec![Value::Null]));
+}
+
+#[test]
+fn test_where_not_eliminates_unknown_from_missing_property() {
+    let g = graph_with_optional_email();
+    assert_eq!(
+        sorted_names(run(
+            &g,
+            "MATCH (x: User) WHERE NOT (x.email = 'nobody@x.test') RETURN x.name",
+        )),
+        vec!["Alice", "Bob"]
+    );
+}
+
+#[test]
+fn test_where_false_and_unknown_is_false() {
+    let g = graph_with_optional_email();
+    let rows = run(
+        &g,
+        "MATCH (x: User) WHERE false AND (x.email = 'nobody@x.test') RETURN x.name",
+    );
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn test_where_unknown_and_true_is_unknown() {
+    let g = graph_with_optional_email();
+    let rows = run(
+        &g,
+        "MATCH (x: User) WHERE (x.email = 'nobody@x.test') AND true RETURN x.name",
+    );
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn test_where_true_or_null_keeps_all_rows() {
+    let g = graph_with_optional_email();
+    assert_eq!(
+        sorted_names(run(&g, "MATCH (x: User) WHERE true OR null RETURN x.name",)),
+        vec!["Alice", "Bob", "Carol"]
+    );
+}
+
+#[test]
+fn test_where_unknown_or_false_is_unknown() {
+    let g = graph_with_optional_email();
+    let rows = run(
+        &g,
+        "MATCH (x: User) WHERE (x.email = 'nobody@x.test') OR false RETURN x.name",
+    );
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn test_return_null_plus_int_is_null() {
+    let g = graph_with_optional_email();
+    let rows = run(&g, "MATCH (x: User) RETURN null + 1");
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|r| r == &vec![Value::Null]));
+}
+
+#[test]
+fn test_return_not_null_is_null() {
+    let g = graph_with_optional_email();
+    let rows = run(&g, "MATCH (x: User) RETURN NOT null");
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|r| r == &vec![Value::Null]));
+}
+
+#[test]
+fn test_where_in_list_null_argument_unknown() {
+    let g = graph_with_optional_email();
+    assert_eq!(
+        sorted_names(run(
+            &g,
+            "MATCH (x: User) WHERE x.email in ['alice@example.com', 'bob@example.com'] RETURN x.name",
+        )),
+        vec!["Alice", "Bob"]
+    );
+}
+
+#[test]
+fn test_where_ne_null_all_unknown() {
+    let g = graph_with_optional_email();
+    let rows = run(&g, "MATCH (x: User) WHERE x.email != null RETURN x.name");
+    assert!(rows.is_empty());
 }
 
 #[test]

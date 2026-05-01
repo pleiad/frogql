@@ -566,10 +566,7 @@ fn create_context(desc: &Option<Descriptor>, t: VariableType) -> TypeEnvironment
 /// `docs/typechecker_migration.md` as a phase-1 punt.
 fn simple_type_of_value(v: &Value) -> SimpleType {
     match v {
-        // Null literal is the SQL untyped null: it inhabits every type for
-        // the purpose of static checks. Mapping to `Star` keeps comparisons
-        // like `x.attr = null` from collapsing the surrounding type
-        // derivation to bottom; the runtime still drops the row via 3VL.
+        // Untyped null literal: map to Star so it does not force bottom in static typing.
         Value::Null => SimpleType::Star,
         Value::Int(_) => SimpleType::Z,
         Value::Float(_) => SimpleType::F,

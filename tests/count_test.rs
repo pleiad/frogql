@@ -90,8 +90,8 @@ fn test_count_star_with_alias() {
 // COUNT(expr) — ISO §20.9 <general set function>, kind = Count
 //
 // Differs from COUNT(*): null inputs are eliminated before counting.
-// In gqlite that means "Failure" results from run_expr (e.g. attribute
-// not present on the node) drop out instead of counting as 1.
+// In gqlite, `Success(Null)` (including missing properties) and `Failure`
+// from `run_expr` are skipped — neither contributes to the count.
 // =======================================================================
 
 #[test]
@@ -105,7 +105,7 @@ fn test_count_expr_total() {
 }
 
 #[test]
-fn test_count_expr_skips_failures() {
+fn test_count_expr_skips_nulls() {
     // Two of the three users have a "nickname" property; the third
     // doesn't. ISO null-elimination drops that row from COUNT(x.nickname).
     let json = r#"{
@@ -146,7 +146,7 @@ fn test_count_distinct_with_alias() {
 }
 
 #[test]
-fn test_count_distinct_skips_failures() {
+fn test_count_distinct_skips_nulls() {
     // DISTINCT applies AFTER null-elimination, so missing nickname
     // doesn't count as "a distinct null". Two users have nicknames
     // ("Al" and "Bo"), both distinct → 2.

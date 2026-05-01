@@ -144,9 +144,7 @@ pub enum Expr {
         op: UnOp,
         operand: Box<Expr>,
     },
-    /// SQL-style null test: `expr IS NULL` (negated=false) or
-    /// `expr IS NOT NULL` (negated=true). Returns Bool. Distinct from
-    /// `expr = null`, which would silently produce false under 3VL.
+    /// `IS NULL` / `IS NOT NULL`; always produces a boolean (contrast with `= null`).
     IsNull {
         operand: Box<Expr>,
         negated: bool,
