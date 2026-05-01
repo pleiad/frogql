@@ -26,6 +26,9 @@ pub enum Token {
     Return,
     Distinct,
     All,
+    /// ISO-39075 §16.x — `LIMIT <integer>` after RETURN. Produces
+    /// `Query.limit = Some(N)`; the runtime caps row emission to N.
+    Limit,
     Typed,
     /// DDL / catalog keywords (uppercase only — see lexer rules).
     Create,
@@ -419,6 +422,7 @@ impl Lexer {
                         "RETURN" | "return" => Token::Return,
                         "DISTINCT" | "distinct" => Token::Distinct,
                         "ALL" | "all" => Token::All,
+                        "LIMIT" | "limit" => Token::Limit,
                         "GROUP" | "group"
                             if matches!(
                                 self.peek_next_word().as_ref().map(|(w, _)| w.as_str()),

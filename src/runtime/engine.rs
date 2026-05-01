@@ -32,6 +32,18 @@ fn check_value_preds(preds: &[(String, BinOp, Value)], props: &Props) -> bool {
         })
 }
 
+/// Smaller cap wins; both inputs honor the runtime's `0 = unbounded`
+/// convention. Callers must short-circuit `Query.limit == Some(0)`
+/// upstream — that's a real "return zero rows" request and would
+/// otherwise be mistranslated to "unbounded" here.
+fn combine_limits(query_limit: Option<u32>, runtime_limit: usize) -> usize {
+    match (query_limit, runtime_limit) {
+        (None, n) => n,
+        (Some(q), 0) => q as usize,
+        (Some(q), n) => (q as usize).min(n),
+    }
+}
+
 /// Runtime engine for evaluating GQL path patterns on a graph.
 /// Generic over `GraphAccess` — works with both in-memory Graph and file-backed GraphStore.
 ///
@@ -56,12 +68,23 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         self.run_path_pattern(pattern, limit)
     }
 
-    /// Run a full Query (MATCH ... WHERE ... RETURN).
+    /// Run a full Query (MATCH ... WHERE ... RETURN [LIMIT N]).
     ///
     /// `limit` semantics differ between the two paths: with no aggregates
     /// it caps input rows (early termination); with aggregates it caps
     /// output rows after grouping (truncating input would corrupt counts).
+    /// `Query.limit == Some(0)` short-circuits to empty per ISO §LIMIT;
+    /// otherwise the in-query and caller caps combine via `combine_limits`.
     pub fn run_query(&self, query: &Query, limit: usize) -> QueryResult {
+        // ISO §LIMIT: `Some(0)` is "return zero rows", distinct from
+        // the runtime's `0 = unbounded`. Honor it before any pattern work.
+        if query.limit == Some(0) {
+            return match &query.returns {
+                None => QueryResult::Raw(IntermediateResult::empty()),
+                Some(_) => QueryResult::Projected(Vec::new()),
+            };
+        }
+        let limit = combine_limits(query.limit, limit);
         let return_items = match &query.returns {
             None => {
                 let ir = self.run_match_chain(query, limit);
@@ -300,7 +323,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     fn run_path_pattern(&self, p: &PathPattern, limit: usize) -> IntermediateResult {
         match p {
-            PathPattern::Node(_) => self.run_node_pattern(p),
+            PathPattern::Node(_) => self.run_node_pattern(p, limit),
             PathPattern::EdgeRight(_)
             | PathPattern::EdgeLeft(_)
             | PathPattern::EdgeUndirected(_)
@@ -368,19 +391,27 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     // --- Optimized node pattern: uses label index when available ---
 
-    fn run_node_pattern(&self, p: &PathPattern) -> IntermediateResult {
+    fn run_node_pattern(&self, p: &PathPattern, limit: usize) -> IntermediateResult {
         let desc = p.descriptor();
         let candidates = self.get_candidate_nodes(desc);
         let var = desc.and_then(|d| d.var.as_deref());
 
-        let rows: Vec<ResultRow> = candidates
-            .iter()
-            .filter(|id| self.filter_node(**id, desc))
-            .map(|&id| {
-                let pv = PathValue::Node(id);
-                ResultRow::new(Path(vec![pv.clone()]), Assignment::from_optional(var, pv))
-            })
-            .collect();
+        // Honor `limit` at scan time so a small cap doesn't enumerate
+        // the full candidate set. `0` is unbounded per runtime convention.
+        let mut rows: Vec<ResultRow> = Vec::new();
+        for &id in &candidates {
+            if !self.filter_node(id, desc) {
+                continue;
+            }
+            let pv = PathValue::Node(id);
+            rows.push(ResultRow::new(
+                Path(vec![pv.clone()]),
+                Assignment::from_optional(var, pv),
+            ));
+            if limit > 0 && rows.len() >= limit {
+                break;
+            }
+        }
         IntermediateResult::new(rows)
     }
 

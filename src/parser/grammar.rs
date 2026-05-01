@@ -130,11 +130,14 @@ impl Parser {
 
     // full_query   = match_clause+ ("GROUP BY" expr (, expr)*)?
     //                ("RETURN" ("DISTINCT")? return_list)?
+    //                ("LIMIT" integer)?
     // match_clause = ("OPTIONAL" "MATCH" | "MATCH"?) query ("WHERE" expr)?
     //
     // ISO §14.3-14.4. The `MATCH` keyword is optional only on the first
     // clause for back-compat with bare-pattern queries (`(x)-[]->(y)`);
-    // an `OPTIONAL` always requires the explicit `MATCH` after it.
+    // an `OPTIONAL` always requires the explicit `MATCH` after it. LIMIT
+    // is accepted both with and without a preceding RETURN — the
+    // runtime applies it to whatever the query produces.
     fn full_query(&mut self) -> Result<Query, String> {
         let first_optional = self.eat(&Token::Optional);
         if first_optional {
@@ -177,23 +180,39 @@ impl Parser {
             None
         };
 
-        if self.eat(&Token::Return) {
+        let (returns, distinct) = if self.eat(&Token::Return) {
             let distinct = self.eat(&Token::Distinct);
-            let returns = self.return_list()?;
-            Ok(Query {
-                matches,
-                group_by,
-                returns: Some(returns),
-                distinct,
-            })
+            (Some(self.return_list()?), distinct)
         } else {
-            Ok(Query {
-                matches,
-                group_by,
-                returns: None,
-                distinct: false,
-            })
+            (None, false)
+        };
+
+        let limit = self.parse_optional_limit()?;
+
+        Ok(Query {
+            matches,
+            group_by,
+            returns,
+            distinct,
+            limit,
+        })
+    }
+
+    /// Optional trailing `LIMIT N`. Returns `None` if absent.
+    /// Negative or out-of-u32-range integers are parse errors.
+    fn parse_optional_limit(&mut self) -> Result<Option<u32>, String> {
+        if !self.eat(&Token::Limit) {
+            return Ok(None);
         }
+        let n = self
+            .expect_number()
+            .map_err(|e| format!("LIMIT requires a non-negative integer: {e}"))?;
+        if n < 0 {
+            return Err(format!("LIMIT requires a non-negative integer, got {n}"));
+        }
+        u32::try_from(n)
+            .map(Some)
+            .map_err(|_| format!("LIMIT {n} exceeds the supported u32 range"))
     }
 
     /// One match clause: pattern + optional WHERE wrapped in `Filter`.

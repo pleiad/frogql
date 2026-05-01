@@ -41,6 +41,7 @@ fn multi_match_query(patterns: &[String]) -> Query {
         group_by: None,
         returns: None,
         distinct: false,
+        limit: None,
     })
 }
 
