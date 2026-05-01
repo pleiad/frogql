@@ -9,18 +9,26 @@ GQLite — a Rust graph database implementing ISO GQL path pattern matching with
 ## Commands
 
 ```bash
-# Tests (129 passing, skip bench_test which has pre-existing failures)
-cargo test --test parser_test --test runtime_test --test store_runtime_test --test text2gql_test
+# Full integration test sweep (skip bench_test which has pre-existing failures)
+cargo test --lib
+cargo test --test parser_test --test runtime_test --test store_runtime_test \
+           --test text2gql_test --test parse_and_run_test --test count_test \
+           --test null_test --test record_test --test list_test \
+           --test compile_diagnostics --test elaborate_test --test float_test \
+           --test graph_type_test --test typecheck_smoke --test aggregates_proptest
 
 # Single test
 cargo test --test runtime_test test_join_star_any_label -- --exact
+
+# Strict clippy (run before every commit)
+cargo clippy --workspace --all-targets -- -D clippy::all
 
 # Build all binaries
 cargo build --release
 
 # Interactive REPL
 ./target/release/gqlite movies.gdb --import-csv path/to/csv_dir/   # create + open
-./target/release/gqlite movies.gdb                                  # open existing
+./target/release/gqlite movies.gdb                                 # open existing
 
 # Python bindings (builds cdylib, installs `gqlite` into the active venv)
 cd python && source ../../pygql/.venv/bin/activate && maturin develop --release
@@ -38,18 +46,11 @@ Python API surface (`python/src/lib.rs`): `gqlite.open(path)`, `gqlite.import_js
 
 ### Compiler pipeline
 
-`parse → elaborate → optimize → run`. Elaboration (`src/elaborate/`) performs
-ISO-mandated semantic lowering: `(x:L {k: v})` becomes `(x:L) WHERE x.k = v`.
-The `:` vs `is` split inside descriptors distinguishes value filters from type
-ascriptions — `{name is str}` stays in the descriptor's `PropertyType`, while
-`{name: 'Alice'}` is hoisted. Descriptors carry a `value_filters` field that
-the parser populates and elaboration drains; after elaboration it is always
-empty. The optimizer is reserved for performance-preserving transforms
-(predicate pushdown, label-index selection, LTJ join rewriting).
+`parse → elaborate → typecheck → optimize → run`. Elaboration (`src/elaborate/`) performs ISO-mandated semantic lowering: `(x:L {k: v})` becomes `(x:L) WHERE x.k = v`. The `:` vs `is` split inside descriptors distinguishes value filters from type ascriptions — `{name is str}` stays in the descriptor's `PropertyType`, while `{name: 'Alice'}` is hoisted. Descriptors carry a `value_filters` field that the parser populates and elaboration drains; after elaboration it is always empty. The optimizer is reserved for performance-preserving transforms (predicate pushdown, label-index selection, LTJ join rewriting).
 
 ### Entry points
 
-- `compile(query) → PathPattern` — parse + elaborate + optimize a path pattern string
+- `compile(query) → PathPattern` — parse + elaborate + typecheck + optimize a path pattern string
 - `compile_query(input) → Query` — parse a full `MATCH ... WHERE ... RETURN` query
 - `compile_query_with(&Schema, input) → Query` — same, but typechecks against a custom schema (used by REPL/Python bindings to honor the active GRAPH TYPE)
 - `parser::parse_statement(input) → Statement` — top-level parser that distinguishes a query from catalog DDL (`CREATE` / `USE` / `DROP GRAPH TYPE`)
@@ -59,29 +60,22 @@ empty. The optimizer is reserved for performance-preserving transforms
 
 ### Graph-type catalog
 
-`LazyGraphStore` owns a `RefCell<GraphTypeCatalog>` (`src/runtime/catalog.rs`)
-loaded from the page chain at `header.catalog_root` on open. The REPL and
-Python bindings route input via `parse_statement`, dispatch DDL through
-`catalog_mut()` + `save_catalog()`, and compile queries with
-`catalog.active_schema()`. The reserved name `DEFAULT` is auto-populated by
-`infer_simple_schema(&store)` (`src/typing/inference.rs`) at import time and
-on `USE GRAPH TYPE DEFAULT`; both `CREATE` and `DROP` of `DEFAULT` are
-rejected. Persistence detail lives in `docs/storage-architecture.md` §3.5.
+`LazyGraphStore` owns a `RefCell<GraphTypeCatalog>` (`src/runtime/catalog.rs`) loaded from the page chain at `header.catalog_root` on open. The REPL and Python bindings route input via `parse_statement`, dispatch DDL through `catalog_mut()` + `save_catalog()`, and compile queries with `catalog.active_schema()`. The reserved name `DEFAULT` is auto-populated by `infer_simple_schema(&store)` (`src/typing/inference.rs`) at import time and on `USE GRAPH TYPE DEFAULT`; both `CREATE` and `DROP` of `DEFAULT` are rejected. Persistence detail lives in `docs/storage-architecture.md` §3.5.
 
-DDL surface today: `CREATE / USE / DROP GRAPH TYPE`, plus inspection /
-validation:
+DDL surface today: `CREATE / USE / DROP GRAPH TYPE`, plus inspection / validation:
 
 - `SHOW GRAPH TYPES` — list all entries with active markers
 - `SHOW GRAPH TYPE <name>` — pretty-print one entry (uses `typing::format::format_schema`)
 - `SHOW CURRENT GRAPH TYPE` — name + content of the active entry
 - `VALIDATE GRAPH TYPE <name>` — walks the data via `typing::validate::validate_against_data` and caches the verdict in `catalog.validations`
 
-`USE` does not validate. The walk is opt-in because it is O(N + E); the
-typechecker still constrains queries against the active schema either way.
+`USE` does not validate. The walk is opt-in because it is O(N + E); the typechecker still constrains queries against the active schema either way.
+
+The REPL convenience command `schema` (no argument) is an alias for `SHOW GRAPH TYPE DEFAULT`. `schema simple` keeps the alternative grouped renderer in `print_schema_simple`.
 
 ### ID system
 
-All node/edge IDs are `u32` internally (`pub type Id = u32` in `model/value.rs`). String names exist only for display via `node_name(id)` / `edge_name(id)` on the trait. `PathValue` variants are `Node(u32)`, `EdgeDirectional(u32)`, `EdgeUndirectional(u32)`, `Nothing`, and `List(Vec<PathValue>)` (for repetition grouping only). PathValue is NOT Copy because of the List variant.
+All node/edge IDs are `u32` internally (`pub type Id = u32` in `model/value.rs`). String names exist only for display via `node_name(id)` / `edge_name(id)` on the trait. `PathValue` variants are `Node(u32)`, `EdgeDirectional(u32)`, `EdgeUndirectional(u32)`, `Nothing`, and `Group(Vec<PathValue>)` — the last is reserved for repetition grouping (`{n,m}` quantifiers) and is NOT a user-facing list. User lists live in `Value::List`. PathValue is NOT Copy because of the Group variant.
 
 ### GraphAccess trait
 
@@ -100,31 +94,43 @@ path_term   = path_factor+                          ← Concat (juxtaposition)
 path_factor = path_primary quantifier?              ← Repeat {n,m}
 ```
 
-`MATCH` keyword is optional — bare path patterns like `(x)-[]->(y)` still work. The `AS` keyword is ambiguous between type cast (in expressions) and alias (in RETURN); `return_comparison()` excludes `AS` from operators so it's available for aliases.
+`MATCH` keyword is optional — bare path patterns like `(x)-[]->(y)` still work. `OPTIONAL MATCH` is supported as a top-level match clause. `is` and `IS` are aliases for the `typed`/`TYPED` type-predicate keyword; `IS NULL` / `IS NOT NULL` are dedicated null tests detected via lookahead before the type-predicate path. The `AS` keyword is ambiguous between type cast (in expressions) and alias (in RETURN); `return_comparison()` excludes `AS` from operators so it's available for aliases.
+
+### Typechecker
+
+The checker walks each `PathPattern` and produces a `(PathType, TypeEnvironment)` pair. `PathType` tracks the *shape* of a single concatenation and is the source of the `guaranteed_empty` short-circuit. `TypeEnvironment` tracks variable bindings.
+
+For multi-clause queries (`MATCH … MATCH …`, with or without `OPTIONAL`), `check_match_chain` threads the environment through the chain but does NOT propagate `PathType` across matches — joins and left-joins produce independent paths. The first match's path stays as the chain's path for short-circuit purposes; later matches contribute only via the environment.
+
+Two key environment operators (`src/typing/type_environment.rs`):
+- `meet` (TJoin rule): for shared keys `x_i`, bind `refine(schema, meet(T_{i1}, T_{i2}))`. Singletons in either side are kept as-is.
+- `outer_join` (TLEFTJOIN rule): for shared keys, `T_{i1} ⊔ refine(schema, meet(T_{i1}, T_{i2}))` — left's type joined with the refined meet so an unsatisfiable optional collapses gracefully to the left binding instead of poisoning the env. Left-only keys stay; right-only keys become `T_k ⊔ Null`.
+
+The `refine` operation (the `S ⊢ T ▷ T'` judgment) is `VariableType::refine(schema, &meet)`: meet first, then refine against the schema. Used inside both env operators.
 
 ### Join strategy: Leapfrog Triejoin (LTJ)
 
-El runtime usa Leapfrog Triejoin (LTJ) como estrategia principal para evaluar joins y concatenaciones de aristas dirigidas. LTJ es un algoritmo worst-case optimal para multi-way joins: vincula variables una a la vez intersectando listas de candidatos de todos los patrones simultáneamente, sin materializar resultados intermedios. La implementación sigue el paper CompactLTJ (Arroyuelo et al., VLDBJ 2025), con la referencia C++ en `../cltj/`.
+The runtime uses Leapfrog Triejoin (LTJ) as its primary strategy for joins and concatenations of directed/undirected edges. LTJ is a worst-case-optimal multi-way join algorithm: it binds variables one at a time by intersecting candidate lists across all participating patterns simultaneously, with no intermediate materialisation. The implementation follows the CompactLTJ paper (Arroyuelo et al., VLDBJ 2025); the C++ reference is in `../cltj/`.
 
-**El problema que resuelve.** La estrategia anterior (hash-join pairwise) materializaba ambos lados de cada join antes de unirlos. Para multi-way joins como un 4-clique con 6 sub-queries, los resultados intermedios crecen exponencialmente: un nodo con grado 100 produce 10K pares en el primer join, 1M triples en el segundo, etc. La mayoría se descarta en joins posteriores. LTJ elimina este blowup.
+**The problem it solves.** The previous strategy (pairwise hash-join) materialised both sides of every join before unifying them. For multi-way joins like a 4-clique with 6 sub-queries, intermediate tables grew exponentially (a node of degree 100 produces 10K pairs at the first join, 1M triples at the second, etc.) and most rows were discarded later. LTJ removes this blowup.
 
-**Idea central: todo es un triple.** Cada arista dirigida del grafo se modela como un triple `(src, label, tgt)`, igual que en RDF. Estos triples se almacenan en 6 ordenamientos sorted (`TripleIndex`): SPO, SOP, POS, PSO, OSP, OPS. Cada ordenamiento permite buscar eficientemente por cualquier prefijo de sus componentes usando binary search.
+**Core idea: everything is a triple.** Each directed edge is modelled as a triple `(src, label, tgt)`, RDF-style. Triples are stored in six sorted orderings (`TripleIndex`): SPO, SOP, POS, PSO, OSP, OPS. Each ordering allows efficient prefix lookups via binary search.
 
-#### Transformación de queries a triples
+#### From queries to triples
 
-La clave de la implementación es que tanto los comma-joins como las concatenaciones de aristas se descomponen en conjuntos de triples. Un concat es simplemente un join sobre nodos intermedios compartidos.
+Comma-joins and edge concatenations both decompose into triple sets — a concat is just a join over shared intermediate nodes.
 
-**Ejemplo 1: cadena de aristas.** La query `(a)->(b)->(c)->(d)` se descompone en:
+**Example 1: edge chain.** `(a)->(b)->(c)->(d)` decomposes into:
 
 ```
-Triple 1: (a, _p0, b)    ← primera arista
-Triple 2: (b, _p1, c)    ← segunda arista
-Triple 3: (c, _p2, d)    ← tercera arista
+Triple 1: (a, _p0, b)    ← first edge
+Triple 2: (b, _p1, c)    ← second edge
+Triple 3: (c, _p2, d)    ← third edge
 ```
 
-Las variables `_p0`, `_p1`, `_p2` son variables frescas para labels (matchean cualquier label). La variable `b` es compartida entre triple 1 y 2; `c` entre 2 y 3. LTJ vincula las variables en un orden inteligente (VEO) e intersecta candidatos en cada paso.
+`_p0`, `_p1`, `_p2` are fresh variables for unconstrained labels. `b` is shared between triples 1 and 2; `c` between 2 and 3. LTJ binds variables in a smart order (the VEO) and intersects candidates step by step.
 
-**Ejemplo 2: triangle (3-clique).** La query `(a)->(b), (b)->(c), (c)->(a)` se descompone en:
+**Example 2: triangle (3-clique).** `(a)->(b), (b)->(c), (c)->(a)` decomposes into:
 
 ```
 Triple 1: (a, _p0, b)
@@ -132,82 +138,94 @@ Triple 2: (b, _p1, c)
 Triple 3: (c, _p2, a)
 ```
 
-Aquí `a` aparece en triples 1 y 3, `b` en 1 y 2, `c` en 2 y 3. LTJ hace:
+`a` appears in triples 1 and 3, `b` in 1 and 2, `c` in 2 and 3. LTJ does:
 
 ```
-para cada a:
-  para cada b en out(a):         ← intersecta triples 1 y 2
-    para cada c en out(b) ∩ in(a):  ← intersecta triples 2 y 3
+for each a:
+  for each b in out(a):                  ← intersects triples 1 and 2
+    for each c in out(b) ∩ in(a):        ← intersects triples 2 and 3
       emit (a, b, c)
 ```
 
-Nunca materializa "todos los pares (a,b)" antes de considerar `c`.
+It never materialises "all (a, b) pairs" before considering `c`.
 
-**Ejemplo 3: labels concretos.** Si la arista tiene label, como `(x)-[:Transfer]->(y)`, el label se codifica como constante en el triple: `(x, Transfer_id, y)`. El iterator pre-fija esta constante y solo explora aristas con ese label.
+**Example 3: literal labels.** `(x)-[:Transfer]->(y)` encodes the label as a constant in the triple: `(x, Transfer_id, y)`. The iterator pre-fixes the constant and only walks edges with that label.
 
-**Ejemplo 4: nodos anónimos.** Los nodos sin variable como `()` reciben variables frescas internas (`_ltj_0`, `_ltj_1`, ...) que participan en el join pero se excluyen del resultado final.
+**Example 4: anonymous nodes.** Bare nodes like `()` get fresh internal variables (`_ltj_0`, `_ltj_1`, …) that participate in the join but are dropped from the result.
 
-#### Cómo funciona el algoritmo
+#### Algorithm in steps
 
-1. **Flatten**: el árbol de `Concat` left-asociativo se aplana en una lista `[Node, Edge, Node, Edge, Node, ...]`.
-2. **Extracción de triples**: cada par `(Node, Edge, Node)` consecutivo produce un triple.
-3. **TripleIndex**: se construye un índice con 6 ordenamientos sorted de todos los triples del grafo. Cada entrada es `(u32, u32, u32, u32)` = (comp0, comp1, comp2, edge_id).
-4. **Iteradores**: cada triple del query tiene un `LtjIterator` que navega el ordering apropiado. Las constantes del triple se pre-fijan, y el iterator selecciona el trie correcto según qué posiciones (S/P/O) ya están fijadas.
-5. **VEO (Variable Elimination Order)**: determina el orden en que se vinculan las variables. Las variables compartidas entre múltiples triples (non-lonely) se vinculan primero; las que aparecen en un solo triple (lonely) al final.
-6. **Leapfrog seek**: para vincular una variable, se rota entre todos los iteradores que contienen esa variable, llamando `leap(c)` (binary search para el menor valor ≥ c). Cuando todos coinciden en el mismo valor, ese valor es un candidato válido.
-7. **Descenso recursivo**: al vincular una variable, se hace `down()` en todos los iteradores, se recurre para la siguiente variable, y luego `up()` para backtrackear.
+1. **Flatten**: the left-associative `Concat` tree is flattened into `[Node, Edge, Node, Edge, Node, …]`.
+2. **Triple extraction**: each consecutive `(Node, Edge, Node)` window emits a triple.
+3. **TripleIndex**: index is built with six sorted orderings of all graph triples. Each entry is `(u32, u32, u32, u32)` = (comp0, comp1, comp2, edge_id).
+4. **Iterators**: each query triple owns an `LtjIterator` that picks the ordering matching its already-fixed positions. Constants are pre-fixed; the iterator selects the right trie based on which S/P/O slots are bound.
+5. **VEO (Variable Elimination Order)**: fixes the order in which variables are bound. Non-lonely variables (in 2+ triples) bind first; lonely variables (in a single triple) last. Within each group, weight breaks ties (`pattern_extract::estimate_var_weights`): equality predicate → 1, range comparison → ~10% of index size, label filter → ~25%, otherwise full index size. Lonely-first inversions are rejected because, without secondary indexes on property values, an equality on a lonely variable still requires a full position scan and elevating it above a structural connector trades a cheap leapfrog for a per-row scan.
+6. **Leapfrog seek**: to bind a variable, rotate across iterators containing it, calling `leap(c)` (binary search for the smallest value ≥ c). When all iterators agree on a value, that's a candidate.
+7. **Recursive descent**: `down()` on iterators after binding, recurse to the next variable, then `up()` to backtrack.
 
-#### Filtros integrados en el loop
+#### In-loop filters
 
-Los filtros (labels de nodos como `(x: Person)`, constraints de properties) se colocan en el nivel del VEO donde todas sus variables ya están vinculadas. Se evalúan antes de descender al siguiente nivel, podando subárboles enteros. Por ejemplo, si `x: Person` falla para `x=5`, no se explora ningún valor de `y` ni `z`.
+Filters (node labels like `(x: Person)`, pushed-down property-type and value predicates) are placed at the VEO level where all their variables are bound. They evaluate before descending and prune entire sub-trees. Three `FilterKind` variants:
+- `NodeLabel { var, label }` — checks the bound node has the required label.
+- `NodeProperty { var, prop }` — checks the bound node has the named property.
+- `NodeAttrCmp { var, attr, op, value }` — checks `node.attr <op> value` for `=`, `!=`, `<`, `<=`, `>`, `>=`. Pushed down by the optimizer from WHERE conjuncts (see *Optimizer*).
 
-#### Cuándo se activa LTJ y cuándo no
+#### When LTJ activates
 
-LTJ se activa automáticamente en `run_join` y `run_concat_pattern` si el pattern es descomponible en triples:
+LTJ kicks in automatically in `run_join` and `run_concat_pattern` whenever the pattern is decomposable into triples:
 
-- **Sí**: cadenas y comma-joins de aristas dirigidas (`-[]->`), izquierda (`<-[]-`) y no dirigidas (`~[e]~`), con o sin label. Las aristas izquierdas se normalizan en extracción intercambiando los endpoints del triple emitido. Las aristas no dirigidas se normalizan al construir el `TripleIndex`: cada arista se guarda como `(s,p,t)` y `(t,p,s)` con el mismo `edge_id`, de modo que un lookup forward las captura desde cualquiera de sus endpoints.
-- **No**: aristas any-direction (`-[e]-` sin tilde), uniones (`|`), repeticiones (`{n,m}`), filtros WHERE con expresiones complejas (los filtros de label sí se integran).
+- **Yes**: chains and comma-joins of directed (`-[]->`), reverse (`<-[]-`), and undirected (`~[e]~`) edges, with or without labels. Reverse edges are normalised at extraction time by swapping the endpoints in the emitted triple. Undirected edges are normalised at index build time: each undirected edge is stored as both `(s, p, t)` and `(t, p, s)` with the same `edge_id`, so a forward lookup catches them from either endpoint.
+- **No**: any-direction edges (`-[e]-` without tilde), unions (`|`), repetitions (`{n,m}`), and WHERE clauses with non-pushable expressions.
 
-Si la descomposición falla, el runtime usa el fallback (hash-join pairwise tanto para joins como para concatenaciones). Esto garantiza cero regresión.
+If decomposition fails, the runtime falls back to pairwise hash-join — guarantees no regression.
 
-#### Limitaciones actuales
+#### Current limits
 
-1. **Repeticiones**: `{n,m}` no se descompone en triples (se podría unrollear para bounds fijos, pero no está implementado). Se usa el runtime existente.
-2. **Aristas no dirigidas/izquierda**: no se modelan como triples actualmente.
-3. **WHERE expressions**: los filtros de labels de nodos están integrados; WHERE con expresiones complejas (`x.age > y.age`) se aplica como post-procesamiento.
-4. **TripleIndex se reconstruye por query**: no hay caché entre queries (se podría cachear en Runtime con `RefCell`).
-5. **VEO es estático**: el orden de variables se fija antes de la búsqueda. Un VEO adaptivo (que re-estima cardinalidades durante la búsqueda) mejoraría queries donde la selectividad varía.
+1. **Repetitions**: `{n,m}` is not unrolled to triples (could be done for fixed bounds; not implemented). Falls back.
+2. **Any-direction edges (without tilde)**: not modelled as triples.
+3. **WHERE expressions**: label and pushed value predicates run inside the loop; arbitrary WHERE (e.g. `x.age > y.age` involving multiple bound vars) post-filters.
+4. **TripleIndex rebuilt per query**: no cross-query caching (could go on `Runtime` with a `RefCell`).
+5. **Static VEO**: variable order is fixed before search. An adaptive VEO that re-estimates cardinalities mid-search would help queries with skewed selectivity. Note also that without secondary indexes on properties, a literal-equality push to a lonely variable is *not* a true point lookup — it still scans the variable's position before rejecting.
 
-#### Resultados en benchmarks (soc-LiveJournal1-100k, limit=1000)
+#### Benchmark results (soc-LiveJournal1-100k, limit=1000)
 
-| Query | Hash-join (antes) | LTJ (ahora) | Speedup |
+| Query | Hash-join (before) | LTJ (after) | Speedup |
 |-------|-------------------|-------------|---------|
-| 3-clique | 0.57s | 0.041s | 14x |
-| 4-cycle | 4.15s | 0.041s | 101x |
-| 3-path | 6.33s | 0.040s | 158x |
-| 2-tree | 101.8s | 0.039s | 2610x |
-| 4-path | 159.8s | 0.039s | 4097x |
-| 4-clique | colgaba | 0.043s | ∞ |
+| 3-clique | 0.57s | 0.041s | 14× |
+| 4-cycle | 4.15s | 0.041s | 101× |
+| 3-path | 6.33s | 0.040s | 158× |
+| 2-tree | 101.8s | 0.039s | 2610× |
+| 4-path | 159.8s | 0.039s | 4097× |
+| 4-clique | hung | 0.043s | ∞ |
 
-#### Estructura del módulo `runtime/ltj/`
+#### Module structure of `runtime/ltj/`
 
 ```
 ltj/
-  mod.rs              — declaraciones
-  triple_index.rs     — TripleIndex: 6 ordenamientos sorted, binary search, leap, range queries
-  iterator.rs         — LtjIterator: navegación con constants pre-fijadas, leap/down/up
-  veo.rs              — VeoSimple: orden fijo por peso, non-lonely primero
-  algorithm.rs        — LtjAlgorithm: leapfrog seek/search, LtjRunner con filtros
-  pattern_extract.rs  — flatten de concats, descomposición en triples, integración con engine
+  mod.rs              — declarations
+  triple_index.rs     — TripleIndex: six sorted orderings, binary search, leap, range queries
+  iterator.rs         — LtjIterator: navigation with pre-fixed constants, leap/down/up
+  veo.rs              — VeoSimple: fixed order, non-lonely first, weight tiebreaker
+  algorithm.rs        — LtjAlgorithm: leapfrog seek/search, LtjRunner with filters
+  pattern_extract.rs  — concat flatten, triple decomposition, engine integration, weight estimation
 ```
 
-### Comma-join fallback (hash-join pairwise)
+### Comma-join fallback (pairwise hash-join)
 
-Cuando LTJ no puede descomponer un join (por contener uniones, repeticiones, o aristas no dirigidas), se usa el hash-join pairwise original. Evalúa ambos lados completamente, construye un hash index sobre la primera variable compartida, y produce el cross-product filtrado. Multi-way joins como `Q1, Q2, Q3` son left-associative: `Join(Join(Q1,Q2), Q3)`.
+When LTJ cannot decompose a join (unions, repetitions, any-direction edges), the original pairwise hash-join handles it. Both sides are evaluated fully, a hash index is built on the first shared variable, and the filtered cross-product is emitted. Multi-way joins like `Q1, Q2, Q3` are left-associative: `Join(Join(Q1, Q2), Q3)`.
 
-### Repetition and PathValue::List
+### Repetition and PathValue::Group
 
-`-[x]->{n,m}` binds `x` to a `List` of matched edges, not a single edge. `to_group()` wraps each value in a singleton list, `concat_group()` concatenates lists. Nested repetitions produce nested lists: `(-[x]->{1,2}){1,2}` gives `x ↦ [[e1], [e2, e3]]`. The zero-repetition base case fills variables with empty lists.
+`-[x]->{n,m}` binds `x` to a `Group` of matched edges, not a single edge. `to_group()` wraps each value in a singleton group; `concat_group()` concatenates groups. Nested repetitions produce nested groups: `(-[x]->{1,2}){1,2}` gives `x ↦ [[e1], [e2, e3]]`. The zero-repetition base case fills variables with empty groups.
+
+### Null semantics
+
+`Value::Null` is a first-class variant. Properties that are absent from a node/edge map are treated as null at query time, and explicit nulls round-trip through the on-disk format.
+
+- **3VL in `cmp_values`** (`runtime/mod.rs`): null on either side yields `false`, so a predicate involving null is dropped from the result. Used by both the LTJ filter loop (`NodeAttrCmp`) and the standard scan (`filter_node`/`filter_edge`).
+- **Aggregate null elimination** (`engine.rs` `collect_aggregate_values`): both `ExprResult::Failure` and `Success(Value::Null)` are dropped before the reducer runs. Empty aggregates emit `Value::Null`.
+- **Wire format**: `PropValue::Null` carries tag byte 6 (no payload). Nested nulls inside lists / records survive the round-trip. Top-level nulls are encoded as key absence — the property is omitted from the on-disk record.
+- **Surface syntax**: the lexer accepts `null` / `NULL`. The parser emits `Expr::Const(Value::Null)`. The typechecker maps the literal to `SimpleType::Star` so `WHERE x = null` does not collapse the surrounding type derivation. `IS NULL` and `IS NOT NULL` (parsed via `try_is_null` lookahead) produce an `Expr::IsNull { operand, negated }` that returns `Value::Bool` regardless of operand type; missing-attribute and unbound-variable failures are treated as null.
 
 ### CSV loader
 
@@ -215,18 +233,21 @@ Cuando LTJ no puede descomponer un join (por contener uniones, repeticiones, o a
 
 ### Storage format (.gdb files)
 
-4KB pages, slotted-page layout for variable-length records. Header page 0 stores root pointers to string table, label indexes, and adjacency index. Node/edge records reference strings by string table ID. Adjacency index maps node_id → Vec<(edge_id, other_node, kind)> where kind is 0=outgoing, 1=incoming, 2=undirected. See `docs/storage-architecture.md` for full specification.
+4 KB pages, slotted-page layout for variable-length records. Header page 0 stores root pointers to string table, label indexes, and adjacency index. Node/edge records reference strings by string table ID. Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6). Adjacency index maps `node_id → Vec<(edge_id, other_node, kind)>` where kind is 0=outgoing, 1=incoming, 2=undirected. See `docs/storage-architecture.md` for the full spec.
 
 ### Optimizer
 
-- **Leapfrog Triejoin**: multi-way join + concat optimization (see above)
-- **Predicate pushdown**: extracts `x.attr is type` from WHERE conjunctions and merges into descriptors
-- **Label index selection**: picks smallest indexed set for compound labels like `A&B` via `LabelType::required_labels()`
+- **Leapfrog Triejoin**: multi-way join + concat optimisation (see above).
+- **Type-predicate pushdown**: extracts `x.attr is T` from WHERE conjunctions and merges into the descriptor's property type.
+- **Value-predicate pushdown**: extracts `x.attr <op> literal` (for `=`, `!=`, `<`, `<=`, `>`, `>=`) and stores it on the node descriptor's `value_preds` field. Pattern extraction emits a `FilterKind::NodeAttrCmp` per predicate; the LTJ runner evaluates it in-loop. Restricted to nodes today; edge value predicates fall through to the residual WHERE.
+- **VEO selectivity-aware tiebreaker**: per-variable weights bias the binding order within each lonely / non-lonely group toward filter-narrowed candidates.
+- **Label index selection**: picks the smallest indexed set for compound labels like `A & B` via `LabelType::required_labels()`.
 
 ## Key conventions
 
-- Labels in patterns require `:` prefix: `-[:Transfer]->` not `-[Transfer]->`
-- The `bench_test` has pre-existing failures — exclude it from regular test runs
-- The `bench/data/` directory is gitignored (large datasets, download via scripts)
-- Example databases in `examples/*.gdb` ARE committed (small, useful for testing)
-- The parent `../CLAUDE.md` covers the full monorepo (pygql, playground, gqlrust)
+- Labels in patterns require the `:` prefix: `-[:Transfer]->`, not `-[Transfer]->`.
+- Run `cargo clippy --workspace --all-targets -- -D clippy::all` before every commit.
+- The `bench_test` target has pre-existing failures — exclude it from regular runs.
+- `bench/data/` is gitignored (large datasets, downloaded via scripts).
+- Example databases in `examples/*.gdb` ARE committed (small, useful for testing).
+- The parent `../CLAUDE.md` covers the full monorepo (pygql, playground, gqlrust).
