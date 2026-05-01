@@ -23,6 +23,7 @@ use crate::typing::label_type::LabelType;
 use super::catalog_io;
 use super::disk_index;
 use super::record::{self, PropValue};
+use super::secondary_index::SecondaryIndex;
 use super::string_table::StringTable;
 
 /// Location of a record on disk: page number + cell index within that page.
@@ -61,6 +62,11 @@ pub struct LazyGraphStore {
     /// Last persisted catalog chain root. Tracked so subsequent writes
     /// can free the old chain before allocating new pages.
     catalog_root: Cell<u32>,
+
+    // Secondary indexes — auto-inferred at open from unique-valued node
+    // properties. Memory-only for now (rebuilt every open). Used by the LTJ
+    // optimizer to constant-fold `(x:L {prop: literal})` start lookups.
+    secondary: RefCell<SecondaryIndex>,
 }
 
 impl LazyGraphStore {
@@ -111,6 +117,7 @@ impl LazyGraphStore {
             undirected_adj: HashMap::new(),
             catalog: RefCell::new(GraphTypeCatalog::new()),
             catalog_root: Cell::new(catalog_root),
+            secondary: RefCell::new(SecondaryIndex::new()),
         };
 
         if has_fast_index {
@@ -136,7 +143,30 @@ impl LazyGraphStore {
             *store.catalog.borrow_mut() = cat;
         }
 
+        // Auto-infer secondary indexes. Single O(N) pass over nodes; reads
+        // properties via the same page cache, so the cost is bounded by the
+        // store's existing access pattern. Idempotent — re-buildable on demand.
+        {
+            let mut idx = SecondaryIndex::new();
+            idx.auto_build(&store);
+            if std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
+                eprintln!("auto-built {} secondary indexes:", idx.list().len());
+                for spec in idx.list() {
+                    eprintln!(
+                        "  {} on (:{} {{{}}}) — {} entries",
+                        spec.name, spec.label, spec.prop, spec.entries
+                    );
+                }
+            }
+            *store.secondary.borrow_mut() = idx;
+        }
+
         Ok(store)
+    }
+
+    /// Read-only borrow of the secondary indexes.
+    pub fn secondary_indexes(&self) -> Ref<'_, SecondaryIndex> {
+        self.secondary.borrow()
     }
 
     // ---- Graph-type catalog ----
@@ -534,6 +564,10 @@ impl GraphAccess for LazyGraphStore {
                 .copied()
                 .collect()
         })
+    }
+
+    fn lookup_node_eq(&self, label: &str, prop: &str, value: &Value) -> Option<Vec<Id>> {
+        self.secondary.borrow().lookup_eq(label, prop, value)
     }
 
     fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {

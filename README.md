@@ -346,6 +346,38 @@ edges) fall back to pairwise hash-join. Speedups on
 `docs/JOIN_STRATEGY_NOTES.md` and `gqlrust/CLAUDE.md` for the algorithm
 in detail.
 
+## Secondary indexes
+
+GQLite auto-builds hash indexes on `(label, prop)` pairs whose values are
+unique within the label, in a single O(N) pass at `LazyGraphStore::open`.
+On the LDBC SF0.1 dataset that captures `Person.id`, `Tag.name`,
+`Country.name`, `TagClass.name`, every other `*_id` column the loader
+produced — 26 indexes in total, no DDL required. The LTJ optimizer
+constant-folds any `NodeAttrCmp { Eq, value }` predicate that hits an
+index, substitutes the resolved NodeId in every triple position, and
+excludes the variable from the VEO so leapfrog never enumerates it.
+
+Measured impact on **LDBC IC2** (`MATCH (p:Person {id: $personId})~[:knows]~...`
+over `bench/data/ldbc-sf0.1.gdb`, 15 params × 3 iters, lazy backend,
+`--limit 20`):
+
+| | Median | Range |
+|---|---|---|
+| Without secondary index (`GQLITE_DISABLE_INDEX_FOLD=1`) | 2417 ms | 2317–2582 ms |
+| With secondary index (default) | **1377 ms** | 1363–1392 ms |
+| **Speedup** | **1.76×** | |
+
+IC2 itself uses a top-level `Comment | Post` union that falls back to
+hash-join, but each branch independently decomposes into LTJ-eligible
+triples and benefits from the start-node pin. Diagnostic env vars:
+`GQLITE_DEBUG_INDEXES=1` prints the auto-built indexes and pinned
+variables; `GQLITE_DISABLE_INDEX_FOLD=1` reverts to the pre-index plan
+for A/B benchmarking.
+
+Today's index covers point-lookup equality only. BTree indexes for
+range filters (IC2/3/4/9 temporal predicates), `CREATE INDEX` DDL, and
+.gdb persistence are tracked as follow-up work.
+
 ## Building and Testing
 
 ```bash

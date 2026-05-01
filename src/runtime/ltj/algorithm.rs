@@ -45,12 +45,18 @@ pub struct LtjAlgorithm<'a> {
     var_to_iterators: Vec<Vec<usize>>,
     /// var_id → the SpoPos of this variable in each iterator
     var_to_positions: Vec<Vec<SpoPos>>,
-    /// Variable ordering
+    /// Variable ordering. Excludes any variables that were pinned to a
+    /// constant by index-resolved equality before search; those don't need
+    /// to be bound by leapfrog because their NodeId is already known.
     veo: Box<dyn Veo>,
     /// Filters indexed by VEO level
     filters_at_level: Vec<Vec<PlacedFilter>>,
-    /// Number of variables
+    /// Number of variables (including pinned ones).
     num_vars: usize,
+    /// (var_id, node_id) bindings resolved by secondary-index lookup before
+    /// search starts. These slots are pre-populated in the result tuple and
+    /// never written to by the search loop.
+    pinned: Vec<(u8, u32)>,
 }
 
 impl<'a> LtjAlgorithm<'a> {
@@ -61,6 +67,7 @@ impl<'a> LtjAlgorithm<'a> {
         veo: Box<dyn Veo>,
         filters_at_level: Vec<Vec<PlacedFilter>>,
         num_vars: usize,
+        pinned: Vec<(u8, u32)>,
     ) -> Self {
         LtjAlgorithm {
             iterators,
@@ -69,6 +76,7 @@ impl<'a> LtjAlgorithm<'a> {
             veo,
             filters_at_level,
             num_vars,
+            pinned,
         }
     }
 
@@ -76,6 +84,15 @@ impl<'a> LtjAlgorithm<'a> {
     pub fn run(&mut self, limit: usize) -> Vec<ResultTuple> {
         let mut results = Vec::new();
         let mut tuple = vec![(0u8, 0u32); self.num_vars];
+        // Pre-populate pinned bindings into the slots beyond the VEO so
+        // result construction sees them. The search loop only writes to
+        // tuple[0..veo.size()].
+        for (i, &binding) in self.pinned.iter().enumerate() {
+            let slot = self.veo.size() + i;
+            if slot < tuple.len() {
+                tuple[slot] = binding;
+            }
+        }
         self.search(0, &mut tuple, &mut results, limit);
         results
     }

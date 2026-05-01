@@ -1,5 +1,5 @@
 use crate::model::graph::Props;
-use crate::model::value::{Id, PathValue};
+use crate::model::value::{Id, PathValue, Value};
 use crate::typing::label_type::LabelType;
 
 /// Trait abstracting graph data access.
@@ -64,5 +64,15 @@ pub trait GraphAccess {
     fn undirected_edges_of(&self, node_id: Id) -> Vec<Id> {
         let _ = node_id;
         vec![]
+    }
+
+    // --- Secondary index ---
+
+    /// Look up node IDs by `(label, prop) = value` via a secondary index, if
+    /// one exists. `Some(vec![])` means the index exists but no node matches;
+    /// `None` means there is no index for this (label, prop) and the caller
+    /// must fall back to a scan. Default impl: no indexes.
+    fn lookup_node_eq(&self, _label: &str, _prop: &str, _value: &Value) -> Option<Vec<Id>> {
+        None
     }
 }

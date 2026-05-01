@@ -94,7 +94,7 @@ DDL surface today: `CREATE / USE / DROP GRAPH TYPE`, plus inspection / validatio
 
 `USE` does not validate. The walk is opt-in because it is O(N + E); the typechecker still constrains queries against the active schema either way.
 
-The REPL convenience command `schema` (no argument) is an alias for `SHOW GRAPH TYPE DEFAULT`. `schema simple` keeps the alternative grouped renderer in `print_schema_simple`.
+REPL meta-commands follow the SQLite dot-prefix convention (see `src/bin/gqlite.rs`): `.schema` aliases `SHOW GRAPH TYPE DEFAULT`, `.schema simple` switches to the grouped by-label renderer in `print_schema_simple` (which lists every node type unconditionally — the earlier "standalone-only" filter hid all nodes on connected graphs and was removed in commit `e23d04d`), `.graph-types` aliases `SHOW GRAPH TYPES`, `.help` lists meta-commands and DDL surface, and `.quit` / `.exit` (plus bare `quit` / `exit`) leave the REPL.
 
 ### ID system
 
@@ -265,8 +265,19 @@ When LTJ cannot decompose a join (unions, repetitions, any-direction edges), the
 - **Leapfrog Triejoin**: multi-way join + concat optimisation (see above).
 - **Type-predicate pushdown**: extracts `x.attr is T` from WHERE conjunctions and merges into the descriptor's property type.
 - **Value-predicate pushdown**: extracts `x.attr <op> literal` (for `=`, `!=`, `<`, `<=`, `>`, `>=`) and stores it on the node descriptor's `value_preds` field. Pattern extraction emits a `FilterKind::NodeAttrCmp` per predicate; the LTJ runner evaluates it in-loop. Restricted to nodes today; edge value predicates fall through to the residual WHERE.
+- **Index-driven constant folding**: when a `NodeAttrCmp { Eq, value }` predicate matches a known secondary index on the variable's `(label, prop)`, `pattern_extract::fold_indexed_constants` resolves the predicate to a single NodeId via `GraphAccess::lookup_node_eq`, substitutes `Term::Variable → Term::Constant` in every triple position, drops the satisfied filter, and pre-binds the variable in the result tuple. The variable is excluded from the VEO so leapfrog never enumerates its position. An empty index hit short-circuits the entire pattern to zero rows. See `runtime/ltj/pattern_extract.rs::FoldOutcome`.
 - **VEO selectivity-aware tiebreaker**: per-variable weights bias the binding order within each lonely / non-lonely group toward filter-narrowed candidates.
 - **Label index selection**: picks the smallest indexed set for compound labels like `A & B` via `LabelType::required_labels()`.
+
+### Secondary indexes
+
+`LazyGraphStore` owns a `RefCell<SecondaryIndex>` (`src/store/secondary_index.rs`) populated at open by a single O(N) pass over nodes. Today the only flavour is **hash on (label, prop) pairs whose values are unique within the label**, auto-inferred — which captures the LDBC IC start lookups (`Person.id`, `Tag.name`, `Country.name`, `TagClass.name`, plus every other `*_id` column the loader produced) without requiring DDL. Floats / lists / records / nulls are not indexable (`IndexKey` covers `Int`, `Str`, `Bool` only). The store exposes the index via the `GraphAccess::lookup_node_eq(label, prop, value) -> Option<Vec<Id>>` trait method; in-memory `Graph` returns `None` and falls back to scan.
+
+Memory-only for now (rebuilt every open). DDL-declared indexes (`CREATE / DROP / SHOW INDEX`), btree variant for range lookups (IC2/3/4/9 temporal filters), and persistence in the .gdb file header chain are tracked as follow-up work.
+
+Diagnostic env vars: `GQLITE_DEBUG_INDEXES=1` prints the auto-built indexes and pinned variables; `GQLITE_DISABLE_INDEX_FOLD=1` disables the LTJ pre-pass for A/B benchmarking.
+
+Measured impact on LDBC IC2 over `bench/data/ldbc-sf0.1.gdb` (15 params × 3 iters, lazy backend, `--limit 20`): across-row median **2417 ms → 1377 ms (1.76×)**. The IC2 query uses a top-level `Comment | Post` union that falls back to hash-join, but each branch independently calls `try_ltj` and benefits from constant-folding the `Person {id: ...}` start.
 
 ## Key conventions
 

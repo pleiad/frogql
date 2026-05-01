@@ -67,13 +67,39 @@ pub fn try_ltj<G: GraphAccess>(
     index: &TripleIndex,
     limit: usize,
 ) -> Option<IntermediateResult> {
-    let decomp = decompose(pattern, index)?;
+    let mut decomp = decompose(pattern, index)?;
 
     if decomp.triples.is_empty() {
         return None;
     }
 
+    // Pre-pass: resolve `var.attr = literal` predicates against any secondary
+    // index the store exposes, then constant-fold the variable's positions in
+    // the triples and pre-bind it in the result tuple. Without this, even with
+    // the eq weight=1 in the VEO, the lonely-var binding would still scan the
+    // variable's position before rejecting (see `veo.rs` rationale comment).
+    let pinned = if std::env::var("GQLITE_DISABLE_INDEX_FOLD").is_ok() {
+        Vec::new()
+    } else {
+        match fold_indexed_constants(graph, &mut decomp) {
+            FoldOutcome::EmptyResult => return Some(IntermediateResult::new(Vec::new())),
+            FoldOutcome::Pinned(p) => p,
+        }
+    };
+    if !pinned.is_empty() && std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
+        eprintln!(
+            "ltj: pinned {} variable(s) via secondary index: {:?}",
+            pinned.len(),
+            pinned
+                .iter()
+                .map(|(v, n)| format!("{}={}", decomp.var_id_to_name[*v as usize], n))
+                .collect::<Vec<_>>()
+        );
+    }
+
     let num_vars = decomp.var_id_to_name.len();
+    let pinned_set: std::collections::HashSet<u8> =
+        pinned.iter().map(|(v, _)| *v).collect();
 
     // Build iterators and var maps
     let mut iterators: Vec<LtjIterator> = Vec::new();
@@ -102,9 +128,11 @@ pub fn try_ltj<G: GraphAccess>(
     // Build VEO with selectivity-aware weights. Variables with strong filters
     // (equality on a constant, range comparison, label) bind early; the
     // lonely / non-lonely flag survives only as a tiebreaker for variables
-    // with the same selectivity class.
+    // with the same selectivity class. Pinned vars are excluded — their
+    // NodeId is already known via the index lookup.
     let weights = estimate_var_weights(num_vars, &decomp.filters, index.len());
     let var_info: Vec<(u8, usize, bool)> = (0..num_vars)
+        .filter(|v| !pinned_set.contains(&(*v as u8)))
         .map(|v| {
             let v_id = v as u8;
             let iters = &var_to_iterators[v];
@@ -146,12 +174,127 @@ pub fn try_ltj<G: GraphAccess>(
         Box::new(veo),
         filters_at_level,
         num_vars,
+        pinned,
     );
 
     let mut runner = LtjRunner::new(algorithm, graph);
     let tuples = runner.run(limit);
 
     Some(convert_results(graph, &tuples, &decomp))
+}
+
+// ---- Index-driven constant folding ----
+
+enum FoldOutcome {
+    /// Every Eq predicate that hit the index resolved to at least one node;
+    /// the listed variables were pinned to specific NodeIds.
+    Pinned(Vec<(u8, u32)>),
+    /// At least one Eq predicate hit the index but matched zero nodes.
+    /// The whole pattern is unsatisfiable; LTJ skips and returns empty.
+    EmptyResult,
+}
+
+/// Walk the extracted filters; for each `NodeAttrCmp { Eq, value }` that
+/// matches a known secondary index on the variable's label+attr, look up the
+/// matching NodeId. If exactly one node matches, pin the variable: substitute
+/// the matching NodeId for every Term::Variable(v) in the triples and drop the
+/// satisfied Eq + NodeLabel filters for that variable.
+fn fold_indexed_constants<G: GraphAccess>(
+    graph: &G,
+    decomp: &mut Decomposition,
+) -> FoldOutcome {
+    // var_id → labels declared via NodeLabel filters. A variable can carry
+    // more than one label (compound `:A & B`); the index lookup needs at
+    // least one to identify the (label, prop) pair.
+    let mut var_to_labels: HashMap<u8, Vec<String>> = HashMap::new();
+    for f in decomp.filters.iter() {
+        if let FilterKind::NodeLabel { var_id, label } = &f.kind {
+            var_to_labels
+                .entry(*var_id)
+                .or_default()
+                .push(label.clone());
+        }
+    }
+
+    let mut pinned: HashMap<u8, u32> = HashMap::new();
+    let mut resolved_filter_indices: Vec<usize> = Vec::new();
+
+    for (i, f) in decomp.filters.iter().enumerate() {
+        let FilterKind::NodeAttrCmp {
+            var_id,
+            attr,
+            op: BinOp::Eq,
+            value,
+        } = &f.kind
+        else {
+            continue;
+        };
+        if pinned.contains_key(var_id) {
+            continue;
+        }
+        let Some(labels) = var_to_labels.get(var_id) else {
+            continue;
+        };
+        // Try every label the var carries; the first hit wins. With auto-
+        // inferred indexes there is at most one anyway.
+        let mut hits = None;
+        for label in labels {
+            if let Some(h) = graph.lookup_node_eq(label, attr, value) {
+                hits = Some(h);
+                break;
+            }
+        }
+        let Some(hits) = hits else { continue };
+        if hits.is_empty() {
+            return FoldOutcome::EmptyResult;
+        }
+        if hits.len() == 1 {
+            pinned.insert(*var_id, hits[0]);
+            resolved_filter_indices.push(i);
+        }
+        // Multi-hit: skipped for v1 (would need a NodeInSet filter). The
+        // existing filter still runs as a fallback so correctness holds.
+    }
+
+    if pinned.is_empty() {
+        return FoldOutcome::Pinned(Vec::new());
+    }
+
+    // Substitute pinned vars in every triple position.
+    for triple in decomp.triples.iter_mut() {
+        for term in triple.terms.iter_mut() {
+            if let Term::Variable(v) = term {
+                if let Some(&node_id) = pinned.get(v) {
+                    *term = Term::Constant(node_id);
+                }
+            }
+        }
+    }
+
+    // Drop the satisfied Eq filters AND any NodeLabel filters for vars we
+    // resolved through the index — the index is keyed by label, so the label
+    // constraint is already checked.
+    let resolved_set: std::collections::HashSet<usize> =
+        resolved_filter_indices.into_iter().collect();
+    let drained: Vec<ExtractedFilter> = decomp.filters.drain(..).collect();
+    decomp.filters = drained
+        .into_iter()
+        .enumerate()
+        .filter(|(i, f)| {
+            if resolved_set.contains(i) {
+                return false;
+            }
+            if let FilterKind::NodeLabel { var_id, .. } = &f.kind {
+                if pinned.contains_key(var_id) {
+                    return false;
+                }
+            }
+            true
+        })
+        .map(|(_, f)| f)
+        .collect();
+
+    FoldOutcome::Pinned(pinned.into_iter().collect())
 }
 
 // ---- Weight estimation for the VEO ----
