@@ -65,6 +65,25 @@ fn test_nested_field_access() {
 }
 
 #[test]
+fn test_missing_record_field_reads_as_null_like_attr_lookup() {
+    let g = graph_with_records();
+    // Missing nested key: Success(Null) like AttrLookup so Failure does not break OR.
+    let r = run(
+        &g,
+        "MATCH (x: User) WHERE (x.address.nonexistent = true) OR (1 = 1) RETURN x.name",
+    );
+    let mut names: Vec<&str> = r
+        .iter()
+        .map(|row| match &row[0] {
+            Value::Str(s) => s.as_str(),
+            _ => panic!("expected string name"),
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Alice", "Bob", "Carol"]);
+}
+
+#[test]
 fn test_nested_field_in_return() {
     let g = graph_with_records();
     let r = run(

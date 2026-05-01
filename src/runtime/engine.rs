@@ -1047,7 +1047,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             Expr::FieldAccess { base, field } => match self.run_expr(mu, base) {
                 ExprResult::Success(Value::Record(m)) => match m.get(field) {
                     Some(v) => ExprResult::Success(v.clone()),
-                    None => ExprResult::Failure(format!("field '{field}' not found")),
+                    None => ExprResult::Success(Value::Null),
                 },
                 ExprResult::Success(other) => {
                     ExprResult::Failure(format!("field access on non-record value: {other}"))

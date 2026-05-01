@@ -2,8 +2,9 @@ use std::fmt;
 
 /// A property value. Scalars (Int/Float/Str/Bool/Null) plus the GQL
 /// constructed types List (ordered collection) and Record (named fields, can
-/// nest). `Null` is the SQL-style absent value; aggregators skip it, and it is
-/// distinct from any string, including `"NULL"`.
+/// nest). `Null` is the SQL-style absent value; in general `WHERE` expressions,
+/// comparisons involving null follow SQL three-valued logic. Aggregators skip null,
+/// and it is distinct from any string, including `"NULL"`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
