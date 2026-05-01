@@ -23,6 +23,9 @@ fn graph_with_records() -> Graph {
         {"id": "u3", "labels": ["User"], "props": {
             "name": "Carol",
             "address": {"street": "Pine", "city": "Seattle", "zip": 98101}
+        }},
+        {"id": "u4", "labels": ["User"], "props": {
+            "name": "Dave"
         }}
       ],
       "edges": []
@@ -67,7 +70,8 @@ fn test_nested_field_access() {
 #[test]
 fn test_missing_record_field_reads_as_null_like_attr_lookup() {
     let g = graph_with_records();
-    // Missing nested key: Success(Null) like AttrLookup so Failure does not break OR.
+    // Covers missing nested key on a record and null base (no address / Dave):
+    // both must be Success(Null), not Failure, so OR (1=1) keeps the row.
     let r = run(
         &g,
         "MATCH (x: User) WHERE (x.address.nonexistent = true) OR (1 = 1) RETURN x.name",
@@ -80,7 +84,7 @@ fn test_missing_record_field_reads_as_null_like_attr_lookup() {
         })
         .collect();
     names.sort();
-    assert_eq!(names, vec!["Alice", "Bob", "Carol"]);
+    assert_eq!(names, vec!["Alice", "Bob", "Carol", "Dave"]);
 }
 
 #[test]

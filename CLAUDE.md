@@ -245,7 +245,7 @@ When LTJ cannot decompose a join (unions, repetitions, any-direction edges), the
 
 ### Null semantics
 
-`Value::Null` is a first-class variant. For a **bound** graph variable, **missing property keys** are read as `Success(Value::Null)` in `AttrLookup`; **missing record keys** in `Expr::FieldAccess` behave the same (`engine.rs` `run_expr`) — FPPC-style `ok null` / ISO default-nullable missing-property behavior. Explicit nulls round-trip through the on-disk format.
+`Value::Null` is a first-class variant. For a **bound** graph variable, **missing property keys** are read as `Success(Value::Null)` in `AttrLookup`; **missing record keys** in `Expr::FieldAccess` behave the same, and **field access with a null base** (`null.city`) yields **`Success(Null)`** — FPPC-style `ok null` / ISO default-nullable missing-property behavior. Explicit nulls round-trip through the on-disk format.
 
 - **Residual `WHERE` and general expressions** (`engine.rs` `run_expr`, `eval_binop`): SQL/GQL-style **three-valued logic** — e.g. null comparisons yield unknown (success value `Null`), `AND`/`OR`/`NOT` follow SQL truth tables, `WHERE` keeps a binding only when the condition is definite `Bool(true)`. `BinOp::As` passes `Null` through so casts do not turn missing reads back into `Failure`.
 - **Pushed-down value predicates** (`cmp_values` in `runtime/mod.rs`, `check_value_preds` in `engine.rs`): null on either side yields **`false`** (not full 3VL). Used by LTJ `NodeAttrCmp` and standard `filter_node`/`filter_edge`; arbitrary residual `WHERE` uses the path above.
