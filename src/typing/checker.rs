@@ -97,19 +97,22 @@ impl Typechecker {
 
     /// Sequential walk of the match chain when at least one is OPTIONAL.
     /// Implements TSeq composed with TMatch / TOpt: each Simple meets, each
-    /// Optional outer-joins. The resulting `PathType` is the meet of the
-    /// individual patterns (the path-shape part is unaffected by OPTIONAL —
-    /// only the env tracks which variables can be Null).
+    /// Optional left-joins.
+    ///
+    /// Path types are not threaded across MATCH statements. They track the
+    /// shape of a single concatenation (used for short-circuiting on Zero);
+    /// joins and left-joins produce independent paths whose shapes are
+    /// unrelated, so we keep the first match's path for short-circuiting on
+    /// its own emptiness and rely on the environment for everything else.
     fn check_match_chain(&mut self, matches: &[MatchStatement]) -> TypecheckResult {
         let mut iter = matches.iter();
         let first = iter
             .next()
             .expect("Query::matches must contain at least one match statement");
         let first_r = self.check_path_pattern(first.pattern());
-        // The first statement's environment is what we accumulate from. For
-        // a leading OPTIONAL, every variable it introduces gains Null per
-        // TOpt with Γ₁ = ∅.
-        let (mut env, mut path) = if first.is_optional() {
+        // For a leading OPTIONAL, every variable it introduces gains Null
+        // per TLEFTJOIN with Γ₁ = ∅.
+        let (mut env, path) = if first.is_optional() {
             let acc =
                 TypeEnvironment::outer_join(&self.schema, &TypeEnvironment::new(), &first_r.env);
             (acc, first_r.path)
@@ -137,7 +140,6 @@ impl Typechecker {
                     TypeEnvironment::outer_join(&self.schema, &env, &r.env)
                 }
             };
-            path = PathType::meet(&self.schema, &path, &r.path);
         }
 
         TypecheckResult::new(path, env)

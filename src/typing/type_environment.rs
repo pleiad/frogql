@@ -93,38 +93,55 @@ impl TypeEnvironment {
         Ok(TypeEnvironment { bindings: result })
     }
 
-    /// Left outer join — the typing operator `Γ₁ ⋈ Γ₂` for OPTIONAL MATCH.
-    ///
-    /// Definition (from the paper / TOpt rule):
+    /// Left outer join — the typing operator `Γ₁ ⟕ Γ₂` for OPTIONAL MATCH,
+    /// rule TLEFTJOIN of the paper:
     ///
     /// ```text
-    /// Γ₁ ⋈ Γ₂ = (Γ₁ ∪ {x ↦ Null | x ∈ dom(Γ₂) \ dom(Γ₁)}) ⊔ (Γ₁ ⊓ Γ₂)
-    ///            └── unsuccess branch ──────────────┘     └ success ┘
+    ///                          S ⊢ T_{i1} ⊓ T_{i2} ▷ T'_i
+    /// ────────────────────────────────────────────────────────────────────
+    /// S ⊢ {x_i ↦ T_{i1}, x_j ↦ T_j} ⟕ {x_i ↦ T_{i2}, x_k ↦ T_k} ▷
+    ///       {x_i ↦ T_{i1} ⊔ T'_i, x_j ↦ T_j, x_k ↦ T_k ⊔ Null}
     /// ```
     ///
-    /// The unsuccess branch keeps `Γ₁` as-is and gives every variable
-    /// introduced only by the optional pattern the type `Null`. The success
-    /// branch is the regular meet. The pointwise join (`union`) of the two
-    /// captures both possibilities.
-    ///
-    /// If `meet` fails (shared variable types are irreconcilable), the
-    /// optional pattern can never match, so the result reduces to the
-    /// unsuccess branch alone.
+    /// where `i` ranges over `dom(Γ₁) ∩ dom(Γ₂)`, `j` over the left-only
+    /// keys, and `k` over the right-only keys. The judgment
+    /// `S ⊢ T ▷ T'` is `refine(schema, T)`. For each shared variable the
+    /// refined meet captures the success branch and the join with the
+    /// left-side type captures the unsuccess branch (so an unsatisfiable
+    /// optional collapses gracefully to the left-side binding instead of
+    /// poisoning the whole environment).
     pub fn outer_join(
         schema: &Schema,
         a: &TypeEnvironment,
         b: &TypeEnvironment,
     ) -> TypeEnvironment {
-        let mut unsuccess = a.clone();
-        for key in b.bindings.keys() {
-            if !a.bindings.contains_key(key) {
-                unsuccess.bindings.insert(key.clone(), VariableType::Null);
+        let mut result: HashMap<String, VariableType> = HashMap::new();
+
+        // Shared keys (i) and left-only keys (j) start from `a`.
+        for (key, t1) in &a.bindings {
+            let merged = match b.bindings.get(key) {
+                Some(t2) => {
+                    // T'_i := refine(schema, meet(T_{i1}, T_{i2}))
+                    let met = VariableType::meet(t1, t2);
+                    let refined = VariableType::refine(schema, &met);
+                    // x_i ↦ T_{i1} ⊔ T'_i
+                    VariableType::join(t1, &refined)
+                }
+                // x_j ↦ T_j (kept as-is)
+                None => t1.clone(),
+            };
+            result.insert(key.clone(), merged);
+        }
+
+        // Right-only keys (k): T_k ⊔ Null.
+        for (key, t2) in &b.bindings {
+            if a.bindings.contains_key(key) {
+                continue;
             }
+            result.insert(key.clone(), VariableType::join(t2, &VariableType::Null));
         }
-        match TypeEnvironment::meet(schema, a, b) {
-            Ok(success) => TypeEnvironment::union(&unsuccess, &success),
-            Err(_) => unsuccess,
-        }
+
+        TypeEnvironment { bindings: result }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -206,8 +223,8 @@ mod tests {
         assert_eq!(r.keys().len(), 1);
     }
 
-    /// New variable in the optional side gets `Null` (unsuccess) joined
-    /// with its real type (success). Pin: `y ↦ T ⊔ Null`.
+    /// New variable in the optional side gets `T_k ⊔ Null` per TLEFTJOIN:
+    /// the optional's real type when it matches, `Null` when it does not.
     #[test]
     fn test_outer_join_new_var_gains_null() {
         let mut a = TypeEnvironment::new();
@@ -219,8 +236,8 @@ mod tests {
         assert_eq!(
             r.get("y"),
             Some(&VariableType::Union(
-                Box::new(VariableType::Null),
                 Box::new(nstar()),
+                Box::new(VariableType::Null),
             )),
         );
     }
@@ -239,8 +256,9 @@ mod tests {
     }
 
     /// When the meet on a shared variable collapses to Zero (irreconcilable
-    /// types), the success branch is impossible — the optional cannot
-    /// match. The result reduces to the unsuccess branch alone.
+    /// types), TLEFTJOIN's `T_{i1} ⊔ T'_i` reduces to `T_{i1} ⊔ Zero`. Zero
+    /// is the bottom of the join lattice, so the binding stays at the
+    /// left-side type. Right-only variables still get `T_k ⊔ Null`.
     #[test]
     fn test_outer_join_irreconcilable_meet_falls_back_to_unsuccess() {
         use crate::typing::descriptor_type::DescriptorType;
@@ -263,8 +281,13 @@ mod tests {
         b.set("y", nstar());
 
         let r = TypeEnvironment::outer_join(&Schema::star(), &a, &b);
-        // Unsuccess branch dominates: x stays as Person (left side), y is Null.
         assert_eq!(r.get("x"), Some(&person));
-        assert_eq!(r.get("y"), Some(&VariableType::Null));
+        assert_eq!(
+            r.get("y"),
+            Some(&VariableType::Union(
+                Box::new(nstar()),
+                Box::new(VariableType::Null),
+            )),
+        );
     }
 }
