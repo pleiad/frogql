@@ -22,10 +22,12 @@ use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
 /// Apply value predicates pushed down by the optimizer to raw graph properties.
 /// Missing key → predicate is null → reject.
 fn check_value_preds(preds: &[(String, BinOp, Value)], props: &Props) -> bool {
-    preds.iter().all(|(attr, op, expected)| match props.get(attr) {
-        Some(actual) => cmp_values(actual, *op, expected),
-        None => false,
-    })
+    preds
+        .iter()
+        .all(|(attr, op, expected)| match props.get(attr) {
+            Some(actual) => cmp_values(actual, *op, expected),
+            None => false,
+        })
 }
 
 /// Runtime engine for evaluating GQL path patterns on a graph.

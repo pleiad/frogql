@@ -39,10 +39,7 @@ fn run(g: &Graph, q: &str) -> Vec<Vec<Value>> {
 #[test]
 fn test_is_null_matches_missing_property() {
     let g = graph_with_optional_email();
-    let rows = run(
-        &g,
-        "MATCH (x: User) WHERE x.email IS NULL RETURN x.name",
-    );
+    let rows = run(&g, "MATCH (x: User) WHERE x.email IS NULL RETURN x.name");
     assert_eq!(rows, vec![vec![Value::Str("Carol".into())]]);
 }
 
@@ -68,10 +65,7 @@ fn test_eq_null_drops_all_rows_under_3vl() {
     // Comparison against null literal yields false → predicate is null →
     // no row passes. This is SQL behavior; users must use IS NULL.
     let g = graph_with_optional_email();
-    let rows = run(
-        &g,
-        "MATCH (x: User) WHERE x.email = null RETURN x.name",
-    );
+    let rows = run(&g, "MATCH (x: User) WHERE x.email = null RETURN x.name");
     assert!(rows.is_empty(), "expected no rows, got {rows:?}");
 }
 
@@ -89,10 +83,7 @@ fn test_null_literal_in_return() {
 fn test_is_null_uppercase() {
     // `NULL` keyword in upper case parses identically.
     let g = graph_with_optional_email();
-    let rows = run(
-        &g,
-        "MATCH (x: User) WHERE x.email IS NULL RETURN x.name",
-    );
+    let rows = run(&g, "MATCH (x: User) WHERE x.email IS NULL RETURN x.name");
     assert_eq!(rows, vec![vec![Value::Str("Carol".into())]]);
 }
 
