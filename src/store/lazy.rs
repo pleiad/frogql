@@ -314,8 +314,24 @@ impl LazyGraphStore {
                 let prop = self.strings.resolve(prop_sid).unwrap().to_string();
                 let btree: BTreeMap<IndexKey, Vec<Id>> =
                     bucket.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                idx.insert_prebuilt(&label, &prop, IndexKind::Hash, true, entries, Some(bucket), None);
-                idx.insert_prebuilt(&label, &prop, IndexKind::BTree, true, entries, None, Some(btree));
+                idx.insert_prebuilt(
+                    &label,
+                    &prop,
+                    IndexKind::Hash,
+                    true,
+                    entries,
+                    Some(bucket),
+                    None,
+                );
+                idx.insert_prebuilt(
+                    &label,
+                    &prop,
+                    IndexKind::BTree,
+                    true,
+                    entries,
+                    None,
+                    Some(btree),
+                );
             }
         }
         idx
