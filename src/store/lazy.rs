@@ -227,13 +227,12 @@ impl LazyGraphStore {
             eprintln!("  catalog load:         {:.3}s", t3.elapsed().as_secs_f64());
         }
 
-        // Auto-infer secondary indexes. Single O(N) pass over nodes; reads
-        // properties via the same page cache, so the cost is bounded by the
-        // store's existing access pattern. Skip with GQLITE_DISABLE_AUTO_INDEXES=1.
+        // Auto-infer secondary indexes. Bulk path: walk node records once,
+        // decode each exactly once, and build hash+btree per (label, prop)
+        // in a single pass. Skip with GQLITE_DISABLE_AUTO_INDEXES=1.
         let t4 = std::time::Instant::now();
         if std::env::var("GQLITE_DISABLE_AUTO_INDEXES").is_err() {
-            let mut idx = SecondaryIndex::new();
-            idx.auto_build(&store);
+            let idx = store.build_auto_indexes_bulk();
             if std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
                 eprintln!("auto-built {} secondary indexes:", idx.list().len());
                 for spec in idx.list() {
@@ -259,6 +258,67 @@ impl LazyGraphStore {
     /// Read-only borrow of the secondary indexes.
     pub fn secondary_indexes(&self) -> Ref<'_, SecondaryIndex> {
         self.secondary.borrow()
+    }
+
+    /// Build the auto-inferred SecondaryIndex via a single pass over node
+    /// records. Three optimizations vs the generic `SecondaryIndex::auto_build`:
+    ///
+    /// 1. Each node record is decoded exactly once (the trait path called
+    ///    `node_labels` then `node_props` — both decoded the same record).
+    /// 2. Bucket maps are keyed by `(label_sid, prop_sid)` — u32 string IDs
+    ///    that the StringTable already interned. Avoids allocating two
+    ///    `String`s per (label, prop) pair per node.
+    /// 3. Label / prop names are resolved exactly once per pair at the end,
+    ///    when emitting the final IndexSpec.
+    pub fn build_auto_indexes_bulk(&self) -> SecondaryIndex {
+        use crate::store::secondary_index::{IndexKey, IndexKind};
+        use std::collections::{BTreeMap, HashMap};
+
+        let mut per_label_prop: HashMap<(u32, u32), HashMap<IndexKey, Vec<Id>>> = HashMap::new();
+        let mut per_label_count: HashMap<u32, usize> = HashMap::new();
+
+        for nid in 0..self.node_count {
+            let decoded = self.read_node_record(nid);
+            // Convert each PropValue to Value once (shared across every
+            // label this node carries) and key by its interned `name_sid`.
+            let props_resolved: Vec<(u32, crate::model::value::Value)> = decoded
+                .props
+                .iter()
+                .map(|(name_sid, pv)| (*name_sid, self.prop_to_value(pv)))
+                .collect();
+            for &label_sid in &decoded.label_str_ids {
+                *per_label_count.entry(label_sid).or_insert(0) += 1;
+                for (prop_sid, v) in &props_resolved {
+                    if let Some(idx_k) = IndexKey::from_value(v) {
+                        per_label_prop
+                            .entry((label_sid, *prop_sid))
+                            .or_default()
+                            .entry(idx_k)
+                            .or_default()
+                            .push(nid);
+                    }
+                }
+            }
+        }
+
+        let mut idx = SecondaryIndex::new();
+        // Same uniqueness rule as `auto_build`: only index when every value
+        // bucket is a singleton AND every node of the label has the prop.
+        for ((label_sid, prop_sid), bucket) in per_label_prop {
+            let label_count = *per_label_count.get(&label_sid).unwrap_or(&0);
+            let total_present: usize = bucket.values().map(|v| v.len()).sum();
+            let unique = bucket.values().all(|v| v.len() == 1);
+            if unique && total_present == label_count && label_count > 0 {
+                let entries = bucket.len();
+                let label = self.strings.resolve(label_sid).unwrap().to_string();
+                let prop = self.strings.resolve(prop_sid).unwrap().to_string();
+                let btree: BTreeMap<IndexKey, Vec<Id>> =
+                    bucket.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                idx.insert_prebuilt(&label, &prop, IndexKind::Hash, true, entries, Some(bucket), None);
+                idx.insert_prebuilt(&label, &prop, IndexKind::BTree, true, entries, None, Some(btree));
+            }
+        }
+        idx
     }
 
     /// Mutable borrow of the secondary indexes — used by `CREATE / DROP

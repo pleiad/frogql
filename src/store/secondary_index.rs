@@ -224,6 +224,53 @@ impl SecondaryIndex {
         }
     }
 
+    /// Inject a pre-built bucket without rescanning the store. Used by the
+    /// fast bulk-build path on `LazyGraphStore` so a single pass over the
+    /// node records can populate both the hash and btree variants without
+    /// duplicating the read+decode work.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_prebuilt(
+        &mut self,
+        label: &str,
+        prop: &str,
+        kind: IndexKind,
+        auto: bool,
+        entries: usize,
+        hash_bucket: Option<HashMap<IndexKey, Vec<Id>>>,
+        btree_bucket: Option<BTreeMap<IndexKey, Vec<Id>>>,
+    ) {
+        let lp = (label.to_string(), prop.to_string());
+        let suffix = match kind {
+            IndexKind::Hash => "auto_hash",
+            IndexKind::BTree => "auto_btree",
+        };
+        let name = if auto {
+            format!("{label}_{prop}_{suffix}")
+        } else {
+            format!("{label}_{prop}_declared")
+        };
+        match kind {
+            IndexKind::Hash => {
+                if let Some(b) = hash_bucket {
+                    self.hashes.insert(lp.clone(), b);
+                }
+            }
+            IndexKind::BTree => {
+                if let Some(b) = btree_bucket {
+                    self.btrees.insert(lp.clone(), b);
+                }
+            }
+        }
+        self.specs.push(IndexSpec {
+            name,
+            label: lp.0,
+            prop: lp.1,
+            kind,
+            auto,
+            entries,
+        });
+    }
+
     /// Drop an index by its declared (or auto-generated) name. Returns true
     /// if the index existed and was removed, false otherwise.
     pub fn drop_named(&mut self, name: &str) -> bool {
