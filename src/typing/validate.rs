@@ -273,13 +273,13 @@ mod tests {
         let mut required = BTreeMap::new();
         required.insert("name".to_string(), SimpleType::S);
         required.insert("age".to_string(), SimpleType::Z);
-        let schema = Schema {
-            nodes: vec![VariableType::Node(DescriptorType::new(
+        let schema = Schema::from_parts(
+            vec![VariableType::Node(DescriptorType::new(
                 LabelType::Label("Person".into()),
                 PropertyType::Closed(required),
             ))],
-            edges: vec![],
-        };
+            vec![],
+        );
         let report = validate_against_data(&g, &schema);
         assert_eq!(report.node_violations, 1);
         assert!(!report.ok());
@@ -295,13 +295,13 @@ mod tests {
                 "edges": []
             }"#,
         );
-        let schema = Schema {
-            nodes: vec![VariableType::Node(DescriptorType::new(
+        let schema = Schema::from_parts(
+            vec![VariableType::Node(DescriptorType::new(
                 LabelType::Label("Person".into()),
                 PropertyType::open_empty(),
             ))],
-            edges: vec![],
-        };
+            vec![],
+        );
         let report = validate_against_data(&g, &schema);
         assert_eq!(report.node_violations, 1);
     }
@@ -318,13 +318,13 @@ mod tests {
         }
         let json = format!(r#"{{"nodes":[{nodes}],"edges":[]}}"#);
         let g = build_graph(&json);
-        let schema = Schema {
-            nodes: vec![VariableType::Node(DescriptorType::new(
+        let schema = Schema::from_parts(
+            vec![VariableType::Node(DescriptorType::new(
                 LabelType::Label("Bar".into()),
                 PropertyType::open_empty(),
             ))],
-            edges: vec![],
-        };
+            vec![],
+        );
         let report = validate_against_data(&g, &schema);
         assert_eq!(report.node_violations, 50);
         let node_samples = report

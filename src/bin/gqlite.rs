@@ -1029,7 +1029,7 @@ fn build_schema_from_body(body: &[TypeElement]) -> Schema {
             TypeElement::Edge(vt) => edges.push(vt.clone()),
         }
     }
-    Schema { nodes, edges }
+    Schema::from_parts(nodes, edges)
 }
 
 fn handle_create(store: &LazyGraphStore, name: &str, body: &[TypeElement]) {
@@ -1188,7 +1188,7 @@ fn handle_show_current(store: &LazyGraphStore) {
 fn print_schema_colored(schema: &Schema) {
     if !schema.nodes.is_empty() {
         println!("{C_BOLD}Node types:{C_RESET}");
-        for vt in &schema.nodes {
+        for vt in schema.nodes.iter() {
             println!("    {}", color_variable(vt));
         }
     }
@@ -1197,7 +1197,7 @@ fn print_schema_colored(schema: &Schema) {
             println!();
         }
         println!("{C_BOLD}Edge types:{C_RESET}");
-        for vt in &schema.edges {
+        for vt in schema.edges.iter() {
             println!("    {}", color_variable(vt));
         }
     }

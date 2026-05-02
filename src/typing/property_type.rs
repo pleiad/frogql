@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -47,53 +47,49 @@ impl PropertyType {
     /// Greatest lower bound.
     pub fn meet(a: &PropertyType, b: &PropertyType) -> PropertyType {
         match (a, b) {
-            // Both closed with identical keys
+            // Both closed with identical key-sets: pointwise meet on values.
             (PropertyType::Closed(ma), PropertyType::Closed(mb))
-                if ma.keys().collect::<BTreeSet<_>>() == mb.keys().collect::<BTreeSet<_>>() =>
+                if ma.len() == mb.len() && ma.keys().eq(mb.keys()) =>
             {
                 let m = ma
-                    .keys()
-                    .map(|k| (k.clone(), SimpleType::meet(&ma[k], &mb[k])))
+                    .iter()
+                    .map(|(k, va)| (k.clone(), SimpleType::meet(va, &mb[k])))
                     .collect();
                 PropertyType::Closed(m)
             }
-            // Both open
+            // Both open: pointwise meet on shared keys, union of the rest.
             (PropertyType::Open(ma), PropertyType::Open(mb)) => {
-                let all_keys: BTreeSet<_> = ma.keys().chain(mb.keys()).cloned().collect();
-                let m = all_keys
-                    .into_iter()
-                    .map(|k| {
-                        let t = match (ma.get(&k), mb.get(&k)) {
-                            (Some(ta), Some(tb)) => SimpleType::meet(ta, tb),
-                            (Some(ta), None) => ta.clone(),
-                            (None, Some(tb)) => tb.clone(),
-                            (None, None) => unreachable!(),
+                let mut out: BTreeMap<String, SimpleType> = ma
+                    .iter()
+                    .map(|(k, va)| {
+                        let t = match mb.get(k) {
+                            Some(vb) => SimpleType::meet(va, vb),
+                            None => va.clone(),
                         };
-                        (k, t)
+                        (k.clone(), t)
                     })
                     .collect();
-                PropertyType::Open(m)
-            }
-            // Open ⊓ Closed where open keys ⊆ closed keys
-            (PropertyType::Open(ma), PropertyType::Closed(mb)) => {
-                let ak: BTreeSet<_> = ma.keys().cloned().collect();
-                let bk: BTreeSet<_> = mb.keys().cloned().collect();
-                if ak.is_subset(&bk) {
-                    let m = bk
-                        .into_iter()
-                        .map(|k| {
-                            let t = if let Some(ta) = ma.get(&k) {
-                                SimpleType::meet(ta, &mb[&k])
-                            } else {
-                                mb[&k].clone()
-                            };
-                            (k, t)
-                        })
-                        .collect();
-                    PropertyType::Closed(m)
-                } else {
-                    PropertyType::Zero
+                for (k, vb) in mb {
+                    out.entry(k.clone()).or_insert_with(|| vb.clone());
                 }
+                PropertyType::Open(out)
+            }
+            // Open ⊓ Closed where open keys ⊆ closed keys.
+            (PropertyType::Open(ma), PropertyType::Closed(mb)) => {
+                if !ma.keys().all(|k| mb.contains_key(k)) {
+                    return PropertyType::Zero;
+                }
+                let m = mb
+                    .iter()
+                    .map(|(k, vb)| {
+                        let t = match ma.get(k) {
+                            Some(va) => SimpleType::meet(va, vb),
+                            None => vb.clone(),
+                        };
+                        (k.clone(), t)
+                    })
+                    .collect();
+                PropertyType::Closed(m)
             }
             // Closed ⊓ Open (symmetric)
             (PropertyType::Closed(_), PropertyType::Open(_)) => PropertyType::meet(b, a),
@@ -105,27 +101,32 @@ impl PropertyType {
     pub fn is_subtype(t1: &PropertyType, t2: &PropertyType) -> bool {
         match (t1, t2) {
             (PropertyType::Zero, _) => true,
+            // Open <: Open: constraint applies only to keys present in both.
             (PropertyType::Open(m1), PropertyType::Open(m2)) => {
-                let shared: BTreeSet<_> =
-                    m1.keys().filter(|k| m2.contains_key(*k)).cloned().collect();
-                shared
-                    .iter()
-                    .all(|k| SimpleType::is_subtype(&m1[k], &m2[k]))
+                m1.iter().all(|(k, t1)| match m2.get(k) {
+                    Some(t2) => SimpleType::is_subtype(t1, t2),
+                    None => true,
+                })
             }
+            // Closed <: Closed: same key-set, pointwise subtype.
             (PropertyType::Closed(m1), PropertyType::Closed(m2)) => {
-                let k1: BTreeSet<_> = m1.keys().cloned().collect();
-                let k2: BTreeSet<_> = m2.keys().cloned().collect();
-                k1 == k2 && k2.iter().all(|k| SimpleType::is_subtype(&m1[k], &m2[k]))
+                m1.len() == m2.len()
+                    && m1.keys().eq(m2.keys())
+                    && m1.iter().all(|(k, v1)| SimpleType::is_subtype(v1, &m2[k]))
             }
+            // Closed <: Open: Closed must cover every Open key.
             (PropertyType::Closed(m1), PropertyType::Open(m2)) => {
-                let k1: BTreeSet<_> = m1.keys().cloned().collect();
-                let k2: BTreeSet<_> = m2.keys().cloned().collect();
-                k2.is_subset(&k1) && k2.iter().all(|k| SimpleType::is_subtype(&m1[k], &m2[k]))
+                m2.iter().all(|(k, v2)| match m1.get(k) {
+                    Some(v1) => SimpleType::is_subtype(v1, v2),
+                    None => false,
+                })
             }
+            // Open <: Closed: Open's key-set must be ⊆ Closed's.
             (PropertyType::Open(m1), PropertyType::Closed(m2)) => {
-                let k1: BTreeSet<_> = m1.keys().cloned().collect();
-                let k2: BTreeSet<_> = m2.keys().cloned().collect();
-                k1.is_subset(&k2) && k1.iter().all(|k| SimpleType::is_subtype(&m1[k], &m2[k]))
+                m1.iter().all(|(k, v1)| match m2.get(k) {
+                    Some(v2) => SimpleType::is_subtype(v1, v2),
+                    None => false,
+                })
             }
             _ => false,
         }
@@ -219,5 +220,100 @@ mod tests {
         let r1 = closed(&[("a", SimpleType::Z)]);
         let r2 = closed(&[("b", SimpleType::Z)]);
         assert_eq!(PropertyType::meet(&r1, &r2), PropertyType::Zero);
+    }
+
+    // ----- subtyping -----
+
+    #[test]
+    fn test_subtype_zero_is_bottom() {
+        let any = open(&[("a", SimpleType::Z)]);
+        assert!(PropertyType::is_subtype(&PropertyType::Zero, &any));
+    }
+
+    #[test]
+    fn test_subtype_open_open_constrains_only_shared_keys() {
+        // Open <: Open ignores keys not present in both.
+        let m1 = open(&[("a", SimpleType::Z), ("b", SimpleType::S)]);
+        let m2 = open(&[("a", SimpleType::Z), ("c", SimpleType::B)]);
+        assert!(PropertyType::is_subtype(&m1, &m2));
+        assert!(PropertyType::is_subtype(&m2, &m1));
+    }
+
+    #[test]
+    fn test_subtype_open_open_fails_on_shared_key_mismatch() {
+        let m1 = open(&[("a", SimpleType::Z)]);
+        let m2 = open(&[("a", SimpleType::S)]); // same key, incompatible type
+        assert!(!PropertyType::is_subtype(&m1, &m2));
+    }
+
+    #[test]
+    fn test_subtype_closed_closed_requires_equal_keysets() {
+        let m1 = closed(&[("a", SimpleType::Z)]);
+        let m2 = closed(&[("a", SimpleType::Z), ("b", SimpleType::S)]);
+        assert!(!PropertyType::is_subtype(&m1, &m2));
+        assert!(!PropertyType::is_subtype(&m2, &m1));
+    }
+
+    #[test]
+    fn test_subtype_closed_under_open_requires_open_keys_subset_of_closed() {
+        // Closed <: Open: every key of Open must exist in Closed (and types match).
+        let m_closed = closed(&[("a", SimpleType::Z), ("b", SimpleType::S)]);
+        let m_open_sub = open(&[("a", SimpleType::Z)]);
+        assert!(PropertyType::is_subtype(&m_closed, &m_open_sub));
+        let m_open_extra = open(&[("a", SimpleType::Z), ("c", SimpleType::B)]);
+        assert!(!PropertyType::is_subtype(&m_closed, &m_open_extra));
+    }
+
+    #[test]
+    fn test_subtype_open_under_closed_requires_open_keys_subset_of_closed() {
+        let m_closed = closed(&[("a", SimpleType::Z), ("b", SimpleType::S)]);
+        let m_open_sub = open(&[("a", SimpleType::Z)]);
+        assert!(PropertyType::is_subtype(&m_open_sub, &m_closed));
+        let m_open_extra = open(&[("a", SimpleType::Z), ("c", SimpleType::B)]);
+        assert!(!PropertyType::is_subtype(&m_open_extra, &m_closed));
+    }
+
+    // ----- meet -----
+
+    #[test]
+    fn test_meet_open_open_unions_keys_pointwise() {
+        let m1 = open(&[("a", SimpleType::Z)]);
+        let m2 = open(&[("b", SimpleType::S)]);
+        let met = PropertyType::meet(&m1, &m2);
+        let expected = open(&[("a", SimpleType::Z), ("b", SimpleType::S)]);
+        assert_eq!(met, expected);
+    }
+
+    #[test]
+    fn test_meet_open_open_meets_shared_simple_types() {
+        // Shared key with compatible types meets to their SimpleType meet.
+        let m1 = open(&[("a", SimpleType::Z)]);
+        let m2 = open(&[("a", SimpleType::Z)]);
+        assert_eq!(PropertyType::meet(&m1, &m2), m1);
+    }
+
+    #[test]
+    fn test_meet_open_closed_subset_yields_closed() {
+        let m_open = open(&[("a", SimpleType::Z)]);
+        let m_closed = closed(&[("a", SimpleType::Z), ("b", SimpleType::S)]);
+        let met = PropertyType::meet(&m_open, &m_closed);
+        assert_eq!(met, m_closed);
+    }
+
+    #[test]
+    fn test_meet_open_closed_extra_keys_yields_zero() {
+        let m_open = open(&[("a", SimpleType::Z), ("c", SimpleType::B)]);
+        let m_closed = closed(&[("a", SimpleType::Z), ("b", SimpleType::S)]);
+        assert_eq!(PropertyType::meet(&m_open, &m_closed), PropertyType::Zero);
+    }
+
+    #[test]
+    fn test_meet_closed_open_symmetric_with_open_closed() {
+        let m_open = open(&[("a", SimpleType::Z)]);
+        let m_closed = closed(&[("a", SimpleType::Z), ("b", SimpleType::S)]);
+        assert_eq!(
+            PropertyType::meet(&m_open, &m_closed),
+            PropertyType::meet(&m_closed, &m_open),
+        );
     }
 }

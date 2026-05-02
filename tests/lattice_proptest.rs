@@ -509,7 +509,7 @@ fn arb_schema_with(
     (nodes, directed, undirected).prop_map(|(nodes, dir, undir)| {
         let mut edges = dir;
         edges.extend(undir);
-        Schema { nodes, edges }
+        Schema::from_parts(nodes, edges)
     })
 }
 
@@ -1446,7 +1446,7 @@ mod schema_refinement_rules {
         // §6 Refinement: against an empty schema, every query → ⊥.
         #[test]
         fn refine_against_empty_schema_is_zero(t in arb_refinable_variable()) {
-            let empty = Schema { nodes: vec![], edges: vec![] };
+            let empty = Schema::from_parts(vec![], vec![]);
             let r = VariableType::refine(&empty, &t);
             prop_assert_eq!(r, VariableType::Zero,
                 "rules.md §6: refine against empty schema = ⊥");
@@ -1501,13 +1501,13 @@ mod schema_refinement_rules {
     fn nondirectional_edge_query_admits_nondirectional_schema_entries() {
         // Schema with one EdgeNonDirectional entry. A non-directional
         // edge query should match it (refinement is non-Zero).
-        let schema = Schema {
-            nodes: vec![VariableType::node_star()],
-            edges: vec![VariableType::edge_non_directional(DescriptorType::new(
+        let schema = Schema::from_parts(
+            vec![VariableType::node_star()],
+            vec![VariableType::edge_non_directional(DescriptorType::new(
                 LabelType::Label("knows".into()),
                 PropertyType::open_empty(),
             ))],
-        };
+        );
         let query = VariableType::edge_non_directional(DescriptorType::new(
             LabelType::Label("knows".into()),
             PropertyType::open_empty(),

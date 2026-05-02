@@ -22,7 +22,7 @@ pub fn format_schema(schema: &Schema) -> String {
     let mut out = String::new();
     if !schema.nodes.is_empty() {
         out.push_str("Node types:\n");
-        for vt in &schema.nodes {
+        for vt in schema.nodes.iter() {
             out.push_str("    ");
             out.push_str(&format_variable(vt));
             out.push('\n');
@@ -33,7 +33,7 @@ pub fn format_schema(schema: &Schema) -> String {
             out.push('\n');
         }
         out.push_str("Edge types:\n");
-        for vt in &schema.edges {
+        for vt in schema.edges.iter() {
             out.push_str("    ");
             out.push_str(&format_variable(vt));
             out.push('\n');

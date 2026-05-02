@@ -1,4 +1,5 @@
 use std::fmt;
+use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
@@ -366,21 +367,38 @@ impl fmt::Display for VariableType {
 }
 
 /// Schema: a set of allowed node and edge types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `nodes` and `edges` are wrapped in `Rc` so `Clone` is cheap — every
+/// `Typechecker::new` call clones the active Schema, and without the
+/// `Rc` wrapping that clone deep-copies the entire descriptor tree.
+///
+/// The fields stay `pub` for read-side compatibility (callers iterate
+/// or index via `&Rc<Vec<T>>` → `&Vec<T>` deref). Schemas are immutable
+/// after construction — DDL replaces the whole Schema rather than
+/// mutating in place, so there is no `Rc::make_mut` call site today.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Schema {
-    pub nodes: Vec<VariableType>,
-    pub edges: Vec<VariableType>,
+    pub nodes: Rc<Vec<VariableType>>,
+    pub edges: Rc<Vec<VariableType>>,
 }
 
 impl Schema {
     /// Permissive schema that allows anything.
     pub fn star() -> Self {
         Schema {
-            nodes: vec![VariableType::node_star()],
-            edges: vec![
+            nodes: Rc::new(vec![VariableType::node_star()]),
+            edges: Rc::new(vec![
                 VariableType::edge_directional(DescriptorType::star()),
                 VariableType::edge_non_directional(DescriptorType::star()),
-            ],
+            ]),
+        }
+    }
+
+    /// Construct from explicit nodes/edges. Used by inference and tests.
+    pub fn from_parts(nodes: Vec<VariableType>, edges: Vec<VariableType>) -> Self {
+        Schema {
+            nodes: Rc::new(nodes),
+            edges: Rc::new(edges),
         }
     }
 }
@@ -495,10 +513,7 @@ mod tests {
     #[test]
     fn test_refine_with_no_matching_label_returns_zero() {
         // Schema with only `Person`; query for `Animal` → ⊥.
-        let schema = Schema {
-            nodes: vec![node_with_label("Person")],
-            edges: vec![],
-        };
+        let schema = Schema::from_parts(vec![node_with_label("Person")], vec![]);
         let q = node_with_label("Animal");
         assert_eq!(VariableType::refine(&schema, &q), VariableType::Zero);
     }
