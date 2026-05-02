@@ -125,9 +125,7 @@ impl PropertyType {
             (PropertyType::Closed(m1), PropertyType::Closed(m2)) => {
                 m1.len() == m2.len()
                     && m1.keys().eq(m2.keys())
-                    && m1
-                        .iter()
-                        .all(|(k, v1)| SimpleType::is_subtype(v1, &m2[k]))
+                    && m1.iter().all(|(k, v1)| SimpleType::is_subtype(v1, &m2[k]))
             }
             // Closed <: Open. Closed must cover every Open key plus possibly
             // more; on shared keys, subtype must hold.
@@ -321,10 +319,7 @@ mod tests {
     fn test_meet_open_closed_extra_keys_yields_zero() {
         let m_open = open(&[("a", SimpleType::Z), ("c", SimpleType::B)]);
         let m_closed = closed(&[("a", SimpleType::Z), ("b", SimpleType::S)]);
-        assert_eq!(
-            PropertyType::meet(&m_open, &m_closed),
-            PropertyType::Zero
-        );
+        assert_eq!(PropertyType::meet(&m_open, &m_closed), PropertyType::Zero);
     }
 
     #[test]

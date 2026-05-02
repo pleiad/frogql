@@ -100,7 +100,10 @@ fn main() {
     // load-time line below covers it.
     let t_idx = Instant::now();
     rt.warm_triple_index();
-    eprintln!("LTJ TripleIndex built in {:.2}s", t_idx.elapsed().as_secs_f64());
+    eprintln!(
+        "LTJ TripleIndex built in {:.2}s",
+        t_idx.elapsed().as_secs_f64()
+    );
     let mut rl = DefaultEditor::new().expect("failed to init readline");
 
     loop {
@@ -1359,9 +1362,9 @@ fn handle_create_index(
         format!("{label}_{prop}_{suffix}")
     });
     let start = Instant::now();
-    let result = store.secondary_indexes_mut().build_declared(
-        store, final_name, label, prop, store_kind,
-    );
+    let result = store
+        .secondary_indexes_mut()
+        .build_declared(store, final_name, label, prop, store_kind);
     let elapsed = start.elapsed();
     match result {
         Ok(spec) => {
@@ -1371,7 +1374,11 @@ fn handle_create_index(
             };
             println!(
                 "INDEX '{}' created ({} on (:{} {{{}}}), {} entries) in {:.3}s.",
-                spec.name, kind_str, spec.label, spec.prop, spec.entries,
+                spec.name,
+                kind_str,
+                spec.label,
+                spec.prop,
+                spec.entries,
                 elapsed.as_secs_f64(),
             );
         }

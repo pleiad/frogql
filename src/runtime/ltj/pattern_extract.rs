@@ -101,8 +101,7 @@ pub fn try_ltj<G: GraphAccess>(
     }
 
     let num_vars = decomp.var_id_to_name.len();
-    let pinned_set: std::collections::HashSet<u8> =
-        pinned.iter().map(|(v, _)| *v).collect();
+    let pinned_set: std::collections::HashSet<u8> = pinned.iter().map(|(v, _)| *v).collect();
 
     // Build iterators and var maps
     let mut iterators: Vec<LtjIterator> = Vec::new();
@@ -202,10 +201,7 @@ enum FoldOutcome {
 /// matching NodeId. If exactly one node matches, pin the variable: substitute
 /// the matching NodeId for every Term::Variable(v) in the triples and drop the
 /// satisfied Eq + NodeLabel filters for that variable.
-fn fold_indexed_constants<G: GraphAccess>(
-    graph: &G,
-    decomp: &mut Decomposition,
-) -> FoldOutcome {
+fn fold_indexed_constants<G: GraphAccess>(graph: &G, decomp: &mut Decomposition) -> FoldOutcome {
     // var_id → labels declared via NodeLabel filters. A variable can carry
     // more than one label (compound `:A & B`); the index lookup needs at
     // least one to identify the (label, prop) pair.

@@ -116,9 +116,7 @@ impl SecondaryIndex {
         lo: Bound<Value>,
         hi: Bound<Value>,
     ) -> Option<Vec<Id>> {
-        let bucket = self
-            .btrees
-            .get(&(label.to_string(), prop.to_string()))?;
+        let bucket = self.btrees.get(&(label.to_string(), prop.to_string()))?;
         let lo_k = bound_to_key(lo)?;
         let hi_k = bound_to_key(hi)?;
         let mut out = Vec::new();
@@ -367,6 +365,8 @@ mod tests {
         assert!(miss.is_empty());
 
         // Non-indexed prop returns None (caller must fall back).
-        assert!(idx.lookup_eq("Person", "firstName", &Value::Str("Alice".into())).is_none());
+        assert!(idx
+            .lookup_eq("Person", "firstName", &Value::Str("Alice".into()))
+            .is_none());
     }
 }
