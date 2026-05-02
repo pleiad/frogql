@@ -7,13 +7,9 @@ use super::variable_type::{Schema, VariableType};
 
 /// A type environment mapping variable names to their inferred `VariableType`.
 ///
-/// `Rc<VariableType>` so that `clone()` on the environment — which fires on
-/// every `Concat`/`Join` via `meet` — is a HashMap-of-Rc-bumps rather than
-/// a deep tree clone per binding. For chain queries the environment grows
-/// to several entries by the time the typechecker reaches the last meet,
-/// and on LDBC-shaped patterns each `VariableType` was a non-trivial
-/// descriptor tree being deep-cloned every time. Rc reduces the per-meet
-/// cost from microseconds to hundreds of nanoseconds.
+/// Bindings are stored as `Rc<VariableType>` so cloning the environment —
+/// which happens on every `Concat`/`Join` via `meet` — only bumps refcounts
+/// instead of deep-cloning each binding's descriptor tree.
 #[derive(PartialEq, Eq, Clone, Debug, Default)]
 pub struct TypeEnvironment {
     bindings: HashMap<String, Rc<VariableType>>,
@@ -75,27 +71,11 @@ impl TypeEnvironment {
     /// `Zero` instead, so we surface the failure as `Err` here when the meet
     /// collapses to bottom on a variable that wasn't already empty in either
     /// input. Behavior at the checker level is equivalent.
-    ///
-    /// FUTURE OPT: the `VariableType::refine` call below re-walks the entire
-    /// schema for every shared variable. Profiling shows this accounts for
-    /// most refine calls in chain queries (e.g. ~6/13 on IC2). When the
-    /// inputs are already refined (the typechecker's invariant), refine on
-    /// the meet result is idempotent in two of three cases — `meet(a, b)`
-    /// returns `Zero` (refine of Zero is Zero), or `a`/`b` unchanged
-    /// (already refined). Only the third case (a new label intersection
-    /// like `Person & Animal` from two non-overlapping schema entries)
-    /// makes the refine load-bearing. A conditional-skip based on cheap
-    /// structural equality could elide most inner refines without losing
-    /// soundness, but requires care to maintain the always-refined
-    /// invariant — left as a follow-up.
     pub fn meet(
         schema: &Schema,
         a: &TypeEnvironment,
         b: &TypeEnvironment,
     ) -> Result<TypeEnvironment, String> {
-        // HashMap clone here is cheap because values are Rc — clones the
-        // hash buckets + bumps an Rc per binding rather than deep-cloning
-        // every VariableType tree.
         let mut result = a.bindings.clone();
         for (key, other) in &b.bindings {
             let merged: Rc<VariableType> = match result.get(key) {
@@ -109,7 +89,7 @@ impl TypeEnvironment {
                     }
                     Rc::new(VariableType::refine(schema, &met))
                 }
-                // Right-only key: share the existing Rc rather than deep-cloning.
+                // Right-only key: keep the binding as-is.
                 None => Rc::clone(other),
             };
             result.insert(key.clone(), merged);
@@ -151,7 +131,7 @@ impl TypeEnvironment {
                     // x_i ↦ T_{i1} ⊔ T'_i
                     Rc::new(VariableType::join(t1, &refined))
                 }
-                // x_j ↦ T_j (kept as-is) — share the existing Rc.
+                // x_j ↦ T_j (left-only, kept as-is).
                 None => Rc::clone(t1),
             };
             result.insert(key.clone(), merged);

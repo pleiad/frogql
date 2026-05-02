@@ -368,17 +368,14 @@ impl fmt::Display for VariableType {
 
 /// Schema: a set of allowed node and edge types.
 ///
-/// `nodes` and `edges` are wrapped in `Rc` so `Clone` is cheap (two
-/// `Rc` bumps instead of deep-cloning every `VariableType` tree).
-/// Schema gets cloned on every `Typechecker::new` call; without the
-/// `Rc` wrapping that clone alone dominated per-call typecheck cost
-/// (~25-45μs on the LDBC-inferred schema with 11 nodes / 25 edges).
+/// `nodes` and `edges` are wrapped in `Rc` so `Clone` is cheap — every
+/// `Typechecker::new` call clones the active Schema, and without the
+/// `Rc` wrapping that clone deep-copies the entire descriptor tree.
 ///
-/// `nodes` and `edges` are `pub` for read-side compatibility: most
-/// callers just iterate / count / inspect, and `&Rc<Vec<T>>` derefs
-/// to `&Vec<T>` for those operations. Mutation requires
-/// `Rc::make_mut`; today no codepath mutates a Schema after
-/// construction — DDL replaces the whole Schema.
+/// The fields stay `pub` for read-side compatibility (callers iterate
+/// or index via `&Rc<Vec<T>>` → `&Vec<T>` deref). Schemas are immutable
+/// after construction — DDL replaces the whole Schema rather than
+/// mutating in place, so there is no `Rc::make_mut` call site today.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Schema {
     pub nodes: Rc<Vec<VariableType>>,

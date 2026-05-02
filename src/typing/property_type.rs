@@ -47,9 +47,7 @@ impl PropertyType {
     /// Greatest lower bound.
     pub fn meet(a: &PropertyType, b: &PropertyType) -> PropertyType {
         match (a, b) {
-            // Both closed with identical key-sets. `BTreeMap` iterates in
-            // sorted order, so equality of key-sets reduces to equal length
-            // plus a parallel-iterator key compare — no intermediate set.
+            // Both closed with identical key-sets: pointwise meet on values.
             (PropertyType::Closed(ma), PropertyType::Closed(mb))
                 if ma.len() == mb.len() && ma.keys().eq(mb.keys()) =>
             {
@@ -59,9 +57,7 @@ impl PropertyType {
                     .collect();
                 PropertyType::Closed(m)
             }
-            // Both open. Walk one side to seed the result, then fold the
-            // other side's missing keys in. Avoids the all-keys BTreeSet
-            // round-trip that the previous version did purely to dedup.
+            // Both open: pointwise meet on shared keys, union of the rest.
             (PropertyType::Open(ma), PropertyType::Open(mb)) => {
                 let mut out: BTreeMap<String, SimpleType> = ma
                     .iter()
@@ -101,42 +97,31 @@ impl PropertyType {
         }
     }
 
-    /// Subtyping. Walks the two maps in place — no intermediate sets, no
-    /// key cloning. The previous version allocated a `BTreeSet<String>` of
-    /// shared/all keys per call (and cloned every key); on LDBC schemas
-    /// with several props per descriptor that's the dominant typechecker
-    /// allocation cost.
+    /// Subtyping.
     pub fn is_subtype(t1: &PropertyType, t2: &PropertyType) -> bool {
         match (t1, t2) {
             (PropertyType::Zero, _) => true,
-            // Open <: Open. Constraint applies only to keys present in
-            // both records (the rest are Star-typed in either map's
-            // unspecified slot, so trivially related).
+            // Open <: Open: constraint applies only to keys present in both.
             (PropertyType::Open(m1), PropertyType::Open(m2)) => {
                 m1.iter().all(|(k, t1)| match m2.get(k) {
                     Some(t2) => SimpleType::is_subtype(t1, t2),
                     None => true,
                 })
             }
-            // Closed <: Closed. Same key-set required, and pointwise
-            // subtype on the shared values. Equality of key-sets via
-            // `keys().eq(...)` is allocation-free thanks to BTreeMap's
-            // sorted iteration.
+            // Closed <: Closed: same key-set, pointwise subtype.
             (PropertyType::Closed(m1), PropertyType::Closed(m2)) => {
                 m1.len() == m2.len()
                     && m1.keys().eq(m2.keys())
                     && m1.iter().all(|(k, v1)| SimpleType::is_subtype(v1, &m2[k]))
             }
-            // Closed <: Open. Closed must cover every Open key plus possibly
-            // more; on shared keys, subtype must hold.
+            // Closed <: Open: Closed must cover every Open key.
             (PropertyType::Closed(m1), PropertyType::Open(m2)) => {
                 m2.iter().all(|(k, v2)| match m1.get(k) {
                     Some(v1) => SimpleType::is_subtype(v1, v2),
                     None => false,
                 })
             }
-            // Open <: Closed. Open's key-set must be ⊆ Closed's; on shared
-            // keys, subtype.
+            // Open <: Closed: Open's key-set must be ⊆ Closed's.
             (PropertyType::Open(m1), PropertyType::Closed(m2)) => {
                 m1.iter().all(|(k, v1)| match m2.get(k) {
                     Some(v2) => SimpleType::is_subtype(v1, v2),
@@ -237,7 +222,7 @@ mod tests {
         assert_eq!(PropertyType::meet(&r1, &r2), PropertyType::Zero);
     }
 
-    // ----- subtyping (post-allocation-rewrite regression guards) -----
+    // ----- subtyping -----
 
     #[test]
     fn test_subtype_zero_is_bottom() {
@@ -288,7 +273,7 @@ mod tests {
         assert!(!PropertyType::is_subtype(&m_open_extra, &m_closed));
     }
 
-    // ----- meet (post-allocation-rewrite regression guards) -----
+    // ----- meet -----
 
     #[test]
     fn test_meet_open_open_unions_keys_pointwise() {
