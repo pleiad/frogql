@@ -68,6 +68,19 @@ impl TypeEnvironment {
     /// `Zero` instead, so we surface the failure as `Err` here when the meet
     /// collapses to bottom on a variable that wasn't already empty in either
     /// input. Behavior at the checker level is equivalent.
+    ///
+    /// FUTURE OPT: the `VariableType::refine` call below re-walks the entire
+    /// schema for every shared variable. Profiling shows this accounts for
+    /// most refine calls in chain queries (e.g. ~6/13 on IC2). When the
+    /// inputs are already refined (the typechecker's invariant), refine on
+    /// the meet result is idempotent in two of three cases — `meet(a, b)`
+    /// returns `Zero` (refine of Zero is Zero), or `a`/`b` unchanged
+    /// (already refined). Only the third case (a new label intersection
+    /// like `Person & Animal` from two non-overlapping schema entries)
+    /// makes the refine load-bearing. A conditional-skip based on cheap
+    /// structural equality could elide most inner refines without losing
+    /// soundness, but requires care to maintain the always-refined
+    /// invariant — left as a follow-up.
     pub fn meet(
         schema: &Schema,
         a: &TypeEnvironment,
