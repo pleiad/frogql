@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::syntax::descriptor::Descriptor;
 
@@ -6,10 +7,16 @@ use super::variable_type::{Schema, VariableType};
 
 /// A type environment mapping variable names to their inferred `VariableType`.
 ///
-/// Used during type checking to track the types of all variables in scope.
+/// `Rc<VariableType>` so that `clone()` on the environment — which fires on
+/// every `Concat`/`Join` via `meet` — is a HashMap-of-Rc-bumps rather than
+/// a deep tree clone per binding. For chain queries the environment grows
+/// to several entries by the time the typechecker reaches the last meet,
+/// and on LDBC-shaped patterns each `VariableType` was a non-trivial
+/// descriptor tree being deep-cloned every time. Rc reduces the per-meet
+/// cost from microseconds to hundreds of nanoseconds.
 #[derive(PartialEq, Eq, Clone, Debug, Default)]
 pub struct TypeEnvironment {
-    bindings: HashMap<String, VariableType>,
+    bindings: HashMap<String, Rc<VariableType>>,
 }
 
 impl TypeEnvironment {
@@ -30,11 +37,11 @@ impl TypeEnvironment {
     }
 
     pub fn set(&mut self, key: &str, value: VariableType) {
-        self.bindings.insert(key.to_string(), value);
+        self.bindings.insert(key.to_string(), Rc::new(value));
     }
 
     pub fn get(&self, key: &str) -> Option<&VariableType> {
-        self.bindings.get(key)
+        self.bindings.get(key).map(Rc::as_ref)
     }
 
     pub fn keys(&self) -> Vec<&String> {
@@ -57,7 +64,7 @@ impl TypeEnvironment {
                 (None, Some(tb)) => VariableType::join(&VariableType::Null, tb),
                 (None, None) => unreachable!(),
             };
-            result.insert(key.clone(), merged);
+            result.insert(key.clone(), Rc::new(merged));
         }
         TypeEnvironment { bindings: result }
     }
@@ -86,9 +93,12 @@ impl TypeEnvironment {
         a: &TypeEnvironment,
         b: &TypeEnvironment,
     ) -> Result<TypeEnvironment, String> {
+        // HashMap clone here is cheap because values are Rc — clones the
+        // hash buckets + bumps an Rc per binding rather than deep-cloning
+        // every VariableType tree.
         let mut result = a.bindings.clone();
         for (key, other) in &b.bindings {
-            let merged = match result.get(key) {
+            let merged: Rc<VariableType> = match result.get(key) {
                 Some(self_t) => {
                     let met = VariableType::meet(self_t, other);
                     if met == VariableType::Zero && !self_t.is_empty() && !other.is_empty() {
@@ -97,9 +107,10 @@ impl TypeEnvironment {
                             key, self_t, other
                         ));
                     }
-                    VariableType::refine(schema, &met)
+                    Rc::new(VariableType::refine(schema, &met))
                 }
-                None => other.clone(),
+                // Right-only key: share the existing Rc rather than deep-cloning.
+                None => Rc::clone(other),
             };
             result.insert(key.clone(), merged);
         }
@@ -128,20 +139,20 @@ impl TypeEnvironment {
         a: &TypeEnvironment,
         b: &TypeEnvironment,
     ) -> TypeEnvironment {
-        let mut result: HashMap<String, VariableType> = HashMap::new();
+        let mut result: HashMap<String, Rc<VariableType>> = HashMap::new();
 
         // Shared keys (i) and left-only keys (j) start from `a`.
         for (key, t1) in &a.bindings {
-            let merged = match b.bindings.get(key) {
+            let merged: Rc<VariableType> = match b.bindings.get(key) {
                 Some(t2) => {
                     // T'_i := refine(schema, meet(T_{i1}, T_{i2}))
                     let met = VariableType::meet(t1, t2);
                     let refined = VariableType::refine(schema, &met);
                     // x_i ↦ T_{i1} ⊔ T'_i
-                    VariableType::join(t1, &refined)
+                    Rc::new(VariableType::join(t1, &refined))
                 }
-                // x_j ↦ T_j (kept as-is)
-                None => t1.clone(),
+                // x_j ↦ T_j (kept as-is) — share the existing Rc.
+                None => Rc::clone(t1),
             };
             result.insert(key.clone(), merged);
         }
@@ -151,14 +162,17 @@ impl TypeEnvironment {
             if a.bindings.contains_key(key) {
                 continue;
             }
-            result.insert(key.clone(), VariableType::join(t2, &VariableType::Null));
+            result.insert(
+                key.clone(),
+                Rc::new(VariableType::join(t2, &VariableType::Null)),
+            );
         }
 
         TypeEnvironment { bindings: result }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.bindings.values().any(VariableType::is_empty)
+        self.bindings.values().any(|v| v.is_empty())
     }
 
     /// Wrap each binding in `VariableType::Group`. Used for repeated/quantified
@@ -169,7 +183,12 @@ impl TypeEnvironment {
             bindings: self
                 .bindings
                 .iter()
-                .map(|(k, v)| (k.clone(), VariableType::Group(Box::new(v.clone()))))
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        Rc::new(VariableType::Group(Box::new(v.as_ref().clone()))),
+                    )
+                })
                 .collect(),
         }
     }
