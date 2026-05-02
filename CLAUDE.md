@@ -78,6 +78,8 @@ Runtime: `serde` + `serde_json` (model serialization), `thiserror` (error types)
 - `compile_unchecked` / `compile_query_unchecked` — skip the typechecker (escape hatch for bench/test scaffolding)
 - `parser::parse_statement(input) → Statement` — top-level parser that distinguishes a query from catalog DDL (`CREATE` / `USE` / `DROP / SHOW / VALIDATE GRAPH TYPE`)
 - `Runtime::new(graph).run(&pattern)` — execute against any `GraphAccess` backend
+- `Runtime::with_triple_index(graph, Arc<TripleIndex>)` — construct with a pre-built shared index (REPL / Python `Connection` build once at open and pass the same Arc to every Runtime)
+- `Runtime::warm_triple_index() -> Arc<TripleIndex>` — force the cache to build now and hand back the Arc for sharing
 - `Runtime::run_query(&query, limit)` — execute with RETURN projection
 - `Runtime::run_with_limit(&pattern, limit)` — early termination after N results
 
@@ -209,8 +211,8 @@ If decomposition fails, the runtime falls back to pairwise hash-join — guarant
 1. **Repetitions**: `{n,m}` is not unrolled to triples (could be done for fixed bounds; not implemented). Falls back.
 2. **Any-direction edges (without tilde)**: not modelled as triples.
 3. **WHERE expressions**: label and pushed value predicates run inside the loop; arbitrary WHERE (e.g. `x.age > y.age` involving multiple bound vars) post-filters.
-4. **TripleIndex rebuilt per query**: no cross-query caching (could go on `Runtime` with a `RefCell`).
-5. **Static VEO**: variable order is fixed before search. An adaptive VEO that re-estimates cardinalities mid-search would help queries with skewed selectivity. Note also that without secondary indexes on properties, a literal-equality push to a lonely variable is *not* a true point lookup — it still scans the variable's position before rejecting.
+4. **TripleIndex not persisted**: cached on `Runtime` via `RefCell<Option<Arc<TripleIndex>>>` and built once per Runtime (eagerly at REPL/Connection open via `warm_triple_index()`); the same Arc is shared across every Runtime spawned for that connection. Persisting in the .gdb header chain would skip the build entirely at the cost of ~12% file size.
+5. **Static VEO**: variable order is fixed before search. An adaptive VEO that re-estimates cardinalities mid-search would help queries with skewed selectivity. With secondary indexes (see below), an `Eq` predicate on an indexed `(label, prop)` is now a true point lookup via constant-folding; vars without an index still scan their position.
 
 #### Benchmark results (soc-LiveJournal1-100k, limit=1000)
 
@@ -258,7 +260,34 @@ When LTJ cannot decompose a join (unions, repetitions, any-direction edges), the
 
 ### Storage format (.gdb files)
 
-4 KB pages, slotted-page layout for variable-length records. Header page 0 stores root pointers to string table, label indexes, and adjacency index. Node/edge records reference strings by string table ID. Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6). Adjacency index maps `node_id → Vec<(edge_id, other_node, kind)>` where kind is 0=outgoing, 1=incoming, 2=undirected. See `docs/storage-architecture.md` for the full spec.
+4 KB pages, slotted-page layout for variable-length records. Header page 0 stores root pointers to string table, label indexes, adjacency index, and (since recently) a CSR adjacency root. Node/edge records reference strings by string table ID. Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6).
+
+Adjacency has two on-disk representations and the loader prefers whichever is present:
+
+- **CSR (preferred, header `csr_adjacency_root`)** — six `Vec<u32>` page chains: `[out_offsets, out_flat, in_offsets, in_flat, und_offsets, und_flat]`. Loaded in O(N + E) total via six big sequential reads; node `n`'s edges are `flat[offsets[n]..offsets[n+1]]`. Stored in memory as three `AdjCsr { offsets: Vec<u32>, flat: Vec<u32> }` on `LazyGraphStore`. Built and written by every `save_graph` call after the format was added (commit `34d97c0`).
+- **Legacy per-node chains (header `adjacency_root`)** — one small page chain per node listing `(edge_id, other_node, kind)` triples (kind 0=out, 1=in, 2=und). The loader still understands this format and rebuilds CSR in memory at open via bucket-sort; legacy `.gdb` files keep working but pay ~30× more time on the topology phase (~5s vs ~0.1s for SF0.1) until they're re-saved into the new format.
+
+See `docs/storage-architecture.md` for the full spec.
+
+`StringTable::str_to_id` (the String→ID dedup map used for writes and label-index lookups) is built lazily on first access. `load()` only fills `id_to_str`; the dedup map is `RefCell<Option<HashMap>>` and populated by the first `intern` or `id_for_str` call. Read-only LazyGraphStore queries never trigger the build, saving ~50% of the load cost.
+
+### Open-time performance
+
+`LazyGraphStore::open` runs a fixed pipeline of phases. Each contributes to total open latency; bottlenecks have moved as the format and in-memory layout evolved. Current breakdown on `bench/data/ldbc-sf0.1.gdb` (CSR-format, 327K nodes / 1.5M edges, warm OS cache):
+
+| Phase | Cost | Where |
+|---|---|---|
+| pager open | ~0 ms | `Pager::open_with_cache` |
+| string table | ~80 ms | `StringTable::load` (id_to_str only — see lazy str_to_id) |
+| topology + indexes | ~70 ms | `load_from_indexes` — six CSR sub-chains read sequentially |
+| catalog | ~0 ms | `catalog_io::read_catalog` |
+| secondary index auto-build | ~420 ms | `build_auto_indexes_bulk` — single pass over node records, u32-keyed buckets |
+| LTJ TripleIndex (eager) | ~670 ms | `Runtime::warm_triple_index` — six sorted orderings of all triples |
+| **total** | **~570 ms warm** | (from a 6.30 s baseline before the optimisation series) |
+
+`GQLITE_TRACE_OPEN=1` prints the per-phase timings. The current dominant phases (TripleIndex, secondary index) are both cheap to write to disk and would drop to a memory-map at the cost of ~12% (TripleIndex) and ~3% (secondary index) extra `.gdb` file size — not yet implemented.
+
+Existing `.gdb` files written before commit `34d97c0` lack the CSR adjacency root and load via the legacy per-node chains (~5 s topology phase). Re-import or re-save to upgrade in place.
 
 ### Optimizer
 
@@ -271,12 +300,12 @@ When LTJ cannot decompose a join (unions, repetitions, any-direction edges), the
 
 ### Secondary indexes
 
-`LazyGraphStore` owns a `RefCell<SecondaryIndex>` (`src/store/secondary_index.rs`) populated at open by a single O(N) pass over nodes. Two flavours coexist on the same `(label, prop)` pair:
+`LazyGraphStore` owns a `RefCell<SecondaryIndex>` (`src/store/secondary_index.rs`) populated at open by `LazyGraphStore::build_auto_indexes_bulk()` — a single O(N) pass over node records that decodes each exactly once and keys bucket maps by `(label_sid, prop_sid)` to avoid `String` allocations during the build. Two flavours coexist on the same `(label, prop)` pair:
 
 - **Hash** for equality (`x.attr = literal`).
 - **BTree** for range filters (`<`, `<=`, `>`, `>=`).
 
-Auto-inference builds both kinds for every `(label, prop)` whose values are unique within the label — captures the LDBC IC start lookups (`Person.id`, `Tag.name`, `Country.name`, `TagClass.name`, plus every other `*_id` column) AND the IC2/3/4/9 temporal range filters (`Comment.creationDate`, `Post.creationDate`, `Forum.creationDate`) without any DDL. Floats / lists / records / nulls are not indexable (`IndexKey` covers `Int`, `Str`, `Bool` only).
+Auto-inference builds both kinds for every `(label, prop)` whose values are unique within the label — captures the LDBC IC start lookups (`Person.id`, `Tag.name`, `Country.name`, `TagClass.name`, plus every other `*_id` column) AND the IC2/3/4/9 temporal range filters (`Comment.creationDate`, `Post.creationDate`, `Forum.creationDate`) without any DDL. Floats / lists / records / nulls are not indexable (`IndexKey` covers `Int`, `Str`, `Bool` only). Skip the auto-build entirely with `GQLITE_DISABLE_AUTO_INDEXES=1`.
 
 DDL: `CREATE [HASH | BTREE] INDEX [<name>] ON :Label(prop) [USING HASH | BTREE]`, `DROP INDEX <name>`, `SHOW INDEXES` (or the REPL meta-command `.indexes`). Both prefix (`CREATE BTREE INDEX foo`) and suffix (`USING BTREE`) syntaxes work; HASH is the default kind. HASH and BTREE coexist; re-declaring the same kind on the same `(label, prop)` is the only conflict.
 
@@ -288,9 +317,17 @@ LTJ wiring (`pattern_extract::fold_indexed_constants` and `fold_range_filters`):
 
 Memory-only for now (rebuilt every open). Persistence in the .gdb file header chain — so DDL-declared indexes survive close/reopen — is the next roadmap item.
 
-Diagnostic env vars: `GQLITE_DEBUG_INDEXES=1` prints the auto-built indexes and pinned variables; `GQLITE_DISABLE_INDEX_FOLD=1` disables the LTJ pre-pass for A/B benchmarking.
+Diagnostic env vars: `GQLITE_DEBUG_INDEXES=1` prints the auto-built indexes and pinned variables; `GQLITE_DISABLE_INDEX_FOLD=1` disables the LTJ pre-pass for A/B benchmarking; `GQLITE_DISABLE_AUTO_INDEXES=1` skips the auto-build at open; `GQLITE_TRACE_OPEN=1` prints per-phase open timings.
 
-Measured impact on LDBC IC2 over `bench/data/ldbc-sf0.1.gdb` (15 params × 3 iters, lazy backend, `--limit 20`): across-row median **2417 ms → 1377 ms (1.76×)**. The IC2 query uses a top-level `Comment | Post` union that falls back to hash-join, but each branch independently calls `try_ltj` and benefits from constant-folding the `Person {id: ...}` start. The BTree path doesn't move the needle on IC2 specifically because `c.creationDate <= maxDate` matches the bulk of the dataset (low selectivity); it shines on more selective range queries.
+Measured impact on LDBC IC2 over `bench/data/ldbc-sf0.1.gdb` (15 params × 3 iters, lazy backend, `--limit 20`):
+
+| Stage | IC2 across-row median |
+|---|---|
+| No secondary indexes, no Triple cache | 2417 ms |
+| Auto hash + btree, no Triple cache | 1377 ms |
+| Auto hash + btree, **TripleIndex cached + warmed at open** | **8.7 ms** (276× total) |
+
+For reference, GraphQLite (a SQLite extension with Cypher) measures 32.82 ms median on the same query — gqlite is ~3.75× faster after the cache lands. The single biggest win is the TripleIndex cache; secondary indexes account for the early phases of the speedup but are dwarfed by the savings of not rebuilding the six-ordering edge index per query.
 
 ## Key conventions
 
