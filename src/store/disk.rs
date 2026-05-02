@@ -275,8 +275,8 @@ impl DiskGraphStore {
     }
 
     fn label_index_lookup(&self, label: &str, dir: &[(u32, u32)]) -> Option<Vec<u32>> {
-        let label_sid = self.strings.str_to_id.get(label)?;
-        let (_, first_page) = dir.iter().find(|(sid, _)| sid == label_sid)?;
+        let label_sid = self.strings.id_for_str(label)?;
+        let (_, first_page) = dir.iter().find(|(sid, _)| *sid == label_sid)?;
         let ids = disk_index::read_u32_chain(&mut self.pager.borrow_mut(), *first_page)
             .unwrap_or_default();
         Some(ids)
