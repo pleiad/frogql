@@ -35,7 +35,7 @@ fn build_schema_from_body(body: &[TypeElement]) -> Schema {
             TypeElement::Edge(vt) => edges.push(vt.clone()),
         }
     }
-    Schema { nodes, edges }
+    Schema::from_parts(nodes, edges)
 }
 
 fn parse_create(input: &str) -> (String, Vec<TypeElement>) {
@@ -557,10 +557,7 @@ fn schema_serialization_roundtrip_preserves_composites() {
     );
 
     let node = VariableType::Node(DescriptorType::new(labels, PropertyType::Closed(props)));
-    let schema = Schema {
-        nodes: vec![node],
-        edges: vec![],
-    };
+    let schema = Schema::from_parts(vec![node], vec![]);
 
     let json = serde_json::to_string(&schema).unwrap();
     let back: Schema = serde_json::from_str(&json).unwrap();

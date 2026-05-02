@@ -115,10 +115,7 @@ fn fraud_schema() -> Schema {
         dummy_person.clone(),
     );
 
-    Schema {
-        nodes: vec![account, dummy_person],
-        edges: vec![transfer, foo_edge],
-    }
+    Schema::from_parts(vec![account, dummy_person], vec![transfer, foo_edge])
 }
 
 /// Social network schema, mirroring fppc::tests::social_schema:
@@ -161,10 +158,7 @@ fn social_schema() -> Schema {
         student.clone(),
     );
 
-    Schema {
-        nodes: vec![teacher, student, comment],
-        edges: vec![knows, likes, author],
-    }
+    Schema::from_parts(vec![teacher, student, comment], vec![knows, likes, author])
 }
 
 // =======================================================================
@@ -419,26 +413,26 @@ fn test_example23() {
     );
 
     // With closed schema {status bool} — typo "stauts" doesn't match -> empty
-    let schema = Schema {
-        nodes: vec![node_dt(
+    let schema = Schema::from_parts(
+        vec![node_dt(
             LabelType::Star,
             closed(&[("status", SimpleType::B)]),
         )],
-        edges: vec![],
-    };
+        vec![],
+    );
     let (r2, _, _) = check_with(schema, "(x: {stauts int} WHERE x.stauts > 0)");
     assert!(r2.empty);
 }
 
 #[test]
 fn test_example24() {
-    let schema = Schema {
-        nodes: vec![node_dt(
+    let schema = Schema::from_parts(
+        vec![node_dt(
             LabelType::Star,
             closed(&[("status", SimpleType::B)]),
         )],
-        edges: vec![],
-    };
+        vec![],
+    );
     let (r, _, _) = check_with(schema, "(x: {status bool} WHERE x.status > 0)");
     assert!(r.empty);
 }

@@ -473,7 +473,7 @@ fn build_schema_from_body(body: &[TypeElement]) -> Schema {
             TypeElement::Edge(vt) => edges.push(vt.clone()),
         }
     }
-    Schema { nodes, edges }
+    Schema::from_parts(nodes, edges)
 }
 
 fn ddl_response(py: Python<'_>, message: &str) -> PyResult<PyObject> {

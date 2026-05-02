@@ -37,7 +37,7 @@ pub fn infer_simple_schema<G: GraphAccess>(g: &G) -> Schema {
         .map(|(key, gp)| edge_variable_type(key, gp, &node_groups))
         .collect();
 
-    Schema { nodes, edges }
+    Schema::from_parts(nodes, edges)
 }
 
 /// Property type for a single value. Lists infer their element type by
