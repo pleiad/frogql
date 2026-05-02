@@ -321,12 +321,11 @@ impl Typechecker {
                             .push(format!("Variable {} is bound to empty type", var));
                         return SimpleType::Zero;
                     }
-                    let at = t.get_attribute(attr);
-                    if at.is_empty() {
+                    if !t.declares_attribute(attr) {
                         self.warnings
                             .push(format!("Attribute {} not found in {}", attr, t));
                     }
-                    at
+                    t.get_attribute(attr)
                 }
                 None => {
                     self.errors
@@ -338,12 +337,15 @@ impl Typechecker {
             Expr::FieldAccess { base, field } => {
                 let base_t = self.check_expr(base, env);
                 match &base_t {
+                    // Missing record field → `Star`, not `Zero`: matches the
+                    // runtime's R_a (missing read = null = ★ inhabitant) and
+                    // keeps boolean propagation honest for 3VL queries.
                     SimpleType::Record(fields) => match fields.get(field) {
                         Some(t) => t.clone(),
                         None => {
                             self.warnings
                                 .push(format!("Field {} not found in record {}", field, base_t));
-                            SimpleType::Zero
+                            SimpleType::Star
                         }
                     },
                     SimpleType::Star | SimpleType::Zero => base_t,

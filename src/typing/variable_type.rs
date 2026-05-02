@@ -75,6 +75,23 @@ impl VariableType {
         }
     }
 
+    /// True iff at least one branch of this variable type declares `attr` —
+    /// used by the typechecker to warn on undeclared attribute access on a
+    /// closed schema, while `get_attribute` itself is permissive (returns
+    /// `Star` so 3VL boolean ops still type-check).
+    pub fn declares_attribute(&self, attr: &str) -> bool {
+        match self {
+            VariableType::Node(d) => d.props.declares(attr),
+            VariableType::EdgeDirectional { desc, .. } => desc.props.declares(attr),
+            VariableType::EdgeNonDirectional { desc, .. } => desc.props.declares(attr),
+            VariableType::Union(t1, t2) => {
+                t1.declares_attribute(attr) || t2.declares_attribute(attr)
+            }
+            VariableType::Group(t) => t.declares_attribute(attr),
+            VariableType::Null | VariableType::Zero => false,
+        }
+    }
+
     // --- Meet ---
 
     fn meet_node(a: &DescriptorType, b: &DescriptorType) -> VariableType {

@@ -36,11 +36,30 @@ impl PropertyType {
     }
 
     /// Get the type of an attribute.
+    ///
+    /// Closed records that lack the attribute return `Star`, not `Zero`: per
+    /// FPPC `R_a`, a missing-attribute read at runtime succeeds with `null`,
+    /// which inhabits every type. Returning `Zero` would propagate through
+    /// boolean operators and falsely mark a 3VL-non-empty query as
+    /// `guaranteed_empty` (e.g. `WHERE x.unknown = … OR true`). Callers that
+    /// want the schema-violation signal can check `declares` first.
     pub fn get(&self, attr: &str) -> SimpleType {
         match self {
-            PropertyType::Open(m) => m.get(attr).cloned().unwrap_or(SimpleType::Star),
-            PropertyType::Closed(m) => m.get(attr).cloned().unwrap_or(SimpleType::Zero),
+            PropertyType::Open(m) | PropertyType::Closed(m) => {
+                m.get(attr).cloned().unwrap_or(SimpleType::Star)
+            }
             PropertyType::Zero => SimpleType::Zero,
+        }
+    }
+
+    /// True iff `attr` is explicitly named in the record. Used to warn on
+    /// closed-record violations even though `get` is permissive — `Open`
+    /// records never warn since their `*` wildcard tolerates any attribute.
+    pub fn declares(&self, attr: &str) -> bool {
+        match self {
+            PropertyType::Open(_) => true,
+            PropertyType::Closed(m) => m.contains_key(attr),
+            PropertyType::Zero => false,
         }
     }
 

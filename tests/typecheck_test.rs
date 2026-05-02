@@ -575,3 +575,88 @@ fn test_check_plain_return_unbound_var_now_caught() {
         "expected an error mentioning z, got: {errs:?}"
     );
 }
+
+/// Schema with a closed `User` record (just `name`) for tests that exercise
+/// undeclared-attribute access.
+fn closed_user_schema() -> Schema {
+    let user = node_dt(label("User"), closed(&[("name", SimpleType::S)]));
+    Schema::from_parts(vec![user], vec![])
+}
+
+fn check_full_with(schema: Schema, query: &str) -> (TypecheckResult, Vec<String>, Vec<String>) {
+    let q = parser::parse_query(query).expect("parse failed");
+    let q = elaborate::elaborate_query(q);
+    let mut tc = Typechecker::new(schema);
+    let r = tc.check_query(&q);
+    (r, tc.errors.clone(), tc.warnings.clone())
+}
+
+#[test]
+fn test_undeclared_attr_or_true_not_marked_empty() {
+    // Regression: missing-attribute access on a closed record used to type
+    // as `Zero`, propagate through `OR` / `AND`, and trigger the Filter's
+    // "not boolean" branch which marks `PathType::Zero` → `guaranteed_empty`.
+    // Per FPPC R_a (missing read = null = ★ inhabitant), the runtime
+    // evaluates the WHERE under 3VL and `Unknown OR true = true`, so the
+    // query is *not* statically empty. The typechecker must agree.
+    let (r, errs, warns) = check_full_with(
+        closed_user_schema(),
+        "MATCH (x: User) WHERE (x.email = 'a@b.test') OR (1 = 1) RETURN x.name",
+    );
+    assert!(r.ok, "expected ok, errs={errs:?}");
+    assert!(
+        !r.empty,
+        "must not be guaranteed-empty: 3VL keeps every row when one OR arm is true"
+    );
+    assert!(
+        warns.iter().any(|w| w.contains("email")),
+        "expected a warning about undeclared `email`, got: {warns:?}"
+    );
+}
+
+#[test]
+fn test_undeclared_attr_alone_not_marked_empty() {
+    // Same intent, simpler shape: a bare missing-attribute predicate types
+    // as `★ = str` → `Bool` (not `Zero = str` → `Zero`), so the query is
+    // not statically empty. Runtime drops every row at query time under
+    // 3VL — that is correct, but it is a *runtime* outcome, not a
+    // typechecker short-circuit.
+    let (r, errs, warns) = check_full_with(
+        closed_user_schema(),
+        "MATCH (x: User) WHERE x.email = 'a@b.test' RETURN x.name",
+    );
+    assert!(r.ok, "expected ok, errs={errs:?}");
+    assert!(!r.empty, "must not be guaranteed-empty");
+    assert!(
+        warns.iter().any(|w| w.contains("email")),
+        "expected a warning about undeclared `email`, got: {warns:?}"
+    );
+}
+
+#[test]
+fn test_undeclared_attr_record_field_or_true_not_marked_empty() {
+    // Two-level lookup: `x.address.foo`. With the schema declaring no
+    // `address`, `x.address` types as ★, and field access on ★ stays ★.
+    // The OR branch must keep the query non-empty.
+    let (r, errs, warns) = check_full_with(
+        closed_user_schema(),
+        "MATCH (x: User) WHERE (x.address.foo = true) OR (1 = 1) RETURN x.name",
+    );
+    assert!(r.ok, "expected ok, errs={errs:?}");
+    assert!(!r.empty, "must not be guaranteed-empty");
+    assert!(
+        warns.iter().any(|w| w.contains("address")),
+        "expected a warning about undeclared `address`, got: {warns:?}"
+    );
+}
+
+#[test]
+fn test_closed_record_warns_on_undeclared_attr() {
+    // The R_a-aligned permissive return type must NOT silence the warning.
+    // Closed records still tell the user: "this attribute isn't declared".
+    let (_, _, warns) = check_full_with(closed_user_schema(), "MATCH (x: User) RETURN x.email");
+    assert!(
+        warns.iter().any(|w| w.contains("email")),
+        "expected a warning about undeclared `email`, got: {warns:?}"
+    );
+}
