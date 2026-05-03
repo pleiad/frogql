@@ -1363,8 +1363,8 @@ mod variable_spec_rules {
                 &VariableType::Union(Box::new(t1.clone()), Box::new(t2.clone())),
             );
             let split = VariableType::join(
-                &VariableType::refine(&schema, &t1),
-                &VariableType::refine(&schema, &t2),
+                VariableType::refine(&schema, &t1),
+                VariableType::refine(&schema, &t2),
             );
             assert_canon_eq!(variable, direct, split,
                 "rules.md §6: refine(T₁ + T₂) ≡ refine(T₁) ⊔ refine(T₂)");

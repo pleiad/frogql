@@ -458,7 +458,7 @@ impl Typechecker {
                     &self.schema,
                     &VariableType::edge_non_directional(dtype.clone()),
                 );
-                VariableType::join(&t_fwd, &t_und)
+                VariableType::join(t_fwd, t_und)
             }
         };
         if matches!(refined, VariableType::Zero) {
