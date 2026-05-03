@@ -199,6 +199,31 @@ impl VariableType {
 
     // --- Subtyping ---
 
+    /// Subtype check for the Node endpoints of an Edge variant.
+    fn node_endpoint_subtype(a: &VariableType, b: &VariableType) -> bool {
+        match (a, b) {
+            (VariableType::Node(a), VariableType::Node(b)) => DescriptorType::is_subtype(a, b),
+            _ => false,
+        }
+    }
+
+    /// Subtype rule for a single orientation of an edge: descriptor
+    /// subtype plus pointwise Node-endpoint subtype on left and right.
+    /// Shared by both `EdgeDirectional` and the orientation-OR check
+    /// of `EdgeNonDirectional`.
+    fn edge_directional_subtype(
+        d1: &DescriptorType,
+        l1: &VariableType,
+        r1: &VariableType,
+        d2: &DescriptorType,
+        l2: &VariableType,
+        r2: &VariableType,
+    ) -> bool {
+        DescriptorType::is_subtype(d1, d2)
+            && Self::node_endpoint_subtype(l1, l2)
+            && Self::node_endpoint_subtype(r1, r2)
+    }
+
     pub fn is_subtype(t1: &VariableType, t2: &VariableType) -> bool {
         match (t1, t2) {
             (VariableType::Zero, _) => true,
@@ -215,21 +240,7 @@ impl VariableType {
                     left: l2,
                     right: r2,
                 },
-            ) => {
-                DescriptorType::is_subtype(d1, d2)
-                    && match (l1.as_ref(), l2.as_ref()) {
-                        (VariableType::Node(a), VariableType::Node(b)) => {
-                            DescriptorType::is_subtype(a, b)
-                        }
-                        _ => false,
-                    }
-                    && match (r1.as_ref(), r2.as_ref()) {
-                        (VariableType::Node(a), VariableType::Node(b)) => {
-                            DescriptorType::is_subtype(a, b)
-                        }
-                        _ => false,
-                    }
-            }
+            ) => Self::edge_directional_subtype(d1, l1, r1, d2, l2, r2),
             (
                 VariableType::EdgeNonDirectional {
                     desc: d1,
@@ -242,24 +253,8 @@ impl VariableType {
                     right: r2,
                 },
             ) => {
-                // Symmetric check
-                let as_dir1 = VariableType::EdgeDirectional {
-                    desc: d1.clone(),
-                    left: l1.clone(),
-                    right: r1.clone(),
-                };
-                let as_dir2a = VariableType::EdgeDirectional {
-                    desc: d2.clone(),
-                    left: l2.clone(),
-                    right: r2.clone(),
-                };
-                let as_dir2b = VariableType::EdgeDirectional {
-                    desc: d2.clone(),
-                    left: r2.clone(),
-                    right: l2.clone(),
-                };
-                VariableType::is_subtype(&as_dir1, &as_dir2a)
-                    || VariableType::is_subtype(&as_dir1, &as_dir2b)
+                Self::edge_directional_subtype(d1, l1, r1, d2, l2, r2)
+                    || Self::edge_directional_subtype(d1, l1, r1, d2, r2, l2)
             }
             (VariableType::Group(a), VariableType::Group(b)) => VariableType::is_subtype(a, b),
             (VariableType::Union(a, b), _) => {
