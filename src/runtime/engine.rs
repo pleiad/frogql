@@ -417,15 +417,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
             PathPattern::Repeat { pattern, lb, ub } => {
                 let ub = ub.expect("unbounded repeat not supported");
-                let mut acc = IntermediateResult::empty();
-                for i in *lb..=ub {
-                    acc = acc.union(self.run_repetition_pattern(pattern, i));
-                    if self.limit_reached(&acc.rows, limit) {
-                        acc.rows.truncate(limit);
-                        break;
-                    }
-                }
-                acc
+                self.run_repetition_range(pattern, *lb, ub, limit)
             }
             PathPattern::Questioned(inner) => {
                 let ir_empty = self.run_path_pattern(&PathPattern::Node(None), limit);
@@ -980,6 +972,133 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             res = IntermediateResult::new(new_rows);
         }
         res
+    }
+
+    /// Range-incremental repetition. Evaluates the inner pattern once,
+    /// builds the first→indices hash map once, then walks every level
+    /// 1..=ub appending rows directly to a single `acc` vector. The
+    /// previous level's row range is reused (by index) as the source
+    /// for the next level, so no level beyond level 1 is ever cloned —
+    /// each row lives in `acc` exactly once. Levels below `lb` are
+    /// built in-place and drained at the end via a single `Vec::drain`
+    /// (one O(remaining) memmove). For `lb == ub` it does the same
+    /// work as legacy minus 1 inner eval; for `lb < ub` it replaces the
+    /// legacy O((ub-lb+1) * ub) build work with O(ub).
+    fn run_repetition_range(
+        &self,
+        p: &PathPattern,
+        lb: usize,
+        ub: usize,
+        limit: usize,
+    ) -> IntermediateResult {
+        if lb > ub {
+            return IntermediateResult::empty();
+        }
+
+        // Length 0 is a special case: a row per node, with empty-list
+        // bindings. Reuse the legacy n=0 codepath rather than
+        // duplicating the all-nodes scan.
+        let mut prefix_rows = if lb == 0 {
+            self.run_repetition_pattern(p, 0).rows
+        } else {
+            Vec::new()
+        };
+
+        if ub == 0 {
+            if limit > 0 && prefix_rows.len() > limit {
+                prefix_rows.truncate(limit);
+            }
+            return IntermediateResult::new(prefix_rows);
+        }
+        if limit > 0 && prefix_rows.len() >= limit {
+            prefix_rows.truncate(limit);
+            return IntermediateResult::new(prefix_rows);
+        }
+
+        let grouped = self.run_path_pattern(p, 0).to_group();
+        if grouped.rows.is_empty() {
+            return IntermediateResult::new(prefix_rows);
+        }
+
+        let mut grouped_by_first: HashMap<Id, Vec<usize>> = HashMap::new();
+        for (i, r) in grouped.rows.iter().enumerate() {
+            if let Some(first) = r.path().first_node_id() {
+                grouped_by_first.entry(first).or_default().push(i);
+            }
+        }
+
+        // Single buffer for levels 1..=ub. level_ranges[k-1] = (start, end)
+        // points to level k inside `rows`. The previous level's slice is
+        // borrowed by index when building the next.
+        let mut rows: Vec<ResultRow> = Vec::new();
+        let mut level_ranges: Vec<(usize, usize)> = Vec::with_capacity(ub);
+
+        // Level 1: cloned once from `grouped` (small — just the inner
+        // pattern's result table). Subsequent levels live in `rows` only.
+        rows.extend(grouped.rows.iter().cloned());
+        level_ranges.push((0, rows.len()));
+
+        for k in 2..=ub {
+            let (prev_start, prev_end) = level_ranges[k - 2];
+            if prev_start == prev_end {
+                break;
+            }
+            let cur_start = rows.len();
+            for i in prev_start..prev_end {
+                let Some(last) = rows[i].path().last_node_id() else {
+                    continue;
+                };
+                if let Some(matches) = grouped_by_first.get(&last) {
+                    // `matches` borrows from grouped_by_first (HashMap),
+                    // which is independent of `rows` — no borrow conflict.
+                    // Each `concat_group` call is a short borrow of rows[i]
+                    // that ends before the subsequent `rows.push`.
+                    for &idx in matches {
+                        let new_row = rows[i].concat_group(&grouped.rows[idx]);
+                        rows.push(new_row);
+                    }
+                }
+            }
+            level_ranges.push((cur_start, rows.len()));
+
+            // Early termination on limit (counts only levels >= lb that
+            // have been built so far; we approximate by total rows minus
+            // the soon-to-be-drained prefix).
+            if limit > 0 {
+                let drained_so_far: usize = level_ranges
+                    .iter()
+                    .take(lb.saturating_sub(1).min(level_ranges.len()))
+                    .map(|(s, e)| e - s)
+                    .sum();
+                if rows.len().saturating_sub(drained_so_far) >= limit {
+                    break;
+                }
+            }
+        }
+
+        // Drop levels [1, lb-1] from rows by draining the contiguous
+        // prefix they occupy. Single memmove of the remaining tail.
+        if lb > 1 {
+            let drop_levels = (lb - 1).min(level_ranges.len());
+            let drop_until = level_ranges
+                .get(drop_levels - 1)
+                .map(|(_, e)| *e)
+                .unwrap_or(0);
+            if drop_until > 0 {
+                rows.drain(0..drop_until);
+            }
+        }
+
+        // Splice the optional length-0 baseline at the front.
+        if !prefix_rows.is_empty() {
+            prefix_rows.extend(rows);
+            rows = prefix_rows;
+        }
+
+        if limit > 0 && rows.len() > limit {
+            rows.truncate(limit);
+        }
+        IntermediateResult::new(rows)
     }
 
     // --- Helpers ---
