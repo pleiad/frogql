@@ -62,6 +62,12 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// RefCell so internal lazy initialization stays an immutable-self
     /// API for callers.
     triple_index: RefCell<Option<Arc<TripleIndex>>>,
+    /// Memoization for uncorrelated `EXISTS` / `NOT EXISTS` predicates.
+    /// Keyed by the body's `Box<Query>` heap address, which stays stable
+    /// for the lifetime of the compiled AST. The stored bool records
+    /// whether the body has any matching row; both `EXISTS` and
+    /// `NOT EXISTS` derive their truth from the same flag.
+    exists_cache: RefCell<HashMap<usize, bool>>,
 }
 
 impl<'g, G: GraphAccess> Runtime<'g, G> {
@@ -69,6 +75,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         Self {
             graph,
             triple_index: RefCell::new(None),
+            exists_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -80,6 +87,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         Self {
             graph,
             triple_index: RefCell::new(Some(idx)),
+            exists_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -1312,10 +1320,43 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
             Expr::Type(_) => ExprResult::Failure("bare type in expression".into()),
 
-            Expr::Exists { .. } | Expr::NotExists { .. } => {
-                ExprResult::Failure("EXISTS / NOT EXISTS are not yet implemented at runtime".into())
-            }
+            Expr::Exists { body } => self.eval_exists(mu, body, /*negated=*/ false),
+            Expr::NotExists { body } => self.eval_exists(mu, body, /*negated=*/ true),
         }
+    }
+
+    /// Runtime evaluation of `EXISTS L` (negated=false) and
+    /// `NOT EXISTS L` (negated=true). Phase 3 only handles the
+    /// uncorrelated case — when the body shares no variable with the
+    /// outer assignment, the body's truth value is row-independent
+    /// and a single inner run with `limit=1` decides it. The result
+    /// is memoized on the body's heap address so subsequent rows of
+    /// the outer table reuse the verdict.
+    ///
+    /// The correlated case (body references a variable already bound
+    /// outside) returns a Failure for now; Phase 4 will replace this
+    /// with the semi-join / anti-join evaluator.
+    fn eval_exists(&self, mu: &Assignment, body: &Query, negated: bool) -> ExprResult {
+        let body_vars = query_freevars(body);
+        let outer_keys = mu.keys();
+        let correlated = body_vars.iter().any(|v| outer_keys.contains(v));
+        if correlated {
+            return ExprResult::Failure(
+                "correlated EXISTS / NOT EXISTS not yet implemented at runtime".into(),
+            );
+        }
+
+        let key = body as *const Query as usize;
+        if let Some(&cached) = self.exists_cache.borrow().get(&key) {
+            let truth = if negated { !cached } else { cached };
+            return ExprResult::Success(Value::Bool(truth));
+        }
+
+        let ir = self.run_match_chain(body, /*limit=*/ 1);
+        let nonempty = !ir.rows.is_empty();
+        self.exists_cache.borrow_mut().insert(key, nonempty);
+        let truth = if negated { !nonempty } else { nonempty };
+        ExprResult::Success(Value::Bool(truth))
     }
 
     fn eval_binop(op: &BinOp, lv: &Value, rv: &Value) -> ExprResult {
@@ -1391,6 +1432,19 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 }
 
 /// Natural join of two intermediate result sets on shared assignment keys
+/// Collect every variable name introduced anywhere inside the query
+/// body (across all match clauses). Used by the existential evaluator
+/// to decide whether a body is correlated with the surrounding scope:
+/// the intersection with the outer `Assignment` keys gives the
+/// correlation set.
+fn query_freevars(q: &Query) -> HashSet<String> {
+    let mut acc = HashSet::new();
+    for m in &q.matches {
+        acc.extend(m.pattern().freevars());
+    }
+    acc
+}
+
 /// (variables that appear on both sides). When no key is shared, the result
 /// is the cross-product. Used by the per-match evaluator only when at least
 /// one match is OPTIONAL — all-Simple queries still go through the LTJ /
