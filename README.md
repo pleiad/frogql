@@ -177,6 +177,44 @@ MATCH (p: Person) -[:ACTED_IN]-> (m: Movie) RETURN p.name, m.title AS movie
 MATCH (p: Person) -[:DIRECTED]-> (m: Movie) RETURN DISTINCT p.name
 ```
 
+### EXISTS / NOT EXISTS
+
+Boolean predicates over a subquery body. Use them to keep or drop outer
+rows based on whether the body has any match.
+
+```
+MATCH (p: Person) WHERE EXISTS { (p)-[:ACTED_IN]->(:Movie) } RETURN p.name
+MATCH (p: Person) WHERE NOT EXISTS { (p)-[:DIRECTED]->(:Movie) } RETURN p.name
+```
+
+The body accepts one or more `MATCH` / `OPTIONAL MATCH` clauses with
+`WHERE` filters. `RETURN`, `GROUP BY`, and `LIMIT` are not allowed
+inside the braces — the body's job is proving non-emptiness, not
+projecting a result table.
+
+Outer-bound variables are visible inside via correlation; inner-only
+bindings stay local. References to inner variables from outside the
+body are rejected at compile time:
+
+```
+MATCH (p) WHERE EXISTS { (p)-[:KNOWS]->(b) } RETURN p.name, b.name
+                                             ^^^^^^^^^^^^^^^^^^^^
+                                             error: b not bound
+```
+
+When the active graph type proves the body unsatisfiable (a label or
+property the schema rejects), the optimiser folds `EXISTS` to `false`
+and `NOT EXISTS` to `true` and the runtime never evaluates the body.
+
+Two regimes at runtime:
+- **Uncorrelated** body (no shared variable with the outer scope) runs
+  once with `limit=1`; the bool result is reused across every outer
+  row.
+- **Correlated** body runs once with no limit; rows are projected onto
+  the correlation variables and stored in a `HashSet`. Per outer row
+  the predicate is one O(1) hash probe — semi-join for `EXISTS`, anti-
+  join for `NOT EXISTS`.
+
 ### Repetition
 
 ```
@@ -422,7 +460,8 @@ cargo test --test parser_test --test runtime_test --test store_runtime_test \
            --test compile_diagnostics --test elaborate_test --test float_test \
            --test graph_type_test --test typecheck_smoke --test typecheck_test \
            --test optional_match_test --test multi_match_test \
-           --test aggregates_proptest --test lattice_proptest --test multi_match_proptest
+           --test aggregates_proptest --test lattice_proptest --test multi_match_proptest \
+           --test exists_fold_test --test exists_runtime_test
 
 # Single test
 cargo test --test runtime_test test_join_star_any_label -- --exact

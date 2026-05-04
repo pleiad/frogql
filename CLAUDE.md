@@ -17,7 +17,8 @@ cargo test --test parser_test --test runtime_test --test store_runtime_test \
            --test compile_diagnostics --test elaborate_test --test float_test \
            --test graph_type_test --test typecheck_smoke --test typecheck_test \
            --test optional_match_test --test multi_match_test \
-           --test aggregates_proptest --test lattice_proptest --test multi_match_proptest
+           --test aggregates_proptest --test lattice_proptest --test multi_match_proptest \
+           --test exists_fold_test --test exists_runtime_test
 
 # Single test
 cargo test --test runtime_test test_join_star_any_label -- --exact
@@ -244,6 +245,22 @@ When LTJ cannot decompose a join (unions, repetitions, any-direction edges), the
 ### Repetition and PathValue::Group
 
 `-[x]->{n,m}` binds `x` to a `Group` of matched edges, not a single edge. `to_group()` wraps each value in a singleton group; `concat_group()` concatenates groups. Nested repetitions produce nested groups: `(-[x]->{1,2}){1,2}` gives `x ↦ [[e1], [e2, e3]]`. The zero-repetition base case fills variables with empty groups.
+
+`engine.rs::run_repetition_range` evaluates `{lb,ub}` in a single pass: the inner pattern runs once, the `first → indices` hash is built once, and every level `1..=ub` grows in a single `rows` buffer reusing the previous level's slice by index. Levels below `lb` get drained at the end via one `Vec::drain`. Replaces an earlier per-length loop that scaled as `O((ub-lb+1) × ub)` with `O(ub)`.
+
+### EXISTS / NOT EXISTS
+
+`Expr::Exists { body }` and `Expr::NotExists { body }` are two distinct AST variants (the optimiser folds each to a different constant). Body is a `Box<Query>` accepting `MATCH`+`WHERE` clauses (one or more, including `OPTIONAL MATCH`); `RETURN`, `GROUP BY`, `LIMIT`, and `DISTINCT` are rejected by the parser since the body's purpose is proving non-emptiness, not projecting.
+
+**Scoping** (typechecker `check_subquery_body`): the body is checked under a clone of the outer environment so outer-bound variables resolve via correlation, then the inner environment is discarded. References to inner-only vars from `RETURN` / outer `WHERE` produce the existing "variable not found" error. Both predicates type as `SimpleType::B`.
+
+**Optimisation** (`src/optimizer/existential.rs`): runs after the per-pattern pushdown passes. Walks every `Expr` reachable from `Query` (WHERE filters, GROUP BY, RETURN, recursive into nested existentials), runs the typechecker on each body against the active schema, and rewrites empty bodies to literals — `false` for `Exists`, `true` for `NotExists`. Catches shape-driven emptiness (a label or property the schema rejects). The pass does not thread outer-scope correlation into the body, so refinement-aware emptiness is left for a future pass; no literal-Boolean propagation either, so an inner-only fold inside an outer body does not collapse the outer.
+
+**Runtime** (`engine.rs::eval_exists`): two regimes share `Runtime::exists_cache: RefCell<HashMap<usize, ExistsCache>>` keyed by the body's heap address.
+- *Uncorrelated* (no shared variable with outer μ): `run_match_chain(body, limit=1)` once, cache the bool; subsequent rows reuse it.
+- *Correlated*: `run_match_chain(body, 0)` once (full body), project every row onto the correlation set (sorted variable names), store as `HashSet<Vec<PathValue>>`. Per outer row, build the probe key from μ and check membership — semi-join for `EXISTS`, anti-join for `NOT EXISTS`. The body runs at most once per `Runtime` regardless of how many outer rows pass through.
+
+The four phases live in commits `4d13327` (parse + typecheck), `163ee30` (fold optimiser), `134890f` (uncorrelated runtime), `d5b4a45` (correlated runtime). Tests in `tests/parser_test.rs`, `tests/typecheck_test.rs`, `tests/exists_fold_test.rs`, `tests/exists_runtime_test.rs`. Formal type rules in `latex/extension/main.tex` (`\textsc{TExists}`, `\textsc{TNotExists}`, plus `\isEmpty(\matchseq) \equiv e \lor \mathsf{empty}(\Gamma')` and the rewrite rules `\textsc{ExistsEmpty}` / `\textsc{NotExistsEmpty}`).
 
 ### Null semantics
 
