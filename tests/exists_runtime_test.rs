@@ -1,12 +1,10 @@
-//! Phase 3: runtime evaluation of `EXISTS` and `NOT EXISTS` for
-//! uncorrelated subqueries (the body shares no variable with the
-//! outer assignment). The body runs once with `limit=1`; the result
-//! is memoized on the body's heap address so subsequent rows of the
-//! outer table reuse the verdict.
+//! Runtime evaluation of `EXISTS` and `NOT EXISTS`.
 //!
-//! Correlated bodies (which share variables with the outer scope)
-//! still fail with a clear "not yet implemented" message. Phase 4
-//! will replace that with a semi/anti-join evaluator.
+//! Two regimes share the cache on `Runtime`:
+//!   - Uncorrelated bodies — single `limit=1` run, cached as a bool.
+//!   - Correlated bodies — single full run, projected onto the
+//!     correlation variables, cached as a `HashSet`. Per outer row
+//!     the predicate is one O(1) hash probe (semi/anti-join).
 //!
 //! All queries here use the permissive `compile_query` path (Star
 //! schema) so the optimiser cannot pre-fold the predicates — every
@@ -114,19 +112,75 @@ fn exists_with_inner_where_runs() {
 }
 
 #[test]
-fn correlated_exists_fails_clearly() {
-    // The body references `x` which is bound by the outer match. The
-    // Phase 3 evaluator cannot run this case yet; the runtime maps
-    // the failure onto a dropped row (the standard convention for
-    // failed expressions on a Bool predicate is "filter out").
+fn correlated_exists_keeps_outer_rows_with_match() {
+    // fraud.json wires every Account into a 4-cycle of Transfer
+    // edges (a1 → p1 → p2 → a2 → a1), so every Account has at least
+    // one outgoing Transfer. EXISTS evaluates to true on every
+    // outer row.
     let g = fraud_graph();
     let count = run_raw_count(
         &g,
         "MATCH (x:Account) WHERE EXISTS { (x)-[:Transfer]->(y) }",
     );
-    // Every row's predicate fails with the "not yet implemented"
-    // message, so every row is filtered out. This documents the
-    // current state and will flip when Phase 4 lands.
+    let total = run_raw_count(&g, "MATCH (x:Account)");
+    assert_eq!(count, total);
+}
+
+#[test]
+fn correlated_not_exists_drops_outer_rows_with_match() {
+    // Symmetric: every Account has an outgoing Transfer, so
+    // NOT EXISTS evaluates to false everywhere.
+    let g = fraud_graph();
+    let count = run_raw_count(
+        &g,
+        "MATCH (x:Account) WHERE NOT EXISTS { (x)-[:Transfer]->(y) }",
+    );
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn correlated_exists_partitions_outer_rows() {
+    // Only `a1` has an outgoing `Foo` edge in fraud.json, so the
+    // semi-join keeps exactly one Account row. The matching anti-
+    // join keeps the other three.
+    let g = fraud_graph();
+    let with_foo = run_projected(
+        &g,
+        "MATCH (x:Account) WHERE EXISTS { (x)-[:Foo]->(y) } RETURN x.owner",
+    );
+    let without_foo = run_projected(
+        &g,
+        "MATCH (x:Account) WHERE NOT EXISTS { (x)-[:Foo]->(y) } RETURN x.owner",
+    );
+    assert_eq!(with_foo.len(), 1);
+    assert_eq!(without_foo.len(), 3);
+    assert_eq!(with_foo[0][0], Value::Str("Aretha".into()));
+    let mut owners: Vec<&Value> = without_foo.iter().map(|r| &r[0]).collect();
+    owners.sort_by_key(|v| match v {
+        Value::Str(s) => s.clone(),
+        _ => String::new(),
+    });
+    assert_eq!(
+        owners,
+        vec![
+            &Value::Str("Jay".into()),
+            &Value::Str("Mike".into()),
+            &Value::Str("Scott".into()),
+        ]
+    );
+}
+
+#[test]
+fn correlated_exists_with_inner_where() {
+    // Body filters on a property of the correlated variable. Only
+    // accounts that send transfers to a Person-labelled target
+    // qualify — that's just `a1 -> d1` via Foo, but Transfer edges
+    // never end at d1, so this should return zero accounts.
+    let g = fraud_graph();
+    let count = run_raw_count(
+        &g,
+        "MATCH (x:Account) WHERE EXISTS { (x)-[:Transfer]->(y:Person) }",
+    );
     assert_eq!(count, 0);
 }
 

@@ -62,12 +62,29 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// RefCell so internal lazy initialization stays an immutable-self
     /// API for callers.
     triple_index: RefCell<Option<Arc<TripleIndex>>>,
-    /// Memoization for uncorrelated `EXISTS` / `NOT EXISTS` predicates.
-    /// Keyed by the body's `Box<Query>` heap address, which stays stable
-    /// for the lifetime of the compiled AST. The stored bool records
-    /// whether the body has any matching row; both `EXISTS` and
-    /// `NOT EXISTS` derive their truth from the same flag.
-    exists_cache: RefCell<HashMap<usize, bool>>,
+    /// Memoization for `EXISTS` / `NOT EXISTS` predicates. Keyed by
+    /// the body's `Box<Query>` heap address, which stays stable for
+    /// the lifetime of the compiled AST. The cached value is one of:
+    ///   - `Uncorrelated(bool)` — the body shares no variable with
+    ///     the outer scope; the bool records whether any row exists.
+    ///   - `Correlated { keys, set }` — the body shares variables
+    ///     with the outer scope; `set` holds the value-tuples on
+    ///     those `keys` for every body row, so a per-outer-row probe
+    ///     is one O(1) hash lookup. The body runs once per Runtime.
+    exists_cache: RefCell<HashMap<usize, ExistsCache>>,
+}
+
+/// Cached evaluation result for an existential predicate.
+enum ExistsCache {
+    Uncorrelated(bool),
+    Correlated {
+        /// Correlation variables, sorted by name so probe-key order is
+        /// deterministic across rows.
+        keys: Vec<String>,
+        /// Hash of `(value at keys[0], value at keys[1], ...)` tuples
+        /// for every row of the body's evaluation.
+        set: HashSet<Vec<PathValue>>,
+    },
 }
 
 impl<'g, G: GraphAccess> Runtime<'g, G> {
@@ -1326,35 +1343,116 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     }
 
     /// Runtime evaluation of `EXISTS L` (negated=false) and
-    /// `NOT EXISTS L` (negated=true). Phase 3 only handles the
-    /// uncorrelated case — when the body shares no variable with the
-    /// outer assignment, the body's truth value is row-independent
-    /// and a single inner run with `limit=1` decides it. The result
-    /// is memoized on the body's heap address so subsequent rows of
-    /// the outer table reuse the verdict.
+    /// `NOT EXISTS L` (negated=true). Two regimes:
     ///
-    /// The correlated case (body references a variable already bound
-    /// outside) returns a Failure for now; Phase 4 will replace this
-    /// with the semi-join / anti-join evaluator.
+    /// **Uncorrelated** — the body shares no variable with the outer
+    /// assignment. The body's truth value is row-independent, so a
+    /// single inner run with `limit=1` decides it. Cached as a bool.
+    ///
+    /// **Correlated** — the body references variables already bound
+    /// outside. Evaluated as a semi/anti-join: the body runs once
+    /// (no limit), every row is projected onto the correlation
+    /// variables and stored in a `HashSet`, and per outer row the
+    /// predicate becomes a single O(1) hash probe. Both the row
+    /// table and the projection live in the cache, so the body
+    /// runs at most once per Runtime regardless of how many outer
+    /// rows are evaluated.
     fn eval_exists(&self, mu: &Assignment, body: &Query, negated: bool) -> ExprResult {
         let body_vars = query_freevars(body);
         let outer_keys = mu.keys();
-        let correlated = body_vars.iter().any(|v| outer_keys.contains(v));
-        if correlated {
-            return ExprResult::Failure(
-                "correlated EXISTS / NOT EXISTS not yet implemented at runtime".into(),
+        let mut correlation: Vec<String> = body_vars
+            .iter()
+            .filter(|v| outer_keys.contains(*v))
+            .cloned()
+            .collect();
+        correlation.sort();
+
+        let body_ptr = body as *const Query as usize;
+
+        if correlation.is_empty() {
+            return self.eval_exists_uncorrelated(body, body_ptr, negated);
+        }
+        self.eval_exists_correlated(mu, body, body_ptr, &correlation, negated)
+    }
+
+    fn eval_exists_uncorrelated(&self, body: &Query, body_ptr: usize, negated: bool) -> ExprResult {
+        if let Some(ExistsCache::Uncorrelated(b)) = self.exists_cache.borrow().get(&body_ptr) {
+            let truth = if negated { !b } else { *b };
+            return ExprResult::Success(Value::Bool(truth));
+        }
+        let ir = self.run_match_chain(body, /*limit=*/ 1);
+        let nonempty = !ir.rows.is_empty();
+        self.exists_cache
+            .borrow_mut()
+            .insert(body_ptr, ExistsCache::Uncorrelated(nonempty));
+        let truth = if negated { !nonempty } else { nonempty };
+        ExprResult::Success(Value::Bool(truth))
+    }
+
+    fn eval_exists_correlated(
+        &self,
+        mu: &Assignment,
+        body: &Query,
+        body_ptr: usize,
+        correlation: &[String],
+        negated: bool,
+    ) -> ExprResult {
+        // Build the cache on first encounter for this body.
+        let need_build = !matches!(
+            self.exists_cache.borrow().get(&body_ptr),
+            Some(ExistsCache::Correlated { .. })
+        );
+        if need_build {
+            let ir = self.run_match_chain(body, /*limit=*/ 0);
+            let mut set: HashSet<Vec<PathValue>> = HashSet::with_capacity(ir.rows.len());
+            for row in &ir.rows {
+                let mut key: Vec<PathValue> = Vec::with_capacity(correlation.len());
+                let mut complete = true;
+                for v in correlation {
+                    match row.assignment.get(v) {
+                        Some(pv) => key.push(pv.clone()),
+                        None => {
+                            // Body row does not bind a correlation
+                            // var (e.g. left-joined OPTIONAL row);
+                            // it cannot match any outer row on this
+                            // key, so skip it.
+                            complete = false;
+                            break;
+                        }
+                    }
+                }
+                if complete {
+                    set.insert(key);
+                }
+            }
+            self.exists_cache.borrow_mut().insert(
+                body_ptr,
+                ExistsCache::Correlated {
+                    keys: correlation.to_vec(),
+                    set,
+                },
             );
         }
 
-        let key = body as *const Query as usize;
-        if let Some(&cached) = self.exists_cache.borrow().get(&key) {
-            let truth = if negated { !cached } else { cached };
-            return ExprResult::Success(Value::Bool(truth));
+        // Probe with the current outer row.
+        let cache = self.exists_cache.borrow();
+        let (keys, set) = match cache.get(&body_ptr) {
+            Some(ExistsCache::Correlated { keys, set }) => (keys, set),
+            _ => unreachable!("cache populated above"),
+        };
+        let mut probe_key: Vec<PathValue> = Vec::with_capacity(keys.len());
+        for v in keys {
+            match mu.get(v) {
+                Some(pv) => probe_key.push(pv.clone()),
+                None => {
+                    // Should not happen — `correlation` was built
+                    // from the intersection with `mu.keys()`. Treat
+                    // as no match (drop EXISTS, satisfy NOT EXISTS).
+                    return ExprResult::Success(Value::Bool(negated));
+                }
+            }
         }
-
-        let ir = self.run_match_chain(body, /*limit=*/ 1);
-        let nonempty = !ir.rows.is_empty();
-        self.exists_cache.borrow_mut().insert(key, nonempty);
+        let nonempty = set.contains(&probe_key);
         let truth = if negated { !nonempty } else { nonempty };
         ExprResult::Success(Value::Bool(truth))
     }
