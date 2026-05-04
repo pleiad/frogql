@@ -19,10 +19,10 @@ param_columns = ["personId", "firstName"]
 param_types = ["int", "string"]
 query = """
 MATCH (p:Person {id: $personId})
-MATCH path = ANY SHORTEST (p)~[:KNOWS]~{1, 3}(friend:Person {firstName: $firstName})
+MATCH path = ANY SHORTEST (p)~[:knows]~{1, 3}(friend:Person {firstName: $firstName})
 WHERE p <> friend
-OPTIONAL MATCH (friend)-[studyAt:STUDY_AT]->(uni:University)-[:IS_LOCATED_IN]->(uniCity:City)
-OPTIONAL MATCH (friend)-[workAt:WORK_AT]->(company:Company)-[:IS_LOCATED_IN]->(companyCountry:Country)
+OPTIONAL MATCH (friend)-[studyAt:studyAt]->(uni:University)-[:isLocatedIn]->(uniCity:City)
+OPTIONAL MATCH (friend)-[workAt:workAt]->(company:Company)-[:isLocatedIn]->(companyCountry:Country)
 RETURN 
     friend.id AS friendId, 
     friend.lastName AS friendLastName, 

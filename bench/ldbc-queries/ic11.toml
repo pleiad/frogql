@@ -17,7 +17,7 @@ params_file = "interactive_11_param.txt"
 param_columns = ["personId", "countryName", "workFromYear"]
 param_types = ["int", "string", "int"]
 query = """
-MATCH (person:Person {id: $personId})~[:KNOWS]~{1, 2}(otherPerson:Person)-[workAt:WORK_AT]->(company:Company)-[:IS_LOCATED_IN]->(country:Country)
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)-[workAt:workAt]->(company:Company)-[:isLocatedIn]->(country:Country)
 WHERE person <> otherPerson 
   AND country.name = $countryName 
   AND workAt.workFrom < $workFromYear

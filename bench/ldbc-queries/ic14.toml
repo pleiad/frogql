@@ -19,22 +19,22 @@ required_features = [
 params_file = "interactive_14_param.txt"
 param_columns = ["person1Id", "person2Id"]
 query = """
-MATCH path = ALL SHORTEST (p1:Person {id: $person1Id})~[:KNOWS]~*(p2:Person {id: $person2Id})
+MATCH path = ALL SHORTEST (p1:Person {id: $person1Id})~[:knows]~*(p2:Person {id: $person2Id})
 RETURN 
     [n IN NODES(path) | n.id] AS personIdsInPath,
     SUM(
         VALUE {
             /* Case 1: Post replies */
-            MATCH (pe1:Person)~[:KNOWS]~(pe2:Person)
+            MATCH (pe1:Person)~[:knows]~(pe2:Person)
             WHERE pe1 IN NODES(path) AND pe2 IN NODES(path) AND pe1 <> pe2
-            OPTIONAL MATCH (pe1)<-[:HAS_CREATOR]-(c:Comment)-[:REPLY_OF]->(po:Post)-[:HAS_CREATOR]->(pe2)
+            OPTIONAL MATCH (pe1)<-[:hasCreator]-(c:Comment)-[:replyOf]->(po:Post)-[:hasCreator]->(pe2)
             RETURN COUNT(c) * 1.0
         } + 
         VALUE {
             /* Case 2: Comment replies */
-            MATCH (pe1:Person)~[:KNOWS]~(pe2:Person)
+            MATCH (pe1:Person)~[:knows]~(pe2:Person)
             WHERE pe1 IN NODES(path) AND pe2 IN NODES(path) AND pe1 <> pe2
-            OPTIONAL MATCH (pe1)<-[:HAS_CREATOR]-(c1:Comment)-[:REPLY_OF]->(c2:Comment)-[:HAS_CREATOR]->(pe2)
+            OPTIONAL MATCH (pe1)<-[:hasCreator]-(c1:Comment)-[:replyOf]->(c2:Comment)-[:hasCreator]->(pe2)
             RETURN COUNT(c1) * 0.5
         }
     ) AS pathWeight

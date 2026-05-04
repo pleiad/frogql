@@ -17,10 +17,10 @@ params_file = "interactive_6_param.txt"
 param_columns = ["personId", "tagName"]
 param_types = ["int", "string"]
 query = """
-MATCH (person:Person {id: $personId})~[:KNOWS]~{1, 2}(otherPerson:Person)
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)
 WHERE person <> otherPerson
-MATCH (otherPerson)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(:Tag {name: $tagName})
-MATCH (post)-[:HAS_TAG]->(otherTag:Tag)
+MATCH (otherPerson)<-[:hasCreator]-(post:Post)-[:hasTag]->(:Tag {name: $tagName})
+MATCH (post)-[:hasTag]->(otherTag:Tag)
 WHERE otherTag.name <> $tagName
 RETURN otherTag.name AS otherTagName, COUNT(post) AS postCount
 GROUP BY otherTagName

@@ -16,7 +16,7 @@ required_features = [
 params_file = "interactive_8_param.txt"
 param_columns = ["personId"]
 query = """
-MATCH (person:Person {id: $personId})<-[:HAS_CREATOR]-(message:Message)<-[:REPLY_OF]-(comment:Comment)-[:HAS_CREATOR]->(commentAuthor:Person)
+MATCH (person:Person {id: $personId})<-[:hasCreator]-(message:Message)<-[:replyOf]-(comment:Comment)-[:hasCreator]->(commentAuthor:Person)
 RETURN 
     commentAuthor.id AS commentAuthorId, 
     commentAuthor.firstName AS commentAuthorFirstName, 

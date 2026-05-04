@@ -17,13 +17,13 @@ params_file = "interactive_3_param.txt"
 param_columns = ["personId", "countryXName", "countryYName", "startDate", "endDate"]
 param_types = ["int", "string", "string", "int", "int"]
 query = """
-MATCH (person:Person {id: $personId})~[:KNOWS]~{1, 2}(otherPerson:Person)
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)
 WHERE person <> otherPerson
-MATCH (otherPerson)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(country:Country)
+MATCH (otherPerson)-[:isLocatedIn]->(:City)-[:isPartOf]->(country:Country)
 WHERE country.name <> $countryXName AND country.name <> $countryYName
-MATCH (otherPerson)<-[:HAS_CREATOR]-(messageX:Message)-[:IS_LOCATED_IN]->(:Country {name: $countryXName})
+MATCH (otherPerson)<-[:hasCreator]-(messageX:Message)-[:isLocatedIn]->(:Country {name: $countryXName})
 WHERE messageX.creationDate >= $startDate AND messageX.creationDate < $startDate + DURATION({days: $durationDays})
-MATCH (otherPerson)<-[:HAS_CREATOR]-(messageY:Message)-[:IS_LOCATED_IN]->(:Country {name: $countryYName})
+MATCH (otherPerson)<-[:hasCreator]-(messageY:Message)-[:isLocatedIn]->(:Country {name: $countryYName})
 WHERE messageY.creationDate >= $startDate AND messageY.creationDate < $startDate + DURATION({days: $durationDays})
 RETURN 
     otherPerson.id AS otherPersonId,

@@ -16,7 +16,7 @@ required_features = [
 params_file = "interactive_9_param.txt"
 param_columns = ["personId", "maxDate"]
 query = """
-MATCH (person:Person {id: $personId})~[:KNOWS]~{1, 2}(otherPerson:Person)<-[:HAS_CREATOR]-(message:Message)
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)<-[:hasCreator]-(message:Message)
 WHERE person <> otherPerson AND message.creationDate < $maxDate
 RETURN 
     otherPerson.id AS otherPersonId, 

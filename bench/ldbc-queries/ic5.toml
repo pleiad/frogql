@@ -16,11 +16,11 @@ required_features = [
 params_file = "interactive_5_param.txt"
 param_columns = ["personId", "minDate"]
 query = """
-MATCH (person:Person {id: $personId})~[:KNOWS]~{1, 2}(otherPerson:Person)
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)
 WHERE person <> otherPerson
-MATCH (otherPerson)<-[hm:HAS_MEMBER]-(forum:Forum)
+MATCH (otherPerson)<-[hm:hasMember]-(forum:Forum)
 WHERE hm.creationDate > $minDate
-OPTIONAL MATCH (otherPerson)<-[:HAS_CREATOR]-(post:Post)<-[:CONTAINER_OF]-(forum)
+OPTIONAL MATCH (otherPerson)<-[:hasCreator]-(post:Post)<-[:containerOf]-(forum)
 RETURN forum.title AS forumTitle, COUNT(post) AS postCount
 GROUP BY forumTitle, forum.id
 ORDER BY postCount DESC, CAST(forum.id AS INTEGER) ASC

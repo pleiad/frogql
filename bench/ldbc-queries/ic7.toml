@@ -18,8 +18,8 @@ required_features = [
 params_file = "interactive_7_param.txt"
 param_columns = ["personId"]
 query = """
-MATCH (person:Person {id: $personId})<-[:HAS_CREATOR]-(message:Message)<-[like:LIKES]-(liker:Person)
-OPTIONAL MATCH (liker)~[:KNOWS]~(person)
+MATCH (person:Person {id: $personId})<-[:hasCreator]-(message:Message)<-[like:likes]-(liker:Person)
+OPTIONAL MATCH (liker)~[:knows]~(person)
 RETURN 
     liker.id AS personId,
     liker.firstName AS personFirstName,
@@ -28,7 +28,7 @@ RETURN
     message.id AS commentOrPostId,
     COALESCE(message.content, message.imageFile) AS commentOrPostContent,
     CAST(FLOOR(CAST(like.creationDate - message.creationDate AS FLOAT) / 60000.0) AS INTEGER) AS minutesLatency,
-    NOT EXISTS { MATCH (liker)~[:KNOWS]~(person) } AS isNew
+    NOT EXISTS { MATCH (liker)~[:knows]~(person) } AS isNew
 ORDER BY likeCreationDate DESC, CAST(personId AS INTEGER) ASC
 LIMIT 20
 """
