@@ -20,6 +20,21 @@ required_features = [
 params_file = "interactive_10_param.txt"
 param_columns = ["personId", "month"]
 query = """
-IC10_QUERY_PLACEHOLDER
-Params (interactive_10_param.txt header): personId | month
+MATCH (person:Person {id: $personId})~[:KNOWS]~{2}(foaf:Person)-[:IS_LOCATED_IN]->(city:City)
+WHERE person <> foaf AND NOT EXISTS { MATCH (person)~[:KNOWS]~(foaf) }
+  AND (
+    (EXTRACT(MONTH FROM foaf.birthday) = $month AND EXTRACT(DAY FROM foaf.birthday) >= 21) OR 
+    (EXTRACT(MONTH FROM foaf.birthday) = ($month MOD 12) + 1 AND EXTRACT(DAY FROM foaf.birthday) < 22)
+  )
+OPTIONAL MATCH (foaf)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(tag:Tag)
+RETURN 
+    foaf.id AS personId,
+    foaf.firstName AS personFirstName,
+    foaf.lastName AS personLastName,
+    SUM(CASE WHEN EXISTS { MATCH (person)-[:HAS_INTEREST]->(tag) } THEN 1 ELSE -1 END) AS commonInterestScore,
+    foaf.gender AS personGender,
+    city.name AS personCityName
+GROUP BY personId, personFirstName, personLastName, personGender, personCityName
+ORDER BY commonInterestScore DESC, CAST(personId AS INTEGER) ASC
+LIMIT 10
 """

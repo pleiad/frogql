@@ -20,6 +20,14 @@ params_file = "interactive_12_param.txt"
 param_columns = ["personId", "tagClassName"]
 param_types = ["int", "string"]
 query = """
-IC12_QUERY_PLACEHOLDER
-Params (interactive_12_param.txt header): personId | tagClassName
+MATCH (person:Person {id: $personId})~[:KNOWS]~(friend:Person)<-[:HAS_CREATOR]-(comment:Comment)-[:REPLY_OF]->(post:Post)-[:HAS_TAG]->(tag:Tag)-[:HAS_TYPE]->(tagClass:TagClass)-[:IS_SUBCLASS_OF]->{0,}(:TagClass {name: $tagClassName})
+RETURN 
+    friend.id AS friendId, 
+    friend.firstName AS friendFirstName, 
+    friend.lastName AS friendLastName, 
+    COLLECT_LIST(DISTINCT tag.name) AS tagNames, 
+    COUNT(comment) AS replyCount
+GROUP BY friendId, friendFirstName, friendLastName
+ORDER BY replyCount DESC, CAST(friendId AS INTEGER) ASC
+LIMIT 20
 """

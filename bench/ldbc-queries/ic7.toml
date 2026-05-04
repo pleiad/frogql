@@ -18,6 +18,17 @@ required_features = [
 params_file = "interactive_7_param.txt"
 param_columns = ["personId"]
 query = """
-IC07_QUERY_PLACEHOLDER
-Params (interactive_7_param.txt header): personId
+MATCH (person:Person {id: $personId})<-[:HAS_CREATOR]-(message:Message)<-[like:LIKES]-(liker:Person)
+OPTIONAL MATCH (liker)~[:KNOWS]~(person)
+RETURN 
+    liker.id AS personId,
+    liker.firstName AS personFirstName,
+    liker.lastName AS personLastName,
+    like.creationDate AS likeCreationDate,
+    message.id AS commentOrPostId,
+    COALESCE(message.content, message.imageFile) AS commentOrPostContent,
+    CAST(FLOOR(CAST(like.creationDate - message.creationDate AS FLOAT) / 60000.0) AS INTEGER) AS minutesLatency,
+    NOT EXISTS { MATCH (liker)~[:KNOWS]~(person) } AS isNew
+ORDER BY likeCreationDate DESC, CAST(personId AS INTEGER) ASC
+LIMIT 20
 """

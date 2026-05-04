@@ -16,6 +16,15 @@ required_features = [
 params_file = "interactive_9_param.txt"
 param_columns = ["personId", "maxDate"]
 query = """
-IC09_QUERY_PLACEHOLDER
-Params (interactive_9_param.txt header): personId | maxDate
+MATCH (person:Person {id: $personId})~[:KNOWS]~{1, 2}(otherPerson:Person)<-[:HAS_CREATOR]-(message:Message)
+WHERE person <> otherPerson AND message.creationDate < $maxDate
+RETURN 
+    otherPerson.id AS otherPersonId, 
+    otherPerson.firstName AS otherPersonFirstName, 
+    otherPerson.lastName AS otherPersonLastName, 
+    message.id AS messageId, 
+    COALESCE(message.content, message.imageFile) AS messageContent, 
+    message.creationDate AS messageCreationDate
+ORDER BY messageCreationDate DESC, CAST(messageId AS INTEGER) ASC
+LIMIT 20
 """

@@ -17,6 +17,13 @@ params_file = "interactive_6_param.txt"
 param_columns = ["personId", "tagName"]
 param_types = ["int", "string"]
 query = """
-IC06_QUERY_PLACEHOLDER
-Params (interactive_6_param.txt header): personId | tagName
+MATCH (person:Person {id: $personId})~[:KNOWS]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(:Tag {name: $tagName})
+MATCH (post)-[:HAS_TAG]->(otherTag:Tag)
+WHERE otherTag.name <> $tagName
+RETURN otherTag.name AS otherTagName, COUNT(post) AS postCount
+GROUP BY otherTagName
+ORDER BY postCount DESC, otherTagName ASC
+LIMIT 10
 """

@@ -16,6 +16,13 @@ required_features = [
 params_file = "interactive_5_param.txt"
 param_columns = ["personId", "minDate"]
 query = """
-IC05_QUERY_PLACEHOLDER
-Params (interactive_5_param.txt header): personId | minDate
+MATCH (person:Person {id: $personId})~[:KNOWS]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)<-[hm:HAS_MEMBER]-(forum:Forum)
+WHERE hm.creationDate > $minDate
+OPTIONAL MATCH (otherPerson)<-[:HAS_CREATOR]-(post:Post)<-[:CONTAINER_OF]-(forum)
+RETURN forum.title AS forumTitle, COUNT(post) AS postCount
+GROUP BY forumTitle, forum.id
+ORDER BY postCount DESC, CAST(forum.id AS INTEGER) ASC
+LIMIT 20
 """

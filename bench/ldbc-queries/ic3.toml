@@ -17,6 +17,22 @@ params_file = "interactive_3_param.txt"
 param_columns = ["personId", "countryXName", "countryYName", "startDate", "endDate"]
 param_types = ["int", "string", "string", "int", "int"]
 query = """
-IC03_QUERY_PLACEHOLDER
-Params (interactive_3_param.txt header): personId | countryXName | countryYName | startDate | endDate
+MATCH (person:Person {id: $personId})~[:KNOWS]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(country:Country)
+WHERE country.name <> $countryXName AND country.name <> $countryYName
+MATCH (otherPerson)<-[:HAS_CREATOR]-(messageX:Message)-[:IS_LOCATED_IN]->(:Country {name: $countryXName})
+WHERE messageX.creationDate >= $startDate AND messageX.creationDate < $startDate + DURATION({days: $durationDays})
+MATCH (otherPerson)<-[:HAS_CREATOR]-(messageY:Message)-[:IS_LOCATED_IN]->(:Country {name: $countryYName})
+WHERE messageY.creationDate >= $startDate AND messageY.creationDate < $startDate + DURATION({days: $durationDays})
+RETURN 
+    otherPerson.id AS otherPersonId,
+    otherPerson.firstName AS otherPersonFirstName,
+    otherPerson.lastName AS otherPersonLastName,
+    COUNT(DISTINCT messageX) AS xCount,
+    COUNT(DISTINCT messageY) AS yCount,
+    COUNT(DISTINCT messageX) + COUNT(DISTINCT messageY) AS totalCount
+GROUP BY otherPersonId, otherPersonFirstName, otherPersonLastName
+ORDER BY totalCount DESC, CAST(otherPersonId AS INTEGER) ASC
+LIMIT 20
 """

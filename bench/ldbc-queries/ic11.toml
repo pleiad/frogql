@@ -17,6 +17,16 @@ params_file = "interactive_11_param.txt"
 param_columns = ["personId", "countryName", "workFromYear"]
 param_types = ["int", "string", "int"]
 query = """
-IC11_QUERY_PLACEHOLDER
-Params (interactive_11_param.txt header): personId | countryName | workFromYear
+MATCH (person:Person {id: $personId})~[:KNOWS]~{1, 2}(otherPerson:Person)-[workAt:WORK_AT]->(company:Company)-[:IS_LOCATED_IN]->(country:Country)
+WHERE person <> otherPerson 
+  AND country.name = $countryName 
+  AND workAt.workFrom < $workFromYear
+RETURN 
+    otherPerson.id AS personId, 
+    otherPerson.firstName AS personFirstName, 
+    otherPerson.lastName AS personLastName, 
+    company.name AS companyName, 
+    workAt.workFrom AS workFromYear
+ORDER BY workFromYear ASC, CAST(personId AS INTEGER) ASC, companyName DESC
+LIMIT 10
 """

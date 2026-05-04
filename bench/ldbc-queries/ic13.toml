@@ -17,6 +17,7 @@ required_features = [
 params_file = "interactive_13_param.txt"
 param_columns = ["person1Id", "person2Id"]
 query = """
-IC13_QUERY_PLACEHOLDER
-Params (interactive_13_param.txt header): person1Id | person2Id
+MATCH path = ANY SHORTEST (p1:Person {id: $person1Id})~[:KNOWS]~*(p2:Person {id: $person2Id})
+RETURN 
+    CASE WHEN PATH_LENGTH(path) IS NULL THEN -1 ELSE PATH_LENGTH(path) END AS shortestPathLength
 """
