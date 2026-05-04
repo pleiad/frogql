@@ -972,3 +972,125 @@ fn test_limit_displays_back() {
         q
     );
 }
+
+// -----------------------------------------------------------------------
+// EXISTS / NOT EXISTS — parser-level tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_parse_exists_simple() {
+    let q = parse_query("MATCH (a) WHERE EXISTS { (a)-[:KNOWS]->(b) } RETURN a.name").unwrap();
+    let pat = q.matches[0].pattern();
+    let PathPattern::Filter(_, expr) = pat else {
+        panic!("expected MATCH ... WHERE filter, got {pat:?}");
+    };
+    assert!(
+        matches!(expr, Expr::Exists { .. }),
+        "expected Expr::Exists, got {expr:?}"
+    );
+}
+
+#[test]
+fn test_parse_not_exists_distinct_from_unop_not() {
+    // `NOT EXISTS { ... }` produces a dedicated `Expr::NotExists`, not
+    // `Expr::Unop { op: Not, operand: Expr::Exists }`. The optimiser
+    // relies on the distinction.
+    let q = parse_query("MATCH (a) WHERE NOT EXISTS { (a)-[:KNOWS]->(b) } RETURN a.name").unwrap();
+    let pat = q.matches[0].pattern();
+    let PathPattern::Filter(_, expr) = pat else {
+        panic!("expected MATCH ... WHERE filter, got {pat:?}");
+    };
+    assert!(
+        matches!(expr, Expr::NotExists { .. }),
+        "expected Expr::NotExists, got {expr:?}"
+    );
+}
+
+#[test]
+fn test_parse_exists_with_inner_match_keyword_and_where() {
+    // MATCH inside the body is optional but accepted, as is an inner
+    // WHERE on the path pattern.
+    let q = parse_query(
+        "MATCH (a) WHERE EXISTS { \
+           MATCH (a)-[:KNOWS]->(b) WHERE b.active = true \
+         } RETURN a.name",
+    )
+    .unwrap();
+    let pat = q.matches[0].pattern();
+    let PathPattern::Filter(_, expr) = pat else {
+        panic!("expected MATCH ... WHERE filter, got {pat:?}");
+    };
+    let body = match expr {
+        Expr::Exists { body } => body,
+        _ => panic!("expected Expr::Exists, got {expr:?}"),
+    };
+    assert_eq!(body.matches.len(), 1);
+    // The inner WHERE folded into the path pattern as a Filter.
+    assert!(matches!(
+        body.matches[0],
+        MatchStatement::Simple {
+            pattern: PathPattern::Filter(_, _)
+        }
+    ));
+}
+
+#[test]
+fn test_parse_exists_rejects_return_inside_body() {
+    let err = parse_query("MATCH (a) WHERE EXISTS { (a)-[:KNOWS]->(b) RETURN b } RETURN a.name")
+        .unwrap_err();
+    assert!(
+        err.contains("RETURN"),
+        "error should mention RETURN, got {err:?}"
+    );
+}
+
+#[test]
+fn test_parse_exists_rejects_limit_inside_body() {
+    let err = parse_query("MATCH (a) WHERE EXISTS { (a)-[:KNOWS]->(b) LIMIT 1 } RETURN a.name")
+        .unwrap_err();
+    assert!(
+        err.to_uppercase().contains("LIMIT"),
+        "error should mention LIMIT, got {err:?}"
+    );
+}
+
+#[test]
+fn test_parse_exists_multi_match_body() {
+    // Two match clauses in the body: a regular MATCH followed by an
+    // OPTIONAL MATCH. Both are accepted.
+    let q = parse_query(
+        "MATCH (a) WHERE EXISTS { \
+           MATCH (a)-[:KNOWS]->(b) \
+           OPTIONAL MATCH (b)-[:LIKES]->(c) \
+         } RETURN a.name",
+    )
+    .unwrap();
+    let pat = q.matches[0].pattern();
+    let PathPattern::Filter(_, expr) = pat else {
+        panic!("expected MATCH ... WHERE filter, got {pat:?}");
+    };
+    let body = match expr {
+        Expr::Exists { body } => body,
+        _ => panic!("expected Expr::Exists, got {expr:?}"),
+    };
+    assert_eq!(body.matches.len(), 2);
+    assert!(matches!(body.matches[0], MatchStatement::Simple { .. }));
+    assert!(matches!(body.matches[1], MatchStatement::Optional { .. }));
+}
+
+#[test]
+fn test_parse_exists_nested_in_unop_not() {
+    // `NOT EXISTS` is parsed as the dedicated variant, but `NOT (EXISTS
+    // { ... })` with parens — if someone writes the parens — would
+    // produce `Unop(Not, Exists)`. Smoke-test that the bare unop NOT
+    // path still works for non-EXISTS operands.
+    let q = parse_query("MATCH (a) WHERE NOT (a.flag = true) RETURN a.name").unwrap();
+    let pat = q.matches[0].pattern();
+    let PathPattern::Filter(_, expr) = pat else {
+        panic!("expected filter, got {pat:?}");
+    };
+    assert!(
+        matches!(expr, Expr::Unop { op: UnOp::Not, .. }),
+        "expected Unop(Not, ...), got {expr:?}"
+    );
+}

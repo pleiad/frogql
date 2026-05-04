@@ -1026,13 +1026,89 @@ impl Parser {
             });
         }
         if self.eat(&Token::Not) {
+            // `NOT EXISTS { ... }` is a distinct AST variant from
+            // `NOT (EXISTS { ... })` — the optimiser folds it to `true`
+            // when the body is empty (vs `false` for `EXISTS`).
+            if self.eat(&Token::Exists) {
+                let body = self.parse_exists_body()?;
+                return Ok(Expr::NotExists {
+                    body: Box::new(body),
+                });
+            }
             let operand = self.unary()?;
             return Ok(Expr::Unop {
                 op: UnOp::Not,
                 operand: Box::new(operand),
             });
         }
+        if self.eat(&Token::Exists) {
+            let body = self.parse_exists_body()?;
+            return Ok(Expr::Exists {
+                body: Box::new(body),
+            });
+        }
         self.primary_expr()
+    }
+
+    /// Parse the body of an `EXISTS { ... }` or `NOT EXISTS { ... }`
+    /// subquery: one or more match clauses (with the leading `MATCH`
+    /// optional, as in the top-level grammar). RETURN, GROUP BY,
+    /// LIMIT, and DISTINCT are not allowed inside the braces — the
+    /// body's purpose is proving non-emptiness, not producing a
+    /// projected result table.
+    fn parse_exists_body(&mut self) -> Result<Query, String> {
+        self.expect(&Token::LBrace)?;
+
+        let first_optional = self.eat(&Token::Optional);
+        if first_optional {
+            self.expect(&Token::Match)?;
+        } else {
+            self.eat(&Token::Match);
+        }
+        let first_pattern = self.match_clause_body()?;
+        let first_stmt = if first_optional {
+            MatchStatement::Optional {
+                pattern: first_pattern,
+            }
+        } else {
+            MatchStatement::Simple {
+                pattern: first_pattern,
+            }
+        };
+        let mut matches = vec![first_stmt];
+
+        loop {
+            if self.eat(&Token::Optional) {
+                self.expect(&Token::Match)?;
+                let pattern = self.match_clause_body()?;
+                matches.push(MatchStatement::Optional { pattern });
+            } else if self.eat(&Token::Match) {
+                let pattern = self.match_clause_body()?;
+                matches.push(MatchStatement::Simple { pattern });
+            } else {
+                break;
+            }
+        }
+
+        if self.check(&Token::Return) {
+            return Err("EXISTS body cannot contain RETURN".into());
+        }
+        if self.check(&Token::GroupBy) {
+            return Err("EXISTS body cannot contain GROUP BY".into());
+        }
+        if self.check(&Token::Limit) {
+            return Err("EXISTS body cannot contain LIMIT".into());
+        }
+
+        self.expect(&Token::RBrace)?;
+
+        Ok(Query {
+            matches,
+            group_by: None,
+            returns: None,
+            distinct: false,
+            limit: None,
+        })
     }
 
     // primary = constant | list_literal | attr_lookup | simple_type | "(" expr ")"

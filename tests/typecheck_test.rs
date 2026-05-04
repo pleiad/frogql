@@ -575,3 +575,91 @@ fn test_check_plain_return_unbound_var_now_caught() {
         "expected an error mentioning z, got: {errs:?}"
     );
 }
+
+// -----------------------------------------------------------------------
+// EXISTS / NOT EXISTS — Phase 1 (parse + typecheck + scoping)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_exists_returns_bool() {
+    // The body is well-formed, outer `a` is bound, the predicate types
+    // as Bool — no errors, no warnings about unknown variables.
+    let (r, errs, _) =
+        check_full_query("MATCH (a) WHERE EXISTS { (a)-[:KNOWS]->(b) } RETURN a.name");
+    assert!(r.ok, "expected ok, errors={errs:?}");
+}
+
+#[test]
+fn test_not_exists_returns_bool() {
+    let (r, errs, _) =
+        check_full_query("MATCH (a) WHERE NOT EXISTS { (a)-[:KNOWS]->(b) } RETURN a.name");
+    assert!(r.ok, "expected ok, errors={errs:?}");
+}
+
+#[test]
+fn test_exists_outer_correlation_visible_inside() {
+    // `friend` is introduced by the outer match and referenced inside
+    // the body. The body must typecheck without "variable not found".
+    let (r, errs, _) = check_full_query(
+        "MATCH (person)-[:KNOWS]->(friend) \
+         WHERE EXISTS { (friend)<-[:HAS_CREATOR]-(post) } \
+         RETURN person.name",
+    );
+    assert!(r.ok, "expected ok, errors={errs:?}");
+}
+
+#[test]
+fn test_exists_inner_var_does_not_leak_to_return() {
+    // `b` is only bound inside the EXISTS body. Referencing it in RETURN
+    // must fail with an unbound-variable error.
+    let (r, errs, _) =
+        check_full_query("MATCH (a) WHERE EXISTS { (a)-[:KNOWS]->(b) } RETURN a.name, b.name");
+    assert!(!r.ok, "expected !ok for inner-var leak to RETURN");
+    assert!(
+        errs.iter().any(|e| e.contains("b")),
+        "expected an error mentioning b, got: {errs:?}"
+    );
+}
+
+#[test]
+fn test_not_exists_inner_var_does_not_leak_to_return() {
+    let (r, errs, _) =
+        check_full_query("MATCH (a) WHERE NOT EXISTS { (a)-[:KNOWS]->(b) } RETURN a.name, b.name");
+    assert!(!r.ok, "expected !ok for inner-var leak to RETURN");
+    assert!(
+        errs.iter().any(|e| e.contains("b")),
+        "expected an error mentioning b, got: {errs:?}"
+    );
+}
+
+#[test]
+fn test_exists_with_inner_where() {
+    // Mirrors the LDBC IC6-shape body: MATCH ... WHERE ... inside the
+    // EXISTS braces. The inner WHERE references both an inner-only var
+    // (`post2`) and an outer-correlated one (`friend`).
+    let (r, errs, _) = check_full_query(
+        "MATCH (person)-[:KNOWS]->(friend) \
+         WHERE NOT EXISTS { \
+           MATCH (friend)<-[:HAS_CREATOR]-(post2:Post) \
+           WHERE post2.score > 0 \
+         } \
+         RETURN person.name",
+    );
+    assert!(r.ok, "expected ok, errors={errs:?}");
+}
+
+#[test]
+fn test_exists_nested() {
+    // EXISTS inside EXISTS — the inner `c` is local to the inner body,
+    // `b` is local to the outer EXISTS body, `a` correlates from the
+    // outermost MATCH.
+    let (r, errs, _) = check_full_query(
+        "MATCH (a) \
+         WHERE EXISTS { \
+           MATCH (a)-[:KNOWS]->(b) \
+           WHERE EXISTS { (b)-[:LIKES]->(c) } \
+         } \
+         RETURN a.name",
+    );
+    assert!(r.ok, "expected ok, errors={errs:?}");
+}

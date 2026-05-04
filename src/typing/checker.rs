@@ -411,7 +411,56 @@ impl Typechecker {
                 let _ = self.check_expr(operand, env);
                 SimpleType::B
             }
+
+            Expr::Exists { body } | Expr::NotExists { body } => {
+                // TExists / TNotExists: type the body under the outer
+                // environment so correlated variables resolve, but
+                // discard the inner environment afterwards — bindings
+                // introduced by the body do not escape. Both predicates
+                // return Bool regardless of body emptiness; the
+                // optimisation that folds an empty body to a literal
+                // happens later.
+                let _ = self.check_subquery_body(body, env);
+                SimpleType::B
+            }
         }
+    }
+
+    /// Type-check the body of an existential subquery. Starts from a
+    /// clone of the outer environment so outer-bound variables are
+    /// visible inside (correlation), then walks the match chain using
+    /// the same TJoin / TLEFTJOIN operators as the top-level query
+    /// checker. Returns the inner result for use by the optimisation
+    /// step (Phase 2); callers that only need Bool can ignore it.
+    fn check_subquery_body(&mut self, q: &Query, outer: &TypeEnvironment) -> TypecheckResult {
+        let mut env = outer.clone();
+        let mut path: Option<PathType> = None;
+        for m in &q.matches {
+            let r = self.check_path_pattern(m.pattern());
+            if path.is_none() {
+                path = Some(r.path.clone());
+            }
+            env = match m {
+                MatchStatement::Simple { .. } => {
+                    match TypeEnvironment::meet(&self.schema, &env, &r.env) {
+                        Ok(e) => e,
+                        Err(msg) => {
+                            self.errors.push(format!(
+                                "EXISTS body: concatenation of contexts failed: {msg}"
+                            ));
+                            env
+                        }
+                    }
+                }
+                MatchStatement::Optional { .. } => {
+                    TypeEnvironment::outer_join(&self.schema, &env, &r.env)
+                }
+            };
+        }
+        let path = path.unwrap_or(PathType::Zero);
+        let mut r = TypecheckResult::new(path, env);
+        r.empty = r.path.is_unsatisfiable() || r.env.is_empty();
+        r
     }
 
     // -----------------------------------------------

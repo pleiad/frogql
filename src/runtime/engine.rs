@@ -1311,6 +1311,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
 
             Expr::Type(_) => ExprResult::Failure("bare type in expression".into()),
+
+            Expr::Exists { .. } | Expr::NotExists { .. } => {
+                ExprResult::Failure("EXISTS / NOT EXISTS are not yet implemented at runtime".into())
+            }
         }
     }
 

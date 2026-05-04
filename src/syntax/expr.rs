@@ -1,5 +1,6 @@
 use std::fmt;
 
+use super::query::Query;
 use crate::model::value::Value;
 use crate::typing::simple_type::SimpleType;
 
@@ -153,6 +154,20 @@ pub enum Expr {
     },
     /// Right-hand side of `is`/`as` operators — a type, not a value.
     Type(SimpleType),
+    /// `EXISTS { <body> }` — Boolean predicate over a subquery body.
+    /// The body is a `Query` without RETURN / GROUP BY / LIMIT / DISTINCT
+    /// (the parser rejects those tokens inside the braces). Outer-bound
+    /// variables are visible inside the body via correlation; bindings
+    /// introduced by the body do not escape to the outer scope.
+    Exists {
+        body: Box<Query>,
+    },
+    /// `NOT EXISTS { <body> }` — separate variant from `Exists` because
+    /// the optimiser folds it to `true` (vs `false` for `Exists`) when
+    /// the body is statically empty.
+    NotExists {
+        body: Box<Query>,
+    },
 }
 
 impl Expr {
@@ -197,6 +212,36 @@ impl fmt::Display for Expr {
                 }
             }
             Expr::Type(t) => write!(f, "{t}"),
+            Expr::Exists { body } => write!(f, "EXISTS {{ {} }}", display_subquery(body)),
+            Expr::NotExists { body } => write!(f, "NOT EXISTS {{ {} }}", display_subquery(body)),
         }
     }
+}
+
+/// Compact textual rendering of a subquery body for the Display
+/// instance. Mirrors the parser's surface form: optional MATCH on the
+/// first clause, explicit MATCH/OPTIONAL MATCH on subsequent ones, no
+/// RETURN / GROUP BY / LIMIT (the parser rejects those tokens inside
+/// EXISTS, so the body never carries them).
+fn display_subquery(q: &Query) -> String {
+    use super::query::MatchStatement;
+    let mut out = String::new();
+    for (i, m) in q.matches.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        match m {
+            MatchStatement::Simple { pattern } => {
+                if i > 0 {
+                    out.push_str("MATCH ");
+                }
+                out.push_str(&format!("{pattern}"));
+            }
+            MatchStatement::Optional { pattern } => {
+                out.push_str("OPTIONAL MATCH ");
+                out.push_str(&format!("{pattern}"));
+            }
+        }
+    }
+    out
 }
