@@ -1,3 +1,4 @@
+pub mod existential;
 pub mod pushdown;
 
 use crate::syntax::path_pattern::PathPattern;

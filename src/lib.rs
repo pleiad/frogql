@@ -23,27 +23,34 @@ use typing::variable_type::Schema;
 /// - Has-Optional: collapse is unsound (OPTIONAL is a left-outer-join).
 ///   Optimize each match's pattern in place and preserve the chain
 ///   structure for the typechecker and runtime to walk per match.
-fn optimize_query(q: Query) -> Query {
-    if !q.has_any_optional() {
+///
+/// After the per-pattern passes, the existential folder walks every
+/// `Expr` (WHERE / GROUP BY / RETURN, recursive into nested EXISTS
+/// bodies) and rewrites empty bodies to `false` / `true` literals.
+fn optimize_query(q: Query, schema: &Schema) -> Query {
+    let mut q = if !q.has_any_optional() {
         let pattern = optimizer::compile(q.collapsed_pattern());
-        return Query {
+        Query {
             matches: vec![MatchStatement::Simple { pattern }],
             ..q
-        };
-    }
-    let matches = q
-        .matches
-        .into_iter()
-        .map(|m| match m {
-            MatchStatement::Simple { pattern } => MatchStatement::Simple {
-                pattern: optimizer::compile(pattern),
-            },
-            MatchStatement::Optional { pattern } => MatchStatement::Optional {
-                pattern: optimizer::compile(pattern),
-            },
-        })
-        .collect();
-    Query { matches, ..q }
+        }
+    } else {
+        let matches = q
+            .matches
+            .into_iter()
+            .map(|m| match m {
+                MatchStatement::Simple { pattern } => MatchStatement::Simple {
+                    pattern: optimizer::compile(pattern),
+                },
+                MatchStatement::Optional { pattern } => MatchStatement::Optional {
+                    pattern: optimizer::compile(pattern),
+                },
+            })
+            .collect();
+        Query { matches, ..q }
+    };
+    optimizer::existential::fold_empty_existentials(&mut q, schema);
+    q
 }
 
 /// Phase-tagged compile failure.
@@ -101,7 +108,7 @@ pub fn compile_query_with_diagnostics_with(
     let warnings = tc.warnings;
     let guaranteed_empty = r.empty;
     Ok(CompileResult {
-        query: optimize_query(q),
+        query: optimize_query(q, schema),
         warnings,
         guaranteed_empty,
     })
@@ -121,7 +128,7 @@ pub fn compile(query: &str) -> Result<PathPattern, String> {
     if !r.ok {
         return Err(tc.errors.join("; "));
     }
-    Ok(optimize_query(q).collapsed_pattern())
+    Ok(optimize_query(q, &Schema::star()).collapsed_pattern())
 }
 
 /// Compile a full GQL query: parse → elaborate → typecheck → optimize.
@@ -149,7 +156,7 @@ pub fn compile_unchecked(query: &str) -> Result<PathPattern, String> {
     let ast = parser::parse(query)?;
     let q = Query::pattern_only(ast);
     let q = elaborate::elaborate_query(q);
-    Ok(optimize_query(q).collapsed_pattern())
+    Ok(optimize_query(q, &Schema::star()).collapsed_pattern())
 }
 
 /// Compile a full GQL query without typechecking. Same plan as
@@ -157,5 +164,5 @@ pub fn compile_unchecked(query: &str) -> Result<PathPattern, String> {
 pub fn compile_query_unchecked(input: &str) -> Result<Query, String> {
     let q = parser::parse_query(input)?;
     let q = elaborate::elaborate_query(q);
-    Ok(optimize_query(q))
+    Ok(optimize_query(q, &Schema::star()))
 }
