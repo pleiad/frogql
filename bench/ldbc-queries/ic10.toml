@@ -6,11 +6,20 @@ name = "Friend recommendation"
 status = "blocked"
 
 blocked_reason = """
-Graph NOT EXISTS / anti-join (FoAF not direct friend; uncommon posts). ORDER BY.
-IC10 birthday window vs `$month` may need `* / %` or date builtins (WHERE has + - only) or bench-expanded predicates.
+Anti-join: FoAF must not already be a direct friend; exclude "common" neighbors
+via graph negation. Ranked result: `ORDER BY`. Birthday predicate vs `$month`
+needs richer scalars than `+`/`-` alone (`*`, `%`, or date builtins).
 """
 
 required_features = [
-    "graph NOT EXISTS / anti-join",
+    "graph NOT EXISTS / existential subquery",
     "ORDER BY",
+    "richer scalar / date expressions (e.g. *, %, date parts)",
 ]
+
+params_file = "interactive_10_param.txt"
+param_columns = ["personId", "month"]
+query = """
+IC10_QUERY_PLACEHOLDER
+Params (interactive_10_param.txt header): personId | month
+"""

@@ -86,8 +86,8 @@ impl MatchStatement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     /// ISO §14.3 `<simple linear query statement>` — the chain of MATCH
-    /// statements. Always non-empty for parsed queries. Currently every
-    /// element is `MatchStatement::Simple`; a future PR will add OPTIONAL.
+    /// statements. Always non-empty for parsed queries. May mix
+    /// `MatchStatement::Simple` and `MatchStatement::Optional`.
     pub matches: Vec<MatchStatement>,
     /// ISO §16.15 explicit GROUP BY. None → no grouping (only valid when
     /// RETURN is pure-aggregate or pure-projection; the typechecker rejects

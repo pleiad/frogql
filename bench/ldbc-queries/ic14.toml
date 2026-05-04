@@ -7,10 +7,18 @@ name = "Trusted connection paths (v1)"
 status = "blocked"
 
 blocked_reason = """
-All shortest paths on :knows with interaction weights and path-side aggregation.
+All shortest paths on `:knows` with interaction weights and aggregation along
+paths - beyond single-pair shortest path; needs dedicated path algorithms + surface.
 """
 
 required_features = [
     "all-shortest-paths",
     "weighted-path / path aggregation",
 ]
+
+params_file = "interactive_14_param.txt"
+param_columns = ["person1Id", "person2Id"]
+query = """
+IC14_QUERY_PLACEHOLDER
+Params (interactive_14_param.txt header): person1Id | person2Id
+"""

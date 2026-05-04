@@ -6,9 +6,16 @@ name = "Recent messages by friends or friends of friends"
 status = "blocked"
 
 blocked_reason = """
-Like IC2 with an extra hop; ORDER BY. No bench query wired.
+Ranked result: `ORDER BY` per spec.
 """
 
 required_features = [
     "ORDER BY",
 ]
+
+params_file = "interactive_9_param.txt"
+param_columns = ["personId", "maxDate"]
+query = """
+IC09_QUERY_PLACEHOLDER
+Params (interactive_9_param.txt header): personId | maxDate
+"""

@@ -5,19 +5,9 @@ id = 2
 name = "Recent messages by your friends"
 status = "implemented"
 
-# Substitution params: relative to the substitution_parameters-sf0.1
-# archive root. The bench resolves this against --params-dir.
 params_file = "interactive_2_param.txt"
-
-# Column names in the param file's header, in order.
-# Used purely for documentation; the bench substitutes by position
-# matching the {placeholder} order in the query template.
 param_columns = ["personId", "maxDate"]
 
-# Query template. {personId} and {maxDate} are placeholders the
-# runner replaces with the param values from the file.
-#
-# `LIMIT 20` is the spec-faithful cap (LDBC IC2 spec: "LIMIT 20").
 query = """
 MATCH (p: Person {id: {personId}})~[:knows]~(friend: Person)<-[:hasCreator]-(c: Comment | Post) \
 WHERE c.creationDate <= {maxDate} \
@@ -25,27 +15,15 @@ RETURN friend.id, friend.firstName, friend.lastName, c.id, c.content, c.creation
 LIMIT 20
 """
 
-# What the spec asks the query to return, in order. For documentation
-# and possible future result-shape validation. Spec uses
-# `coalesce(message.content, message.imageFile)` — we return c.content
-# directly (see divergences below).
 return_columns = [
     "friend.id", "friend.firstName", "friend.lastName",
     "c.id", "c.content", "c.creationDate",
 ]
 
-# Expected per-column types in the RETURN list. One entry per
-# column; multiple type letters separated by `/` mean the column is
-# a union (e.g. `n/s` = nullable string). Type letters: i=Int s=Str
-# n=Null b=Bool f=Float l=List r=Record. Each runner computes the
-# actual shape from its results and verifies `actual ⊆ expected` per
-# column position; mismatches are logged as a query-translation bug.
-# `c.content` is `n/s` because the LDBC schema permits a Post to have
-# a null `content` field (e.g. when only `imageFile` is set).
 expected_shape = "i,s,s,i,n/s,i"
 
 [divergences]
 no-coalesce  = "spec returns coalesce(message.content, message.imageFile); we return c.content"
 no-order-by  = "spec ORDER BY message.creationDate DESC, message.id ASC; we don't sort"
-edge-casing  = "spec uses [:KNOWS] / [:HAS_CREATOR]; loader gives [:knows] / [:hasCreator]"
+edge-casing  = "imported rel types are lowercase filename stems (:knows, :hasCreator); many IC writeups use different casing"
 message-union = "spec uses (message:Message) Cypher label inheritance; we use Comment | Post path-pattern alternation"

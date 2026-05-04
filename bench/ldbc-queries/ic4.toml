@@ -6,11 +6,18 @@ name = "New topics"
 status = "blocked"
 
 blocked_reason = """
-Anti-join: tags on posts in the window that never appeared before—needs graph
-NOT EXISTS (boolean `not` is not enough). ORDER BY.
+Anti-join: in-window friend posts with a tag, excluding tags that ever appeared on
+any friend's post before the window. Ranked result: `ORDER BY`.
 """
 
 required_features = [
     "graph NOT EXISTS / existential subquery",
     "ORDER BY",
 ]
+
+params_file = "interactive_4_param.txt"
+param_columns = ["personId", "startDate", "endDate"]
+query = """
+IC04_QUERY_PLACEHOLDER
+Params (interactive_4_param.txt header): personId | startDate | endDate
+"""

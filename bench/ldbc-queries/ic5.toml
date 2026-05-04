@@ -6,10 +6,16 @@ name = "New groups"
 status = "blocked"
 
 blocked_reason = """
-OPTIONAL MATCH for zero post counts per (forum, person); ORDER BY.
+Ranked result: `ORDER BY` per spec.
 """
 
 required_features = [
-    "OPTIONAL MATCH",
     "ORDER BY",
 ]
+
+params_file = "interactive_5_param.txt"
+param_columns = ["personId", "minDate"]
+query = """
+IC05_QUERY_PLACEHOLDER
+Params (interactive_5_param.txt header): personId | minDate
+"""

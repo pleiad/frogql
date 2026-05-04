@@ -6,10 +6,18 @@ name = "Recent likers of a person's messages"
 status = "blocked"
 
 blocked_reason = """
-Latest like per liker: ORDER BY plus per-group pick (no windows/subqueries).
+Latest like per liker: global `ORDER BY` is not enough; need per-group top row
+(or equivalent subquery / window).
 """
 
 required_features = [
     "ORDER BY",
-    "per-group latest / windows",
+    "per-group latest / argmax (or windows / subqueries)",
 ]
+
+params_file = "interactive_7_param.txt"
+param_columns = ["personId"]
+query = """
+IC07_QUERY_PLACEHOLDER
+Params (interactive_7_param.txt header): personId
+"""

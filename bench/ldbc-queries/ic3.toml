@@ -6,10 +6,17 @@ name = "Friends and friends of friends that have been to given countries"
 status = "blocked"
 
 blocked_reason = """
-COUNT/GROUP BY ok; LDBC times are ints (interval end may need param-side math).
-ORDER BY. No bench query wired.
+Ranked result: `ORDER BY` per spec.
 """
 
 required_features = [
     "ORDER BY",
 ]
+
+params_file = "interactive_3_param.txt"
+param_columns = ["personId", "countryXName", "countryYName", "startDate", "endDate"]
+param_types = ["int", "string", "string", "int", "int"]
+query = """
+IC03_QUERY_PLACEHOLDER
+Params (interactive_3_param.txt header): personId | countryXName | countryYName | startDate | endDate
+"""
