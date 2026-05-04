@@ -2,14 +2,14 @@
 
 ## Status
 
-- **Implemented**: IC2.
-- **Catalogued, not yet implemented**: IC1, IC3–IC14. Each has a
-  `bench/ldbc-queries/ic<n>.toml` with `blocked_reason` and
-  `required_features` (gaps vs spec-faithful LDBC; aggregates and int times
-  already exist in gqlite). No `LIMIT` in query text—use bench `--limit`.
+- **Implemented**: IC2 — `query` + in-query `LIMIT 20`; bench uses `run_query(..., 0)` (caller cap off, LIMIT applies).
+- **Blocked**: IC1, IC3–IC14 — `blocked_reason`, `required_features`, optional `params_file` / `param_columns` / `param_types` / `query` (not run). `--ic blocked` = inventory only.
 
-`./target/release/ldbc_bench placeholder --ic blocked` prints the
-inventory.
+`ic<n>.toml`: title, spec URL, keys, `query`; IC2 adds `return_columns`, `expected_shape`, `[divergences]`. Import / type letters (`i`/`s`/…, `/` = union): below.
+
+### Labels (CsvBasic → `.gdb`)
+
+**Edges:** rel type = middle stem of the edge CSV filename (e.g. `knows`, `replyOf`, `hasMember`). **Nodes:** label from the node CSV stem with initial cap (`Person`, `Post`, `TagClass` — see `ldbc_node_label` in `src/model/csv_loader.rs`). Different rule than edges; use these strings in patterns against an imported `.gdb`.
 
 ## Setup
 
@@ -64,7 +64,7 @@ cargo build --release --bin ldbc_bench
 ./target/release/ldbc_bench bench/data/ldbc-sf0.1.gdb --ic all
 
 # Inventory of blocked ICs (no run):
-./target/release/ldbc_bench placeholder --ic blocked
+./target/release/ldbc_bench bench/data/ldbc-sf0.1.gdb --ic blocked
 ```
 
 ### Flags
@@ -75,7 +75,6 @@ cargo build --release --bin ldbc_bench
 | `--backend memory\|lazy\|disk` | `lazy` | Which `GraphAccess` to use |
 | `--iters N` | `3` | Measured iterations per param row |
 | `--warmup N` | `0` | Extra iters per row before measurement; their times are discarded. Whether it helps depends on OS / RAM / storage — on a warm machine with free RAM ≥ dataset size it usually doesn't (OS page cache populated by row#0); on cold or cache-constrained machines it can absorb a cold-iter spike. Raise it if the per-row summary shows iter 0 consistently dominating min/median. |
-| `--limit N` | `20` | Row cap (`Runtime::run_query`'s second arg; emulates spec `LIMIT 20` until gqlite has the keyword) |
 | `--params-dir <dir>` | `bench/data/substitution_parameters-sf0.1/substitution_parameters-sf0.1` | Where the LDBC param files live |
 | `--queries-dir <dir>` | `bench/ldbc-queries` | Where the per-IC TOML files live |
 | `--csv-dir <dir>` | — | Required only with `--backend memory`; the .gdb path is then ignored |
@@ -111,7 +110,7 @@ IC2;lazy;10995116278647|1346112000000;1;0;20;8418309000
 | `params` | substitution-param values for this row, joined by `\|` (same separator LDBC's param files use). For IC2, that's `<personId>\|<maxDate>` |
 | `row` | 0-indexed line of the LDBC param file (`interactive_<n>_param.txt`); same number as `row#N` in the stderr summary |
 | `iter` | 0-indexed iteration of this same row (0 to `--iters - 1`) |
-| `result_count` | how many rows the query returned (capped at `--limit`) |
+| `result_count` | how many rows the query returned (capped by the in-query `LIMIT` and `Runtime::run_query` limit combining) |
 | `elapsed_ns` | wall time of one `Runtime::run_query` call, in **nanoseconds** |
 
 For `--iters 3` with 15 IC2 params, you get 45 rows of CSV. Use this
@@ -130,7 +129,7 @@ Loading bench/data/ldbc-sf0.1.gdb (LazyGraphStore)...
   RSS after open: 401.2 MiB (+391.3 MiB)
 
 === IC2: Recent messages by your friends (backend=lazy) ===
-Params: interactive_2_param.txt (15 rows, columns: personId, maxDate);  0+3 iters/param (warmup+measured);  limit=20
+Params: interactive_2_param.txt (15 rows, columns: personId, maxDate);  0+3 iters/param (warmup+measured)
   IC2 row#0   (19791209300143|1354060800000) count=20  min= 7637.99ms  med= 7800.62ms  mean= 8316.74ms  max= 9511.62ms  (n=3)
   IC2 row#1   (10995116278647|1346112000000) count=20  min= 7858.60ms  med= 8418.31ms  mean= 8448.11ms  max= 9067.41ms  (n=3)
   ...
@@ -149,7 +148,7 @@ much RAM the backend's open call cost.
 
 - `row#N` — same as the `row` column in the CSV (0-indexed line of the LDBC param file)
 - `(personId|maxDate)` in parens — substitution-param values for this row
-- `count=20` — `result_count` (rows the query returned, capped at `--limit`)
+- `count=20` — `result_count` (rows the query returned; IC2 uses `LIMIT 20` in the GQL template)
 - `min / med / mean / max` — the four stats computed from `--iters` runs of this row, in milliseconds
 - `(n=3)` — the sample size. When `--iters 1` (so n=1), the four stats collapse to the same number; the bench prints `wall=Xms` instead with a hint to raise `--iters`
 

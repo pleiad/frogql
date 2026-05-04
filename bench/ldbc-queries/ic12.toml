@@ -6,7 +6,8 @@ name = "Expert search"
 status = "blocked"
 
 blocked_reason = """
-COLLECT_LIST / multiset for `tagNames`; ORDER BY; TagClass / isSubclassOf hierarchy.
+Multiset list aggregate for ordered `tagNames`; `ORDER BY`; TagClass /
+`isSubclassOf` hierarchy in the pattern or schema.
 """
 
 required_features = [
@@ -14,3 +15,11 @@ required_features = [
     "ORDER BY",
     "TagClass / isSubclassOf hierarchy",
 ]
+
+params_file = "interactive_12_param.txt"
+param_columns = ["personId", "tagClassName"]
+param_types = ["int", "string"]
+query = """
+IC12_QUERY_PLACEHOLDER
+Params (interactive_12_param.txt header): personId | tagClassName
+"""

@@ -7,14 +7,12 @@
 //!
 //! ## Query catalog
 //!
-//! Each IC is described by a `bench/ldbc-queries/ic<n>.toml` file:
+//! Thin `bench/ldbc-queries/ic<n>.toml` (title, spec URL, keys, `query`). Import,
+//! `expected_shape`, bench flags: `bench/LDBC_BENCHMARK.md`.
 //!
-//! - `status = "implemented"` queries carry a `query` template and a
-//!   `params_file` reference; the runner substitutes `{paramName}`
-//!   placeholders against the LDBC `substitution_parameters-sf0.1/
-//!   interactive_<n>_param.txt` file.
-//! - `status = "blocked"` queries carry `blocked_reason` + `required_features`.
-//!   The runner skips them; `--ic blocked` prints the inventory.
+//! - **implemented**: `query` + `params_file`; `{col}` ↔ param header.
+//! - **blocked**: `blocked_reason`, `required_features`, optional `query` /
+//!   params (not executed). `--ic blocked` prints inventory.
 //!
 //! ## Usage
 //!
@@ -575,6 +573,12 @@ fn main() {
             }
             if let Some(feats) = &q.required_features {
                 eprintln!("        required: {}", feats.join(", "));
+            }
+            if let Some(query) = &q.query {
+                eprintln!("        query:");
+                for line in query.trim_end().lines() {
+                    eprintln!("        | {line}");
+                }
             }
         }
         return;

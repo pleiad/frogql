@@ -6,9 +6,16 @@ name = "Recent replies on a person's messages"
 status = "blocked"
 
 blocked_reason = """
-ORDER BY (creationDate DESC, id ASC).
+Stable ordering: `ORDER BY` (`creationDate DESC`, `id ASC` tie-break) per spec.
 """
 
 required_features = [
     "ORDER BY",
 ]
+
+params_file = "interactive_8_param.txt"
+param_columns = ["personId"]
+query = """
+IC08_QUERY_PLACEHOLDER
+Params (interactive_8_param.txt header): personId
+"""

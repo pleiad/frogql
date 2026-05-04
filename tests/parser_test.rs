@@ -639,17 +639,16 @@ fn test_match_simple() {
     assert!(q.returns.is_none());
 }
 
-/// Pin the structural invariant of the multi-MATCH refactor (ISO §14.3-14.4):
-/// every parsed Query has exactly one match statement, and it is a `Simple`
-/// holding the parsed pattern. Without this, `Query::collapsed_pattern()`
-/// would silently panic on `vec![]` instead of failing in tests.
+/// Pin structural invariants for a minimal query: one `MATCH`, emitted as
+/// `MatchStatement::Simple`. Multi-clause and `OPTIONAL MATCH` queries are
+/// covered in `optional_match_test` and `multi_match_proptest`.
 #[test]
 fn test_query_has_one_simple_match_statement() {
     let q = gqlrust::compile_query("MATCH (x)-[:Knows]->(y) RETURN x.name").unwrap();
     assert_eq!(q.matches.len(), 1, "parser must produce exactly one match");
     assert!(
         matches!(&q.matches[0], MatchStatement::Simple { .. }),
-        "current parser only emits Simple match statements (Optional comes in a later PR)"
+        "expected `MATCH ...` without OPTIONAL to parse as `Simple`"
     );
 }
 

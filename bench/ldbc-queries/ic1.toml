@@ -6,12 +6,18 @@ name = "Transitive friends with a certain name"
 status = "blocked"
 
 blocked_reason = """
-Per-friend minimum hop distance for output and ORDER BY; OPTIONAL MATCH for
-work/study summaries. Multi-hop :knows can use `{1,3}` or unions.
+Per-friend minimum hop distance in results; `ORDER BY` per spec.
 """
 
 required_features = [
     "per-friend shortest-path distance in results",
-    "OPTIONAL MATCH",
     "ORDER BY",
 ]
+
+params_file = "interactive_1_param.txt"
+param_columns = ["personId", "firstName"]
+param_types = ["int", "string"]
+query = """
+IC01_QUERY_PLACEHOLDER
+Params (interactive_1_param.txt header): personId | firstName
+"""

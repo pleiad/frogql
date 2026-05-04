@@ -6,9 +6,17 @@ name = "Tag co-occurrence"
 status = "blocked"
 
 blocked_reason = """
-ORDER BY for ranked output. No bench query wired.
+Ranked result: `ORDER BY` per spec.
 """
 
 required_features = [
     "ORDER BY",
 ]
+
+params_file = "interactive_6_param.txt"
+param_columns = ["personId", "tagName"]
+param_types = ["int", "string"]
+query = """
+IC06_QUERY_PLACEHOLDER
+Params (interactive_6_param.txt header): personId | tagName
+"""

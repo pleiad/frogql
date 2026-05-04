@@ -6,9 +6,17 @@ name = "Single shortest path"
 status = "blocked"
 
 blocked_reason = """
-Shortest path / hop distance between two Persons over :knows.
+Single-source / single-pair shortest path or hop count between two `Person`
+nodes over `:knows` (no `shortestPath()`-style primitive yet).
 """
 
 required_features = [
     "shortest-path (single-pair distance or path)",
 ]
+
+params_file = "interactive_13_param.txt"
+param_columns = ["person1Id", "person2Id"]
+query = """
+IC13_QUERY_PLACEHOLDER
+Params (interactive_13_param.txt header): person1Id | person2Id
+"""
