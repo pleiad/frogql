@@ -151,12 +151,12 @@ impl VariableType {
                             right: rb,
                         },
                     ) => VariableType::join(
-                        &VariableType::EdgeNonDirectional {
+                        VariableType::EdgeNonDirectional {
                             desc: da.clone(),
                             left: la.clone(),
                             right: ra.clone(),
                         },
-                        &VariableType::EdgeNonDirectional {
+                        VariableType::EdgeNonDirectional {
                             desc: db.clone(),
                             left: lb.clone(),
                             right: rb.clone(),
@@ -168,7 +168,7 @@ impl VariableType {
             (VariableType::Union(t1, t2), _) => {
                 let r1 = VariableType::meet(t1, b);
                 let r2 = VariableType::meet(t2, b);
-                VariableType::join(&r1, &r2)
+                VariableType::join(r1, r2)
             }
             (_, VariableType::Union(_, _)) => VariableType::meet(b, a),
             (VariableType::Null, VariableType::Null) => VariableType::Null,
@@ -180,30 +180,49 @@ impl VariableType {
 
     // --- Join ---
 
-    pub fn join(a: &VariableType, b: &VariableType) -> VariableType {
-        if *a == VariableType::Zero {
-            return b.clone();
+    pub fn join(a: VariableType, b: VariableType) -> VariableType {
+        if a == VariableType::Zero {
+            return b;
         }
-        if *b == VariableType::Zero {
-            return a.clone();
+        if b == VariableType::Zero {
+            return a;
         }
         if a == b {
-            return a.clone();
+            return a;
         }
-        VariableType::Union(Box::new(a.clone()), Box::new(b.clone()))
+        VariableType::Union(Box::new(a), Box::new(b))
     }
 
-    pub fn join_from_list(types: &[VariableType]) -> VariableType {
-        if types.is_empty() {
-            return VariableType::Zero;
-        }
-        types
-            .iter()
-            .skip(1)
-            .fold(types[0].clone(), |acc, t| VariableType::join(&acc, t))
+    pub fn join_from_list(types: Vec<VariableType>) -> VariableType {
+        types.into_iter().fold(VariableType::Zero, Self::join)
     }
 
     // --- Subtyping ---
+
+    /// Subtype check for the Node endpoints of an Edge variant.
+    fn node_endpoint_subtype(a: &VariableType, b: &VariableType) -> bool {
+        match (a, b) {
+            (VariableType::Node(a), VariableType::Node(b)) => DescriptorType::is_subtype(a, b),
+            _ => false,
+        }
+    }
+
+    /// Subtype rule for a single orientation of an edge: descriptor
+    /// subtype plus pointwise Node-endpoint subtype on left and right.
+    /// Shared by both `EdgeDirectional` and the orientation-OR check
+    /// of `EdgeNonDirectional`.
+    fn edge_directional_subtype(
+        d1: &DescriptorType,
+        l1: &VariableType,
+        r1: &VariableType,
+        d2: &DescriptorType,
+        l2: &VariableType,
+        r2: &VariableType,
+    ) -> bool {
+        DescriptorType::is_subtype(d1, d2)
+            && Self::node_endpoint_subtype(l1, l2)
+            && Self::node_endpoint_subtype(r1, r2)
+    }
 
     pub fn is_subtype(t1: &VariableType, t2: &VariableType) -> bool {
         match (t1, t2) {
@@ -221,21 +240,7 @@ impl VariableType {
                     left: l2,
                     right: r2,
                 },
-            ) => {
-                DescriptorType::is_subtype(d1, d2)
-                    && match (l1.as_ref(), l2.as_ref()) {
-                        (VariableType::Node(a), VariableType::Node(b)) => {
-                            DescriptorType::is_subtype(a, b)
-                        }
-                        _ => false,
-                    }
-                    && match (r1.as_ref(), r2.as_ref()) {
-                        (VariableType::Node(a), VariableType::Node(b)) => {
-                            DescriptorType::is_subtype(a, b)
-                        }
-                        _ => false,
-                    }
-            }
+            ) => Self::edge_directional_subtype(d1, l1, r1, d2, l2, r2),
             (
                 VariableType::EdgeNonDirectional {
                     desc: d1,
@@ -248,24 +253,8 @@ impl VariableType {
                     right: r2,
                 },
             ) => {
-                // Symmetric check
-                let as_dir1 = VariableType::EdgeDirectional {
-                    desc: d1.clone(),
-                    left: l1.clone(),
-                    right: r1.clone(),
-                };
-                let as_dir2a = VariableType::EdgeDirectional {
-                    desc: d2.clone(),
-                    left: l2.clone(),
-                    right: r2.clone(),
-                };
-                let as_dir2b = VariableType::EdgeDirectional {
-                    desc: d2.clone(),
-                    left: r2.clone(),
-                    right: l2.clone(),
-                };
-                VariableType::is_subtype(&as_dir1, &as_dir2a)
-                    || VariableType::is_subtype(&as_dir1, &as_dir2b)
+                Self::edge_directional_subtype(d1, l1, r1, d2, l2, r2)
+                    || Self::edge_directional_subtype(d1, l1, r1, d2, r2, l2)
             }
             (VariableType::Group(a), VariableType::Group(b)) => VariableType::is_subtype(a, b),
             (VariableType::Union(a, b), _) => {
@@ -308,7 +297,7 @@ impl VariableType {
                     .filter(|n| VariableType::is_subtype(n, node))
                     .map(|n| VariableType::meet(n, node))
                     .collect();
-                VariableType::join_from_list(&matches)
+                VariableType::join_from_list(matches)
             }
             VariableType::EdgeDirectional { .. } | VariableType::EdgeNonDirectional { .. } => {
                 let matches: Vec<VariableType> = schema
@@ -317,11 +306,11 @@ impl VariableType {
                     .filter(|e| VariableType::is_subtype(e, node))
                     .map(|e| VariableType::meet(e, node))
                     .collect();
-                VariableType::join_from_list(&matches)
+                VariableType::join_from_list(matches)
             }
             VariableType::Union(t1, t2) => VariableType::join(
-                &VariableType::refine(schema, t1),
-                &VariableType::refine(schema, t2),
+                VariableType::refine(schema, t1),
+                VariableType::refine(schema, t2),
             ),
             VariableType::Group(t) => {
                 VariableType::Group(Box::new(VariableType::refine(schema, t)))
@@ -473,17 +462,17 @@ mod tests {
     #[test]
     fn test_join_drops_left_zero() {
         let n = VariableType::node_star();
-        assert_eq!(VariableType::join(&VariableType::Zero, &n), n);
+        assert_eq!(VariableType::join(VariableType::Zero, n.clone()), n);
     }
     #[test]
     fn test_join_drops_right_zero() {
         let n = VariableType::node_star();
-        assert_eq!(VariableType::join(&n, &VariableType::Zero), n);
+        assert_eq!(VariableType::join(n.clone(), VariableType::Zero), n);
     }
     #[test]
     fn test_join_collapses_equal_operands() {
         let n = VariableType::node_star();
-        assert_eq!(VariableType::join(&n, &n), n);
+        assert_eq!(VariableType::join(n.clone(), n.clone()), n);
     }
 
     // meet — Node preservation + descriptor combination.

@@ -55,9 +55,9 @@ impl TypeEnvironment {
         let mut result = HashMap::with_capacity(keys.len());
         for key in keys {
             let merged = match (a.bindings.get(key), b.bindings.get(key)) {
-                (Some(ta), Some(tb)) => VariableType::join(ta, tb),
-                (Some(ta), None) => VariableType::join(ta, &VariableType::Null),
-                (None, Some(tb)) => VariableType::join(&VariableType::Null, tb),
+                (Some(ta), Some(tb)) => VariableType::join((**ta).clone(), (**tb).clone()),
+                (Some(ta), None) => VariableType::join((**ta).clone(), VariableType::Null),
+                (None, Some(tb)) => VariableType::join(VariableType::Null, (**tb).clone()),
                 (None, None) => unreachable!(),
             };
             result.insert(key.clone(), Rc::new(merged));
@@ -129,7 +129,7 @@ impl TypeEnvironment {
                     let met = VariableType::meet(t1, t2);
                     let refined = VariableType::refine(schema, &met);
                     // x_i ↦ T_{i1} ⊔ T'_i
-                    Rc::new(VariableType::join(t1, &refined))
+                    Rc::new(VariableType::join((**t1).clone(), refined))
                 }
                 // x_j ↦ T_j (left-only, kept as-is).
                 None => Rc::clone(t1),
@@ -144,7 +144,7 @@ impl TypeEnvironment {
             }
             result.insert(
                 key.clone(),
-                Rc::new(VariableType::join(t2, &VariableType::Null)),
+                Rc::new(VariableType::join((**t2).clone(), VariableType::Null)),
             );
         }
 
