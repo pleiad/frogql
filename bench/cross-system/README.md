@@ -14,10 +14,13 @@ across all (selected) systems.
 |---|---|---|
 | gqlite (lazy backend) | [`gqlite/`](gqlite/) | ✅ implemented |
 | GraphQLite — colliery-io/graphqlite (Cypher, SQLite-backed) | [`graphqlite/`](graphqlite/) | ✅ implemented |
+| Kuzu — kuzudb (vectorized columnar engine, CIDR 2023; pinned to v0.11.3 since [upstream archived 2025-10-10](https://github.com/kuzudb/kuzu)) | [`kuzu/`](kuzu/) | ✅ implemented; see [`kuzu/DIVERGENCES.md`](kuzu/DIVERGENCES.md) for the archival-status framing and the `UNION ALL` query-shape divergence |
 | GraphLite — GraphLite-AI/GraphLite (ISO GQL, Sled-backed) | — | not yet integrated |
 | GQLite — webbery/gqlite (custom DSL, dead since April 2023) | — | not yet integrated |
 
 ## Setup
+
+### 1. Shared dataset
 
 The bench depends on the same LDBC SF0.1 dataset our regular
 `ldbc_bench` uses. From the repo root:
@@ -34,9 +37,44 @@ That produces:
 - `bench/data/substitution_parameters-sf0.1/.../interactive_2_param.txt`
   — 15 IC2 param rows (`personId|maxDate`)
 
-Each external system additionally needs its own one-time setup
-(install the system's CLI/library, load the LDBC CSVs into the
-system's native format). See each subdir's README/script.
+### 2. Per-system prerequisites
+
+Each external system has its own install line. To install all of
+them in one go:
+
+```bash
+bash bench/cross-system/install_python_deps.sh
+```
+
+That script just runs `pip install -r requirements.txt` in each
+implemented per-system subdir. If you'd rather install them
+piecemeal, they're:
+
+| System | Install command | Other prerequisites |
+|---|---|---|
+| `gqlite` | `cargo build --release` (covered by step 1) | none |
+| `graphqlite` | `pip install -r bench/cross-system/graphqlite/requirements.txt` | none |
+| `kuzu` | `pip install -r bench/cross-system/kuzu/requirements.txt` | none |
+
+Each per-system subdir has its own `README.md` documenting prereqs,
+CLI, and any per-system gotchas. Failing-but-scaffolded systems
+(e.g. on the `bench/cross-system-failed-attempts` branch) ship a
+`DIVERGENCES.md` that explains why their integration didn't pan out.
+
+### 3. Per-system data load
+
+The first time `run_all.sh` runs, each implemented system's runner
+will auto-invoke its own `setup.py` (or equivalent) to load the LDBC
+CSVs into that system's native format. This is a one-time cost
+amortized over every subsequent bench run. To pre-load explicitly:
+
+```bash
+python bench/cross-system/graphqlite/setup.py --ic 2
+python bench/cross-system/kuzu/setup.py --ic 2
+```
+
+(`gqlite` doesn't need a separate per-system setup — `bench_setup`
+in step 1 already produced its `.gdb`.)
 
 ## Running
 
