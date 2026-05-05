@@ -55,3 +55,10 @@ required-features = ["bench"]
 
 [workspace]
 members = [".", "python"]
+# resolver = "2" computes features per-target instead of unifying them
+# globally across the workspace. Without it, building the python crate
+# with --target X drags in gqlrust's default features (repl, bench)
+# even though python/Cargo.toml sets default-features = false on
+# gqlrust — which pulls ring (via ureq) and breaks aarch64
+# cross-builds inside the manylinux2014 container.
+resolver = "2"
