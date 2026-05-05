@@ -1,28 +1,28 @@
-//! Known typechecker / parser gaps for ORDER BY (Feature GA03 + GQ13).
+//! Tests for ORDER BY typechecker / parser surface (Features GA03 +
+//! GQ13). The file mixes three kinds of tests:
 //!
-//! These tests document cases where the surface accepts (or rejects with
-//! the wrong message) queries that ISO/IEC 39075:2024 §16.17 implies
-//! should be handled differently. Every test in this file is `#[ignore]`
-//! by default so it does not break CI; running `cargo test --
-//! --ignored` exposes them as failing tests for review.
+//! - **Passing tests** — pin behavior that this branch fixed:
+//!   alias-in-sort-key resolution (Gap 1), aggregate-alias-in-sort-key
+//!   resolution (Gap 2), structural match for aggregate queries
+//!   (Gap 2 auxiliary), non-comparable sort keys rejected per ISO
+//!   §22.14 (Gap 4).
+//! - **Companion runtime tests** — pin observable runtime behavior on
+//!   the gaps that are NOT fixed yet, so the contrast with the
+//!   desired typecheck behavior is concrete.
+//! - **`#[ignore]`d tests** — document remaining gaps. Run with
+//!   `cargo test -- --ignored` to surface them as failing.
 //!
-//! The runtime behaves correctly on every legal query that reaches it —
-//! these gaps are upstream of evaluation. They split into three classes:
-//!
-//! 1. **Parser blocks ISO-legal forms**: bare-name aliases and aggregate
-//!    expressions in `<sort key>` are §16.17-legal but the gqlite parser
-//!    rejects them earlier than typecheck.
-//! 2. **Typechecker accepts ill-typed sort keys**: missing attribute
-//!    (under a strict graph type) and non-comparable types (lists,
-//!    records) are accepted silently; the runtime falls back to
-//!    "treat-as-null" or "treat-as-equal" instead of producing an error.
-//! 3. **Aggregate output typing is implicit**: same root cause we already
-//!    discussed for `SUM(x.name)` — the typechecker discards the inner
-//!    expression's type, so it cannot detect a non-numeric aggregate.
+//! Currently ignored:
+//! - `typecheck_gap_unknown_attr_under_strict_schema` — strict schema
+//!   does not promote the missing-attribute warning to error (Gap 3).
+//! - `typecheck_gap_direct_aggregate_in_sort_key` — `ORDER BY COUNT(*)`
+//!   without an intermediate alias still fails at parse, would need
+//!   an `Expr::Aggregate` variant.
 
 use gqlrust::compile_query;
 use gqlrust::compile_query_with;
 use gqlrust::model::graph::Graph;
+use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 use gqlrust::typing::variable_type::Schema;
@@ -40,16 +40,16 @@ use gqlrust::typing::variable_type::Schema;
 /// record amended with the projected items, so a bare reference to a
 /// `<return item alias>` is legal.
 ///
-/// **Today**: parser fails with `"unexpected bare variable 'n' in
-/// expression"` because `expr()` requires `name.attr` and rejects
-/// stand-alone names.
-///
-/// **Gap**: either teach `expr()` to accept bare names that match a
-/// RETURN alias, or add a separate sort-key parser that knows about
-/// the aliases in scope.
+/// **Status: FIXED**. `parse_sort_key` now resolves bare-name sort
+/// keys against the RETURN aliases (after the `Returns` block is
+/// already parsed by the time `parse_optional_order_by` runs). When
+/// the alias points to a `ReturnItem::Expr`, the underlying
+/// expression is substituted via `SortKey::Expr` (pre-projection
+/// sort path); when it points to a `ReturnItem::Aggregate`, the
+/// sort key becomes `SortKey::Column(idx)` and the runtime sorts
+/// post-projection by column index.
 #[test]
-#[ignore = "ISO-legal RETURN alias as sort key — parser rejects bare names"]
-fn typecheck_gap_alias_in_sort_key() {
+fn typecheck_resolves_alias_in_sort_key() {
     let r = compile_query("MATCH (x) RETURN x.name AS n ORDER BY n");
     assert!(
         r.is_ok(),
@@ -58,31 +58,45 @@ fn typecheck_gap_alias_in_sort_key() {
     );
 }
 
-/// `MATCH (x: User) RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY COUNT(*) DESC`
+/// `MATCH (x: User) RETURN x.city, COUNT(*) AS c GROUP BY x.city ORDER BY c DESC`
 ///
 /// **ISO §16.17 SR 1**: a sort key is an `<aggregating value expression>`,
 /// which expands to include `<aggregate function>`. Sorting groups by
-/// their cardinality (`ORDER BY COUNT(*)`) is the canonical use case.
+/// the cardinality of the aggregate is the canonical use case.
 ///
-/// **Today**: parser fails with `"expected expression, got Count"`
-/// because `expr()` doesn't dispatch to `aggregate_function()`. Only
-/// `return_item()` does, via `peek_aggregate_kind()`.
-///
-/// **Gap**: extend `expr()` to recognize aggregate function calls, OR
-/// special-case sort_spec to allow the aggregate-function form. The
-/// runtime would also need to evaluate the sort key against the
-/// aggregated row (post-projection), which our current
-/// "sort-before-projection" pipeline does not support — see also
-/// `typecheck_gap_sort_over_aggregate_column_runtime` below.
+/// **Status: FIXED via alias indirection**. Direct `ORDER BY COUNT(*)`
+/// (no alias) is still a parse error because `expr()` does not
+/// dispatch to `aggregate_function()` — that would require an
+/// `Expr::Aggregate` variant and is left as future work. The user
+/// must alias the aggregate (`COUNT(*) AS c`) and reference it in
+/// the sort key (`ORDER BY c`); the parser resolves the alias to a
+/// `SortKey::Column(idx)` and the runtime sorts post-projection.
 #[test]
-#[ignore = "ISO-legal aggregate as sort key — parser rejects COUNT/SUM/AVG/MIN/MAX outside RETURN"]
-fn typecheck_gap_aggregate_in_sort_key() {
+fn typecheck_resolves_aggregate_alias_in_sort_key() {
+    let r = compile_query(
+        "MATCH (x: User) RETURN x.city, COUNT(*) AS c GROUP BY x.city ORDER BY c DESC",
+    );
+    assert!(
+        r.is_ok(),
+        "ORDER BY <aggregate alias> should be accepted, got: {:?}",
+        r.err()
+    );
+}
+
+/// `MATCH (x: User) RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY COUNT(*) DESC`
+///
+/// Direct aggregate in a sort key (no alias indirection). Still a
+/// parse error today — `expr()` does not accept aggregate-function
+/// calls. Marked ignored so the requirement remains on record.
+#[test]
+#[ignore = "Direct aggregate in sort key (without alias) — needs Expr::Aggregate variant"]
+fn typecheck_gap_direct_aggregate_in_sort_key() {
     let r = compile_query(
         "MATCH (x: User) RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY COUNT(*) DESC",
     );
     assert!(
         r.is_ok(),
-        "ORDER BY COUNT(*) should be accepted, got: {:?}",
+        "direct ORDER BY COUNT(*) should eventually be accepted, got: {:?}",
         r.err()
     );
 }
@@ -205,10 +219,144 @@ fn runtime_accepts_unknown_attr_in_sort_key_under_permissive_schema() {
     }
 }
 
-/// Companion to `typecheck_gap_non_comparable_sort_key`: list-typed
-/// sort keys end up as Equal across the comparator. We pin the
-/// "doesn't crash, doesn't sort" outcome so the prof can decide
-/// whether silent identity-on-incomparable is acceptable.
+// =====================================================================
+// Class 4: ORDER BY with RETURN-alias resolution (Gap 1 + 2). These
+// runtime tests pin the actual ordered output so we know the alias
+// path produces the right comparator behaviour, not just "doesn't
+// crash".
+// =====================================================================
+
+/// Non-aggregate query: `RETURN x.name AS n ORDER BY n` must produce
+/// the same output as `RETURN x.name ORDER BY x.name`. The alias
+/// resolves to the underlying `Expr` at parse time, so the runtime
+/// uses the existing pre-projection sort fast path.
+#[test]
+fn runtime_alias_of_expr_sorts_identically_to_underlying_expr() {
+    let json = r#"{
+      "nodes": [
+        {"id": "u1", "labels": ["User"], "props": {"name": "Charlie"}},
+        {"id": "u2", "labels": ["User"], "props": {"name": "Alice"}},
+        {"id": "u3", "labels": ["User"], "props": {"name": "Bob"}}
+      ],
+      "edges": []
+    }"#;
+    let g = Graph::from_json_str(json).unwrap();
+
+    let rt = Runtime::new(&g);
+    let q1 = compile_query("MATCH (x: User) RETURN x.name AS n ORDER BY n").unwrap();
+    let q2 = compile_query("MATCH (x: User) RETURN x.name ORDER BY x.name").unwrap();
+    let r1 = match rt.run_query(&q1, 0) {
+        QueryResult::Projected(rs) => rs,
+        _ => panic!("expected projected"),
+    };
+    let r2 = match rt.run_query(&q2, 0) {
+        QueryResult::Projected(rs) => rs,
+        _ => panic!("expected projected"),
+    };
+    assert_eq!(r1, r2, "alias-as-sort-key must match the bare-expr form");
+    assert_eq!(
+        r1,
+        vec![
+            vec![Value::Str("Alice".into())],
+            vec![Value::Str("Bob".into())],
+            vec![Value::Str("Charlie".into())],
+        ]
+    );
+}
+
+/// Aggregate query with alias-of-aggregate: groups must come back in
+/// descending order of `COUNT(*)`. Pre-fix this would compile but
+/// silently NOT sort (the aggregate path skipped sort entirely);
+/// post-fix the post-projection sort orders by the alias's column.
+#[test]
+fn runtime_alias_of_aggregate_orders_groups_by_count() {
+    let json = r#"{
+      "nodes": [
+        {"id": "u1", "labels": ["User"], "props": {"city": "Santiago"}},
+        {"id": "u2", "labels": ["User"], "props": {"city": "Santiago"}},
+        {"id": "u3", "labels": ["User"], "props": {"city": "Santiago"}},
+        {"id": "u4", "labels": ["User"], "props": {"city": "Valpo"}},
+        {"id": "u5", "labels": ["User"], "props": {"city": "Concepcion"}},
+        {"id": "u6", "labels": ["User"], "props": {"city": "Concepcion"}}
+      ],
+      "edges": []
+    }"#;
+    let g = Graph::from_json_str(json).unwrap();
+    let rt = Runtime::new(&g);
+    let q = compile_query(
+        "MATCH (x: User) RETURN x.city, COUNT(*) AS c GROUP BY x.city ORDER BY c DESC",
+    )
+    .unwrap();
+    let rows = match rt.run_query(&q, 0) {
+        QueryResult::Projected(rs) => rs,
+        _ => panic!("expected projected"),
+    };
+    let counts: Vec<&Value> = rows.iter().map(|r| &r[1]).collect();
+    assert_eq!(
+        counts,
+        vec![&Value::Int(3), &Value::Int(2), &Value::Int(1)],
+        "groups must be ordered by COUNT(*) DESC"
+    );
+}
+
+/// Aggregate query with `ORDER BY <bare expr matching a RETURN item>`:
+/// covers the structural-match auto-resolution. The query has no
+/// alias on `x.city` but the parser still rewrites the sort key to a
+/// column reference because `x.city` is identical to a RETURN item.
+#[test]
+fn runtime_aggregate_query_sorts_by_implicit_grouping_column() {
+    let json = r#"{
+      "nodes": [
+        {"id": "u1", "labels": ["U"], "props": {"city": "Z"}},
+        {"id": "u2", "labels": ["U"], "props": {"city": "A"}},
+        {"id": "u3", "labels": ["U"], "props": {"city": "M"}}
+      ],
+      "edges": []
+    }"#;
+    let g = Graph::from_json_str(json).unwrap();
+    let rt = Runtime::new(&g);
+    let q = compile_query("MATCH (x: U) RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY x.city")
+        .unwrap();
+    let rows = match rt.run_query(&q, 0) {
+        QueryResult::Projected(rs) => rs,
+        _ => panic!("expected projected"),
+    };
+    let cities: Vec<&Value> = rows.iter().map(|r| &r[0]).collect();
+    assert_eq!(
+        cities,
+        vec![
+            &Value::Str("A".into()),
+            &Value::Str("M".into()),
+            &Value::Str("Z".into()),
+        ],
+        "groups must come out alphabetically by city"
+    );
+}
+
+/// Mixed-keys typecheck rule: `ORDER BY n, x.age` where `n` is an
+/// aggregate alias and `x.age` is a bare Expr. The typechecker
+/// rejects because post-projection sort cannot evaluate Expr keys
+/// (no assignment after aggregation) and pre-projection sort cannot
+/// look up Column keys (no projected row yet).
+#[test]
+fn typecheck_rejects_mixed_alias_and_expr_sort_keys_in_aggregate_query() {
+    let r = compile_query(
+        "MATCH (x: User) RETURN x.name, COUNT(*) AS c GROUP BY x.name ORDER BY c, x.email",
+    );
+    let err = r.expect_err("mixed alias + Expr sort keys must be rejected");
+    assert!(
+        err.contains("ORDER BY mixes") || err.contains("only aliases"),
+        "error message must explain the mix, got: {err}"
+    );
+}
+
+/// Companion to the list-typed gap: under permissive Schema::star
+/// the typechecker sees `Star` for the sort key (not `List`), so
+/// the comparable-type check does not fire. The runtime evaluates
+/// the list value, `value_cmp` returns `None`, the comparator falls
+/// back to `Equal` per US007, and rows survive in some stable order.
+/// Pinned so the contrast with the strict-schema gap test is
+/// concrete.
 #[test]
 fn runtime_treats_list_sort_key_as_equal_so_input_order_preserved() {
     let json = r#"{

@@ -4,7 +4,7 @@ use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::{
     Aggregator, GeneralSetKind, MatchStatement, NullsOrder, Query, ReturnItem, SetQuantifier,
-    SortDir, SortSpec,
+    SortDir, SortKey, SortSpec,
 };
 use crate::syntax::statement::{IndexKindStmt, Statement, TypeElement};
 use crate::typing::descriptor_type::DescriptorType;
@@ -220,7 +220,7 @@ impl Parser {
             (None, None) => None,
         };
 
-        let order_by = self.parse_optional_order_by()?;
+        let order_by = self.parse_optional_order_by(returns.as_deref())?;
         let limit = self.parse_optional_limit()?;
 
         Ok(Query {
@@ -267,21 +267,43 @@ impl Parser {
     /// Optional trailing `ORDER BY <sort spec list>`. Returns `None` if
     /// absent. The list is non-empty when present (parse error if no
     /// spec follows the keyword).
-    fn parse_optional_order_by(&mut self) -> Result<Option<Vec<SortSpec>>, String> {
+    ///
+    /// `returns` is the already-parsed `<return item list>` from the
+    /// surrounding RETURN clause (or `None` for ORDER BY without
+    /// RETURN). It enables ISO §16.17 SR 5c — bare-name sort keys
+    /// resolve to RETURN aliases.
+    fn parse_optional_order_by(
+        &mut self,
+        returns: Option<&[ReturnItem]>,
+    ) -> Result<Option<Vec<SortSpec>>, String> {
         if !self.eat(&Token::OrderBy) {
             return Ok(None);
         }
-        let mut specs = vec![self.sort_spec()?];
+        let mut specs = vec![self.sort_spec(returns)?];
         while self.eat(&Token::Comma) {
-            specs.push(self.sort_spec()?);
+            specs.push(self.sort_spec(returns)?);
         }
         Ok(Some(specs))
     }
 
-    /// One `<sort specification>`: expr, optional direction, optional
-    /// null ordering. ISO §16.17 SR 5b: ASC is implicit when omitted.
-    fn sort_spec(&mut self) -> Result<SortSpec, String> {
-        let key = self.expr()?;
+    /// One `<sort specification>`: expr (or alias reference), optional
+    /// direction, optional null ordering. ISO §16.17 SR 5b: ASC is
+    /// implicit when omitted.
+    ///
+    /// Alias resolution (§16.17 SR 5c). When the next token is a bare
+    /// `Name` not followed by `Dot` (which would make it `var.attr`),
+    /// AND that name matches a `<return item alias>` from the RETURN
+    /// clause, the sort key resolves to a column reference into the
+    /// projected output row instead of a free expression. This lets:
+    ///
+    ///   RETURN x.name AS n ORDER BY n        -- alias of regular expr
+    ///   RETURN COUNT(*) AS c ORDER BY c DESC -- alias of aggregate
+    ///
+    /// both work without re-introducing the projected expression in
+    /// the sort key. Unmatched bare names fall through to `expr()`,
+    /// which produces the existing "unexpected bare variable" error.
+    fn sort_spec(&mut self, returns: Option<&[ReturnItem]>) -> Result<SortSpec, String> {
+        let key = self.parse_sort_key(returns)?;
         let dir = match self.peek() {
             Token::Asc | Token::Ascending => {
                 self.advance();
@@ -305,6 +327,55 @@ impl Parser {
             _ => None,
         };
         Ok(SortSpec { key, dir, nulls })
+    }
+
+    /// Resolve a single sort key. Two resolution strategies fire in
+    /// order:
+    ///
+    /// 1. **Bare-name alias** (§16.17 SR 5c): if the next token is a
+    ///    Name not followed by `Dot` and the name matches a
+    ///    `<return item alias>`, return `SortKey::Column(idx)`.
+    /// 2. **Structural match against a non-aggregate RETURN item**: only
+    ///    activated when the query has at least one aggregate. Sorts
+    ///    like `RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY x.city`
+    ///    parse `x.city` as an `Expr` because there is no alias to
+    ///    look up; we then check whether that expression is
+    ///    structurally identical to one of the RETURN items and, if
+    ///    so, rewrite to `SortKey::Column(idx)`. The aggregate path
+    ///    needs this because post-projection sort has no assignment
+    ///    to evaluate the Expr against.
+    ///
+    /// Non-aggregate queries skip strategy 2 — sorting by an Expr
+    /// against the binding table is faster and lossless, and
+    /// rewriting to a column would force the slower post-projection
+    /// path for no benefit.
+    fn parse_sort_key(&mut self, returns: Option<&[ReturnItem]>) -> Result<SortKey, String> {
+        // Strategy 1: bare-name alias resolution.
+        if let (Some(items), Token::Name(name)) = (returns, self.peek().clone()) {
+            if !matches!(self.peek_at(1), Some(Token::Dot)) {
+                if let Some(idx) = items.iter().position(|it| it.alias() == Some(&name)) {
+                    self.advance();
+                    return Ok(SortKey::Column(idx));
+                }
+            }
+        }
+
+        // Strategy 2: parse as Expr, then for aggregate queries try a
+        // structural match against the RETURN items.
+        let expr = self.expr()?;
+        if let Some(items) = returns {
+            let has_aggregate_in_returns = items.iter().any(|it| it.is_aggregate());
+            if has_aggregate_in_returns {
+                for (idx, item) in items.iter().enumerate() {
+                    if let ReturnItem::Expr { expr: ret_expr, .. } = item {
+                        if *ret_expr == expr {
+                            return Ok(SortKey::Column(idx));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(SortKey::Expr(expr))
     }
 
     /// One match clause: pattern + optional WHERE wrapped in `Filter`.

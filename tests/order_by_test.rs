@@ -134,9 +134,10 @@ fn parser_order_alone_without_by_does_not_consume_keyword() {
 #[test]
 fn runtime_asc_default_orders_ascending_with_nulls_last() {
     // Ages: Alice=30, Bob=25, Carol=40, Dave=25, Eve=null. ASC default
-    // → 25, 25, 30, 40, null. Bob and Dave are peers; the sort is
-    // stable but their relative order is implementation-stable rather
-    // than ISO-guaranteed (§16.17 GR 1k / US006).
+    // → 25, 25, 30, 40, null. Bob and Dave are peers; under pdqsort
+    // their relative order is implementation-dependent (§16.17 GR 1k
+    // / US006). The test asserts only the age column to stay valid
+    // regardless of which peer comes first.
     let g = graph_with_users();
     let rows = run_projected(&g, "MATCH (x: User) RETURN x.name, x.age ORDER BY x.age");
     assert_eq!(rows.len(), 5);
@@ -309,12 +310,13 @@ fn runtime_order_by_without_return_sorts_raw_table() {
 }
 
 #[test]
-fn runtime_order_by_stable_for_peers() {
-    // Two users with age=25 (Bob, Dave). Stable sort means their input
-    // order is preserved when the sort key alone cannot resolve. We
-    // pin the implementation choice (Rust's `sort_by` is stable) so
-    // the result is reproducible — gqlite is stricter than ISO US006
-    // here, which leaves peer order implementation-dependent.
+fn runtime_order_by_deterministic_across_runs() {
+    // Two users with age=25 (Bob, Dave). Per ISO §16.17 GR 1k / US006
+    // the relative order of peers is implementation-dependent — gqlite
+    // uses pdqsort (`sort_unstable_by`), which does not preserve input
+    // order for peer rows but IS deterministic for a given input
+    // vector. Two runs of the same query against the same graph must
+    // therefore produce byte-identical output.
     let g = graph_with_users();
     let rows1 = run_projected(&g, "MATCH (x: User) RETURN x.name, x.age ORDER BY x.age");
     let rows2 = run_projected(&g, "MATCH (x: User) RETURN x.name, x.age ORDER BY x.age");

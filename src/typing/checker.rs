@@ -8,7 +8,7 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem, SortSpec};
+use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem, SortKey, SortSpec};
 
 use super::descriptor_type::DescriptorType;
 use super::label_type::LabelType;
@@ -89,7 +89,7 @@ impl Typechecker {
             }
         }
         if let Some(specs) = &q.order_by {
-            self.check_order_by(specs, &r.env);
+            self.check_order_by(specs, q.returns.as_deref(), &r.env);
         }
 
         if !self.errors.is_empty() {
@@ -106,16 +106,66 @@ impl Typechecker {
     ///
     /// gqlite does not implement Feature GA04, so non-scalar types
     /// (lists, records, repetition groups) are rejected here. Scalars
-    /// (Z, F, B, S), the wildcard `Star` (imprecise / dynamic), `Zero`
-    /// (unsatisfiable), and `Union` of those pass through.
+    /// (Z, F, B, S) and the wildcard `Star` (imprecise / dynamic)
+    /// pass; `Zero` (unsatisfiable type — typically a strict-schema
+    /// lookup of an undeclared attribute) is rejected so the user
+    /// finds the typo at compile time.
     ///
-    /// `check_expr` returns the `SimpleType` of the expression — used
-    /// to be discarded; we now propagate it for the §22.14 check.
-    /// RETURN aliases are still not visible here (parser limitation,
-    /// documented in `tests/typecheck_gaps_order_by_test.rs`).
-    fn check_order_by(&mut self, specs: &[SortSpec], env: &TypeEnvironment) {
+    /// Two key shapes:
+    /// - `SortKey::Expr` — checked via `check_expr` against the
+    ///   binding-table env. Output type runs through the orderability
+    ///   predicate.
+    /// - `SortKey::Column` — already validated by `check_returns` for
+    ///   the underlying `ReturnItem`. The column index is a
+    ///   parse-time invariant (in bounds by construction); we still
+    ///   look up the matching return item to enforce §22.14 against
+    ///   its declared type. Aggregate items receive a permissive
+    ///   `Star` for now (typing the aggregate output is a separate
+    ///   gap).
+    fn check_order_by(
+        &mut self,
+        specs: &[SortSpec],
+        returns: Option<&[ReturnItem]>,
+        env: &TypeEnvironment,
+    ) {
+        // Mixed Expr+Column sort keys are rejected: post-projection
+        // sort has no assignment to evaluate Expr against, and pre-
+        // projection sort has no projected row to look up Column in.
+        // The user's workaround is to alias every sort target.
+        let has_expr = specs.iter().any(|s| matches!(s.key, SortKey::Expr(_)));
+        let has_column = specs.iter().any(|s| matches!(s.key, SortKey::Column(_)));
+        if has_expr && has_column {
+            self.errors.push(
+                "ORDER BY mixes RETURN-alias references and free expressions; either \
+                 use only aliases (each sort target with `AS <name>` in RETURN) or \
+                 only free expressions over the binding table."
+                    .into(),
+            );
+        }
+
         for spec in specs {
-            let t = self.check_expr(&spec.key, env);
+            let t = match &spec.key {
+                SortKey::Expr(e) => self.check_expr(e, env),
+                SortKey::Column(idx) => match returns.and_then(|rs| rs.get(*idx)) {
+                    Some(ReturnItem::Expr { expr, .. }) => self.check_expr(expr, env),
+                    // Aggregator output type is not propagated (separate
+                    // typecheck gap). Treat as Star so the comparable-
+                    // value check passes — runtime guarantees a scalar
+                    // for COUNT/SUM/AVG/MIN/MAX in the supported cases.
+                    Some(ReturnItem::Aggregate { .. }) => SimpleType::Star,
+                    None => {
+                        // Index out of range — should not happen if the
+                        // parser produced this SortKey, but report as a
+                        // hard error rather than panicking.
+                        self.errors.push(format!(
+                            "ORDER BY column reference #{idx} is out of bounds for the \
+                             RETURN clause (only {} item(s) projected)",
+                            returns.map(|rs| rs.len()).unwrap_or(0),
+                        ));
+                        continue;
+                    }
+                },
+            };
             if !is_orderable_per_iso_22_14(&t) {
                 self.errors.push(format!(
                     "ORDER BY sort key `{}` has type {} which is not a comparable \
