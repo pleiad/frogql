@@ -181,9 +181,7 @@ bench runs.
 
 For completeness, the integration shape if we'd pushed through:
 
-1. Build with CMake on Windows-MSYS or PowerShell (~30 min). Their
-   `tool/` directory ships flex/bison binaries for Windows, so this
-   step is plausible.
+1. Build with CMake (~we tried, hit blockers — see below).
 2. Write a C++ bench harness (`run.cpp`) that opens the DB, parses
    IC2 params from the LDBC params file, builds the per-param-row
    DSL string, executes via `gqlite_exec`, captures result rows in
@@ -199,6 +197,108 @@ For completeness, the integration shape if we'd pushed through:
 Estimated effort: 1-2 working days, with a high probability that
 the `limit`-less DSL produces results that aren't comparable to the
 other systems' LIMIT-20 outputs anyway.
+
+## Build attempt (Windows, May 2026): three sequential failures
+
+For completeness, we tried to actually build the library on a
+Windows machine before settling on the discard verdict. Three
+separate failures, each requiring manual intervention:
+
+### Failure 1 — git-describe submodule version
+
+Cloning with `git clone --depth 1 --recursive` (the README's
+recommendation) brings the `libmdbx` submodule at commit
+`d5e4c198` from 2022, which predates any tagged release in our
+shallow checkout. CMake configure fails at
+`third_party/libmdbx/cmake/utils.cmake:84`:
+
+```
+fatal: No names found, cannot describe anything.
+CMake Error: Please fetch tags and/or install latest version of
+git ('describe --tags --long --dirty' failed)
+```
+
+Worked around by `git fetch --tags --unshallow` in the submodule,
+then creating a synthetic `v0.0.0-bench` tag at the pinned commit
+so libmdbx's CMake tag-matcher succeeds.
+
+### Failure 2 — flex/bison not on PATH for MSBuild custom commands
+
+The README claims: *"An version of flex&bison is placed in dir
+`tool`. So it's not need to install dependency."* But the CMake
+custom command at `tool/CMakeLists.txt` uses `WORKING_DIRECTORY
+${CMAKE_SOURCE_DIR}/tool` and runs `flex` bare, expecting Windows
+to find `flex.exe` via the working directory. **MSBuild does not
+honor cwd-based binary lookup for custom build steps**:
+
+```
+"flex" no se reconoce como un comando interno o externo,
+programa o archivo por lotes ejecutable.
+[generated_tokens.vcxproj] error MSB8066: Custom build for
+'CMakeFiles/.../generated_tokens.rule' exited with code 9009.
+```
+
+Worked around by pre-generating `include/token.cpp`, `token.h`,
+and `gql.cpp` manually with the bundled `tool/flex.exe` and
+`tool/bison.exe`, AND by prefixing `tool/` to `PATH` for the
+`cmake --build` invocation. Without both fixes, the parser/lexer
+never gets generated.
+
+### Failure 3 — libmdbx version-mismatch in generated `version.c`
+
+After the build advances past parser generation, libmdbx's
+`version.c` (CMake-templated from `version.c.in`) fires a
+compile-time `#error`:
+
+```c
+#if MDBX_VERSION_MAJOR != 0 || MDBX_VERSION_MINOR != 0
+#error "API version mismatch! Had `git fetch --tags` done?"
+#endif
+```
+
+The generated version.c writes `0 / 0` (because the synthetic tag
+we created has no version), but `mdbx.h` defines
+`MDBX_VERSION_MAJOR=0, MINOR=11`. The mismatch fires the
+preprocessor `#error`. Worked around by patching the generated
+version.c to remove the `#error`.
+
+### Failure 4 — MASM assembly file not built/linked
+
+After all of the above, the build advances to linking the gqlite
+library and fails with:
+
+```
+LINK : fatal error LNK1181: cannot open input file
+'gqlite.dir\Release\jump_x86_64_ms_pe_masm.obj'
+[gqlite.vcxproj]
+```
+
+The repo contains x86_64 hand-written MASM assembly files
+(README states 18.2% of the codebase is "Assembly") for what
+appear to be Boost.Context-style coroutine `jump_*`/`make_*`
+context switches. CMake doesn't enable MASM (`enable_language(ASM_MASM)`)
+in the project, so MSBuild compiles the `.cpp` units that reference
+the assembly stubs but never assembles the `.asm` files into
+`.obj`s. Linker has nothing to resolve `jump_fcontext` against.
+
+We stopped here. **Each individual failure is patchable. Together
+they say the project's CMake configuration has not been exercised
+on a fresh Windows checkout in years**, which is consistent with
+the 2-year-stale last commit. Combined with the grammar-level
+blockers (no LIMIT, no label disjunction), the build issues are
+the second-order signal — even if all three were patched, the
+grammar still can't express IC2.
+
+### What the build outcome means for the verdict
+
+This isn't a "Windows is hard" complaint — every other system in
+this bench (kuzu, graphqlite, gqlite itself) builds clean from a
+fresh `git clone` on the same Windows + MSVC 2022 environment.
+The build issues are specific to webbery/gqlite's pre-2024 CMake
+configuration and unmaintained submodules. They strengthen the
+discard verdict rather than weaken it: a system that can't be
+built without manual patches in 2026 is, in practical terms,
+unmaintained.
 
 ## Verdict
 
