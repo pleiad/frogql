@@ -10,27 +10,27 @@ param_columns = ["personId", "maxDate"]
 param_types = ["int", "int"]
 
 query = """
-MATCH (person:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(message:Comment|Post)
-WHERE message.creationDate < $maxDate
+MATCH (:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(message:Comment|Post)
+WHERE message.creationDate <= $maxDate
 RETURN
-    friend.id AS friendId,
-    friend.firstName AS friendFirstName,
-    friend.lastName AS friendLastName,
-    message.id AS messageId,
-    COALESCE(message.content, message.imageFile) AS messageContent,
-    message.creationDate AS messageCreationDate
-ORDER BY messageCreationDate DESC, messageId ASC
+    friend.id AS personId,
+    friend.firstName AS personFirstName,
+    friend.lastName AS personLastName,
+    message.id AS postOrCommentId,
+    COALESCE(message.content, message.imageFile) AS postOrCommentContent,
+    message.creationDate AS postOrCommentCreationDate
+ORDER BY postOrCommentCreationDate DESC, postOrCommentId ASC
 LIMIT 20
 """
 
 return_columns = [
-    "friendId", "friendFirstName", "friendLastName",
-    "messageId", "messageContent", "messageCreationDate",
+    "personId", "personFirstName", "personLastName",
+    "postOrCommentId", "postOrCommentContent", "postOrCommentCreationDate",
 ]
 
 expected_shape = "i,s,s,i,n/s,i"
 
 [divergences]
-message-union = "spec uses (message:Message) Cypher label inheritance; our LDBC loader doesn't synthesize a :Message superlabel, so we use the :Comment|Post path-pattern alternation. Same logical query, syntactic restatement."
-edge-casing = "spec uses :KNOWS, :HAS_CREATOR (uppercase / underscore_case); our LDBC loader produces :knows, :hasCreator (lowercase camelCase, from filename stems). Loader convention; not a query-level divergence."
-no-cast-int = "spec ORDER BY tie-break is `CAST(messageId AS INTEGER) ASC`. gqlite stores LDBC IDs as native int, so plain `messageId ASC` sorts identically. `CAST(... AS INTEGER)` syntax isn't in the parser; not needed here."
+message-union = "spec uses (message:Message); our LDBC loader doesn't synthesize a :Message superlabel, so we use the :Comment|Post ISO GQL alternation. Same logical query."
+edge-casing = "spec uses :KNOWS, :HAS_CREATOR (uppercase). Our loader produces :knows, :hasCreator (filename-stem convention). Loader-level."
+no-tointeger = "spec ORDER BY tie-break is `toInteger(postOrCommentId) ASC`. gqlite stores LDBC IDs as native int, so `postOrCommentId ASC` sorts identically. `toInteger()` isn't in the parser; not needed here."

@@ -9,11 +9,11 @@ params_file = "interactive_8_param.txt"
 param_columns = ["personId"]
 param_types = ["int"]
 query = """
-MATCH (person:Person {id: $personId})<-[:hasCreator]-(message:Comment|Post)<-[:replyOf]-(comment:Comment)-[:hasCreator]->(commentAuthor:Person)
+MATCH (start:Person {id: $personId})<-[:hasCreator]-(:Comment|Post)<-[:replyOf]-(comment:Comment)-[:hasCreator]->(person:Person)
 RETURN
-    commentAuthor.id AS commentAuthorId,
-    commentAuthor.firstName AS commentAuthorFirstName,
-    commentAuthor.lastName AS commentAuthorLastName,
+    person.id AS personId,
+    person.firstName AS personFirstName,
+    person.lastName AS personLastName,
     comment.creationDate AS commentCreationDate,
     comment.id AS commentId,
     comment.content AS commentContent
@@ -22,13 +22,13 @@ LIMIT 20
 """
 
 return_columns = [
-    "commentAuthorId", "commentAuthorFirstName", "commentAuthorLastName",
+    "personId", "personFirstName", "personLastName",
     "commentCreationDate", "commentId", "commentContent",
 ]
 
 expected_shape = "i,s,s,i,i,s"
 
 [divergences]
-message-union = "spec uses (message:Message); we use (message:Comment|Post). Same as IC2/IC7."
+message-union = "spec uses anonymous `(:Message)`; we use `(:Comment|Post)`. Loader doesn't synthesize :Message. Same as IC2/IC7."
 edge-casing = "loader produces lowercase :hasCreator / :replyOf. No semantic difference."
-no-cast-int = "ORDER BY tie-break is `CAST(commentId AS INTEGER) ASC`. gqlite stores `Comment.id` as native int; plain `commentId ASC` is exact-equivalent."
+no-tointeger = "spec ORDER BY uses plain `commentId ASC` already (no toInteger here); we match it directly."

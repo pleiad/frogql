@@ -1,21 +1,23 @@
 // Cypher translation of bench/ldbc-queries/ic8.toml for graphqlite.
 //
-// Source-of-truth: bench/ldbc-queries/ic8.toml. The query is a
-// direct translation of the spec — `(message:Message)` → `WHERE
-// message:Comment OR message:Post`, plain int-column ORDER BY (no
-// CAST needed since `.ldbcId` is already int-typed).
+// Source-of-truth: bench/ldbc-queries/ic8.toml. Mirrors the toml's
+// shape — same MATCH chain (`start` is the queried Person, `person`
+// is the comment author), same column names matching the LDBC
+// reference Cypher. Plain int ORDER BY (no toInteger needed since
+// `.ldbcId` is int-typed).
 //
-// graphqlite-specific divergences:
+// graphqlite-specific divergences from the toml:
 //   - `.ldbcId` instead of `.id` (graphqlite reserves `.id`).
-//   - WHERE for label disjunction.
+//   - `WHERE message:Comment OR message:Post` instead of label
+//     disjunction in the pattern.
 //   - Edge labels lowercase.
-MATCH (person:Person {ldbcId: $personId})<-[:hasCreator]-(message)<-[:replyOf]-(comment:Comment)-[:hasCreator]->(commentAuthor:Person)
+MATCH (start:Person {ldbcId: $personId})<-[:hasCreator]-(message)<-[:replyOf]-(comment:Comment)-[:hasCreator]->(person:Person)
 WHERE (message:Comment OR message:Post)
-RETURN commentAuthor.ldbcId AS commentAuthor_id,
-       commentAuthor.firstName AS commentAuthor_firstName,
-       commentAuthor.lastName AS commentAuthor_lastName,
-       comment.creationDate AS comment_creationDate,
-       comment.ldbcId AS comment_id,
-       comment.content AS comment_content
-ORDER BY comment_creationDate DESC, comment_id ASC
+RETURN person.ldbcId AS personId,
+       person.firstName AS personFirstName,
+       person.lastName AS personLastName,
+       comment.creationDate AS commentCreationDate,
+       comment.ldbcId AS commentId,
+       comment.content AS commentContent
+ORDER BY commentCreationDate DESC, commentId ASC
 LIMIT 20

@@ -31,7 +31,8 @@ return_columns = [
 expected_shape = "i,s,s,i,i,n/s,b"
 
 [divergences]
-message-union = "spec uses (message:Message); we use (message:Comment|Post). Same as IC2's message-union divergence."
-edge-casing = "loader produces lowercase :knows / :hasCreator / :likes (filename-stem convention). Spec uses uppercase. No semantic difference."
-no-minutes-latency = "spec also returns `minutesLatency = floor((like.creationDate - message.creationDate) / 60000)`. Dropping this column. gqlite parser doesn't tokenize `/` (division) and has no `FLOOR`/`CAST(... AS FLOAT)` — we'd need three parser features at once. The remaining 7 columns are returned verbatim."
-no-cast-int = "ORDER BY tie-break is `CAST(personId AS INTEGER) ASC`. gqlite stores `Person.id` as native int; plain `personId ASC` is exact-equivalent."
+message-union = "spec uses (message:Message); we use (message:Comment|Post). Same as IC2."
+edge-casing = "loader produces lowercase :knows / :hasCreator / :likes. Spec uses uppercase. No semantic difference."
+no-per-liker-dedup = "spec uses `WITH liker, message, like.creationDate AS likeTime, person ORDER BY likeTime DESC, toInteger(message.id) ASC WITH liker, head(collect({msg: message, likeTime: likeTime})) AS latestLike, person` to keep ONLY the most-recent like per liker. Our query drops this dedup — returns one row per (liker, message, like) tuple instead of one row per liker. Result rows differ: spec returns up to 20 distinct likers (each with their latest like); we return up to 20 likes (a single liker who liked many messages can appear multiple times). gqlite's parser has no `WITH` (ISO GQL §16; would need explicit projection stage), no `collect()` aggregate, no `head()` list function — three feature gaps stack to make this canonical idiom unexpressible. Cross-system bench applies the same simplification to graphqlite and Kuzu's cypher files for apples-to-apples comparison; per-engine canonical Cypher would not run the same query across systems."
+no-minutes-latency = "spec returns `minutesLatency = toInteger(floor(toFloat(latestLike.likeTime - latestLike.msg.creationDate)/1000.0)/60.0)`. Dropped. gqlite parser doesn't tokenize `/` and has no `toFloat`/`floor`/`toInteger`. The remaining 7 columns are returned."
+no-tointeger = "ORDER BY tie-break is `toInteger(personId) ASC`. gqlite stores `Person.id` as native int; plain `personId ASC` sorts identically."

@@ -2,27 +2,27 @@
 // (colliery-io/graphqlite 0.4.4 from PyPI).
 //
 // Source-of-truth: bench/ldbc-queries/ic2.toml. The toml runs the
-// spec-faithful query (COALESCE, ORDER BY) since gqlite supports
-// both as of 2026-05. This file is the direct translation for
-// graphqlite's Cypher dialect.
+// closest-to-spec query gqlite's ISO GQL parser supports today
+// (anonymous start, COALESCE, ORDER BY, <=). This translation
+// mirrors the toml's shape — same columns, same logical query —
+// for fair cross-system comparison. NOT a verbatim copy of the
+// LDBC reference Cypher; the toml is the bench's source-of-truth.
 //
-// graphqlite-specific divergences:
-//   - graphqlite reserves `.id` for the loader's external_id
-//     (prefixed `"Person:933"` etc.), so we expose the int LDBC id
-//     under `.ldbcId` and reference it everywhere `gqlite` uses `.id`.
+// graphqlite-specific divergences from the toml:
+//   - graphqlite reserves `.id` for the loader's prefixed
+//     external_id; we read the int LDBC id from `.ldbcId`.
 //     See DIVERGENCES.md.
-//   - graphqlite's Cypher dialect rejects `(c:Comment|Post)` label
-//     disjunction in patterns (Cypher 5+ feature). We use the
-//     equivalent `WHERE c:Comment OR c:Post` form. Same logical query.
-//   - Edge labels lowercase (`:knows`, `:hasCreator`) per the loader
-//     convention. Spec writeups vary on casing.
-MATCH (p:Person {ldbcId: $personId})-[:knows]-(friend:Person)<-[:hasCreator]-(message)
-WHERE (message:Comment OR message:Post) AND message.creationDate < $maxDate
-RETURN friend.ldbcId AS friend_id,
-       friend.firstName AS friend_firstName,
-       friend.lastName AS friend_lastName,
-       message.ldbcId AS message_id,
-       COALESCE(message.content, message.imageFile) AS message_content,
-       message.creationDate AS message_creationDate
-ORDER BY message_creationDate DESC, message_id ASC
+//   - Cypher 4.x dialect rejects `(message:Comment|Post)` label
+//     disjunction in patterns; we use `WHERE message:Comment OR
+//     message:Post`. Same logical query.
+//   - Edge labels lowercase per loader convention.
+MATCH (:Person {ldbcId: $personId})-[:knows]-(friend:Person)<-[:hasCreator]-(message)
+WHERE (message:Comment OR message:Post) AND message.creationDate <= $maxDate
+RETURN friend.ldbcId AS personId,
+       friend.firstName AS personFirstName,
+       friend.lastName AS personLastName,
+       message.ldbcId AS postOrCommentId,
+       COALESCE(message.content, message.imageFile) AS postOrCommentContent,
+       message.creationDate AS postOrCommentCreationDate
+ORDER BY postOrCommentCreationDate DESC, postOrCommentId ASC
 LIMIT 20
