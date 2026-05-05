@@ -717,3 +717,91 @@ fn test_groupby_explicit_pure_aggregate() {
     let rs = run(&g, "MATCH (x: User) RETURN SUM(x.age)");
     assert_eq!(rs, vec![vec![Value::Int(95)]]);
 }
+
+// =====================================================================
+// GROUP BY position: ISO §14.11 places `<group by clause>` INSIDE the
+// `<return statement body>`, after the return item list. Earlier
+// gqlite releases used `MATCH ... GROUP BY ... RETURN ...` (legacy);
+// the canonical ISO form is `MATCH ... RETURN ... GROUP BY ...`. Both
+// positions parse to the same AST; specifying GROUP BY in both is a
+// parse error.
+// =====================================================================
+
+#[test]
+fn test_groupby_canonical_position_after_return_items() {
+    let g = graph_three_users();
+    let rs = run(
+        &g,
+        "MATCH (x: User) RETURN x.city, COUNT(*) GROUP BY x.city",
+    );
+    let mut sorted: Vec<Vec<Value>> = rs;
+    sorted.sort_by(|a, b| match (&a[0], &b[0]) {
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        _ => std::cmp::Ordering::Equal,
+    });
+    // Same expected output as the legacy form on three_users (2 cities).
+    assert_eq!(sorted.len(), 2);
+}
+
+#[test]
+fn test_groupby_canonical_and_legacy_produce_equal_results() {
+    // Pin that the two positions are semantically equivalent.
+    let g = graph_three_users();
+    let canonical = run(
+        &g,
+        "MATCH (x: User) RETURN x.city, COUNT(*) GROUP BY x.city",
+    );
+    let legacy = run(
+        &g,
+        "MATCH (x: User) GROUP BY x.city RETURN x.city, COUNT(*)",
+    );
+    let sort_rows = |mut rs: Vec<Vec<Value>>| {
+        rs.sort_by(|a, b| match (&a[0], &b[0]) {
+            (Value::Str(x), Value::Str(y)) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
+        });
+        rs
+    };
+    assert_eq!(sort_rows(canonical), sort_rows(legacy));
+}
+
+#[test]
+fn test_groupby_canonical_with_distinct_and_multi_key() {
+    // ISO §14.11: GROUP BY follows the return item list within the
+    // RETURN body, even when DISTINCT is set. The clause must still
+    // parse and produce the right group keys.
+    let q = gqlrust::compile_query_unchecked(
+        "MATCH (x: U) RETURN DISTINCT x.country, x.city, COUNT(*) GROUP BY x.country, x.city",
+    )
+    .unwrap();
+    assert!(q.distinct);
+    let gb = q.group_by.expect("group_by must be present");
+    assert_eq!(gb.len(), 2);
+}
+
+#[test]
+fn test_groupby_specified_in_both_positions_is_parse_error() {
+    let r = gqlrust::compile_query_unchecked(
+        "MATCH (x: User) GROUP BY x.city RETURN x.city, COUNT(*) GROUP BY x.city",
+    );
+    assert!(r.is_err(), "expected parse error, got {r:?}");
+    let err = r.unwrap_err();
+    assert!(
+        err.contains("GROUP BY") && err.contains("only once"),
+        "expected error mentioning duplicate GROUP BY, got: {err}"
+    );
+}
+
+#[test]
+fn test_groupby_canonical_with_order_by_and_limit() {
+    // Full §14.10 + §14.11 trailing chain: RETURN body (with GROUP BY
+    // inside) followed by ORDER BY then LIMIT.
+    let g = graph_three_users();
+    let rs = run(
+        &g,
+        "MATCH (x: User) RETURN x.city, COUNT(*) GROUP BY x.city \
+         ORDER BY x.city LIMIT 10",
+    );
+    assert!(rs.len() <= 10);
+    assert!(!rs.is_empty());
+}

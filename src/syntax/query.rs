@@ -10,6 +10,34 @@ pub enum SetQuantifier {
     Distinct,
 }
 
+/// ISO §16.17 `<ordering specification>`. ASC is implicit when omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDir {
+    Asc,
+    Desc,
+}
+
+/// ISO §16.17 `<null ordering>` (Feature GA03). When the user does not
+/// specify NULLS FIRST or NULLS LAST, the implementation default kicks
+/// in — gqlite uses NULLS LAST regardless of `SortDir` per ISO §16.17
+/// SR 6 ("the default for `<null ordering>` shall not depend on the
+/// context outside of `<sort specification list>`").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NullsOrder {
+    First,
+    Last,
+}
+
+/// ISO §16.17 `<sort specification>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SortSpec {
+    pub key: Expr,
+    pub dir: SortDir,
+    /// `None` means the user did not specify, so the implementation
+    /// default applies (see `NullsOrder` doc).
+    pub nulls: Option<NullsOrder>,
+}
+
 /// ISO §20.9 `<general set function type>` core 5 (always supported).
 /// `COLLECT_LIST`/`STDDEV_*` (Feature GF10) deferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +126,16 @@ pub struct Query {
     pub group_by: Option<Vec<Expr>>,
     pub returns: Option<Vec<ReturnItem>>,
     pub distinct: bool,
+    /// ISO §14.9 `<order by clause>` + §16.17 `<sort specification list>`.
+    /// `None` means no ordering — rows come out in whatever order the
+    /// runtime produced them (LTJ VEO / candidate-list iteration). When
+    /// `Some(specs)`, runtime sorts the working table by `specs` BEFORE
+    /// applying LIMIT (per §14.9 GR 5: ORDER BY → OFFSET → LIMIT).
+    ///
+    /// Default direction is ASC per §16.17 SR 5b. Default null ordering
+    /// is implementation-defined (gqlite uses NULLS LAST regardless of
+    /// direction per §16.17 SR 6).
+    pub order_by: Option<Vec<SortSpec>>,
     /// ISO/IEC 39075:2024 `<limit clause>` (feature GQ13). `None` means
     /// "no LIMIT clause was written"; callers may still pass a runtime
     /// cap via `Runtime::run_query(_, cap)` and it will apply. `Some(N)`
@@ -132,6 +170,7 @@ impl Query {
             group_by: None,
             returns: None,
             distinct: false,
+            order_by: None,
             limit: None,
         }
     }
@@ -243,8 +282,28 @@ impl fmt::Display for Query {
             let items: Vec<String> = returns.iter().map(|r| r.to_string()).collect();
             write!(f, "{}", items.join(", "))?;
         }
+        if let Some(specs) = &self.order_by {
+            let parts: Vec<String> = specs.iter().map(|s| s.to_string()).collect();
+            write!(f, " ORDER BY {}", parts.join(", "))?;
+        }
         if let Some(n) = self.limit {
             write!(f, " LIMIT {n}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for SortSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.key)?;
+        match self.dir {
+            SortDir::Asc => {} // ASC is the default — print only when DESC.
+            SortDir::Desc => write!(f, " DESC")?,
+        }
+        match self.nulls {
+            None => {}
+            Some(NullsOrder::First) => write!(f, " NULLS FIRST")?,
+            Some(NullsOrder::Last) => write!(f, " NULLS LAST")?,
         }
         Ok(())
     }

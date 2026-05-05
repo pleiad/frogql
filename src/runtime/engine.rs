@@ -10,7 +10,8 @@ use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::{
-    Aggregator, GeneralSetKind, MatchStatement, Query, ReturnItem, SetQuantifier,
+    Aggregator, GeneralSetKind, MatchStatement, NullsOrder, Query, ReturnItem, SetQuantifier,
+    SortDir, SortSpec,
 };
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
@@ -171,18 +172,45 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             };
         }
         let limit = combine_limits(query.limit, limit);
+        let has_order = query.order_by.is_some();
         let return_items = match &query.returns {
             None => {
-                let ir = self.run_match_chain(query, limit);
+                // Raw path. ORDER BY needs the full binding table before
+                // it can sort; otherwise the limit can be threaded into
+                // the match chain for early termination.
+                let input_limit = if has_order { 0 } else { limit };
+                let mut ir = self.run_match_chain(query, input_limit);
+                if let Some(specs) = &query.order_by {
+                    self.sort_rows(&mut ir.rows, specs);
+                    if limit > 0 && ir.rows.len() > limit {
+                        ir.rows.truncate(limit);
+                    }
+                }
                 return QueryResult::Raw(ir);
             }
             Some(items) => items,
         };
 
         let has_aggs = return_items.iter().any(|i| i.is_aggregate());
-        let needs_full_input = has_aggs || query.distinct;
+        // Aggregation, DISTINCT and ORDER BY all need the full input
+        // before they can apply, so we cannot early-terminate the match
+        // chain when any of them are present.
+        let needs_full_input = has_aggs || query.distinct || has_order;
         let input_limit = if needs_full_input { 0 } else { limit };
-        let ir = self.run_match_chain(query, input_limit);
+        let mut ir = self.run_match_chain(query, input_limit);
+
+        // Sort BEFORE projection / aggregation when the query has
+        // ORDER BY without aggregation. Sorting the binding table lets
+        // the sort key reference any variable in the env via `run_expr`
+        // without alias resolution. Aggregate queries fall through the
+        // default unsorted path; ORDER BY over aggregate columns is a
+        // future extension (would need to resolve sort keys against
+        // projected columns or aggregate expressions).
+        if !has_aggs {
+            if let Some(specs) = &query.order_by {
+                self.sort_rows(&mut ir.rows, specs);
+            }
+        }
 
         let projected = if has_aggs {
             let mut p = self.run_aggregated(return_items, query.group_by.as_deref(), &ir.rows);
@@ -204,6 +232,41 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         QueryResult::Projected(projected)
     }
 
+    /// Sort the binding table by a list of sort specifications.
+    /// Implements ISO §16.17 GR 1: stable sort by lexicographic
+    /// comparison of sort keys. Null handling per §16.17 SR 6 — the
+    /// implementation default is NULLS LAST regardless of direction
+    /// when the user does not specify; explicit NULLS FIRST/LAST
+    /// (Feature GA03) overrides it.
+    ///
+    /// `Failure` from `run_expr` (unbound variable, missing attribute)
+    /// and `Success(Value::Null)` are both treated as null per the
+    /// 3VL convention used elsewhere in the engine.
+    fn sort_rows(&self, rows: &mut Vec<ResultRow>, specs: &[SortSpec]) {
+        // Pre-compute each spec's key per row so the comparator is a
+        // tuple compare, not n×log(n) `run_expr` calls.
+        let mut decorated: Vec<(Vec<Option<Value>>, ResultRow)> = std::mem::take(rows)
+            .into_iter()
+            .map(|row| {
+                let keys = specs
+                    .iter()
+                    .map(|s| match self.run_expr(&row.assignment, &s.key) {
+                        ExprResult::Success(Value::Null) | ExprResult::Failure(_) => None,
+                        ExprResult::Success(v) => Some(v),
+                    })
+                    .collect();
+                (keys, row)
+            })
+            .collect();
+
+        // `sort_by` is stable, so peer rows (§16.17 GR 1k) preserve
+        // their original order — gqlite chooses to be stricter than
+        // ISO US006, which leaves peer order implementation-dependent.
+        decorated.sort_by(|(a, _), (b, _)| compare_sort_keys(a, b, specs));
+
+        rows.extend(decorated.into_iter().map(|(_, r)| r));
+    }
+
     /// Evaluate the match chain. Two paths:
     ///
     /// - All-Simple: collapse to one `PathPattern::Join` and run the
@@ -223,15 +286,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
         let mut iter = query.matches.iter();
         let first = iter.next().expect("Query::matches must be non-empty");
-        let mut acc = self.run_path_pattern(first.pattern(), 0);
-        // Leading OPTIONAL with an empty preceding table: ISO §14.4 GR 1
-        // says OPTIONAL preserves the empty row when no match exists, so
-        // an OPTIONAL as the very first statement still yields one row
-        // (with all its variables set to Nothing) when its pattern is
-        // unsatisfiable. We do not synthesize that row here because the
-        // current pipeline starts from the first pattern's results
-        // directly; nothing in the existing test suite or §14.10 §FINISH
-        // depends on the empty-row case for a leading OPTIONAL.
+        // When the chain has only one match, no subsequent join can
+        // filter rows further — pass `limit` down so the LTJ runtime can
+        // early-terminate inside `run_path_pattern`. Multi-match chains
+        // pass 0 because Simple matches may filter rows out and we'd
+        // lose candidates by truncating the leading binding table.
+        let first_limit = if query.matches.len() == 1 { limit } else { 0 };
+        let mut acc = self.run_path_pattern(first.pattern(), first_limit);
         let mut bound_vars: HashSet<String> = first.pattern().freevars();
 
         for m in iter {
@@ -249,6 +310,15 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 acc.rows.truncate(limit);
                 break;
             }
+        }
+
+        // Defensive truncation: when the for-loop never runs (single-match
+        // chain) the LTJ runtime may have produced more than `limit` rows
+        // for patterns it can't early-terminate. Without this, a query
+        // like `OPTIONAL MATCH (x) LIMIT 5` with no RETURN would emit
+        // every binding row instead of five.
+        if limit > 0 && acc.rows.len() > limit {
+            acc.rows.truncate(limit);
         }
 
         acc
@@ -1853,6 +1923,60 @@ impl GroupKey {
     fn from_values(vs: Vec<Value>) -> Self {
         GroupKey(vs)
     }
+}
+
+/// Compare two pre-computed sort-key tuples for ISO §16.17 ORDER BY.
+///
+/// Each key is `Option<Value>`: `None` represents the null value (either
+/// `Value::Null` or a failure during expression evaluation). For each
+/// position the comparison is:
+///
+/// - both null → Equal (per §16.17 GR 1g.ii.1)
+/// - one side null → ordering depends on `<null ordering>`. Default is
+///   NULLS LAST regardless of `SortDir` (§16.17 SR 6, gqlite IS001
+///   choice).
+/// - both non-null → `value_cmp`; an Unknown result (incomparable
+///   values) falls back to Equal so the comparator stays a total order
+///   (US007 leaves this implementation-dependent).
+///
+/// `SortDir::Desc` reverses the ordering of the value comparison only;
+/// the null-ordering policy is unaffected by direction (per the SR 6
+/// invariant on the implementation default).
+fn compare_sort_keys(
+    a: &[Option<Value>],
+    b: &[Option<Value>],
+    specs: &[SortSpec],
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    debug_assert_eq!(a.len(), specs.len());
+    debug_assert_eq!(b.len(), specs.len());
+
+    for (i, spec) in specs.iter().enumerate() {
+        let nulls = spec.nulls.unwrap_or(NullsOrder::Last);
+        let ord = match (&a[i], &b[i]) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => match nulls {
+                NullsOrder::First => Ordering::Less,
+                NullsOrder::Last => Ordering::Greater,
+            },
+            (Some(_), None) => match nulls {
+                NullsOrder::First => Ordering::Greater,
+                NullsOrder::Last => Ordering::Less,
+            },
+            (Some(av), Some(bv)) => match value_cmp(av, bv) {
+                Some(o) => match spec.dir {
+                    SortDir::Asc => o,
+                    SortDir::Desc => o.reverse(),
+                },
+                // Incomparable (cross-kind) — total-order fallback.
+                None => Ordering::Equal,
+            },
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    Ordering::Equal
 }
 
 /// MIN/MAX ordering. Int<->Float promote; cross-kind returns None.

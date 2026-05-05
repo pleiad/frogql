@@ -337,3 +337,55 @@ fn runtime_optional_where_runs_before_outer_join() {
         );
     }
 }
+
+// =====================================================================
+// Regression: LIMIT must be honored when the chain is a single OPTIONAL
+// with no following match. ISO §14.3-14.4 SR4 allows OPTIONAL as the
+// only statement; without RETURN the Raw path used to skip the
+// truncation entirely because the for-loop never ran.
+// =====================================================================
+
+#[test]
+fn runtime_single_optional_match_honors_limit_without_return() {
+    let g = fraud_graph();
+    let rt = Runtime::new(&g);
+    // 5 nodes in fraud.json. With limit=2 the binding table must shrink.
+    let q = compile_query("OPTIONAL MATCH (x) LIMIT 2").unwrap();
+    match rt.run_query(&q, 0) {
+        QueryResult::Raw(ir) => assert_eq!(
+            ir.rows.len(),
+            2,
+            "single-OPTIONAL Raw path must respect LIMIT (was emitting all rows)",
+        ),
+        _ => panic!("expected Raw result for query without RETURN"),
+    }
+}
+
+#[test]
+fn runtime_single_simple_match_honors_limit_without_return() {
+    // Same regression for a single Simple match: this path collapses to
+    // run_path_pattern which honors limit, but pin it explicitly so the
+    // single-match limit invariant is covered for both shapes.
+    let g = fraud_graph();
+    let rt = Runtime::new(&g);
+    let q = compile_query("MATCH (x) LIMIT 2").unwrap();
+    match rt.run_query(&q, 0) {
+        QueryResult::Raw(ir) => assert_eq!(ir.rows.len(), 2),
+        _ => panic!("expected Raw result"),
+    }
+}
+
+#[test]
+fn runtime_single_optional_match_caller_limit_also_honored() {
+    // The runtime cap (passed via `Runtime::run_query(_, cap)`) must also
+    // shrink a single-OPTIONAL Raw result. Combine_limits picks the
+    // smaller of in-query LIMIT and caller cap; here only the caller cap
+    // is set.
+    let g = fraud_graph();
+    let rt = Runtime::new(&g);
+    let q = compile_query("OPTIONAL MATCH (x)").unwrap();
+    match rt.run_query(&q, 3) {
+        QueryResult::Raw(ir) => assert_eq!(ir.rows.len(), 3),
+        _ => panic!("expected Raw result"),
+    }
+}

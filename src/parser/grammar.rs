@@ -3,7 +3,8 @@ use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::{
-    Aggregator, GeneralSetKind, MatchStatement, Query, ReturnItem, SetQuantifier,
+    Aggregator, GeneralSetKind, MatchStatement, NullsOrder, Query, ReturnItem, SetQuantifier,
+    SortDir, SortSpec,
 };
 use crate::syntax::statement::{IndexKindStmt, Statement, TypeElement};
 use crate::typing::descriptor_type::DescriptorType;
@@ -128,16 +129,37 @@ impl Parser {
         }
     }
 
-    // full_query   = match_clause+ ("GROUP BY" expr (, expr)*)?
-    //                ("RETURN" ("DISTINCT")? return_list)?
+    // full_query   = match_clause+ legacy_group_by?
+    //                ("RETURN" ("DISTINCT")? return_list group_by?)?
+    //                ("ORDER BY" sort_spec (, sort_spec)*)?
     //                ("LIMIT" integer)?
+    // sort_spec    = expr ("ASC"|"DESC"|"ASCENDING"|"DESCENDING")?
+    //                ("NULLS FIRST"|"NULLS LAST")?
     // match_clause = ("OPTIONAL" "MATCH" | "MATCH"?) query ("WHERE" expr)?
     //
-    // ISO §14.3-14.4. The `MATCH` keyword is optional only on the first
-    // clause for back-compat with bare-pattern queries (`(x)-[]->(y)`);
-    // an `OPTIONAL` always requires the explicit `MATCH` after it. LIMIT
-    // is accepted both with and without a preceding RETURN — the
-    // runtime applies it to whatever the query produces.
+    // ISO §14.3-14.4 + §14.9 + §14.11 + §16.17. The `MATCH` keyword is
+    // optional only on the first clause for back-compat with bare-
+    // pattern queries (`(x)-[]->(y)`); an `OPTIONAL` always requires
+    // the explicit `MATCH` after it.
+    //
+    // GROUP BY position. ISO §14.11 places `<group by clause>` INSIDE
+    // the `<return statement body>`, after the `<return item list>`:
+    //
+    //     <return statement body> ::=
+    //       [<set quantifier>] {* | <return item list>} [<group by clause>]
+    //
+    // Earlier versions of this parser put GROUP BY between WHERE and
+    // RETURN (commit 72a6449e). To stay ISO-conformant without breaking
+    // the test corpus written against that older surface, BOTH
+    // positions are accepted: the canonical post-items position is the
+    // ISO-correct form and the one we recommend; the legacy pre-RETURN
+    // form is still parsed but flagged as the same clause. Specifying
+    // GROUP BY in both positions is a parse error.
+    //
+    // ORDER BY and LIMIT are both accepted with or without a preceding
+    // RETURN — the runtime applies them to whatever binding table the
+    // query produces. Their order matches §14.9 GR 5: ORDER BY happens
+    // BEFORE LIMIT.
     fn full_query(&mut self) -> Result<Query, String> {
         let first_optional = self.eat(&Token::Optional);
         if first_optional {
@@ -170,23 +192,35 @@ impl Parser {
             }
         }
 
-        let group_by = if self.eat(&Token::GroupBy) {
-            let mut exprs = vec![self.expr()?];
-            while self.eat(&Token::Comma) {
-                exprs.push(self.expr()?);
-            }
-            Some(exprs)
-        } else {
-            None
-        };
+        // Legacy position: GROUP BY between the match chain and RETURN.
+        // Pre-ISO form kept for back-compat (commit 72a6449e). The
+        // canonical post-items position below is ISO §14.11.
+        let legacy_group_by = self.parse_group_by_clause()?;
 
-        let (returns, distinct) = if self.eat(&Token::Return) {
+        let (returns, distinct, post_return_group_by) = if self.eat(&Token::Return) {
             let distinct = self.eat(&Token::Distinct);
-            (Some(self.return_list()?), distinct)
+            let items = self.return_list()?;
+            // ISO §14.11 <return statement body>: GROUP BY clause
+            // immediately follows the <return item list>.
+            let gb = self.parse_group_by_clause()?;
+            (Some(items), distinct, gb)
         } else {
-            (None, false)
+            (None, false, None)
         };
 
+        let group_by = match (legacy_group_by, post_return_group_by) {
+            (Some(_), Some(_)) => {
+                return Err(
+                    "GROUP BY appears both before RETURN and inside the RETURN body — \
+                     specify it only once (the canonical position is after the return items per ISO §14.11)"
+                        .into(),
+                );
+            }
+            (Some(gb), None) | (None, Some(gb)) => Some(gb),
+            (None, None) => None,
+        };
+
+        let order_by = self.parse_optional_order_by()?;
         let limit = self.parse_optional_limit()?;
 
         Ok(Query {
@@ -194,8 +228,23 @@ impl Parser {
             group_by,
             returns,
             distinct,
+            order_by,
             limit,
         })
+    }
+
+    /// Parse a `GROUP BY <expr> ("," <expr>)*` clause. Returns `None` if
+    /// the next token is not `GROUP BY`. Both the legacy pre-RETURN and
+    /// the canonical post-items positions go through this helper.
+    fn parse_group_by_clause(&mut self) -> Result<Option<Vec<Expr>>, String> {
+        if !self.eat(&Token::GroupBy) {
+            return Ok(None);
+        }
+        let mut exprs = vec![self.expr()?];
+        while self.eat(&Token::Comma) {
+            exprs.push(self.expr()?);
+        }
+        Ok(Some(exprs))
     }
 
     /// Optional trailing `LIMIT N`. Returns `None` if absent.
@@ -213,6 +262,49 @@ impl Parser {
         u32::try_from(n)
             .map(Some)
             .map_err(|_| format!("LIMIT {n} exceeds the supported u32 range"))
+    }
+
+    /// Optional trailing `ORDER BY <sort spec list>`. Returns `None` if
+    /// absent. The list is non-empty when present (parse error if no
+    /// spec follows the keyword).
+    fn parse_optional_order_by(&mut self) -> Result<Option<Vec<SortSpec>>, String> {
+        if !self.eat(&Token::OrderBy) {
+            return Ok(None);
+        }
+        let mut specs = vec![self.sort_spec()?];
+        while self.eat(&Token::Comma) {
+            specs.push(self.sort_spec()?);
+        }
+        Ok(Some(specs))
+    }
+
+    /// One `<sort specification>`: expr, optional direction, optional
+    /// null ordering. ISO §16.17 SR 5b: ASC is implicit when omitted.
+    fn sort_spec(&mut self) -> Result<SortSpec, String> {
+        let key = self.expr()?;
+        let dir = match self.peek() {
+            Token::Asc | Token::Ascending => {
+                self.advance();
+                SortDir::Asc
+            }
+            Token::Desc | Token::Descending => {
+                self.advance();
+                SortDir::Desc
+            }
+            _ => SortDir::Asc,
+        };
+        let nulls = match self.peek() {
+            Token::NullsFirst => {
+                self.advance();
+                Some(NullsOrder::First)
+            }
+            Token::NullsLast => {
+                self.advance();
+                Some(NullsOrder::Last)
+            }
+            _ => None,
+        };
+        Ok(SortSpec { key, dir, nulls })
     }
 
     /// One match clause: pattern + optional WHERE wrapped in `Filter`.
@@ -1096,6 +1188,9 @@ impl Parser {
         if self.check(&Token::GroupBy) {
             return Err("EXISTS body cannot contain GROUP BY".into());
         }
+        if self.check(&Token::OrderBy) {
+            return Err("EXISTS body cannot contain ORDER BY".into());
+        }
         if self.check(&Token::Limit) {
             return Err("EXISTS body cannot contain LIMIT".into());
         }
@@ -1107,6 +1202,7 @@ impl Parser {
             group_by: None,
             returns: None,
             distinct: false,
+            order_by: None,
             limit: None,
         })
     }

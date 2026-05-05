@@ -8,7 +8,7 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem};
+use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem, SortSpec};
 
 use super::descriptor_type::DescriptorType;
 use super::label_type::LabelType;
@@ -88,11 +88,24 @@ impl Typechecker {
                 None => self.check_no_implicit_group_by(returns),
             }
         }
+        if let Some(specs) = &q.order_by {
+            self.check_order_by(specs, &r.env);
+        }
 
         if !self.errors.is_empty() {
             r.ok = false;
         }
         r
+    }
+
+    /// ISO §16.17: each `<sort key>` is a value expression evaluated in
+    /// the working record context. We reuse the binding-table env for
+    /// validation — RETURN aliases are not yet visible here (would
+    /// require a follow-up that threads the return-item env through).
+    fn check_order_by(&mut self, specs: &[SortSpec], env: &TypeEnvironment) {
+        for spec in specs {
+            let _ = self.check_expr(&spec.key, env);
+        }
     }
 
     /// Sequential walk of the match chain when at least one is OPTIONAL.

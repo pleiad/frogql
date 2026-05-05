@@ -30,6 +30,21 @@ pub enum Token {
     /// ISO-39075 §16.x — `LIMIT <integer>` after RETURN. Produces
     /// `Query.limit = Some(N)`; the runtime caps row emission to N.
     Limit,
+    /// ISO-39075 §14.9 + §16.16-17 — `ORDER BY <sort spec list>`.
+    /// Compound token (only emitted when `ORDER` is followed by `BY`)
+    /// so `order` and `by` stay valid as property names.
+    OrderBy,
+    /// `<ordering specification>` (§16.17). Both short and long forms;
+    /// case-insensitive, reserved. `ASC`/`DESC` are short enough to be
+    /// rare property names and the standard requires both.
+    Asc,
+    Desc,
+    Ascending,
+    Descending,
+    /// `<null ordering>` (§16.17, Feature GA03). Compound to keep `nulls`
+    /// and `first`/`last` usable as identifiers outside this context.
+    NullsFirst,
+    NullsLast,
     Typed,
     /// DDL / catalog keywords (uppercase only — see lexer rules).
     Create,
@@ -443,6 +458,43 @@ impl Lexer {
                             }
                             Token::GroupBy
                         }
+                        // `ORDER BY` is the only spelling we recognize
+                        // ('ORDER' alone has no meaning in GQL grammar).
+                        "ORDER" | "order"
+                            if matches!(
+                                self.peek_next_word().as_ref().map(|(w, _)| w.as_str()),
+                                Some("by")
+                            ) =>
+                        {
+                            if let Some((_, end)) = self.peek_next_word() {
+                                self.pos = end;
+                            }
+                            Token::OrderBy
+                        }
+                        // `NULLS FIRST` / `NULLS LAST` recognized as compounds
+                        // (Feature GA03). `nulls` alone stays available as a
+                        // property name; the lookahead only fires when the
+                        // next word is FIRST or LAST.
+                        "NULLS" | "nulls"
+                            if matches!(
+                                self.peek_next_word().as_ref().map(|(w, _)| w.as_str()),
+                                Some("first") | Some("last")
+                            ) =>
+                        {
+                            let (next_word, end) = self.peek_next_word().unwrap();
+                            self.pos = end;
+                            if next_word == "first" {
+                                Token::NullsFirst
+                            } else {
+                                Token::NullsLast
+                            }
+                        }
+                        // ISO §16.17 <ordering specification>. Both short
+                        // and long forms; case-insensitive.
+                        "ASC" | "asc" => Token::Asc,
+                        "DESC" | "desc" => Token::Desc,
+                        "ASCENDING" | "ascending" => Token::Ascending,
+                        "DESCENDING" | "descending" => Token::Descending,
                         // Soft keywords: only when followed by `(`. Keeps
                         // `{count: 1}`, `x.sum`, etc. working as identifiers.
                         "COUNT" | "count" if self.peek_non_space() == Some('(') => Token::Count,
