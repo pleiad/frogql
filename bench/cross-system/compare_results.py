@@ -65,6 +65,12 @@ def main() -> int:
     by_cell: dict[tuple[int, str], list[tuple[int, int]]] = defaultdict(list)
     raw_params_by_row: dict[int, str] = {}
     queries_seen: set[str] = set()
+    # Per-system error tally. A CSV row with `result_count == -1` is a
+    # sentinel emitted by a runner whose query failed (panic, error,
+    # whatever); we count those separately and exclude them from the
+    # latency / count summaries below.
+    errors_by_system: dict[str, int] = defaultdict(int)
+    error_rows_by_system: dict[str, set[int]] = defaultdict(set)
 
     with path.open() as f:
         reader = csv.DictReader(f, delimiter=";")
@@ -77,19 +83,53 @@ def main() -> int:
                 print(f"  ! malformed row, skipping: {e} :: {r}", file=sys.stderr)
                 continue
             backend = r["backend"]
-            by_cell[(row_idx, backend)].append((elapsed, rc))
-            raw_params_by_row.setdefault(row_idx, r["params"])
             queries_seen.add(r.get("query", ""))
+            raw_params_by_row.setdefault(row_idx, r["params"])
+            if rc < 0:
+                errors_by_system[backend] += 1
+                error_rows_by_system[backend].add(row_idx)
+                continue
+            by_cell[(row_idx, backend)].append((elapsed, rc))
 
-    if not by_cell:
-        print("no rows found in input — nothing to compare.", file=sys.stderr)
+    if not by_cell and not errors_by_system:
+        print("no rows found in input -- nothing to compare.", file=sys.stderr)
         return 1
 
-    systems = sorted({b for (_, b) in by_cell.keys()})
-    rows = sorted({r for (r, _) in by_cell.keys()})
+    # Systems set is the union of "any successful row" and "any errored row",
+    # so a system that errored on every param row still shows up in tables
+    # (with a column of dashes) instead of vanishing silently.
+    systems = sorted(
+        {b for (_, b) in by_cell.keys()} | set(errors_by_system.keys())
+    )
+    rows = sorted(
+        {r for (r, _) in by_cell.keys()}
+        | {r for s in error_rows_by_system.values() for r in s}
+    )
     query_label = sorted(queries_seen).pop() if len(queries_seen) == 1 else (
         ",".join(sorted(queries_seen)) if queries_seen else "?"
     )
+
+    # ---- 0. Errored-row tally per system ----
+    # Surface this BEFORE the per-cell table because a high error count means
+    # the latency numbers below are over a partial sample. Per-system
+    # divergences (e.g. graphlite/DIVERGENCES.md) document why a system
+    # might error.
+    print(f"=== Errored param rows [{query_label}] (sentinel result_count = -1) ===")
+    print()
+    if not errors_by_system:
+        print("  none -- every system answered every param row.")
+    else:
+        for s in systems:
+            n_iters = errors_by_system.get(s, 0)
+            n_rows = len(error_rows_by_system.get(s, set()))
+            if n_iters == 0:
+                continue
+            erows = sorted(error_rows_by_system.get(s, set()))
+            print(
+                f"  {s:<22} {n_rows} param row(s) errored "
+                f"({n_iters} sentinel iter(s)): rows={erows}"
+            )
+    print()
 
     # ---- 1. Per-cell summary ----
     print(f"=== Per-cell summary [{query_label}] (latency, ms; result_count) ===")
@@ -156,7 +196,7 @@ def main() -> int:
         for s in systems:
             samples = by_cell.get((rk, s), [])
             if not samples:
-                cells.append(f"{'—':>14}")
+                cells.append(f"{'--':>14}")
             else:
                 elapsed_ms = [e / 1_000_000.0 for e, _ in samples]
                 med = statistics.median(elapsed_ms)

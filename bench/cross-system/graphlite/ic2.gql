@@ -1,0 +1,28 @@
+-- ISO GQL translation of bench/ldbc-queries/ic2.toml.
+--
+-- Source-of-truth IC2 lives in that toml; this file is a language
+-- translation. Substitution placeholders use double-curly form
+-- (`{{personId}}` / `{{maxDate}}`) which run.rs replaces per param row
+-- because graphlite-rust-sdk 0.0.1 has no parameter-binding API.
+--
+-- Divergences from the LDBC spec, applied to every system in the
+-- cross-system bench for apples-to-apples:
+--   - no ORDER BY (gqlite parser doesn't support it)
+--   - no `coalesce(c.content, c.imageFile)` — return c.content directly
+--   - lowercase :knows / :hasCreator (loader convention)
+--
+-- GraphLite-specific divergences (driven by the SDK 0.0.1 dialect docs):
+--   - `:knows` is loaded in both directions during setup, so the
+--     pattern uses a directed `-[:knows]->`. Equivalent to the
+--     undirected `~[:knows]~` in our own gqlite IC2.
+--   - No `(c:Comment | Post)` union-label syntax; we issue this as
+--     two separate queries (one per label) at the runner level and
+--     concatenate the results before returning. The runner takes
+--     care of union-ing — this template covers ONE message label,
+--     with `{{messageLabel}}` filled in by the runner.
+MATCH (p:Person {id: {{personId}}})-[:knows]->(friend:Person)<-[:hasCreator]-(c:{{messageLabel}})
+WHERE c.creationDate <= {{maxDate}}
+RETURN friend.id AS friend_id, friend.firstName AS friend_firstName,
+       friend.lastName AS friend_lastName,
+       c.id AS c_id, c.content AS c_content, c.creationDate AS c_creationDate
+LIMIT 20
