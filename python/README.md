@@ -20,13 +20,17 @@ import frogql
 # Open or create a .gdb database
 conn = frogql.open("movies.gdb")
 
-# Run a query — returns a list of {alias: value} dicts
+# Run a query — returns a list of {alias: value} dicts.
+# Use `AS name` in RETURN to pick the dict key; otherwise the
+# projection falls back to col0, col1, ...
 rows = conn.execute(
-    "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) WHERE m.released = 1999 RETURN p.name, m.title",
+    "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) "
+    "WHERE m.released = 1999 "
+    "RETURN p.name AS actor, m.title AS title",
     limit=10,
 )
 for row in rows:
-    print(row["p.name"], "->", row["m.title"])
+    print(row["actor"], "->", row["title"])
 
 # Inspect the graph
 print(conn.node_count, conn.edge_count)
