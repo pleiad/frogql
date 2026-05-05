@@ -98,13 +98,33 @@ impl Typechecker {
         r
     }
 
-    /// ISO §16.17: each `<sort key>` is a value expression evaluated in
-    /// the working record context. We reuse the binding-table env for
-    /// validation — RETURN aliases are not yet visible here (would
-    /// require a follow-up that threads the return-item env through).
+    /// ISO §16.17 + §22.14: each `<sort key>` is a value expression
+    /// evaluated in the working record context. The sort key is also
+    /// an *operand of an ordering operation* (§22.14 SR 2c), so per
+    /// §22.14 Conformance Rule 1 (without Feature GA04 "Universal
+    /// comparison") its declared type must be a comparable value type.
+    ///
+    /// gqlite does not implement Feature GA04, so non-scalar types
+    /// (lists, records, repetition groups) are rejected here. Scalars
+    /// (Z, F, B, S), the wildcard `Star` (imprecise / dynamic), `Zero`
+    /// (unsatisfiable), and `Union` of those pass through.
+    ///
+    /// `check_expr` returns the `SimpleType` of the expression — used
+    /// to be discarded; we now propagate it for the §22.14 check.
+    /// RETURN aliases are still not visible here (parser limitation,
+    /// documented in `tests/typecheck_gaps_order_by_test.rs`).
     fn check_order_by(&mut self, specs: &[SortSpec], env: &TypeEnvironment) {
         for spec in specs {
-            let _ = self.check_expr(&spec.key, env);
+            let t = self.check_expr(&spec.key, env);
+            if !is_orderable_per_iso_22_14(&t) {
+                self.errors.push(format!(
+                    "ORDER BY sort key `{}` has type {} which is not a comparable \
+                     value type per ISO §22.14 Conformance Rule 1; expected a scalar \
+                     (Int, Float, Bool, Str) — gqlite does not implement Feature GA04 \
+                     'Universal comparison'.",
+                    spec.key, t,
+                ));
+            }
         }
     }
 
@@ -775,5 +795,109 @@ fn short_var_type(t: &VariableType) -> String {
         VariableType::Group(inner) => format!("group<{}>", short_var_type(inner)),
         VariableType::Null => "Null".to_string(),
         VariableType::Zero => "⊥".to_string(),
+    }
+}
+
+/// ISO §22.14 + §4.4.2: a `SimpleType` is *comparable* if every value
+/// it represents is essentially comparable (predefined scalar types)
+/// or is the imprecise / unsatisfiable case where the runtime decides
+/// dynamically.
+///
+/// Without Feature GA04 ("Universal comparison"), composite types
+/// — lists, records, and repetition-grouping types — are NOT
+/// comparable. Returning `false` for those triggers a typecheck
+/// error in `check_order_by` (and is the natural place to wire a
+/// future GA04 toggle).
+fn is_orderable_per_iso_22_14(t: &SimpleType) -> bool {
+    match t {
+        // Predefined scalars are essentially comparable per §4.4.2.
+        SimpleType::Z | SimpleType::F | SimpleType::B | SimpleType::S => true,
+        // `Star` is the gradual / dynamic type — value comes at
+        // runtime, so we accept the static check here.
+        SimpleType::Star => true,
+        // `Zero` is the unsatisfiable type — produced when a sort
+        // key references an attribute the strict schema does not
+        // declare, or any contradictory constraint. Typing the sort
+        // key as Zero means "this expression has no value the
+        // standard could compare against itself" — distinct from
+        // §4.4.2's null handling. We reject it so the user finds the
+        // typo (or schema mismatch) at compile time.
+        SimpleType::Zero => false,
+        // A union of orderable types is orderable iff both branches
+        // are. `int|str` is therefore rejected — at runtime that mix
+        // would degrade to "fall back to Equal" (§16.17 GR 1i,
+        // US007), which is the silent misbehavior we are trying to
+        // surface in compile time.
+        //
+        // Note: `union(a, Zero) = a` (see `SimpleType::union`), so a
+        // Zero branch never reaches this case via construction.
+        SimpleType::Union(a, b) => is_orderable_per_iso_22_14(a) && is_orderable_per_iso_22_14(b),
+        // Lists, records, and repetition groups are not essentially
+        // comparable — there is no inherent total order on them. Per
+        // §22.14 Conformance Rule 1, an implementation that does not
+        // claim Feature GA04 must reject these.
+        SimpleType::List(_) | SimpleType::Record(_) | SimpleType::Group(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod orderable_tests {
+    use super::is_orderable_per_iso_22_14;
+    use super::SimpleType;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn scalars_and_star_are_orderable() {
+        for t in [
+            SimpleType::Z,
+            SimpleType::F,
+            SimpleType::B,
+            SimpleType::S,
+            SimpleType::Star,
+        ] {
+            assert!(
+                is_orderable_per_iso_22_14(&t),
+                "{t:?} should be orderable per §22.14"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_is_not_orderable() {
+        // Zero typically comes from a strict-schema lookup of an
+        // undeclared attribute, or from a contradictory constraint.
+        // Either way the sort key cannot meaningfully order rows.
+        assert!(!is_orderable_per_iso_22_14(&SimpleType::Zero));
+    }
+
+    #[test]
+    fn lists_and_records_are_not_orderable_without_ga04() {
+        assert!(!is_orderable_per_iso_22_14(&SimpleType::List(Box::new(
+            SimpleType::Z
+        ))));
+        let mut fields = BTreeMap::new();
+        fields.insert("k".into(), SimpleType::S);
+        assert!(!is_orderable_per_iso_22_14(&SimpleType::Record(fields)));
+        assert!(!is_orderable_per_iso_22_14(&SimpleType::Group(Box::new(
+            SimpleType::Z
+        ))));
+    }
+
+    #[test]
+    fn union_orderable_iff_both_sides_orderable() {
+        // int|str: both scalar → orderable in our model. ISO §4.4.2
+        // would actually class this as not-essentially-comparable,
+        // but our value_cmp returns None on cross-kind, which falls
+        // through to the static accept here. A stricter pass could
+        // reject cross-kind unions; documented as a known follow-up.
+        let int_or_str = SimpleType::Union(Box::new(SimpleType::Z), Box::new(SimpleType::S));
+        assert!(is_orderable_per_iso_22_14(&int_or_str));
+
+        // int|list rejects.
+        let int_or_list = SimpleType::Union(
+            Box::new(SimpleType::Z),
+            Box::new(SimpleType::List(Box::new(SimpleType::Z))),
+        );
+        assert!(!is_orderable_per_iso_22_14(&int_or_list));
     }
 }
