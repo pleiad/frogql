@@ -392,21 +392,22 @@ table). Same SF0.1 dataset, same 15 IC2 param rows, 5 measured iters
 
 ### Cross-row median IC2 latency
 
-| Mode | Env | Median (ms) | × baseline |
+| Mode | Env / args | Median (ms) | × baseline |
 |---|---|---|---|
 | `lazy-baseline` | (none) | **0.22** | 1× |
 | `lazy-no-auto-indexes` | `GQLITE_DISABLE_AUTO_INDEXES=1` | **184** | 836× slower |
 | `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | **185** | 841× slower |
+| `disk-baseline` | `--backend disk` | **175** | 795× slower |
 
 For context, on the same run:
-- kuzu-cypher: 6.4 ms median (29× slower than gqlite-baseline; 29×
-  *faster* than either ablated gqlite mode)
+- kuzu-cypher: 6.4 ms median (29× slower than gqlite-baseline; ~27×
+  *faster* than any ablated gqlite mode)
 - graphqlite-cypher: 11.4 ms median (52× slower than gqlite-baseline;
-  16× faster than either ablated gqlite mode)
+  ~16× faster than any ablated gqlite mode)
 
 Result counts match across all 15 param rows in every mode (`OK row N:
-count=20` × 15) — disabling the optimisations slows the engine but
-doesn't change the answer set.
+count=20` × 15) — disabling the optimisations or switching backends
+slows the engine but doesn't change the answer set.
 
 ### What each disabled flag costs
 
@@ -419,12 +420,24 @@ doesn't change the answer set.
   single NodeId pre-loop and drops `p` from the VEO. Without folding,
   the indexed lookup happens once per LTJ leapfrog round-trip instead
   of once per query — the index is built but barely used.
+- **`--backend disk`**: switches from `LazyGraphStore` (LRU page cache
+  + secondary indexes built at open) to `DiskGraphStore` (topology in
+  RAM, everything else read straight from the page file with no
+  caching). The 795× slowdown is in the same range as the two
+  optimization-flag modes, but the cause is structurally different:
+  **`DiskGraphStore` doesn't override `lookup_node_eq` /
+  `lookup_node_range`** (only `LazyGraphStore` does, in
+  `src/store/lazy.rs:784-788`), so the LTJ fold pass falls through
+  to the default trait impl that returns `None` and the start-node
+  lookup degrades to a position scan. **Auto-indexes and the fold
+  pass aren't backend-portable today.**
 
-The two flags target the same hot path from different angles: the
-auto-build supplies the index, the fold pass *uses* it. Disable
-either and IC2 collapses; the 836×/841× near-identical slowdown is
-the signature of a single critical optimisation surface (the
-indexed start-node lookup), not two independent contributions.
+The first two flags target the same hot path from different angles:
+the auto-build supplies the index, the fold pass *uses* it. The disk
+backend is missing both surfaces entirely. All three slowdowns
+(836×/841×/795×) cluster around the same magnitude — the signature
+of a single critical optimisation surface (the indexed start-node
+lookup) rather than three independent contributions.
 
 ### What this is NOT showing
 
@@ -434,11 +447,18 @@ indexed start-node lookup), not two independent contributions.
   (CLAUDE.md "Secondary indexes" reports it as a 158× speedup over
   the auto-indexes-only baseline). Documenting it here as a known
   follow-up.
-- **Not a language ablation.** This says "gqlite without these two
+- **Not a language ablation.** This says "gqlite without these
   optimisations is slower than the external Python-wrapped systems."
   It does NOT say "Rust without optimisations equals Python." We
   haven't isolated FFI overhead vs engine work in the external
   systems. Don't read the table that way.
+- **`disk-baseline` is not a "disk I/O cost" measurement.** The 795×
+  slowdown vs `lazy-baseline` is dominated by the missing index hook,
+  not by disk reads. A future `DiskGraphStore` that implements
+  `lookup_node_eq` would land somewhere between disk-baseline and
+  lazy-baseline — exact position TBD. Right now we cannot separate
+  "disk is slow because I/O" from "disk is slow because no indexes"
+  because the two are coupled in the implementation.
 - **Not a multi-IC story.** Only IC2 is wired up today. The bench
   scaffolding accepts `--ic <n>`; once gqlite's parser supports more
   ICs, the same `--ablate` flag surfaces them in the same table.

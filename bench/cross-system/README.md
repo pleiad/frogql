@@ -128,15 +128,17 @@ bench/cross-system/run_all.sh --ablate
 bench/cross-system/run_all.sh --ablate --only gqlite   # ablation table only
 ```
 
-**Ablation mode** (`--ablate`): when set, gqlite runs three times,
-each with a different combination of `GQLITE_DISABLE_*` env vars,
-and emits per-iter rows with distinct backend labels:
+**Ablation mode** (`--ablate`): when set, gqlite runs four times
+across two axes (optimization knobs on the lazy backend, plus the
+disk backend as a separate storage shape) and emits per-iter rows
+with distinct backend labels:
 
-| Mode | Env | Tests |
+| Mode | Env / args | Tests |
 |---|---|---|
 | `lazy-baseline` | (none) | All optimizations on (LTJ + auto-indexes + index folding + TripleIndex cache) |
 | `lazy-no-auto-indexes` | `GQLITE_DISABLE_AUTO_INDEXES=1` | Skip the `(label, prop)` secondary-index auto-build at open |
 | `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | Disable LTJ index-driven constant folding (the pre-pass that turns `MATCH (n {id:X})` into a single-NodeId pre-bind) |
+| `disk-baseline` | `--backend disk` | DiskGraphStore (no LRU page cache, no secondary indexes today) — RAM/disk tradeoff vs lazy |
 
 The ablation modes show up as additional `backend` columns in
 `comparison.txt` so the same `compare_results.py` machinery

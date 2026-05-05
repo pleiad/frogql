@@ -118,28 +118,42 @@ echo ""
 
 # ---- gqlite ablation modes -----------------------------------------
 #
-# When --ablate is set, gqlite runs once per mode below. Each mode
-# sets a different combination of GQLITE_DISABLE_* env vars and
-# emits per-iter rows tagged with a distinct backend label
-# (rewritten via awk after ldbc_bench finishes). compare_results.py
-# then surfaces the modes as separate columns in the latency table —
-# the ablation result drops out of the existing comparison machinery
-# without any compare_results.py changes.
+# When --ablate is set, gqlite runs once per mode below. Modes vary
+# along two axes:
+#   1. ABLATION_ENV — inline env vars passed to ldbc_bench. Used for
+#      GQLITE_DISABLE_* knobs that turn off individual optimizations
+#      while keeping the same backend.
+#   2. ABLATION_ARGS — extra args appended to gqlite/run.sh. Used for
+#      backend selection (lazy vs disk — different RAM/disk tradeoff,
+#      not an optimization flag).
+# Per-mode rows are tagged with a distinct backend label (rewritten
+# via awk after ldbc_bench finishes). compare_results.py surfaces the
+# modes as separate columns in the latency table — the ablation result
+# drops out of the existing comparison machinery without any
+# compare_results.py changes.
 #
-# (TripleIndex disable would be a fourth mode but no env var exists
+# (TripleIndex disable would be a fifth mode but no env var exists
 # for it today; would need a small ldbc_bench / Runtime change.
 # Documented as a future ablation in SURVEY.md.)
 declare -A ABLATION_LABELS=(
     [baseline]="lazy-baseline"
     [no-auto-indexes]="lazy-no-auto-indexes"
     [no-fold]="lazy-no-fold"
+    [disk]="disk-baseline"
 )
 declare -A ABLATION_ENV=(
     [baseline]=""
     [no-auto-indexes]="GQLITE_DISABLE_AUTO_INDEXES=1"
     [no-fold]="GQLITE_DISABLE_INDEX_FOLD=1"
+    [disk]=""
 )
-ABLATION_MODES=(baseline no-auto-indexes no-fold)
+declare -A ABLATION_ARGS=(
+    [baseline]=""
+    [no-auto-indexes]=""
+    [no-fold]=""
+    [disk]="--backend disk"
+)
+ABLATION_MODES=(baseline no-auto-indexes no-fold disk)
 
 # ---- Per-system loop ------------------------------------------------
 
@@ -275,18 +289,20 @@ for sys in "${SYSTEMS[@]}"; do
             for mode in "${ABLATION_MODES[@]}"; do
                 label="${ABLATION_LABELS[$mode]}"
                 env_setup="${ABLATION_ENV[$mode]}"
+                extra_args="${ABLATION_ARGS[$mode]}"
                 out_csv="$OUT_DIR/${sys}-${mode}.ic${ic}.csv"
                 stderr_log="$OUT_DIR/${sys}-${mode}.ic${ic}.stderr.log"
-                echo "    [ablation: $label] env: ${env_setup:-(none)}"
-                if ! eval "$env_setup $runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP" \
+                echo "    [ablation: $label] env: ${env_setup:-(none)} args: ${extra_args:-(none)}"
+                if ! eval "$env_setup $runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP $extra_args" \
                         2>"$stderr_log"; then
                     echo "[FAIL] $sys $mode ic$ic runner returned non-zero" \
                         | tee -a "$OUT_DIR/skipped.log"
                     continue
                 fi
                 # Rewrite column 2 (`backend`) on every data row from
-                # `lazy` to `<label>`. Header passes through unchanged
-                # (NR==1 branch). awk rewrites in-place via a temp file.
+                # whatever ldbc_bench wrote (`lazy` or `disk`) to
+                # `<label>`. Header passes through unchanged (NR==1
+                # branch). awk rewrites in-place via a temp file.
                 awk -F';' -v OFS=';' -v label="$label" \
                     'NR==1 {print; next} {$2 = label; print}' \
                     "$out_csv" > "$out_csv.tmp" \
