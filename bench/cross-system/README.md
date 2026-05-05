@@ -1,8 +1,12 @@
-# Cross-system IC2 benchmark
+# Cross-system benchmark
 
-Side-by-side latency for **LDBC SNB Interactive Complex Read 2** on
+Side-by-side latency for LDBC SNB Interactive Complex queries on
 gqlite + a set of external graph systems, against the same SF0.1
-dataset and the same 15 substitution-parameter rows.
+dataset and the same substitution-parameter rows. Currently only IC2
+is wired up (it's the only IC whose `bench/ldbc-queries/ic<n>.toml`
+has `status = "implemented"`); more come online as the parser gains
+features. The runner accepts `--ic <n>`; each invocation runs one IC
+across all (selected) systems.
 
 ## What gets compared
 
@@ -37,8 +41,11 @@ system's native format). See each subdir's README/script.
 ## Running
 
 ```bash
-# Everything that's implemented:
+# Default: IC2 against every implemented system.
 bench/cross-system/run_all.sh
+
+# Pick a different IC (must be 'implemented' in its toml):
+bench/cross-system/run_all.sh --ic 2
 
 # Just one system (useful while iterating on a per-system runner):
 bench/cross-system/run_all.sh --only gqlite
@@ -48,10 +55,13 @@ bench/cross-system/run_all.sh --only gqlite,graphqlite
 bench/cross-system/run_all.sh --iters 30 --warmup 3
 ```
 
+For a multi-IC sweep, run the script once per IC — each invocation
+lands in its own timestamped results dir.
+
 Output lands in `bench/cross-system/results/<timestamp>/`:
 - `<system>.csv` per system — raw per-iter rows (same schema as
   `ldbc_bench`:
-  `query;backend;params;row;iter;result_count;result_shape;elapsed_ns`)
+  `query;backend;params;row;iter;result_count;elapsed_ns`)
 - `cross_system.csv` — concatenation of all the above
 - `comparison.txt` — `compare_results.py` output (latency table +
   count/shape consistency check + side-by-side comparison)
@@ -100,3 +110,4 @@ the comment-link explains.
 - LDBC-driver-mediated audited compliance — that's a different
   deliverable (~3 weeks more work). This bench is research-paper-tier.
 - CI integration — bench machines vary too much to threshold on.
+
