@@ -185,6 +185,46 @@ fn correlated_exists_with_inner_where() {
 }
 
 #[test]
+fn exists_cache_does_not_leak_across_run_query_calls() {
+    // Regression: the per-Runtime exists_cache is keyed by the body's
+    // heap address, which is only unique while the AST is alive. A
+    // long-lived Runtime (REPL, benches, embedded callers) reuses
+    // freed addresses across queries, so a stale entry from a prior
+    // body would silently satisfy the next EXISTS probe. The runtime
+    // clears the cache at the top of every public entry; this test
+    // exercises a single Runtime across two queries whose bodies
+    // collide in correlation shape (`[x]`) but disagree in body
+    // content. Each verdict must reflect its own body, not the prior
+    // one.
+    let g = fraud_graph();
+    let rt = Runtime::new(&g);
+
+    // First query: every Account has an outgoing Transfer, so the
+    // semi-join keeps every row. Populates the cache for body
+    // `(x)-[:Transfer]->(y)` with the full Account set.
+    let q1 = compile_query("MATCH (x:Account) WHERE EXISTS { (x)-[:Transfer]->(y) }").unwrap();
+    let n1 = match rt.run_query(&q1, 0) {
+        QueryResult::Raw(ir) => ir.rows.len(),
+        _ => panic!("raw expected"),
+    };
+    let total = run_raw_count(&g, "MATCH (x:Account)");
+    assert_eq!(n1, total);
+
+    // Second query, same Runtime: Transfer edges never end at a
+    // Person, so the semi-join must keep zero rows. If the cache
+    // leaked from q1 (heap-address collision on the body Box), the
+    // prior full-Account set would wrongly satisfy this probe and
+    // bring back all four Accounts.
+    let q2 =
+        compile_query("MATCH (x:Account) WHERE EXISTS { (x)-[:Transfer]->(y:Person) }").unwrap();
+    let n2 = match rt.run_query(&q2, 0) {
+        QueryResult::Raw(ir) => ir.rows.len(),
+        _ => panic!("raw expected"),
+    };
+    assert_eq!(n2, 0);
+}
+
+#[test]
 fn nested_uncorrelated_exists() {
     // Outer EXISTS body contains another (uncorrelated) EXISTS. The
     // inner runs, then the outer runs. Both evaluate to true because

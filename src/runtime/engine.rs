@@ -63,8 +63,14 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// API for callers.
     triple_index: RefCell<Option<Arc<TripleIndex>>>,
     /// Memoization for `EXISTS` / `NOT EXISTS` predicates. Keyed by
-    /// the body's `Box<Query>` heap address, which stays stable for
-    /// the lifetime of the compiled AST. The cached value is one of:
+    /// the body's `Box<Query>` heap address, which stays stable while
+    /// the compiled AST is alive. Across queries the address is *not*
+    /// stable: once a query AST is dropped, its allocation can be
+    /// recycled by a subsequent parse with a different body. The
+    /// runtime clears the cache at the top of every public entry
+    /// point (`run`, `run_with_limit`, `run_query`) to keep the
+    /// memoization scoped to one top-level execution. The cached
+    /// value is one of:
     ///   - `Uncorrelated(bool)` — the body shares no variable with
     ///     the outer scope; the bool records whether any row exists.
     ///   - `Correlated { keys, set }` — the body shares variables
@@ -132,11 +138,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     }
 
     pub fn run(&self, pattern: &PathPattern) -> IntermediateResult {
+        self.exists_cache.borrow_mut().clear();
         self.run_path_pattern(pattern, 0)
     }
 
     /// Run with a result limit (0 = unlimited). Stops early once limit is reached.
     pub fn run_with_limit(&self, pattern: &PathPattern, limit: usize) -> IntermediateResult {
+        self.exists_cache.borrow_mut().clear();
         self.run_path_pattern(pattern, limit)
     }
 
@@ -148,6 +156,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// `Query.limit == Some(0)` short-circuits to empty per ISO §LIMIT;
     /// otherwise the in-query and caller caps combine via `combine_limits`.
     pub fn run_query(&self, query: &Query, limit: usize) -> QueryResult {
+        // The exists_cache is keyed by body heap address, which is only
+        // unique while the AST is alive. A long-lived Runtime (REPL,
+        // benches) reuses freed addresses across queries, so a stale
+        // entry from a prior body would silently satisfy a new EXISTS
+        // probe. Scope memoization to one top-level execution.
+        self.exists_cache.borrow_mut().clear();
         // ISO §LIMIT: `Some(0)` is "return zero rows", distinct from
         // the runtime's `0 = unbounded`. Honor it before any pattern work.
         if query.limit == Some(0) {
