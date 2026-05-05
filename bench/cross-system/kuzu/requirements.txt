@@ -1,1 +1,4 @@
 kuzu==0.11.3
+# psutil for cross-platform peak-RSS sampling in run.py.
+# resource.getrusage isn't available on Windows.
+psutil>=5.9

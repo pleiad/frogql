@@ -40,6 +40,17 @@ key space is per-label. Edge loaders know each CSV's source and
 target label types from the filename, so they can construct the
 right prefixed keys for lookup.
 
+Why properties carry `ldbcId` instead of `id`: graphqlite reserves
+the `.id` Cypher accessor for the loader-supplied external_id (the
+first tuple element of `insert_nodes_bulk`). Setting `props["id"]`
+in the dict is silently overwritten — `MATCH (p) RETURN p.id` always
+returns the prefixed string `"Person:933"`, never the int we tried
+to store. To return the raw LDBC int from queries, we store it
+under a non-conflicting prop name `ldbcId`. IC translation files
+(`ic2.cypher` etc.) use `friend.ldbcId` accordingly. This is a
+graphqlite-specific divergence; gqlite and Kuzu use plain `.id`.
+Documented in `DIVERGENCES.md`.
+
 Throughput: graphqlite's bulk APIs do ~10K nodes/sec; full SF0.1
 load (~327K nodes + ~1.5M edges) lands in roughly 1-3 minutes.
 
@@ -136,7 +147,7 @@ def load_persons(g: Graph, csv_dir: Path, id_map: dict) -> None:
     for r in _csv_dict_rows(csv_dir / "dynamic" / "person_0_0.csv"):
         pid = r["id"]
         nodes.append((_key("Person", pid), {
-            "id": int(pid),
+            "ldbcId": int(pid),
             "firstName": r["firstName"],
             "lastName": r["lastName"],
             "gender": r["gender"],
@@ -154,7 +165,7 @@ def load_comments(g: Graph, csv_dir: Path, id_map: dict) -> None:
     nodes = []
     for r in _csv_dict_rows(csv_dir / "dynamic" / "comment_0_0.csv"):
         nodes.append((_key("Comment", r["id"]), {
-            "id": int(r["id"]),
+            "ldbcId": int(r["id"]),
             "creationDate": int(r["creationDate"]),
             "locationIP": r["locationIP"],
             "browserUsed": r["browserUsed"],
@@ -168,7 +179,7 @@ def load_posts(g: Graph, csv_dir: Path, id_map: dict) -> None:
     nodes = []
     for r in _csv_dict_rows(csv_dir / "dynamic" / "post_0_0.csv"):
         nodes.append((_key("Post", r["id"]), {
-            "id": int(r["id"]),
+            "ldbcId": int(r["id"]),
             "imageFile": r.get("imageFile", ""),
             "creationDate": int(r["creationDate"]),
             "locationIP": r["locationIP"],
@@ -184,7 +195,7 @@ def load_forums(g: Graph, csv_dir: Path, id_map: dict) -> None:
     nodes = []
     for r in _csv_dict_rows(csv_dir / "dynamic" / "forum_0_0.csv"):
         nodes.append((_key("Forum", r["id"]), {
-            "id": int(r["id"]),
+            "ldbcId": int(r["id"]),
             "title": r["title"],
             "creationDate": int(r["creationDate"]),
         }, "Forum"))
@@ -195,7 +206,7 @@ def load_organisations(g: Graph, csv_dir: Path, id_map: dict) -> None:
     nodes = []
     for r in _csv_dict_rows(csv_dir / "static" / "organisation_0_0.csv"):
         nodes.append((_key("Organisation", r["id"]), {
-            "id": int(r["id"]),
+            "ldbcId": int(r["id"]),
             "type": r["type"],
             "name": r["name"],
             "url": r["url"],
@@ -207,7 +218,7 @@ def load_places(g: Graph, csv_dir: Path, id_map: dict) -> None:
     nodes = []
     for r in _csv_dict_rows(csv_dir / "static" / "place_0_0.csv"):
         nodes.append((_key("Place", r["id"]), {
-            "id": int(r["id"]),
+            "ldbcId": int(r["id"]),
             "name": r["name"],
             "url": r["url"],
             "type": r["type"],
@@ -219,7 +230,7 @@ def load_tags(g: Graph, csv_dir: Path, id_map: dict) -> None:
     nodes = []
     for r in _csv_dict_rows(csv_dir / "static" / "tag_0_0.csv"):
         nodes.append((_key("Tag", r["id"]), {
-            "id": int(r["id"]),
+            "ldbcId": int(r["id"]),
             "name": r["name"],
             "url": r["url"],
         }, "Tag"))
@@ -230,7 +241,7 @@ def load_tagclasses(g: Graph, csv_dir: Path, id_map: dict) -> None:
     nodes = []
     for r in _csv_dict_rows(csv_dir / "static" / "tagclass_0_0.csv"):
         nodes.append((_key("TagClass", r["id"]), {
-            "id": int(r["id"]),
+            "ldbcId": int(r["id"]),
             "name": r["name"],
             "url": r["url"],
         }, "TagClass"))

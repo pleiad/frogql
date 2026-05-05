@@ -1,1 +1,4 @@
 graphqlite==0.4.4
+# psutil for cross-platform peak-RSS sampling in run.py.
+# resource.getrusage isn't available on Windows.
+psutil>=5.9

@@ -119,7 +119,32 @@ bench/cross-system/run_all.sh --iters 30 --warmup 3
 # Force a clean re-load of every system's DB before benching
 # (captures real setup time; default skips setup if DB exists):
 bench/cross-system/run_all.sh --rebuild-setup
+
+# Ablation mode — gqlite runs in three modes (baseline + two
+# disabled-optimization variants), each emitted as a separate
+# `backend` label. Other systems run normally; the comparison
+# table renders the ablation modes as additional columns.
+bench/cross-system/run_all.sh --ablate
+bench/cross-system/run_all.sh --ablate --only gqlite   # ablation table only
 ```
+
+**Ablation mode** (`--ablate`): when set, gqlite runs four times
+across two axes (optimization knobs on the lazy backend, plus the
+disk backend as a separate storage shape) and emits per-iter rows
+with distinct backend labels:
+
+| Mode | Env / args | Tests |
+|---|---|---|
+| `lazy-baseline` | (none) | All optimizations on (LTJ + auto-indexes + index folding + TripleIndex cache) |
+| `lazy-no-auto-indexes` | `GQLITE_DISABLE_AUTO_INDEXES=1` | Skip the `(label, prop)` secondary-index auto-build at open |
+| `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | Disable LTJ index-driven constant folding (the pre-pass that turns `MATCH (n {id:X})` into a single-NodeId pre-bind) |
+| `disk-baseline` | `--backend disk` | DiskGraphStore (no LRU page cache, no secondary indexes today) — RAM/disk tradeoff vs lazy |
+
+The ablation modes show up as additional `backend` columns in
+`comparison.txt` so the same `compare_results.py` machinery
+renders them — no separate ablation script. See
+[`SURVEY.md`](SURVEY.md#ablation-results) for the headline
+findings (which optimization buys what).
 
 The orchestrator iterates **systems on the outer loop, ICs on the
 inner**: for each system, set up once (loading full LDBC SF0.1),
@@ -132,8 +157,13 @@ Output lands in `bench/cross-system/results/<timestamp>/`:
   schema `query;backend;params;row;iter;result_count;elapsed_ns`
 - `cross_system.csv` — concatenation of all the above
 - `comparison.txt` — `compare_results.py` output (latency table +
-  count/shape consistency check + side-by-side comparison)
-- `setup_times.txt` — per-system load wall time (when measurable)
+  count/shape consistency check + side-by-side comparison + memory
+  footprint + per-(system, IC) shape pass/fail)
+- `setup_times.txt` — per-system load wall time **and on-disk DB
+  size** (`db_bytes` column). Sizes are measured against each
+  system's `marker` path (see `SETUP_MARKER` in `run_all.sh`); for
+  Kuzu this is the single `.db` file, not the sibling
+  `_kuzu_work/` working dir.
 - `<system>.setup.log`, `<system>.ic<n>.stderr.log` — per-stage logs
 - `skipped.log` — any (system, IC) pair that couldn't run
 - `run_info.txt` — timestamp, host, gqlite commit, etc.
@@ -157,20 +187,31 @@ the comment-link explains.
 
 ## Reading the results
 
-`comparison.txt` has three sections:
+`comparison.txt` has five sections, each rendered per IC for
+multi-IC runs:
 
 1. **Per-cell summary** — for each (params_row, system) pair, median
-   latency, p95, iter count, the result_count, and the result_shape
-   (per-row type signatures, deduped — e.g. `i,s,s,i,s,i|i,s,s,i,n,i`
-   for IC2 where `c.content` is sometimes null).
-2. **Count + shape consistency** — for each params_row, do all systems
-   agree on row count AND per-row column types? Without ORDER BY the
-   actual row contents legitimately differ (each system picks a
-   different N rows from the full result), but the column count and
-   types must match. `WARN` flags disagreement, which means a
-   per-system query translation bug.
+   latency, p95, iter count, and the result_count. (Result shape is
+   verified separately; see section 5.)
+2. **Result-count consistency** — for each params_row, do all systems
+   agree on row count? Without ORDER BY the actual row contents
+   legitimately differ (each system picks a different N rows from
+   the full result), but counts must match. `WARN` flags
+   disagreement, which means a per-system query translation bug.
 3. **Side-by-side latency** — one row per params_row, one column per
    system, median ms.
+4. **Memory footprint** — peak RSS during the query loop per
+   (system, IC), parsed from `*.stderr.log` files. The `over
+   baseline` column subtracts the runner's at-startup RSS so the
+   delta is roughly "engine + DB state" across runners (see Notes
+   in the section header for caveats — graphqlite's RSS is small
+   because SQLite uses mmap; data lives in OS page cache, not
+   process RSS).
+5. **Shape verification** — per-(system, IC) pass/fail tally
+   against the toml's `expected_shape`. Catches per-column type
+   mismatches that count consistency alone misses (we hit one of
+   these with graphqlite's `friend.id` returning prefixed strings;
+   see `graphqlite/DIVERGENCES.md`).
 
 ## Measurement basis (read this before quoting numbers)
 
@@ -235,8 +276,8 @@ honestly.
    directly by `run_all.sh` and timed.
 6. **Pinned versions.** kuzu is pinned to `0.11.3` (the upstream
    project archived 2025-10-10; the wheel is frozen and reproducible).
-   graphqlite tracks its latest PyPI release. gqlite is whatever
-   the bench branch builds.
+   graphqlite is pinned to `0.4.4`. gqlite is whatever the bench
+   branch builds.
 
 ### What's INTENTIONALLY not measured
 

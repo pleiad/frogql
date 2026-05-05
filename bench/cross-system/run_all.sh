@@ -19,6 +19,13 @@
 #       [--only gqlite,kuzu]          # subset of systems
 #       [--rebuild-setup]             # force per-system setup re-run
 #                                     # (default: skip setup if DB exists)
+#       [--ablate]                    # run gqlite in 4 modes: lazy
+#                                     # baseline, GQLITE_DISABLE_AUTO_INDEXES=1,
+#                                     # GQLITE_DISABLE_INDEX_FOLD=1, and
+#                                     # --backend disk. Each mode emits
+#                                     # its own per-iter CSV with a
+#                                     # distinct backend label. Other
+#                                     # systems run normally.
 #
 # Output: bench/cross-system/results/<timestamp>/
 #   setup_times.txt         metadata: per-system setup wall time
@@ -46,6 +53,7 @@ ITERS=10
 WARMUP=2
 ONLY=""
 REBUILD=0
+ABLATE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --ic|--ics)         ICS_ARG="$2"; shift 2 ;;
@@ -53,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         --warmup)           WARMUP="$2"; shift 2 ;;
         --only)             ONLY="$2"; shift 2 ;;
         --rebuild-setup)    REBUILD=1; shift ;;
+        --ablate)           ABLATE=1; shift ;;
         -h|--help)
             awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
             exit 0 ;;
@@ -76,6 +85,7 @@ START_EPOCH=$(date +%s)
     echo "iters:            $ITERS"
     echo "warmup:           $WARMUP"
     echo "rebuild_setup:    $REBUILD"
+    echo "ablate:           $ABLATE"
     echo "host:             $(hostname 2>/dev/null || echo unknown)"
     echo "uname:            $(uname -a 2>/dev/null || echo unknown)"
     echo "gqlite_branch:    $(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
@@ -83,6 +93,12 @@ START_EPOCH=$(date +%s)
     echo "gqlite_dirty:     $(git -C "$REPO_ROOT" diff --quiet 2>/dev/null && echo no || echo yes)"
     echo "rustc:            $(rustc --version 2>&1 || echo missing)"
     echo "python:           $(python --version 2>&1 || echo missing)"
+    # Per-system versions — pinned in requirements.txt but capturing
+    # the resolved version per run guards against accidental drift
+    # (e.g. a fresh `pip install` resolving an unpinned transitive).
+    echo "graphqlite_ver:   $(python -c 'import importlib.metadata as m; print(m.version("graphqlite"))' 2>/dev/null || echo missing)"
+    echo "kuzu_ver:         $(python -c 'import importlib.metadata as m; print(m.version("kuzu"))' 2>/dev/null || echo missing)"
+    echo "psutil_ver:       $(python -c 'import importlib.metadata as m; print(m.version("psutil"))' 2>/dev/null || echo missing)"
     echo "ldbc_dataset:     SF0.1"
 } > "$OUT_DIR/run_info.txt"
 
@@ -104,7 +120,47 @@ echo "  iters:   $ITERS"
 echo "  warmup:  $WARMUP"
 echo "  systems: ${SYSTEMS[*]}"
 [[ $REBUILD -eq 1 ]] && echo "  setup:   --rebuild-setup (force fresh per-system load)"
+[[ $ABLATE -eq 1 ]] && echo "  ablate:  --ablate (gqlite runs in 4 modes: lazy-baseline, no-auto-indexes, no-fold, disk-baseline)"
 echo ""
+
+# ---- gqlite ablation modes -----------------------------------------
+#
+# When --ablate is set, gqlite runs once per mode below. Modes vary
+# along two axes:
+#   1. ABLATION_ENV — inline env vars passed to ldbc_bench. Used for
+#      GQLITE_DISABLE_* knobs that turn off individual optimizations
+#      while keeping the same backend.
+#   2. ABLATION_ARGS — extra args appended to gqlite/run.sh. Used for
+#      backend selection (lazy vs disk — different RAM/disk tradeoff,
+#      not an optimization flag).
+# Per-mode rows are tagged with a distinct backend label (rewritten
+# via awk after ldbc_bench finishes). compare_results.py surfaces the
+# modes as separate columns in the latency table — the ablation result
+# drops out of the existing comparison machinery without any
+# compare_results.py changes.
+#
+# (TripleIndex disable would be a fifth mode but no env var exists
+# for it today; would need a small ldbc_bench / Runtime change.
+# Documented as a future ablation in SURVEY.md.)
+declare -A ABLATION_LABELS=(
+    [baseline]="lazy-baseline"
+    [no-auto-indexes]="lazy-no-auto-indexes"
+    [no-fold]="lazy-no-fold"
+    [disk]="disk-baseline"
+)
+declare -A ABLATION_ENV=(
+    [baseline]=""
+    [no-auto-indexes]="GQLITE_DISABLE_AUTO_INDEXES=1"
+    [no-fold]="GQLITE_DISABLE_INDEX_FOLD=1"
+    [disk]=""
+)
+declare -A ABLATION_ARGS=(
+    [baseline]=""
+    [no-auto-indexes]=""
+    [no-fold]=""
+    [disk]="--backend disk"
+)
+ABLATION_MODES=(baseline no-auto-indexes no-fold disk)
 
 # ---- Per-system loop ------------------------------------------------
 
@@ -159,7 +215,28 @@ declare -A RUNNER=(
 )
 
 SETUP_TIMES_FILE="$OUT_DIR/setup_times.txt"
-echo "system    elapsed_seconds    status" > "$SETUP_TIMES_FILE"
+echo "system    elapsed_seconds    db_bytes        status" > "$SETUP_TIMES_FILE"
+
+# Native-DB size of `marker`. All three current backends write a
+# single file (gqlite's `.gdb`, graphqlite's SQLite `.db`, Kuzu's
+# embedded `.db` — Kuzu's WAL/work data lives in a sibling
+# `_kuzu_work/` we don't include because it isn't part of the loaded
+# DB). The dir branch is here for forward-compat: future backends
+# (e.g. RocksDB-based) ship multi-file directories. Returns "—" on
+# missing/unreadable paths so the column always has a value.
+db_size_bytes() {
+    local p="$1"
+    [[ -e "$p" ]] || { echo "—"; return; }
+    if [[ -d "$p" ]]; then
+        # `du -sb` works on MSYS bash + Linux; sums directory bytes.
+        # POSIX `du` returns blocks not bytes, so prefer the GNU -b
+        # extension (always available on bench hosts).
+        du -sb "$p" 2>/dev/null | awk '{print $1}' || echo "—"
+    else
+        # Single file — `stat -c %s` is the portable size accessor.
+        stat -c %s "$p" 2>/dev/null || echo "—"
+    fi
+}
 
 for sys in "${SYSTEMS[@]}"; do
     runner_cmd="${RUNNER[$sys]:-}"
@@ -213,7 +290,8 @@ for sys in "${SYSTEMS[@]}"; do
         setup_status="cached"
         echo "  setup: cached at $marker"
     fi
-    printf "%-12s %-18s %s\n" "$sys" "$elapsed_s" "$setup_status" \
+    db_bytes=$(db_size_bytes "$marker")
+    printf "%-12s %-18s %-15s %s\n" "$sys" "$elapsed_s" "$db_bytes" "$setup_status" \
         >> "$SETUP_TIMES_FILE"
 
     if [[ "$setup_status" == "fail" ]]; then
@@ -222,14 +300,51 @@ for sys in "${SYSTEMS[@]}"; do
     fi
 
     # --- Per-IC bench phase ---
+    # Ablation special-case: when --ablate is set AND we're running
+    # gqlite, run the harness once per ablation mode (different
+    # GQLITE_DISABLE_* env vars) and rewrite the `backend` CSV column
+    # to distinguish the modes. ldbc_bench hard-codes "lazy" as the
+    # backend label; awk does the rewrite without touching the
+    # binary.
+    #
+    # Why post-process via awk and not pass a label flag through to
+    # ldbc_bench: keeps the ablation logic confined to run_all.sh
+    # and avoids touching gqlite's bench-runner code, which other
+    # bench paths (the single-system ldbc_bench output) also depend
+    # on.
     for ic in "${IC_LIST[@]}"; do
         echo "  --- ic$ic ---"
-        out_csv="$OUT_DIR/${sys}.ic${ic}.csv"
-        stderr_log="$OUT_DIR/${sys}.ic${ic}.stderr.log"
-        if ! eval "$runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP" \
-                2>"$stderr_log"; then
-            echo "[FAIL] $sys ic$ic runner returned non-zero" \
-                | tee -a "$OUT_DIR/skipped.log"
+        if [[ "$sys" == "gqlite" && $ABLATE -eq 1 ]]; then
+            for mode in "${ABLATION_MODES[@]}"; do
+                label="${ABLATION_LABELS[$mode]}"
+                env_setup="${ABLATION_ENV[$mode]}"
+                extra_args="${ABLATION_ARGS[$mode]}"
+                out_csv="$OUT_DIR/${sys}-${mode}.ic${ic}.csv"
+                stderr_log="$OUT_DIR/${sys}-${mode}.ic${ic}.stderr.log"
+                echo "    [ablation: $label] env: ${env_setup:-(none)} args: ${extra_args:-(none)}"
+                if ! eval "$env_setup $runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP $extra_args" \
+                        2>"$stderr_log"; then
+                    echo "[FAIL] $sys $mode ic$ic runner returned non-zero" \
+                        | tee -a "$OUT_DIR/skipped.log"
+                    continue
+                fi
+                # Rewrite column 2 (`backend`) on every data row from
+                # whatever ldbc_bench wrote (`lazy` or `disk`) to
+                # `<label>`. Header passes through unchanged (NR==1
+                # branch). awk rewrites in-place via a temp file.
+                awk -F';' -v OFS=';' -v label="$label" \
+                    'NR==1 {print; next} {$2 = label; print}' \
+                    "$out_csv" > "$out_csv.tmp" \
+                    && mv "$out_csv.tmp" "$out_csv"
+            done
+        else
+            out_csv="$OUT_DIR/${sys}.ic${ic}.csv"
+            stderr_log="$OUT_DIR/${sys}.ic${ic}.stderr.log"
+            if ! eval "$runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP" \
+                    2>"$stderr_log"; then
+                echo "[FAIL] $sys ic$ic runner returned non-zero" \
+                    | tee -a "$OUT_DIR/skipped.log"
+            fi
         fi
     done
 
@@ -295,11 +410,16 @@ done
 echo ""
 echo "--- Comparison ---"
 if command -v python >/dev/null 2>&1; then
-    python "$SCRIPT_DIR/compare_results.py" "$unified" \
+    # Pass the results dir as the second arg so compare_results.py can
+    # also surface shape-verification failures from the per-system
+    # *.stderr.log files. Without that, count-consistency passes can
+    # mask per-column type mismatches (e.g. graphqlite returning
+    # `"Person:933"` strings where the toml expected an int).
+    python "$SCRIPT_DIR/compare_results.py" "$unified" "$OUT_DIR" \
         | tee "$OUT_DIR/comparison.txt"
 else
     echo "  (python not on PATH; skipping comparison.py — run it manually:" >&2
-    echo "   python $SCRIPT_DIR/compare_results.py $unified)" >&2
+    echo "   python $SCRIPT_DIR/compare_results.py $unified $OUT_DIR)" >&2
 fi
 
 END_EPOCH=$(date +%s)
