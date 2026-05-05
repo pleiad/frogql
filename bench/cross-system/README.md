@@ -8,6 +8,12 @@ has `status = "implemented"`); more come online as the parser gains
 features. The runner accepts `--ic <n>`; each invocation runs one IC
 across all (selected) systems.
 
+> **Reading this for the first time?** [`SURVEY.md`](SURVEY.md) is
+> the single-page narrative covering every system we evaluated
+> (working AND rejected), the architectural pattern across the
+> rejections, and what's intentionally out of scope. This README is
+> the operational doc — how to set up, run, and read the results.
+
 ## What gets compared
 
 | System | Subdir | Status |
