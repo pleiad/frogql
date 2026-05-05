@@ -3,32 +3,35 @@
 
 id = 7
 name = "Recent likers of a person's messages"
-status = "blocked"
-
-blocked_reason = """
-Latest like per liker: global `ORDER BY` is not enough; need per-group top row
-(or equivalent subquery / window).
-"""
-
-required_features = [
-    "ORDER BY",
-    "per-group latest / argmax (or windows / subqueries)",
-]
+status = "implemented"
 
 params_file = "interactive_7_param.txt"
 param_columns = ["personId"]
+param_types = ["int"]
 query = """
-MATCH (person:Person {id: $personId})<-[:hasCreator]-(message:Message)<-[like:likes]-(liker:Person)
+MATCH (person:Person {id: $personId})<-[:hasCreator]-(message:Comment|Post)<-[like:likes]-(liker:Person)
 OPTIONAL MATCH (liker)~[:knows]~(person)
-RETURN 
+RETURN
     liker.id AS personId,
     liker.firstName AS personFirstName,
     liker.lastName AS personLastName,
     like.creationDate AS likeCreationDate,
     message.id AS commentOrPostId,
     COALESCE(message.content, message.imageFile) AS commentOrPostContent,
-    CAST(FLOOR(CAST(like.creationDate - message.creationDate AS FLOAT) / 60000.0) AS INTEGER) AS minutesLatency,
     NOT EXISTS { MATCH (liker)~[:knows]~(person) } AS isNew
-ORDER BY likeCreationDate DESC, CAST(personId AS INTEGER) ASC
+ORDER BY likeCreationDate DESC, personId ASC
 LIMIT 20
 """
+
+return_columns = [
+    "personId", "personFirstName", "personLastName",
+    "likeCreationDate", "commentOrPostId", "commentOrPostContent", "isNew",
+]
+
+expected_shape = "i,s,s,i,i,n/s,b"
+
+[divergences]
+message-union = "spec uses (message:Message); we use (message:Comment|Post). Same as IC2's message-union divergence."
+edge-casing = "loader produces lowercase :knows / :hasCreator / :likes (filename-stem convention). Spec uses uppercase. No semantic difference."
+no-minutes-latency = "spec also returns `minutesLatency = floor((like.creationDate - message.creationDate) / 60000)`. Dropping this column. gqlite parser doesn't tokenize `/` (division) and has no `FLOOR`/`CAST(... AS FLOAT)` — we'd need three parser features at once. The remaining 7 columns are returned verbatim."
+no-cast-int = "ORDER BY tie-break is `CAST(personId AS INTEGER) ASC`. gqlite stores `Person.id` as native int; plain `personId ASC` is exact-equivalent."

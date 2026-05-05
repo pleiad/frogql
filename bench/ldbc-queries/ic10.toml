@@ -6,15 +6,24 @@ name = "Friend recommendation"
 status = "blocked"
 
 blocked_reason = """
-Anti-join: FoAF must not already be a direct friend; exclude "common" neighbors
-via graph negation. Ranked result: `ORDER BY`. Birthday predicate vs `$month`
-needs richer scalars than `+`/`-` alone (`*`, `%`, or date builtins).
+Tested 2026-05-05. Heaviest-blocked IC; needs four parser features
+that gqlite doesn't have:
+  - `WHERE person <> foaf` — bare-node comparison; needs property
+    access. Same fix as IC3/5/6/9.
+  - `EXTRACT(MONTH FROM foaf.birthday)` — `EXTRACT(... FROM ...)`
+    syntax not in parser.
+  - `$month MOD 12` — `MOD` operator not in parser.
+  - `CASE WHEN ... THEN ... ELSE ... END` — `CASE` expression not
+    in parser. Used inside `SUM(CASE WHEN ... THEN 1 ELSE -1 END)`,
+    so removing it isn't trivial — would need to rewrite with two
+    separate counts joined by `-`.
 """
 
 required_features = [
-    "graph NOT EXISTS / existential subquery",
-    "ORDER BY",
-    "richer scalar / date expressions (e.g. *, %, date parts)",
+    "bare-node comparison (or property-access rewrite)",
+    "EXTRACT(date-part FROM date)",
+    "MOD operator",
+    "CASE WHEN ... END expression",
 ]
 
 params_file = "interactive_10_param.txt"

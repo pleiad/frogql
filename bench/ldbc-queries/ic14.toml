@@ -7,13 +7,30 @@ name = "Trusted connection paths (v1)"
 status = "blocked"
 
 blocked_reason = """
-All shortest paths on `:knows` with interaction weights and aggregation along
-paths - beyond single-pair shortest path; needs dedicated path algorithms + surface.
+Tested 2026-05-05. The most-blocked IC of the catalog. Stack of gaps:
+  - `MATCH path = ALL SHORTEST (...)` — path naming + ALL SHORTEST
+    quantifier missing.
+  - `[n IN NODES(path) | n.id]` — list comprehension `[x IN list | f(x)]`
+    not in parser. Also `NODES(path)` would need path naming first.
+  - `VALUE { ... }` — inline subquery returning a scalar; not in parser.
+  - `WHERE pe1 IN NODES(path)` — `IN` over a list expression; need to
+    test once NODES(path) exists.
+  - `pe1 <> pe2` — bare-node comparison, same gap as IC3/5/6/9.
+  - `COUNT(c) * 1.0`, `COUNT(c1) * 0.5` — multiplication operator
+    missing.
+This query is structurally beyond the current parser surface; would
+need a roadmap rather than incremental tweaks.
 """
 
 required_features = [
-    "all-shortest-paths",
-    "weighted-path / path aggregation",
+    "named path patterns (MATCH path = ...)",
+    "ALL SHORTEST quantifier",
+    "PATH_LENGTH / NODES path functions",
+    "list comprehension `[x IN list | expr]`",
+    "VALUE { ... } scalar subquery",
+    "IN over list expressions",
+    "bare-node comparison",
+    "multiplication operator `*`",
 ]
 
 params_file = "interactive_14_param.txt"

@@ -6,11 +6,21 @@ name = "Recent messages by friends or friends of friends"
 status = "blocked"
 
 blocked_reason = """
-Ranked result: `ORDER BY` per spec.
+Tested 2026-05-05. The query DOES execute end-to-end after a single
+rewrite — `WHERE person <> otherPerson` → `WHERE person.id != otherPerson.id`
+plus dropping `CAST(messageId AS INTEGER)` from ORDER BY. 13.5s on
+SF0.1 (the `~[:knows]~{1,2}` 2-hop variable-length is what's slow,
+not the parser). We're holding off on shipping this one because the
+property-rewrite was deemed hacky — the spec compares two node
+references and we'd be silently translating that to ID comparison
+in the bench harness, which loses faithfulness even though LDBC IDs
+make the rewrite semantically equivalent. Revisit if/when gqlite
+supports bare-node comparison or `id(node)` / `elementId(node)`.
 """
 
 required_features = [
-    "ORDER BY",
+    "bare-node comparison (or `id(node)` builtin)",
+    "`<>` operator (or rewrite to `!=`)",
 ]
 
 params_file = "interactive_9_param.txt"

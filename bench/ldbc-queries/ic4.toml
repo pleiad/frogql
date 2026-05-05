@@ -6,13 +6,22 @@ name = "New topics"
 status = "blocked"
 
 blocked_reason = """
-Anti-join: in-window friend posts with a tag, excluding tags that ever appeared on
-any friend's post before the window. Ranked result: `ORDER BY`.
+Tested 2026-05-05. Most of the query parses (NOT EXISTS works, ORDER BY
+works). The remaining gaps:
+  - `$startDate + DURATION({days: $durationDays})` — `DURATION` literal
+    not in parser.
+  - Inlining as `$startDate + $durationDays * 86400000` doesn't help
+    because `*` (multiplication) also doesn't tokenize. Would need to
+    pre-compute the millis offset in the substitution layer per param
+    row (turn the second WHERE bound into a precomputed integer).
+  - `COUNT(post)` — bare-node aggregate; `COUNT(post.id)` or `COUNT(*)`
+    would parse.
 """
 
 required_features = [
-    "graph NOT EXISTS / existential subquery",
-    "ORDER BY",
+    "DURATION literal (or substitution-time pre-computation)",
+    "multiplication operator `*`",
+    "COUNT over bare node references",
 ]
 
 params_file = "interactive_4_param.txt"

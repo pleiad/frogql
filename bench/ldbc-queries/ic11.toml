@@ -6,11 +6,19 @@ name = "Job referral"
 status = "blocked"
 
 blocked_reason = """
-Ranked result: `ORDER BY` per spec.
+Tested 2026-05-05. Same as IC9 — the query DOES execute end-to-end
+after a single rewrite (`WHERE person <> otherPerson` →
+`WHERE person.id != otherPerson.id`, plus dropping the `CAST`).
+We're holding off shipping for the same reason: the property-rewrite
+loses spec-faithfulness even though it's semantically equivalent
+on LDBC IDs. The bench would silently misrepresent what gqlite is
+running. Revisit when bare-node comparison (or `id(node)` builtin)
+lands.
 """
 
 required_features = [
-    "ORDER BY",
+    "bare-node comparison (or `id(node)` builtin)",
+    "`<>` operator (or rewrite to `!=`)",
 ]
 
 params_file = "interactive_11_param.txt"

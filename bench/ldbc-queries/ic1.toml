@@ -6,12 +6,27 @@ name = "Transitive friends with a certain name"
 status = "blocked"
 
 blocked_reason = """
-Per-friend minimum hop distance in results; `ORDER BY` per spec.
+Multiple gqlite parser/runtime gaps stack here. Tested 2026-05-05:
+  - `MATCH path = ANY SHORTEST (...)` — path naming + shortest-path
+    quantifier not in the parser. Without these, no `PATH_LENGTH(path)`,
+    no `NODES(path)`.
+  - `WHERE p <> friend` — bare-node comparison in expressions not
+    supported. Workaround `WHERE p.id != friend.id` would parse but
+    we'd still be blocked by the path-naming.
+  - `COLLECT_LIST(...)` — list-aggregate function unknown. Tested also
+    `collect`, `array_agg` — none recognized.
+  - `RECORD {k: v, ...}` — record literal in expressions not in parser.
+  - `CAST(friendId AS INTEGER)` in ORDER BY — `CAST` syntax absent.
 """
 
 required_features = [
-    "per-friend shortest-path distance in results",
-    "ORDER BY",
+    "named path patterns (MATCH path = ...)",
+    "ANY SHORTEST quantifier",
+    "PATH_LENGTH / NODES path functions",
+    "COLLECT_LIST aggregate",
+    "RECORD literal",
+    "bare-node comparison or property-access workaround",
+    "CAST(... AS INTEGER) (or sort directly on int columns)",
 ]
 
 params_file = "interactive_1_param.txt"
