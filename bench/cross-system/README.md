@@ -8,6 +8,12 @@ has `status = "implemented"`); more come online as the parser gains
 features. The runner accepts `--ic <n>`; each invocation runs one IC
 across all (selected) systems.
 
+> **Reading this for the first time?** [`SURVEY.md`](SURVEY.md) is
+> the single-page narrative covering every system we evaluated
+> (working AND rejected), the architectural pattern across the
+> rejections, and what's intentionally out of scope. This README is
+> the operational doc — how to set up, run, and read the results.
+
 ## What gets compared
 
 | System | Subdir | Status |
@@ -27,7 +33,10 @@ The bench depends on the same LDBC SF0.1 dataset our regular
 
 ```bash
 cargo build --release
-./target/release/bench_setup   # downloads + extracts SF0.1 (~17 MiB)
+# Linux/macOS:
+./target/release/bench_setup
+# Windows (PowerShell or cmd, NOT MSYS bash — see "Windows note" below):
+cargo run --release --bin bench_setup
 ```
 
 That produces:
@@ -36,6 +45,14 @@ That produces:
   — raw LDBC CSVs (used by external systems' loaders)
 - `bench/data/substitution_parameters-sf0.1/.../interactive_2_param.txt`
   — 15 IC2 param rows (`personId|maxDate`)
+
+> **Windows note**: the binary is named `bench_setup.exe`, which
+> Windows treats as an installer (`setup` in the name triggers UAC
+> elevation). Invoking from MSYS bash fails with `os error 740`.
+> Run it from PowerShell or cmd.exe instead, OR via `cargo run`
+> in a non-MSYS shell. `run_all.sh` does NOT auto-rebuild gqlite's
+> `.gdb`; it verifies that the file exists and instructs you to
+> rebuild manually if missing.
 
 ### 2. Per-system prerequisites
 
@@ -54,7 +71,7 @@ piecemeal, they're:
 |---|---|---|
 | `gqlite` | `cargo build --release` (covered by step 1) | none |
 | `graphqlite` | `pip install -r bench/cross-system/graphqlite/requirements.txt` | none |
-| `kuzu` | `pip install -r bench/cross-system/kuzu/requirements.txt` | none |
+| `kuzu` | `pip install -r bench/cross-system/kuzu/requirements.txt` | none — `kuzu==0.11.3` pinned, archived but reproducible |
 
 Each per-system subdir has its own `README.md` documenting prereqs,
 CLI, and any per-system gotchas. Failing-but-scaffolded systems
@@ -63,18 +80,25 @@ CLI, and any per-system gotchas. Failing-but-scaffolded systems
 
 ### 3. Per-system data load
 
-The first time `run_all.sh` runs, each implemented system's runner
-will auto-invoke its own `setup.py` (or equivalent) to load the LDBC
-CSVs into that system's native format. This is a one-time cost
-amortized over every subsequent bench run. To pre-load explicitly:
+`run_all.sh` orchestrates the data-load step automatically per
+system: for each system in turn, it invokes the system's `setup.py`
+(or, for gqlite, verifies the `.gdb` is present), then runs each
+requested IC. By default setup is skipped if the system's database
+already exists; pass `--rebuild-setup` to force a clean reload.
+
+The setup loads the FULL LDBC SF0.1 dataset for each system —
+every node and edge type, including Multi-Valued Attributes
+(`person_email_emailaddress`, `person_speaks_language`) as
+list-typed properties on Person. This means setup is IC-agnostic:
+adding a new IC translation (`ic<n>.cypher` per system) does NOT
+require any setup-script changes. Same DB, all ICs.
+
+To pre-load explicitly (or to time setup separately):
 
 ```bash
-python bench/cross-system/graphqlite/setup.py --ic 2
-python bench/cross-system/kuzu/setup.py --ic 2
+python bench/cross-system/graphqlite/setup.py --force
+python bench/cross-system/kuzu/setup.py --force
 ```
-
-(`gqlite` doesn't need a separate per-system setup — `bench_setup`
-in step 1 already produced its `.gdb`.)
 
 ## Running
 
@@ -82,28 +106,37 @@ in step 1 already produced its `.gdb`.)
 # Default: IC2 against every implemented system.
 bench/cross-system/run_all.sh
 
-# Pick a different IC (must be 'implemented' in its toml):
-bench/cross-system/run_all.sh --ic 2
+# Multi-IC sweep, all in one invocation:
+bench/cross-system/run_all.sh --ics 2,3,11
 
-# Just one system (useful while iterating on a per-system runner):
+# Subset of systems (useful while iterating on a per-system runner):
 bench/cross-system/run_all.sh --only gqlite
 bench/cross-system/run_all.sh --only gqlite,graphqlite
 
 # Tune iteration count:
 bench/cross-system/run_all.sh --iters 30 --warmup 3
+
+# Force a clean re-load of every system's DB before benching
+# (captures real setup time; default skips setup if DB exists):
+bench/cross-system/run_all.sh --rebuild-setup
 ```
 
-For a multi-IC sweep, run the script once per IC — each invocation
-lands in its own timestamped results dir.
+The orchestrator iterates **systems on the outer loop, ICs on the
+inner**: for each system, set up once (loading full LDBC SF0.1),
+then run all requested ICs against that DB, then move on. Memory
+is reclaimed naturally between systems via process exit — no
+shared state, no concurrent system DBs in memory at once.
 
 Output lands in `bench/cross-system/results/<timestamp>/`:
-- `<system>.csv` per system — raw per-iter rows (same schema as
-  `ldbc_bench`:
-  `query;backend;params;row;iter;result_count;elapsed_ns`)
+- `<system>.ic<n>.csv` per (system, IC) — raw per-iter rows in
+  schema `query;backend;params;row;iter;result_count;elapsed_ns`
 - `cross_system.csv` — concatenation of all the above
 - `comparison.txt` — `compare_results.py` output (latency table +
   count/shape consistency check + side-by-side comparison)
-- `skipped.log` — any systems that couldn't run, with reasons
+- `setup_times.txt` — per-system load wall time (when measurable)
+- `<system>.setup.log`, `<system>.ic<n>.stderr.log` — per-stage logs
+- `skipped.log` — any (system, IC) pair that couldn't run
+- `run_info.txt` — timestamp, host, gqlite commit, etc.
 
 ## The query
 
@@ -138,6 +171,80 @@ the comment-link explains.
    per-system query translation bug.
 3. **Side-by-side latency** — one row per params_row, one column per
    system, median ms.
+
+## Measurement basis (read this before quoting numbers)
+
+Cross-system bench numbers are useful only if you understand what's
+being measured. Every choice that's not strictly identical across
+systems is documented here so reviewers can interpret the numbers
+honestly.
+
+### What's IDENTICAL across systems
+
+- **Same dataset.** LDBC SNB SF0.1, all entities, all edges, all MVAs.
+  Each system's `setup.py` (or, for gqlite, `bench_setup`) loads the
+  full dataset — no per-IC subset fragmentation.
+- **Same parameter rows.** All 15 LDBC IC2 substitution params; same
+  `personId|maxDate` values fed to every system.
+- **Same IC translation, structurally.** Each per-system
+  `ic<n>.cypher` (or `.gql`) is a translation of the canonical query
+  in `bench/ldbc-queries/ic<n>.toml`. Per-system divergences from
+  that canonical shape are documented in each subdir's
+  `DIVERGENCES.md`.
+- **Same warmup + iter counts.** Every system gets the same `--warmup`
+  iters discarded before measurement and the same `--iters` measured.
+- **Same result-shape verification.** Every system's runner emits
+  `SHAPE row=N count=N shape=<sig>` lines compared against the toml's
+  `expected_shape`; `run_all.sh` tallies pass/fail per system.
+
+### What's DIFFERENT across systems (and why)
+
+1. **FFI overhead.** gqlite is benched via the Rust `ldbc_bench` binary
+   — the per-iter timer wraps `Runtime::run_query()`, no Python in the
+   path. graphqlite and Kuzu are benched through their Python wheels;
+   their per-iter timer wraps `g.query(...)` / `conn.execute(...)`,
+   which includes ~1-2ms of Python ↔ C/C++ FFI overhead per call.
+   We deliberately measure each system through its **primary
+   user-facing interface** (gqlite's CLI/Rust, the others' Python
+   wrappers) rather than artificially inflating gqlite's number to
+   "match" the others. A user picking gqlite would write Rust; a user
+   picking Kuzu would write Python. The numbers reflect that.
+2. **Compile (parse + plan) cost.** gqlite compiles the query once
+   per param row outside the timed loop; the timer measures
+   execution only. Kuzu and graphqlite handle this internally via
+   plan caches keyed by query string — repeated calls don't re-parse.
+   No system pays per-iter compile cost in the measurement.
+3. **Query shapes within IC2.** Each system uses its native idiom
+   for the label-disjunction step (`(c:Comment|Post)` for gqlite,
+   `WHERE c:Comment OR c:Post` for graphqlite, multi-typed REL TABLE
+   `(c)` unlabeled for Kuzu). Different shapes → different optimizer
+   paths within each engine, but logically the same query. We do NOT
+   constrain engines to a foreign shape. Per-system shape divergences
+   are listed in each subdir's `DIVERGENCES.md`.
+4. **No ORDER BY anywhere.** The canonical IC2 in
+   `bench/ldbc-queries/ic2.toml` drops `ORDER BY` because gqlite's
+   parser doesn't support it yet. We apply the same drop to every
+   system for fairness with our own engine. **This means our IC2
+   numbers are NOT comparable to published LDBC IC2 numbers** (which
+   include ORDER BY). Document this anywhere external comparison is
+   made.
+5. **Setup time.** Reported in `setup_times.txt` per system.
+   gqlite's setup is user-managed (the `bench_setup` binary can't
+   be invoked from MSYS bash on Windows due to UAC); it shows
+   "user-managed" in the table. The other systems' setup is invoked
+   directly by `run_all.sh` and timed.
+6. **Pinned versions.** kuzu is pinned to `0.11.3` (the upstream
+   project archived 2025-10-10; the wheel is frozen and reproducible).
+   graphqlite tracks its latest PyPI release. gqlite is whatever
+   the bench branch builds.
+
+### What's INTENTIONALLY not measured
+
+- Memory footprint
+- Cold-cache (first-iter) vs warm-cache breakdown
+- Multiple scale factors (SF1, SF10, SF100). LDBC SF0.1 is the
+  smallest; we'd add larger SFs if a finding requires them.
+- Concurrency / multi-thread query throughput
 
 ## Out of scope
 

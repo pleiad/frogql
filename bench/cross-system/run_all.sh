@@ -1,36 +1,39 @@
 #!/usr/bin/env bash
-# Cross-system bench — orchestrator.
+# Cross-system bench — orchestrator (system-outer-loop redesign).
 #
-# Invokes every per-system runner in turn for a chosen IC, captures
-# each runner's CSV into a timestamped results dir, then runs
-# compare_results.py to produce a side-by-side comparison table.
+# For each system, sequentially:
+#   1. Set up ONCE — load full LDBC SF0.1 into the system's native
+#      format. Captured to setup_times.txt.
+#   2. For each requested IC, run the per-iter bench. Each runner is
+#      a separate process invocation; per-system memory is reclaimed
+#      automatically at process exit.
+#
+# This avoids fragmented "per-IC subset" loaders. All systems load
+# the same dataset, all queries run against the same DB across ICs.
 #
 # Usage:
-#   bench/cross-system/run_all.sh [--ic <n>] [--iters N] [--warmup N] [--only <list>]
-#
-# Default --ic is 2. Each invocation runs one IC against every
-# (selected) system. For a multi-IC sweep, invoke this script once
-# per IC — each run lands in its own timestamped dir.
-#
-# --only takes a comma-separated subset of system names, e.g.
-#   --only gqlite        # just our system (debugging)
-#   --only gqlite,graphqlite
-# Default runs every system whose runner exists and is ready.
+#   bench/cross-system/run_all.sh \
+#       [--ics 2,3,11]                # default: 2
+#       [--iters N]                   # default: 10 measured iters per param row
+#       [--warmup N]                  # default: 2
+#       [--only gqlite,kuzu]          # subset of systems
+#       [--rebuild-setup]             # force per-system setup re-run
+#                                     # (default: skip setup if DB exists)
 #
 # Output: bench/cross-system/results/<timestamp>/
-#   gqlite.csv
-#   graphqlite.csv          (if integrated)
-#   graphlite.csv           (if integrated)
-#   kuzu.csv                (if integrated; kuzudb.com / kuzu on PyPI)
-#   webbery_gqlite.csv      (if integrated; SKIPPED.md otherwise)
-#   cross_system.csv        (concatenation of all the above)
-#   comparison.txt          (compare_results.py output)
-#   run_info.txt            (metadata: timestamp, host, ic, etc.)
+#   setup_times.txt         metadata: per-system setup wall time
+#   <system>.<icN>.csv      per (system, IC): per-iter latency rows
+#   cross_system.csv        all per-iter rows concatenated
+#   comparison.txt          compare_results.py output (per-IC tables)
+#   <system>.<icN>.stderr.log  per (system, IC) runner stderr
+#   skipped.log             any system+IC pair that couldn't run
+#   run_info.txt            timestamp, host, gqlite commit, etc.
 #
 # Prereq: ./target/release/bench_setup has been run so the LDBC SF0.1
-# dataset (~17 MiB) is downloaded and built into ldbc-sf0.1.gdb.
-# Each external system's runner has its own additional setup
-# requirements; see the corresponding subdir's README/run script.
+# CSVs are present under bench/data/ldbc-sf0.1/, and gqlite's own
+# .gdb file is built. Each external system additionally needs its
+# Python deps installed — see the per-system subdir's README.md or
+# run `bench/cross-system/install_python_deps.sh`.
 
 set -euo pipefail
 
@@ -38,16 +41,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RESULTS_ROOT="$SCRIPT_DIR/results"
 
-IC=2
+ICS_ARG="2"
 ITERS=10
 WARMUP=2
 ONLY=""
+REBUILD=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --ic)     IC="$2"; shift 2 ;;
-        --iters)  ITERS="$2"; shift 2 ;;
-        --warmup) WARMUP="$2"; shift 2 ;;
-        --only)   ONLY="$2"; shift 2 ;;
+        --ic|--ics)         ICS_ARG="$2"; shift 2 ;;
+        --iters)            ITERS="$2"; shift 2 ;;
+        --warmup)           WARMUP="$2"; shift 2 ;;
+        --only)             ONLY="$2"; shift 2 ;;
+        --rebuild-setup)    REBUILD=1; shift ;;
         -h|--help)
             awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
             exit 0 ;;
@@ -55,18 +60,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+IFS=',' read -ra IC_LIST <<<"$ICS_ARG"
+
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OUT_DIR="$RESULTS_ROOT/$TIMESTAMP"
 mkdir -p "$OUT_DIR"
 START_EPOCH=$(date +%s)
 
-# Capture run-environment metadata up-front so any future re-analysis
-# of the timestamped results dir knows which gqlite revision, host,
-# and toolchain produced these numbers. Best-effort across platforms;
-# missing fields surface as empty values, not errors.
+# Run-environment metadata. Captured up-front so any future re-analysis
+# of the timestamped results dir knows which gqlite revision and host
+# produced these numbers.
 {
     echo "timestamp:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "ic:               $IC"
+    echo "ics:              ${IC_LIST[*]}"
+    echo "iters:            $ITERS"
+    echo "warmup:           $WARMUP"
+    echo "rebuild_setup:    $REBUILD"
     echo "host:             $(hostname 2>/dev/null || echo unknown)"
     echo "uname:            $(uname -a 2>/dev/null || echo unknown)"
     echo "gqlite_branch:    $(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
@@ -77,11 +86,10 @@ START_EPOCH=$(date +%s)
     echo "ldbc_dataset:     SF0.1"
 } > "$OUT_DIR/run_info.txt"
 
-# Systems registered here. Order matters only for cosmetic per-system
-# stderr output; the comparison script sorts independently.
-ALL_SYSTEMS=(gqlite graphqlite kuzu graphlite webbery_gqlite)
+# Systems registered here. Order is per-system bench order; doesn't
+# affect comparison since compare_results.py sorts independently.
+ALL_SYSTEMS=(gqlite graphqlite kuzu)
 
-# Filter via --only.
 if [[ -n "$ONLY" ]]; then
     IFS=',' read -ra SYSTEMS <<<"$ONLY"
 else
@@ -89,60 +97,156 @@ else
 fi
 
 cd "$REPO_ROOT"
-echo "=== Cross-system IC$IC bench — $TIMESTAMP ==="
+echo "=== Cross-system bench — $TIMESTAMP ==="
 echo "  results: $OUT_DIR"
-echo "  ic:      $IC"
+echo "  ics:     ${IC_LIST[*]}"
 echo "  iters:   $ITERS"
 echo "  warmup:  $WARMUP"
 echo "  systems: ${SYSTEMS[*]}"
+[[ $REBUILD -eq 1 ]] && echo "  setup:   --rebuild-setup (force fresh per-system load)"
 echo ""
 
-# Run each system. Missing/unimplemented runners are non-fatal; we
-# log "SKIPPED" for them and continue. compare_results.py only
-# considers CSVs that actually got produced.
-for sys in "${SYSTEMS[@]}"; do
-    runner=""
-    case "$sys" in
-        gqlite)         runner="$SCRIPT_DIR/gqlite/run.sh" ;;
-        graphqlite)     runner="$SCRIPT_DIR/graphqlite/run.py" ;;
-        graphlite)      runner="$SCRIPT_DIR/graphlite/run.sh" ;;  # wraps cargo run
-        kuzu)           runner="$SCRIPT_DIR/kuzu/run.py" ;;
-        webbery_gqlite) runner="$SCRIPT_DIR/webbery_gqlite/run.sh" ;;
-    esac
+# ---- Per-system loop ------------------------------------------------
 
-    if [[ -z "$runner" || ! -e "$runner" ]]; then
-        echo "[SKIP] $sys: runner not present at $runner" | tee -a "$OUT_DIR/skipped.log"
+# Per-system setup commands. Each is the path to a setup.py / no-op
+# call that loads the system's native DB. gqlite's "setup" is the
+# repo-root bench_setup binary which is shared across IC runs (it
+# produces the .gdb that ldbc_bench reads).
+# gqlite's setup is the workspace's `bench_setup` Rust binary. On
+# Windows it can't be invoked from a non-admin MSYS shell because
+# the binary name contains "setup", which triggers the OS's
+# installer-detection heuristic — Windows demands UAC elevation
+# (`ERROR_ELEVATION_REQUIRED` / "La operación solicitada requiere
+# elevación", error 740). `cargo run` doesn't help — cargo just
+# shells out to the .exe and Windows blocks it the same way. The
+# clean fix is upstream (rename the binary OR add a Windows manifest
+# that explicitly declares `requestedExecutionLevel asInvoker`); we
+# don't carry that change in this PR.
+#
+# Workaround: gqlite's setup is treated as a user-managed prereq.
+# `run_all.sh` doesn't try to invoke bench_setup; it just verifies
+# that `bench/data/ldbc-sf0.1.gdb` exists. Setup time for gqlite is
+# reported as "user-managed" — to capture a comparable number, run
+# `cargo run --release --bin bench_setup -- --rebuild` from a
+# non-MSYS shell (Windows: PowerShell or cmd.exe). On Linux/macOS
+# this whole problem doesn't exist.
+declare -A SETUP_CMD=(
+    [graphqlite]="python $SCRIPT_DIR/graphqlite/setup.py"
+    [kuzu]="python $SCRIPT_DIR/kuzu/setup.py"
+)
+
+declare -A REBUILD_FLAG=(
+    [graphqlite]="--force"
+    [kuzu]="--force"
+)
+
+# Per-system DB-existence checks. Setup is skipped if the marker
+# already exists, unless --rebuild-setup is passed. These are just
+# heuristics for "is the DB built?" — the runner does its own check
+# and errors cleanly if the DB is genuinely missing.
+declare -A SETUP_MARKER=(
+    [gqlite]="$REPO_ROOT/bench/data/ldbc-sf0.1.gdb"
+    [graphqlite]="$REPO_ROOT/bench/data/cross-system/graphqlite/ldbc-sf01.db"
+    [kuzu]="$REPO_ROOT/bench/data/cross-system/kuzu/ldbc-sf01.db"
+)
+
+# Per-system runner commands (path is per-system; dispatch is per-runner).
+# Each runner gets `<out_csv> --ic <n> --iters <N> --warmup <N>`.
+declare -A RUNNER=(
+    [gqlite]="bash $SCRIPT_DIR/gqlite/run.sh"
+    [graphqlite]="python $SCRIPT_DIR/graphqlite/run.py"
+    [kuzu]="python $SCRIPT_DIR/kuzu/run.py"
+)
+
+SETUP_TIMES_FILE="$OUT_DIR/setup_times.txt"
+echo "system    elapsed_seconds    status" > "$SETUP_TIMES_FILE"
+
+for sys in "${SYSTEMS[@]}"; do
+    runner_cmd="${RUNNER[$sys]:-}"
+    marker="${SETUP_MARKER[$sys]:-}"
+    if [[ -z "$runner_cmd" ]]; then
+        echo "[SKIP] $sys: not registered in run_all.sh" \
+            | tee -a "$OUT_DIR/skipped.log"
         continue
     fi
 
-    echo "--- $sys ---"
-    out_csv="$OUT_DIR/${sys}.csv"
-    # Capture each runner's stderr to a per-system log. Runners emit
-    # `SHAPE row=N count=N shape=<sig>` lines there, which we grep
-    # for the shape-consistency summary at the end of this script.
-    stderr_log="$OUT_DIR/${sys}.stderr.log"
+    echo "==================== $sys ===================="
 
-    case "$sys" in
-        graphqlite|kuzu)
-                    python "$runner" "$out_csv" --ic "$IC" --iters "$ITERS" --warmup "$WARMUP" \
-                        2>"$stderr_log" || \
-            echo "[FAIL] $sys runner returned non-zero" | tee -a "$OUT_DIR/skipped.log" ;;
-        *)          bash "$runner" "$out_csv" --ic "$IC" --iters "$ITERS" --warmup "$WARMUP" \
-                        2>"$stderr_log" || \
-            echo "[FAIL] $sys runner returned non-zero" | tee -a "$OUT_DIR/skipped.log" ;;
-    esac
+    # --- Setup phase ---
+    # gqlite is special: its setup binary can't be invoked from this
+    # script on Windows (UAC), so it's user-managed — verify only.
+    # Other systems have a setup_cmd we can invoke directly.
+    setup_cmd="${SETUP_CMD[$sys]:-}"
+    setup_status="ok"
+    elapsed_s="0.00"
+    if [[ -z "$setup_cmd" ]]; then
+        # User-managed setup (e.g. gqlite's bench_setup).
+        if [[ ! -e "$marker" ]]; then
+            echo "[FAIL] $sys: $marker missing." \
+                | tee -a "$OUT_DIR/skipped.log"
+            echo "  Setup is user-managed for this system. Run:" >&2
+            echo "    cargo run --release --bin bench_setup -- --rebuild" >&2
+            echo "  from a non-MSYS shell (PowerShell/cmd on Windows)." >&2
+            setup_status="fail"
+        else
+            setup_status="user-managed"
+            echo "  setup: user-managed (verified $marker exists)"
+        fi
+    elif [[ $REBUILD -eq 1 || ! -e "$marker" ]]; then
+        if [[ $REBUILD -eq 1 ]]; then
+            extra_arg="${REBUILD_FLAG[$sys]:---force}"
+            echo "  setup: $setup_cmd $extra_arg (forced rebuild)"
+        else
+            extra_arg=""
+            echo "  setup: $setup_cmd (DB missing, building)"
+        fi
+        setup_log="$OUT_DIR/${sys}.setup.log"
+        setup_start=$(date +%s%N)
+        if ! eval "$setup_cmd $extra_arg" >"$setup_log" 2>&1; then
+            setup_status="fail"
+            echo "[FAIL] $sys setup failed; see $setup_log" \
+                | tee -a "$OUT_DIR/skipped.log"
+        fi
+        setup_end=$(date +%s%N)
+        elapsed_s=$(awk "BEGIN { printf \"%.2f\", ($setup_end - $setup_start) / 1e9 }")
+    else
+        setup_status="cached"
+        echo "  setup: cached at $marker"
+    fi
+    printf "%-12s %-18s %s\n" "$sys" "$elapsed_s" "$setup_status" \
+        >> "$SETUP_TIMES_FILE"
+
+    if [[ "$setup_status" == "fail" ]]; then
+        echo "  skipping IC runs for $sys — setup failed"
+        continue
+    fi
+
+    # --- Per-IC bench phase ---
+    for ic in "${IC_LIST[@]}"; do
+        echo "  --- ic$ic ---"
+        out_csv="$OUT_DIR/${sys}.ic${ic}.csv"
+        stderr_log="$OUT_DIR/${sys}.ic${ic}.stderr.log"
+        if ! eval "$runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP" \
+                2>"$stderr_log"; then
+            echo "[FAIL] $sys ic$ic runner returned non-zero" \
+                | tee -a "$OUT_DIR/skipped.log"
+        fi
+    done
+
+    echo ""
 done
 
-# Concatenate every produced per-system CSV (skipping per-system
-# header lines so the unified file has exactly one header).
-echo ""
+# ---- Concatenate ----------------------------------------------------
+
 echo "--- Concatenating ---"
 unified="$OUT_DIR/cross_system.csv"
 header_written=0
 produced=0
-for sys in "${SYSTEMS[@]}"; do
-    csv="$OUT_DIR/${sys}.csv"
+for csv in "$OUT_DIR"/*.csv; do
     [[ -f "$csv" ]] || continue
+    base="$(basename "$csv")"
+    # Skip the unified file itself if a previous run left one.
+    [[ "$base" == "cross_system.csv" ]] && continue
     produced=$((produced + 1))
     if [[ $header_written -eq 0 ]]; then
         head -n 1 "$csv" > "$unified"
@@ -159,33 +263,35 @@ if [[ $produced -eq 0 ]]; then
     exit 1
 fi
 
-echo "  unified: $unified ($(wc -l <"$unified") lines, $produced systems)"
+echo "  unified: $unified ($(wc -l <"$unified") lines, $produced per-(sys,ic) CSVs)"
 
-# Shape-verification summary. Each runner logs `SHAPE row=N
-# count=N shape=<sig> status=<ok|fail|no-expected>` per params row;
-# verification is independent per runner against the
-# `expected_shape` field in the IC's toml. We just tally pass/fail
-# counts here. A failure is a per-system query-translation bug; the
-# stderr log has the per-row reason.
+# ---- Setup-time summary ---------------------------------------------
+
+echo ""
+echo "--- Setup times ---"
+column -t "$SETUP_TIMES_FILE" 2>/dev/null || cat "$SETUP_TIMES_FILE"
+
+# ---- Shape verification ---------------------------------------------
+
 echo ""
 echo "--- Shape verification ---"
-for sys in "${SYSTEMS[@]}"; do
-    log="$OUT_DIR/${sys}.stderr.log"
+for log in "$OUT_DIR"/*.stderr.log; do
     [[ -f "$log" ]] || continue
+    name=$(basename "$log" .stderr.log)
     total=$(grep -c "^  SHAPE row=" "$log" || true)
     ok=$(grep -c "^  SHAPE row=.* status=ok$" "$log" || true)
     if [[ "$total" -eq 0 ]]; then
-        echo "  $sys: no SHAPE lines (runner emitted none)"
         continue
     fi
     if [[ "$ok" -eq "$total" ]]; then
-        echo "  $sys: $ok/$total rows passed shape verification"
+        echo "  $name: $ok/$total rows passed"
     else
-        echo "  $sys: $ok/$total rows passed; $((total - ok)) failed (see $log)"
+        echo "  $name: $ok/$total rows passed; $((total - ok)) failed (see $log)"
     fi
 done
 
-# Run comparison.
+# ---- Comparison -----------------------------------------------------
+
 echo ""
 echo "--- Comparison ---"
 if command -v python >/dev/null 2>&1; then
