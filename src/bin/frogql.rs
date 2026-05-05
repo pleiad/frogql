@@ -1,10 +1,10 @@
 //! Interactive GQL REPL (like sqlite3 but for graphs).
 //!
 //! Usage:
-//!   gqlite <database.gdb> [--no-typecheck]                          # open existing
-//!   gqlite <database.gdb> --import-csv <dir> [--no-typecheck]       # create from CSV (spanner_import_config.json)
-//!   gqlite <database.gdb> --import-ldbc-csv <dir> [--no-typecheck]  # create from LDBC SNB CsvBasic dataset
-//!   gqlite <database.gdb> --import-json <file> [--no-typecheck]     # create from JSON
+//!   frogql <database.gdb> [--no-typecheck]                          # open existing
+//!   frogql <database.gdb> --import-csv <dir> [--no-typecheck]       # create from CSV (spanner_import_config.json)
+//!   frogql <database.gdb> --import-ldbc-csv <dir> [--no-typecheck]  # create from LDBC SNB CsvBasic dataset
+//!   frogql <database.gdb> --import-json <file> [--no-typecheck]     # create from JSON
 
 use std::env;
 use std::path::Path;

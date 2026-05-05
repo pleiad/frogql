@@ -206,6 +206,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "frogql-py"
+version = "0.1.0"
+dependencies = [
+ "gqlrust",
+ "pyo3",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -239,14 +247,6 @@ dependencies = [
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
-]
-
-[[package]]
-name = "gqlite-py"
-version = "0.1.0"
-dependencies = [
- "gqlrust",
- "pyo3",
 ]
 
 [[package]]

@@ -13,6 +13,9 @@ __pycache__/
 /bench/data/cross-system/
 /python/.venv/
 /python/foo.py
+/python/pypi_token
+/python/.mypy_cache/
+/python/dist/
 *.swp
 # Large generated databases (re-create with scripts/convert_dev_datasets.py)
 examples/neoflix.gdb

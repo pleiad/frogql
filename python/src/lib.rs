@@ -118,7 +118,7 @@ impl Connection {
 
     fn __repr__(&self) -> String {
         format!(
-            "<gqlite.Connection nodes={} edges={}>",
+            "<frogql.Connection nodes={} edges={}>",
             self.store.node_count(),
             self.store.edge_count()
         )
@@ -611,7 +611,7 @@ fn pathvalue_to_py<'py>(
 }
 
 #[pymodule]
-fn gqlite(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn frogql(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Connection>()?;
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(import_json, m)?)?;

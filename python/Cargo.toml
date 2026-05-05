@@ -1,10 +1,10 @@
 [package]
-name = "gqlite-py"
+name = "frogql-py"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "gqlite"
+name = "frogql"
 crate-type = ["cdylib"]
 
 [dependencies]

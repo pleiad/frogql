@@ -1,5 +1,5 @@
 //! `bench_setup` — fetch the LDBC SF0.1 dataset + substitution
-//! parameters and build the gqlite `.gdb`. Idempotent: each step
+//! parameters and build the frogql `.gdb`. Idempotent: each step
 //! checks for its output and skips if present. Pass `--rebuild` to
 //! force the .gdb to rebuild even if it exists.
 //!
@@ -32,7 +32,7 @@ fn print_usage(prog: &str) {
         "Usage: {prog} [--data-dir <dir>] [--rebuild] [--skip-download]\n\
          \n\
          Downloads the LDBC SF0.1 dataset + substitution params, then\n\
-         builds <data-dir>/ldbc-sf0.1.gdb via gqlite --import-ldbc-csv.\n\
+         builds <data-dir>/ldbc-sf0.1.gdb via frogql --import-ldbc-csv.\n\
          Idempotent — re-running with the artifacts present is a no-op.\n\
          \n\
          Defaults:\n\
@@ -148,7 +148,7 @@ fn main() {
         extract_tar_zst(&params_archive, &params_dir);
     }
 
-    // Step 3: .gdb. Shells out to the gqlite binary's --import-ldbc-csv
+    // Step 3: .gdb. Shells out to the frogql binary's --import-ldbc-csv
     // path so the .gdb is built by exactly the same code the REPL uses.
     let gdb_path = data_dir.join("ldbc-sf0.1.gdb");
     if gdb_path.exists() && !rebuild {
@@ -257,7 +257,7 @@ fn extract_tar_zst(archive: &Path, dest: &Path) {
     eprintln!("  done in {:.1}s", t0.elapsed().as_secs_f64());
 }
 
-/// Build the .gdb by shelling out to the gqlite binary, which we
+/// Build the .gdb by shelling out to the frogql binary, which we
 /// expect alongside this one in `target/release/`. Using the binary
 /// rather than calling the loader API directly means the .gdb is
 /// constructed by exactly the same code path users run from the REPL.
@@ -265,35 +265,35 @@ fn build_gdb(gdb_path: &Path, csv_dir: &Path) {
     eprintln!("building {} from {}", gdb_path.display(), csv_dir.display());
     let t0 = Instant::now();
 
-    // `target/release/gqlite` lives next to `target/release/bench_setup`.
+    // `target/release/frogql` lives next to `target/release/bench_setup`.
     let exe_dir = env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| fail("could not locate own executable to find sibling gqlite binary"));
-    let gqlite_bin = exe_dir.join(if cfg!(windows) {
-        "gqlite.exe"
+        .unwrap_or_else(|| fail("could not locate own executable to find sibling frogql binary"));
+    let frogql_bin = exe_dir.join(if cfg!(windows) {
+        "frogql.exe"
     } else {
-        "gqlite"
+        "frogql"
     });
-    if !gqlite_bin.exists() {
+    if !frogql_bin.exists() {
         fail(&format!(
-            "gqlite binary not found at {}.\n\
+            "frogql binary not found at {}.\n\
              Build it first:\n\t\
-             cargo build --release --bin gqlite",
-            gqlite_bin.display()
+             cargo build --release --bin frogql",
+            frogql_bin.display()
         ));
     }
 
-    let status = Command::new(&gqlite_bin)
+    let status = Command::new(&frogql_bin)
         .arg(gdb_path)
         .arg("--import-ldbc-csv")
         .arg(csv_dir)
         .arg("--no-typecheck")
         .stdin(std::process::Stdio::null())
         .status()
-        .unwrap_or_else(|e| fail(&format!("spawn gqlite: {e}")));
+        .unwrap_or_else(|e| fail(&format!("spawn frogql: {e}")));
     if !status.success() {
-        fail(&format!("gqlite import exited with status {status}"));
+        fail(&format!("frogql import exited with status {status}"));
     }
     eprintln!(
         "  done: {} in {:.1}s",
