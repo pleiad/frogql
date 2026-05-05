@@ -14,9 +14,15 @@ Per-IC inputs (all derived from --ic <n>):
     bench/ldbc-queries/ic<n>.toml         — query metadata
     bench/cross-system/kuzu/ic<n>.cypher  — Kuzu translation
     bench/data/substitution_parameters-sf0.1/.../<toml.params_file>
-    bench/data/cross-system/kuzu/ic<n>.db — pre-loaded DB
 
-Prereq: setup.py has been run (or will be auto-run) so the DB exists.
+Shared input (one DB across all ICs):
+    bench/data/cross-system/kuzu/ldbc-sf01.db — full LDBC SF0.1
+    loaded by setup.py. The runner is IC-specific; setup is not.
+
+Prereq: setup.py has been run so the LDBC DB exists. The runner
+errors out cleanly if the DB is missing — it does NOT auto-invoke
+setup, because the cross-system orchestrator (`run_all.sh`) is
+responsible for ordering setup-then-run per system.
 
 Usage:
     python run.py <out_csv> [--ic <n>] [--iters N] [--warmup N]
@@ -26,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-import subprocess
 import time
 from pathlib import Path
 
@@ -48,6 +53,7 @@ PARAMS_DIR = (
     / "bench/data/substitution_parameters-sf0.1/substitution_parameters-sf0.1"
 )
 DB_DIR = REPO_ROOT / "bench/data/cross-system/kuzu"
+DB_NAME = "ldbc-sf01.db"
 LDBC_QUERIES_DIR = REPO_ROOT / "bench/ldbc-queries"
 BACKEND_LABEL = "kuzu-cypher"
 
@@ -137,10 +143,19 @@ def derive_columns(return_columns: list[str]) -> list[str]:
 
 
 def run_query(conn, query: str, bindings: dict) -> tuple[list[str], list[list]]:
-    """Execute, return (column_names, data_rows). Kuzu's `execute`
-    returns a QueryResult with `has_next()` / `get_next()` iteration
-    and `get_column_names()`. We materialize all rows because the
-    runner needs `len(rows)` and shape-of-rows.
+    """Execute, return (column_names, data_rows). Kuzu's
+    `Connection.execute(query_string, params)` is the documented
+    user-facing API; the engine maintains an internal plan cache so
+    repeated calls with the same query string don't re-parse on
+    every iteration. (Note: Kuzu has a `PreparedStatement` API too,
+    but it's officially deprecated in 0.11.x — we deliberately use
+    the recommended single-call form so the bench reflects what end
+    users would actually write.)
+
+    Iteration: `QueryResult.has_next()` / `.get_next()` materializes
+    rows one at a time across the PyO3 boundary. We collect into a
+    list because the runner needs `len(rows)` and the shape-of-rows
+    type signature.
     """
     result = conn.execute(query, bindings)
     cols = result.get_column_names()
@@ -165,7 +180,7 @@ def main() -> int:
     ic = args.ic
     toml_path = LDBC_QUERIES_DIR / f"ic{ic}.toml"
     query_file = HERE / f"ic{ic}.cypher"
-    db_path = DB_DIR / f"ic{ic}.db"
+    db_path = DB_DIR / DB_NAME
 
     if not toml_path.is_file():
         sys.stderr.write(f"  toml missing: {toml_path}\n")
@@ -200,15 +215,12 @@ def main() -> int:
     if not db_path.exists():
         sys.stderr.write(
             f"  kuzu db missing: {db_path}\n"
-            f"  running setup.py to build it (one-time, ~minute)...\n"
+            f"  run setup.py first:\n"
+            f"    python {HERE / 'setup.py'}\n"
+            f"  (the cross-system orchestrator does this automatically;\n"
+            f"   if you're seeing this manually, you bypassed run_all.sh)\n"
         )
-        rc = subprocess.run(
-            [sys.executable, str(HERE / "setup.py"), "--ic", str(ic)],
-            cwd=str(REPO_ROOT),
-        ).returncode
-        if rc != 0:
-            sys.stderr.write(f"  setup.py failed with code {rc}\n")
-            return rc
+        return 1
 
     query = load_query(query_file)
     header, params_rows = load_params(params_file)

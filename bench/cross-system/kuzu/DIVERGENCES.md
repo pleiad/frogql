@@ -115,14 +115,24 @@ is expected when copying data into the hasCreator table.`
 This is standard Kuzu usage, just slightly more verbose than the
 single-typed case.
 
-### 3. Schema must declare every CSV column
+### 3. Schema must declare every CSV column; MVAs need pre-aggregation
 
-Kuzu's COPY FROM rejects rows where the column count doesn't match
-the table schema. The LDBC Person CSV has 8 columns; our IC2 only
-queries 3 (id, firstName, lastName). Rather than pre-process CSVs,
-the schema in `setup.py` declares all 8 — IC2 simply doesn't
-reference the unused fields. Same approach for Comment (6 cols) and
-Post (8 cols).
+Kuzu's COPY FROM requires every CSV column to match the table
+schema (no `DEFAULT` fill on COPY — we verified by probe). The LDBC
+node CSVs have many columns (Person: 8, Comment: 6, Post: 8); our
+schema declares them all and IC2 simply doesn't reference unused
+fields.
+
+For the two Multi-Valued Attributes (MVAs) on Person — `email` and
+`language`, declared in our schema as `STRING[]` — there's no
+matching column in `person_0_0.csv`. LDBC ships them as separate
+files (`person_email_emailaddress_0_0.csv`,
+`person_speaks_language_0_0.csv`) with one row per (Person, value).
+`setup.py` pre-aggregates these to `{person_id: [value, ...]}` and
+writes an augmented Person CSV with `email` and `language` columns
+formatted as Kuzu LIST literals (`[a,b,c]`). Then COPY FROM the
+augmented CSV. Same data model as gqlite's LDBC loader (which
+surfaces these as `Value::List` properties on Person).
 
 ### 4. `knows` is materialized in both directions at load time
 
@@ -130,6 +140,22 @@ LDBC's `person_knows_person_0_0.csv` records each pair once. Kuzu
 has no undirected REL TABLE primitive, so we generate a reversed CSV
 in `setup.py` and COPY it into the same `knows` table. Same
 convention used by every other system in the cross-system bench.
+
+### 5. PreparedStatement API is deprecated; we use `execute(query_str, params)`
+
+Kuzu has both `Connection.execute(query_str, params)` (single-call,
+documented preferred API) and a `PreparedStatement` class (separate
+prepare + execute) that's officially deprecated in v0.11.x — calling
+the prepared form emits a DeprecationWarning. The deprecated form
+is ~10-15% faster in microbenchmarks (we measured 5.6ms vs 6.3ms
+for IC2) because `execute(string, params)` pays a plan-cache lookup
++ framework overhead per call.
+
+We use the **documented preferred API**: `execute(query_str, params)`.
+That's what real apps would write today. The 0.7ms gap is real but
+it's the cost of the supported path; capturing it as a "fairness
+fix" by switching to the deprecated API would be measuring a path
+no one is supposed to use anymore.
 
 ## What's NOT divergent
 

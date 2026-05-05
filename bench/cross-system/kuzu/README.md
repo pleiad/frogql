@@ -30,32 +30,39 @@ The cross-system orchestrator drives this subdir as part of
 in isolation:
 
 ```bash
-# One-time: load LDBC SF0.1 IC2 subset into Kuzu's native format.
-# Outputs to bench/data/cross-system/kuzu/ic2.db/ (Kuzu writes a
-# multi-file directory). Idempotent; --force to rebuild.
-python bench/cross-system/kuzu/setup.py --ic 2
+# One-time: load FULL LDBC SF0.1 (every entity type, MVAs included)
+# into Kuzu's native format. Outputs to
+# bench/data/cross-system/kuzu/ldbc-sf01.db/ (Kuzu writes a multi-
+# file directory). Idempotent; --force to rebuild.
+python bench/cross-system/kuzu/setup.py
 
-# Bench. Writes per-iter CSV in cross-system schema to <out_csv>.
+# Bench an IC. Writes per-iter CSV to <out_csv>.
 python bench/cross-system/kuzu/run.py /tmp/kuzu.csv \
     --ic 2 --iters 10 --warmup 2
 ```
 
-`run.py` will auto-invoke `setup.py` if the DB doesn't exist.
+The runner does NOT auto-invoke setup if the DB is missing — the
+cross-system orchestrator (`run_all.sh`) is responsible for
+ordering setup-then-run per system. If you bypass run_all.sh,
+remember to run setup.py first.
+
+Setup is **IC-agnostic**: one `ldbc-sf01.db` covers any IC we
+implement. Adding a new IC translation (`ic<n>.cypher`) doesn't
+require any setup.py changes.
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `requirements.txt` | Single line: `kuzu==0.11.3` |
-| `setup.py` | LDBC CSV → Kuzu native DB. Schema-first (CREATE NODE/REL TABLE), then COPY FROM with FROM/TO hints for the multi-typed `hasCreator` REL TABLE. Materializes `knows` in both directions. |
-| `run.py` | Per-iter CSV emitter. Reads `ic<n>.toml` for query metadata + params; reads `ic<n>.cypher` for the translation; iterates the result set via `QueryResult.has_next()` / `.get_next()`. |
-| `ic2.cypher` | openCypher translation of `bench/ldbc-queries/ic2.toml`. Uses `UNION ALL` of two MATCH clauses (one for `:Comment`, one for `:Post`) because Kuzu doesn't accept `(c:Comment\|Post)` or `WHERE c:Comment OR c:Post`. See `DIVERGENCES.md`. |
-| `DIVERGENCES.md` | Documented divergences from the spec / the other systems' translations. The UNION ALL form is the major one. |
+| `setup.py` | LDBC CSV → Kuzu native DB. Loads the FULL LDBC SF0.1 dataset (every entity, every edge, MVAs as `STRING[]` on Person). Schema-first (CREATE NODE/REL TABLE), then COPY FROM with FROM/TO hints for the multi-typed REL TABLEs (`hasCreator`, `replyOf`, `isLocatedIn`, `hasTag`, `likes`). Materializes `knows` in both directions. Pre-aggregates Person MVAs (email, language) into a generated CSV before COPY. |
+| `run.py` | Per-iter CSV emitter. Reads `ic<n>.toml` for query metadata + params; reads `ic<n>.cypher` for the translation; iterates the result set via `QueryResult.has_next()` / `.get_next()`. Uses the documented `Connection.execute(query_str, params)` API (Kuzu's internal plan cache handles repeated queries; the `PreparedStatement` API is officially deprecated). |
+| `ic2.cypher` | openCypher translation of `bench/ldbc-queries/ic2.toml`. Uses unlabeled `(c)` because Kuzu's multi-typed `hasCreator` REL TABLE constrains it to Comment-or-Post automatically — no UNION ALL or label predicate needed. See `DIVERGENCES.md`. |
+| `DIVERGENCES.md` | Documented divergences from the spec / the other systems' translations, plus the archival-status framing. |
 
 ## Adding new ICs
 
 When `bench/ldbc-queries/ic<n>.toml` flips to `status = "implemented"`,
-add `bench/cross-system/kuzu/ic<n>.cypher` here. `setup.py`'s
-`SUPPORTED_ICS` may need updating if the new IC requires LDBC nodes/
-edges we don't currently load (Forum, Tag, Place, etc.). `run.py`
-needs no changes — it derives all paths from `--ic <n>`.
+add `bench/cross-system/kuzu/ic<n>.cypher` here. **No setup.py
+changes needed** — the DB is loaded once with the full LDBC dataset
+and shared across all ICs. `run.py` derives all paths from `--ic <n>`.
