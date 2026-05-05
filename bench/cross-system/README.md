@@ -16,7 +16,7 @@ across all (selected) systems.
 | GraphQLite — colliery-io/graphqlite (Cypher, SQLite-backed) | [`graphqlite/`](graphqlite/) | ✅ implemented |
 | Kuzu — kuzudb (vectorized columnar engine, CIDR 2023; pinned to v0.11.3 since [upstream archived 2025-10-10](https://github.com/kuzudb/kuzu)) | [`kuzu/`](kuzu/) | ✅ implemented; see [`kuzu/DIVERGENCES.md`](kuzu/DIVERGENCES.md) for the archival-status framing and the `UNION ALL` query-shape divergence |
 | GraphLite — GraphLite-AI/GraphLite (ISO GQL, Sled-backed) | — | not yet integrated |
-| GQLite — webbery/gqlite (custom DSL, dead since April 2023) | — | not yet integrated |
+| GQLite — webbery/gqlite (custom DSL, dead since April 2023) | [`webbery_gqlite/`](webbery_gqlite/) | ❌ discarded — see [`webbery_gqlite/SKIPPED.md`](webbery_gqlite/SKIPPED.md) for blockers (no LIMIT in grammar, no label-disjunction, per-row load idiom) |
 
 ## Setup
 
