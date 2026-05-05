@@ -147,11 +147,52 @@ impl Lexer {
         c
     }
 
+    /// Skips whitespace plus ISO GQL §3.10 comments:
+    ///   `-- ...` to end of line (or input)
+    ///   `/* ... */` block, non-nesting
+    /// Loops until neither matches so back-to-back comments and
+    /// whitespace get consumed together.
     fn skip_whitespace(&mut self) {
-        while let Some(c) = self.peek() {
-            if c.is_whitespace() {
-                self.advance();
-            } else {
+        loop {
+            // Plain whitespace.
+            let mut progressed = false;
+            while let Some(c) = self.peek() {
+                if c.is_whitespace() {
+                    self.advance();
+                    progressed = true;
+                } else {
+                    break;
+                }
+            }
+
+            // -- line comment
+            if self.peek() == Some('-') && self.input.get(self.pos + 1).copied() == Some('-') {
+                self.advance(); // first -
+                self.advance(); // second -
+                while let Some(c) = self.peek() {
+                    self.advance();
+                    if c == '\n' {
+                        break;
+                    }
+                }
+                progressed = true;
+            }
+
+            // /* block comment */ (non-nesting)
+            if self.peek() == Some('/') && self.input.get(self.pos + 1).copied() == Some('*') {
+                self.advance(); // /
+                self.advance(); // *
+                while let Some(c) = self.peek() {
+                    self.advance();
+                    if c == '*' && self.peek() == Some('/') {
+                        self.advance();
+                        break;
+                    }
+                }
+                progressed = true;
+            }
+
+            if !progressed {
                 break;
             }
         }
