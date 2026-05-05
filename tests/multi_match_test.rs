@@ -37,6 +37,7 @@ fn multi_match_query(patterns: &[&str]) -> Query {
         group_by: None,
         returns: None,
         distinct: false,
+        order_by: None,
         limit: None,
     })
 }
