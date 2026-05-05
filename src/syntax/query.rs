@@ -28,10 +28,20 @@ pub enum NullsOrder {
     Last,
 }
 
+/// `Expr` — evaluated against the binding-table assignment
+/// (pre-projection sort). `Column(idx)` — index into the projected
+/// row, produced by the parser when a sort key resolves to a RETURN
+/// alias or to an aggregate already in RETURN (post-projection sort).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SortKey {
+    Expr(Expr),
+    Column(usize),
+}
+
 /// ISO §16.17 `<sort specification>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SortSpec {
-    pub key: Expr,
+    pub key: SortKey,
     pub dir: SortDir,
     /// `None` means the user did not specify, so the implementation
     /// default applies (see `NullsOrder` doc).
@@ -290,6 +300,15 @@ impl fmt::Display for Query {
             write!(f, " LIMIT {n}")?;
         }
         Ok(())
+    }
+}
+
+impl fmt::Display for SortKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SortKey::Expr(e) => write!(f, "{e}"),
+            SortKey::Column(idx) => write!(f, "#{idx}"),
+        }
     }
 }
 

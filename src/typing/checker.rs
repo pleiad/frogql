@@ -8,7 +8,7 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem, SortSpec};
+use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem, SortKey, SortSpec};
 
 use super::descriptor_type::DescriptorType;
 use super::label_type::LabelType;
@@ -89,7 +89,7 @@ impl Typechecker {
             }
         }
         if let Some(specs) = &q.order_by {
-            self.check_order_by(specs, &r.env);
+            self.check_order_by(specs, q.returns.as_deref(), &r.env);
         }
 
         if !self.errors.is_empty() {
@@ -98,13 +98,52 @@ impl Typechecker {
         r
     }
 
-    /// ISO §16.17: each `<sort key>` is a value expression evaluated in
-    /// the working record context. We reuse the binding-table env for
-    /// validation — RETURN aliases are not yet visible here (would
-    /// require a follow-up that threads the return-item env through).
-    fn check_order_by(&mut self, specs: &[SortSpec], env: &TypeEnvironment) {
+    /// ISO §16.17 + §22.14: enforce comparable-value-type per CR 1
+    /// (no Feature GA04). Mixed Expr+Column sort keys cannot be
+    /// served by either pre- or post-projection sort.
+    fn check_order_by(
+        &mut self,
+        specs: &[SortSpec],
+        returns: Option<&[ReturnItem]>,
+        env: &TypeEnvironment,
+    ) {
+        let has_expr = specs.iter().any(|s| matches!(s.key, SortKey::Expr(_)));
+        let has_column = specs.iter().any(|s| matches!(s.key, SortKey::Column(_)));
+        if has_expr && has_column {
+            self.errors.push(
+                "ORDER BY mixes RETURN-alias references and free expressions; either \
+                 use only aliases (each sort target with `AS <name>` in RETURN) or \
+                 only free expressions over the binding table."
+                    .into(),
+            );
+        }
+
         for spec in specs {
-            let _ = self.check_expr(&spec.key, env);
+            let t = match &spec.key {
+                SortKey::Expr(e) => self.check_expr(e, env),
+                SortKey::Column(idx) => match returns.and_then(|rs| rs.get(*idx)) {
+                    Some(ReturnItem::Expr { expr, .. }) => self.check_expr(expr, env),
+                    // Aggregate output typing is a separate gap; pass-through.
+                    Some(ReturnItem::Aggregate { .. }) => SimpleType::Star,
+                    None => {
+                        self.errors.push(format!(
+                            "ORDER BY column reference #{idx} is out of bounds for the \
+                             RETURN clause (only {} item(s) projected)",
+                            returns.map(|rs| rs.len()).unwrap_or(0),
+                        ));
+                        continue;
+                    }
+                },
+            };
+            if !is_orderable_per_iso_22_14(&t) {
+                self.errors.push(format!(
+                    "ORDER BY sort key `{}` has type {} which is not a comparable \
+                     value type per ISO §22.14 Conformance Rule 1; expected a scalar \
+                     (Int, Float, Bool, Str) — gqlite does not implement Feature GA04 \
+                     'Universal comparison'.",
+                    spec.key, t,
+                ));
+            }
         }
     }
 
@@ -232,12 +271,9 @@ impl Typechecker {
             PathPattern::EdgeUndirected(desc) => self.check_edge(EdgeDir::None, desc),
             PathPattern::EdgeAnyDirection(desc) => self.check_edge(EdgeDir::Any, desc),
 
-            PathPattern::Concat(p1, p2) | PathPattern::Join(p1, p2) => {
-                // Concat composes two patterns over a shared endpoint variable.
-                // Join is gqlite's comma-join — patterns sharing variables but
-                // not endpoint-glued. For typing both reduce to: meet the
-                // environments under the schema and meet the path shapes.
-                // The shape distinction matters at runtime, not for types.
+            PathPattern::Concat(p1, p2) => {
+                // TConcat: paths share an endpoint, so `PathType::meet`
+                // composes their shapes.
                 let r1 = self.check_path_pattern(p1);
                 let r2 = self.check_path_pattern(p2);
 
@@ -253,6 +289,34 @@ impl Typechecker {
                 self.warn_for_collapsed_bindings(&cm, &r1.env, &r2.env);
 
                 let p = PathType::meet(&self.schema, &r1.path, &r2.path);
+                TypecheckResult::new(p, cm)
+            }
+
+            PathPattern::Join(p1, p2) => {
+                // TJoin: emptiness is `e1 ∨ e2`, env is `Γ1 ⊓ Γ2`. No
+                // path-meet — `(x:A), (y:B)` describes independent
+                // variables; meeting their labels would falsely
+                // collapse to Zero. Same class of bug Toro fixed for
+                // multi-MATCH in `354eaf6`.
+                let r1 = self.check_path_pattern(p1);
+                let r2 = self.check_path_pattern(p2);
+
+                let cm = match TypeEnvironment::meet(&self.schema, &r1.env, &r2.env) {
+                    Ok(env) => env,
+                    Err(e) => {
+                        self.errors
+                            .push(format!("Concatenation of contexts failed: {}", e));
+                        r1.env.clone()
+                    }
+                };
+
+                self.warn_for_collapsed_bindings(&cm, &r1.env, &r2.env);
+
+                let p = if r1.path.is_unsatisfiable() || r2.path.is_unsatisfiable() {
+                    PathType::Zero
+                } else {
+                    r1.path
+                };
                 TypecheckResult::new(p, cm)
             }
 
@@ -423,6 +487,18 @@ impl Typechecker {
                 // Bool.
                 let _ = self.check_expr(operand, env);
                 SimpleType::B
+            }
+
+            Expr::Coalesce(args) => {
+                // ISO §20.7 SR 1c-1d: result type is the union of arg types.
+                let mut iter = args.iter();
+                let first = iter.next().expect("parser ensures ≥ 2 args");
+                let mut acc = self.check_expr(first, env);
+                for a in iter {
+                    let t = self.check_expr(a, env);
+                    acc = SimpleType::union(&acc, &t);
+                }
+                acc
             }
 
             Expr::Exists { body } | Expr::NotExists { body } => {
@@ -775,5 +851,79 @@ fn short_var_type(t: &VariableType) -> String {
         VariableType::Group(inner) => format!("group<{}>", short_var_type(inner)),
         VariableType::Null => "Null".to_string(),
         VariableType::Zero => "⊥".to_string(),
+    }
+}
+
+/// ISO §22.14 CR 1 + §4.4.2: `Star` deferred to runtime; `Zero` is
+/// surfaced as a typo / schema mismatch; lists / records / groups
+/// would need Feature GA04.
+fn is_orderable_per_iso_22_14(t: &SimpleType) -> bool {
+    match t {
+        SimpleType::Z | SimpleType::F | SimpleType::B | SimpleType::S | SimpleType::Star => true,
+        SimpleType::Zero => false,
+        SimpleType::Union(a, b) => is_orderable_per_iso_22_14(a) && is_orderable_per_iso_22_14(b),
+        SimpleType::List(_) | SimpleType::Record(_) | SimpleType::Group(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod orderable_tests {
+    use super::is_orderable_per_iso_22_14;
+    use super::SimpleType;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn scalars_and_star_are_orderable() {
+        for t in [
+            SimpleType::Z,
+            SimpleType::F,
+            SimpleType::B,
+            SimpleType::S,
+            SimpleType::Star,
+        ] {
+            assert!(
+                is_orderable_per_iso_22_14(&t),
+                "{t:?} should be orderable per §22.14"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_is_not_orderable() {
+        // Zero typically comes from a strict-schema lookup of an
+        // undeclared attribute, or from a contradictory constraint.
+        // Either way the sort key cannot meaningfully order rows.
+        assert!(!is_orderable_per_iso_22_14(&SimpleType::Zero));
+    }
+
+    #[test]
+    fn lists_and_records_are_not_orderable_without_ga04() {
+        assert!(!is_orderable_per_iso_22_14(&SimpleType::List(Box::new(
+            SimpleType::Z
+        ))));
+        let mut fields = BTreeMap::new();
+        fields.insert("k".into(), SimpleType::S);
+        assert!(!is_orderable_per_iso_22_14(&SimpleType::Record(fields)));
+        assert!(!is_orderable_per_iso_22_14(&SimpleType::Group(Box::new(
+            SimpleType::Z
+        ))));
+    }
+
+    #[test]
+    fn union_orderable_iff_both_sides_orderable() {
+        // int|str: both scalar → orderable in our model. ISO §4.4.2
+        // would actually class this as not-essentially-comparable,
+        // but our value_cmp returns None on cross-kind, which falls
+        // through to the static accept here. A stricter pass could
+        // reject cross-kind unions; documented as a known follow-up.
+        let int_or_str = SimpleType::Union(Box::new(SimpleType::Z), Box::new(SimpleType::S));
+        assert!(is_orderable_per_iso_22_14(&int_or_str));
+
+        // int|list rejects.
+        let int_or_list = SimpleType::Union(
+            Box::new(SimpleType::Z),
+            Box::new(SimpleType::List(Box::new(SimpleType::Z))),
+        );
+        assert!(!is_orderable_per_iso_22_14(&int_or_list));
     }
 }

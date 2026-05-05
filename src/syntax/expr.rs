@@ -152,6 +152,9 @@ pub enum Expr {
         operand: Box<Expr>,
         negated: bool,
     },
+    /// ISO §20.7 `<case abbreviation>` — `COALESCE(v1, ..., vN)`,
+    /// N ≥ 2 (parser-enforced). First non-null wins.
+    Coalesce(Vec<Expr>),
     /// Right-hand side of `is`/`as` operators — a type, not a value.
     Type(SimpleType),
     /// `EXISTS { <body> }` — Boolean predicate over a subquery body.
@@ -210,6 +213,10 @@ impl fmt::Display for Expr {
                 } else {
                     write!(f, "({operand} IS NULL)")
                 }
+            }
+            Expr::Coalesce(args) => {
+                let parts: Vec<String> = args.iter().map(|e| e.to_string()).collect();
+                write!(f, "COALESCE({})", parts.join(", "))
             }
             Expr::Type(t) => write!(f, "{t}"),
             Expr::Exists { body } => write!(f, "EXISTS {{ {} }}", display_subquery(body)),

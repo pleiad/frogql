@@ -11,7 +11,7 @@ use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::{
     Aggregator, GeneralSetKind, MatchStatement, NullsOrder, Query, ReturnItem, SetQuantifier,
-    SortDir, SortSpec,
+    SortDir, SortKey, SortSpec,
 };
 use crate::typing::descriptor_type::DescriptorType;
 use crate::typing::label_type::LabelType;
@@ -173,11 +173,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
         let limit = combine_limits(query.limit, limit);
         let has_order = query.order_by.is_some();
+        let has_column_sort_key = query
+            .order_by
+            .as_ref()
+            .is_some_and(|specs| specs.iter().any(|s| matches!(s.key, SortKey::Column(_))));
+
         let return_items = match &query.returns {
             None => {
-                // Raw path. ORDER BY needs the full binding table before
-                // it can sort; otherwise the limit can be threaded into
-                // the match chain for early termination.
                 let input_limit = if has_order { 0 } else { limit };
                 let mut ir = self.run_match_chain(query, input_limit);
                 if let Some(specs) = &query.order_by {
@@ -192,77 +194,67 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         };
 
         let has_aggs = return_items.iter().any(|i| i.is_aggregate());
-        // Aggregation, DISTINCT and ORDER BY all need the full input
-        // before they can apply, so we cannot early-terminate the match
-        // chain when any of them are present.
         let needs_full_input = has_aggs || query.distinct || has_order;
         let input_limit = if needs_full_input { 0 } else { limit };
         let mut ir = self.run_match_chain(query, input_limit);
 
-        // Sort BEFORE projection / aggregation when the query has
-        // ORDER BY without aggregation. Sorting the binding table lets
-        // the sort key reference any variable in the env via `run_expr`
-        // without alias resolution. Aggregate queries fall through the
-        // default unsorted path; ORDER BY over aggregate columns is a
-        // future extension (would need to resolve sort keys against
-        // projected columns or aggregate expressions).
-        if !has_aggs {
+        let pre_projection_sort = !has_aggs && !has_column_sort_key;
+        if pre_projection_sort {
             if let Some(specs) = &query.order_by {
                 self.sort_rows(&mut ir.rows, specs);
             }
         }
 
-        let projected = if has_aggs {
-            let mut p = self.run_aggregated(return_items, query.group_by.as_deref(), &ir.rows);
+        let mut projected = if has_aggs {
+            let p = self.run_aggregated(return_items, query.group_by.as_deref(), &ir.rows);
             if query.distinct {
-                p = dedup_preserving_order(p);
+                dedup_preserving_order(p)
+            } else {
+                p
             }
-            if limit > 0 && p.len() > limit {
-                p.truncate(limit);
-            }
-            p
         } else {
-            let mut p = self.run_row_by_row(return_items, &ir.rows, query.distinct);
-            if limit > 0 && p.len() > limit {
-                p.truncate(limit);
-            }
-            p
+            self.run_row_by_row(return_items, &ir.rows, query.distinct)
         };
+
+        if has_order && !pre_projection_sort {
+            if let Some(specs) = &query.order_by {
+                sort_projected_rows(&mut projected, specs);
+            }
+        }
+
+        if limit > 0 && projected.len() > limit {
+            projected.truncate(limit);
+        }
 
         QueryResult::Projected(projected)
     }
 
-    /// Sort the binding table by a list of sort specifications.
-    /// Implements ISO §16.17 GR 1: stable sort by lexicographic
-    /// comparison of sort keys. Null handling per §16.17 SR 6 — the
-    /// implementation default is NULLS LAST regardless of direction
-    /// when the user does not specify; explicit NULLS FIRST/LAST
-    /// (Feature GA03) overrides it.
-    ///
-    /// `Failure` from `run_expr` (unbound variable, missing attribute)
-    /// and `Success(Value::Null)` are both treated as null per the
-    /// 3VL convention used elsewhere in the engine.
+    /// Pre-projection sort over `IntermediateResult` rows. ISO §16.17
+    /// GR 1; pdqsort per §16.17 GR 1k/US006 (peer order is
+    /// implementation-dependent). Caller guarantees every spec is a
+    /// `SortKey::Expr`.
     fn sort_rows(&self, rows: &mut Vec<ResultRow>, specs: &[SortSpec]) {
-        // Pre-compute each spec's key per row so the comparator is a
-        // tuple compare, not n×log(n) `run_expr` calls.
         let mut decorated: Vec<(Vec<Option<Value>>, ResultRow)> = std::mem::take(rows)
             .into_iter()
             .map(|row| {
                 let keys = specs
                     .iter()
-                    .map(|s| match self.run_expr(&row.assignment, &s.key) {
-                        ExprResult::Success(Value::Null) | ExprResult::Failure(_) => None,
-                        ExprResult::Success(v) => Some(v),
+                    .map(|s| match &s.key {
+                        SortKey::Expr(e) => match self.run_expr(&row.assignment, e) {
+                            ExprResult::Success(Value::Null) | ExprResult::Failure(_) => None,
+                            ExprResult::Success(v) => Some(v),
+                        },
+                        SortKey::Column(_) => unreachable!(
+                            "Column sort key reached pre-projection path — caller must \
+                             route to sort_projected_rows"
+                        ),
                     })
                     .collect();
                 (keys, row)
             })
             .collect();
 
-        // `sort_by` is stable, so peer rows (§16.17 GR 1k) preserve
-        // their original order — gqlite chooses to be stricter than
-        // ISO US006, which leaves peer order implementation-dependent.
-        decorated.sort_by(|(a, _), (b, _)| compare_sort_keys(a, b, specs));
+        decorated.sort_unstable_by(|(a, _), (b, _)| compare_sort_keys(a, b, specs));
 
         rows.extend(decorated.into_iter().map(|(_, r)| r));
     }
@@ -1419,6 +1411,18 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 ExprResult::Success(Value::Bool(if *negated { !is_null } else { is_null }))
             }
 
+            Expr::Coalesce(args) => {
+                // ISO §20.7 SR 1c-1d: first non-null wins. Failure is
+                // treated as null (3VL).
+                for a in args {
+                    match self.run_expr(mu, a) {
+                        ExprResult::Success(Value::Null) | ExprResult::Failure(_) => continue,
+                        ExprResult::Success(v) => return ExprResult::Success(v),
+                    }
+                }
+                ExprResult::Success(Value::Null)
+            }
+
             Expr::Type(_) => ExprResult::Failure("bare type in expression".into()),
 
             Expr::Exists { body } => self.eval_exists(mu, body, /*negated=*/ false),
@@ -1925,23 +1929,36 @@ impl GroupKey {
     }
 }
 
-/// Compare two pre-computed sort-key tuples for ISO §16.17 ORDER BY.
-///
-/// Each key is `Option<Value>`: `None` represents the null value (either
-/// `Value::Null` or a failure during expression evaluation). For each
-/// position the comparison is:
-///
-/// - both null → Equal (per §16.17 GR 1g.ii.1)
-/// - one side null → ordering depends on `<null ordering>`. Default is
-///   NULLS LAST regardless of `SortDir` (§16.17 SR 6, gqlite IS001
-///   choice).
-/// - both non-null → `value_cmp`; an Unknown result (incomparable
-///   values) falls back to Equal so the comparator stays a total order
-///   (US007 leaves this implementation-dependent).
-///
-/// `SortDir::Desc` reverses the ordering of the value comparison only;
-/// the null-ordering policy is unaffected by direction (per the SR 6
-/// invariant on the implementation default).
+/// Post-projection sort over already-projected rows. Caller
+/// guarantees every spec is a `SortKey::Column` (typechecker rejects
+/// the mixed case).
+fn sort_projected_rows(rows: &mut Vec<Vec<Value>>, specs: &[SortSpec]) {
+    let mut decorated: Vec<(Vec<Option<Value>>, Vec<Value>)> = std::mem::take(rows)
+        .into_iter()
+        .map(|projected| {
+            let keys: Vec<Option<Value>> = specs
+                .iter()
+                .map(|s| match &s.key {
+                    SortKey::Column(idx) => match projected.get(*idx) {
+                        Some(Value::Null) | None => None,
+                        Some(v) => Some(v.clone()),
+                    },
+                    SortKey::Expr(_) => unreachable!(
+                        "Expr sort key reached post-projection path — typechecker \
+                         should have rejected mixed Expr/Column"
+                    ),
+                })
+                .collect();
+            (keys, projected)
+        })
+        .collect();
+    decorated.sort_unstable_by(|(a, _), (b, _)| compare_sort_keys(a, b, specs));
+    rows.extend(decorated.into_iter().map(|(_, p)| p));
+}
+
+/// ISO §16.17 GR 1g comparator over pre-computed key tuples. `None`
+/// is the null value; default null ordering is NULLS LAST per SR 6.
+/// Cross-kind values fall back to Equal per US007.
 fn compare_sort_keys(
     a: &[Option<Value>],
     b: &[Option<Value>],
@@ -1968,7 +1985,6 @@ fn compare_sort_keys(
                     SortDir::Asc => o,
                     SortDir::Desc => o.reverse(),
                 },
-                // Incomparable (cross-kind) — total-order fallback.
                 None => Ordering::Equal,
             },
         };

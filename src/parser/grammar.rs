@@ -4,7 +4,7 @@ use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::{
     Aggregator, GeneralSetKind, MatchStatement, NullsOrder, Query, ReturnItem, SetQuantifier,
-    SortDir, SortSpec,
+    SortDir, SortKey, SortSpec,
 };
 use crate::syntax::statement::{IndexKindStmt, Statement, TypeElement};
 use crate::typing::descriptor_type::DescriptorType;
@@ -129,37 +129,19 @@ impl Parser {
         }
     }
 
-    // full_query   = match_clause+ legacy_group_by?
-    //                ("RETURN" ("DISTINCT")? return_list group_by?)?
-    //                ("ORDER BY" sort_spec (, sort_spec)*)?
-    //                ("LIMIT" integer)?
-    // sort_spec    = expr ("ASC"|"DESC"|"ASCENDING"|"DESCENDING")?
-    //                ("NULLS FIRST"|"NULLS LAST")?
-    // match_clause = ("OPTIONAL" "MATCH" | "MATCH"?) query ("WHERE" expr)?
+    // ISO §14.3-14.4 + §14.9 + §14.11 + §16.17.
     //
-    // ISO §14.3-14.4 + §14.9 + §14.11 + §16.17. The `MATCH` keyword is
-    // optional only on the first clause for back-compat with bare-
-    // pattern queries (`(x)-[]->(y)`); an `OPTIONAL` always requires
-    // the explicit `MATCH` after it.
+    //   full_query   = match_clause+ legacy_group_by?
+    //                  ("RETURN" ("DISTINCT")? return_list group_by?)?
+    //                  ("ORDER BY" sort_spec (, sort_spec)*)?
+    //                  ("LIMIT" integer)?
+    //   sort_spec    = expr ("ASC"|"DESC"|"ASCENDING"|"DESCENDING")?
+    //                  ("NULLS FIRST"|"NULLS LAST")?
+    //   match_clause = ("OPTIONAL" "MATCH" | "MATCH"?) query ("WHERE" expr)?
     //
-    // GROUP BY position. ISO §14.11 places `<group by clause>` INSIDE
-    // the `<return statement body>`, after the `<return item list>`:
-    //
-    //     <return statement body> ::=
-    //       [<set quantifier>] {* | <return item list>} [<group by clause>]
-    //
-    // Earlier versions of this parser put GROUP BY between WHERE and
-    // RETURN (commit 72a6449e). To stay ISO-conformant without breaking
-    // the test corpus written against that older surface, BOTH
-    // positions are accepted: the canonical post-items position is the
-    // ISO-correct form and the one we recommend; the legacy pre-RETURN
-    // form is still parsed but flagged as the same clause. Specifying
-    // GROUP BY in both positions is a parse error.
-    //
-    // ORDER BY and LIMIT are both accepted with or without a preceding
-    // RETURN — the runtime applies them to whatever binding table the
-    // query produces. Their order matches §14.9 GR 5: ORDER BY happens
-    // BEFORE LIMIT.
+    // GROUP BY: ISO §14.11 places it INSIDE `<return statement body>`,
+    // after the item list. Pre-72a6449e gqlite put it between WHERE and
+    // RETURN; both positions are accepted (specifying both is an error).
     fn full_query(&mut self) -> Result<Query, String> {
         let first_optional = self.eat(&Token::Optional);
         if first_optional {
@@ -220,7 +202,7 @@ impl Parser {
             (None, None) => None,
         };
 
-        let order_by = self.parse_optional_order_by()?;
+        let order_by = self.parse_optional_order_by(returns.as_deref())?;
         let limit = self.parse_optional_limit()?;
 
         Ok(Query {
@@ -233,9 +215,6 @@ impl Parser {
         })
     }
 
-    /// Parse a `GROUP BY <expr> ("," <expr>)*` clause. Returns `None` if
-    /// the next token is not `GROUP BY`. Both the legacy pre-RETURN and
-    /// the canonical post-items positions go through this helper.
     fn parse_group_by_clause(&mut self) -> Result<Option<Vec<Expr>>, String> {
         if !self.eat(&Token::GroupBy) {
             return Ok(None);
@@ -264,24 +243,24 @@ impl Parser {
             .map_err(|_| format!("LIMIT {n} exceeds the supported u32 range"))
     }
 
-    /// Optional trailing `ORDER BY <sort spec list>`. Returns `None` if
-    /// absent. The list is non-empty when present (parse error if no
-    /// spec follows the keyword).
-    fn parse_optional_order_by(&mut self) -> Result<Option<Vec<SortSpec>>, String> {
+    /// `returns` is the already-parsed `<return item list>` for §16.17
+    /// SR 5c alias resolution; pass `None` when there is no RETURN.
+    fn parse_optional_order_by(
+        &mut self,
+        returns: Option<&[ReturnItem]>,
+    ) -> Result<Option<Vec<SortSpec>>, String> {
         if !self.eat(&Token::OrderBy) {
             return Ok(None);
         }
-        let mut specs = vec![self.sort_spec()?];
+        let mut specs = vec![self.sort_spec(returns)?];
         while self.eat(&Token::Comma) {
-            specs.push(self.sort_spec()?);
+            specs.push(self.sort_spec(returns)?);
         }
         Ok(Some(specs))
     }
 
-    /// One `<sort specification>`: expr, optional direction, optional
-    /// null ordering. ISO §16.17 SR 5b: ASC is implicit when omitted.
-    fn sort_spec(&mut self) -> Result<SortSpec, String> {
-        let key = self.expr()?;
+    fn sort_spec(&mut self, returns: Option<&[ReturnItem]>) -> Result<SortSpec, String> {
+        let key = self.parse_sort_key(returns)?;
         let dir = match self.peek() {
             Token::Asc | Token::Ascending => {
                 self.advance();
@@ -305,6 +284,53 @@ impl Parser {
             _ => None,
         };
         Ok(SortSpec { key, dir, nulls })
+    }
+
+    /// Resolve a sort key (ISO §16.17 SR 1 + 5c). Order: bare-name
+    /// alias → direct aggregate (must match a `ReturnItem::Aggregate`)
+    /// → free `Expr` (aggregate queries get a structural-match pass
+    /// against non-aggregate RETURN items so post-projection sort can
+    /// look them up).
+    fn parse_sort_key(&mut self, returns: Option<&[ReturnItem]>) -> Result<SortKey, String> {
+        if let (Some(items), Token::Name(name)) = (returns, self.peek().clone()) {
+            if !matches!(self.peek_at(1), Some(Token::Dot)) {
+                if let Some(idx) = items.iter().position(|it| it.alias() == Some(&name)) {
+                    self.advance();
+                    return Ok(SortKey::Column(idx));
+                }
+            }
+        }
+
+        if returns.is_some() && self.peek_aggregate_kind().is_some() {
+            let agg = self.aggregate_function()?;
+            if let Some(items) = returns {
+                for (idx, item) in items.iter().enumerate() {
+                    if let ReturnItem::Aggregate { agg: ret_agg, .. } = item {
+                        if *ret_agg == agg {
+                            return Ok(SortKey::Column(idx));
+                        }
+                    }
+                }
+            }
+            return Err(format!(
+                "ORDER BY {agg} is not in the RETURN list — direct aggregates in \
+                 sort keys must also appear as a RETURN item (alias optional)."
+            ));
+        }
+
+        let expr = self.expr()?;
+        if let Some(items) = returns {
+            if items.iter().any(|it| it.is_aggregate()) {
+                for (idx, item) in items.iter().enumerate() {
+                    if let ReturnItem::Expr { expr: ret_expr, .. } = item {
+                        if *ret_expr == expr {
+                            return Ok(SortKey::Column(idx));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(SortKey::Expr(expr))
     }
 
     /// One match clause: pattern + optional WHERE wrapped in `Filter`.
@@ -1391,6 +1417,20 @@ impl Parser {
                 let e = self.expr()?;
                 self.expect(&Token::RParen)?;
                 Ok(e)
+            }
+            Token::Coalesce => {
+                // ISO §20.7: at least two args.
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let mut args = vec![self.expr()?];
+                while self.eat(&Token::Comma) {
+                    args.push(self.expr()?);
+                }
+                self.expect(&Token::RParen)?;
+                if args.len() < 2 {
+                    return Err("COALESCE requires at least two arguments per ISO §20.7".into());
+                }
+                Ok(Expr::Coalesce(args))
             }
             _ => Err(format!("expected expression, got {:?}", self.peek())),
         }
