@@ -119,7 +119,30 @@ bench/cross-system/run_all.sh --iters 30 --warmup 3
 # Force a clean re-load of every system's DB before benching
 # (captures real setup time; default skips setup if DB exists):
 bench/cross-system/run_all.sh --rebuild-setup
+
+# Ablation mode — gqlite runs in three modes (baseline + two
+# disabled-optimization variants), each emitted as a separate
+# `backend` label. Other systems run normally; the comparison
+# table renders the ablation modes as additional columns.
+bench/cross-system/run_all.sh --ablate
+bench/cross-system/run_all.sh --ablate --only gqlite   # ablation table only
 ```
+
+**Ablation mode** (`--ablate`): when set, gqlite runs three times,
+each with a different combination of `GQLITE_DISABLE_*` env vars,
+and emits per-iter rows with distinct backend labels:
+
+| Mode | Env | Tests |
+|---|---|---|
+| `lazy-baseline` | (none) | All optimizations on (LTJ + auto-indexes + index folding + TripleIndex cache) |
+| `lazy-no-auto-indexes` | `GQLITE_DISABLE_AUTO_INDEXES=1` | Skip the `(label, prop)` secondary-index auto-build at open |
+| `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | Disable LTJ index-driven constant folding (the pre-pass that turns `MATCH (n {id:X})` into a single-NodeId pre-bind) |
+
+The ablation modes show up as additional `backend` columns in
+`comparison.txt` so the same `compare_results.py` machinery
+renders them — no separate ablation script. See
+[`SURVEY.md`](SURVEY.md#ablation-results) for the headline
+findings (which optimization buys what).
 
 The orchestrator iterates **systems on the outer loop, ICs on the
 inner**: for each system, set up once (loading full LDBC SF0.1),

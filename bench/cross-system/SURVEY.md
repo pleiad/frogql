@@ -377,6 +377,78 @@ its scope; Kuzu is engineering-comparable to gqlite. The systems
 because they're architecturally weaker, not because they're
 abandoned.
 
+## Ablation results
+
+Headline finding: **gqlite's IC2 latency is bought entirely by two
+specific architectural choices, not by being written in Rust.** With
+either disabled, gqlite is ~30× *slower* than Kuzu and ~17× slower
+than graphqlite — it was never just "compiled-language wins."
+
+Run via `bench/cross-system/run_all.sh --ablate` (see the README's
+"Ablation mode" section for the orchestration shape and env-var
+table). Same SF0.1 dataset, same 15 IC2 param rows, 5 measured iters
++ 2 warmup, the run captured below is at
+`bench/cross-system/results/20260505_121355/comparison.txt`.
+
+### Cross-row median IC2 latency
+
+| Mode | Env | Median (ms) | × baseline |
+|---|---|---|---|
+| `lazy-baseline` | (none) | **0.22** | 1× |
+| `lazy-no-auto-indexes` | `GQLITE_DISABLE_AUTO_INDEXES=1` | **184** | 836× slower |
+| `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | **185** | 841× slower |
+
+For context, on the same run:
+- kuzu-cypher: 6.4 ms median (29× slower than gqlite-baseline; 29×
+  *faster* than either ablated gqlite mode)
+- graphqlite-cypher: 11.4 ms median (52× slower than gqlite-baseline;
+  16× faster than either ablated gqlite mode)
+
+Result counts match across all 15 param rows in every mode (`OK row N:
+count=20` × 15) — disabling the optimisations slows the engine but
+doesn't change the answer set.
+
+### What each disabled flag costs
+
+- **`GQLITE_DISABLE_AUTO_INDEXES=1`**: skips `LazyGraphStore::build_auto_indexes_bulk()`
+  at open. Without secondary indexes on `(label, prop)`, IC2's start-
+  node lookup `MATCH (p:Person {id: $personId})` degrades from O(1)
+  hash lookup to a scan over the candidate-list backing store.
+- **`GQLITE_DISABLE_INDEX_FOLD=1`**: keeps the indexes built, but
+  disables the LTJ pre-pass that resolves the `Eq` predicate to a
+  single NodeId pre-loop and drops `p` from the VEO. Without folding,
+  the indexed lookup happens once per LTJ leapfrog round-trip instead
+  of once per query — the index is built but barely used.
+
+The two flags target the same hot path from different angles: the
+auto-build supplies the index, the fold pass *uses* it. Disable
+either and IC2 collapses; the 836×/841× near-identical slowdown is
+the signature of a single critical optimisation surface (the
+indexed start-node lookup), not two independent contributions.
+
+### What this is NOT showing
+
+- **Not a TripleIndex ablation.** No env var disables the LTJ
+  TripleIndex cache; ablating that would require a small ldbc_bench
+  / Runtime change. The cache is the second-biggest gqlite IC2 win
+  (CLAUDE.md "Secondary indexes" reports it as a 158× speedup over
+  the auto-indexes-only baseline). Documenting it here as a known
+  follow-up.
+- **Not a language ablation.** This says "gqlite without these two
+  optimisations is slower than the external Python-wrapped systems."
+  It does NOT say "Rust without optimisations equals Python." We
+  haven't isolated FFI overhead vs engine work in the external
+  systems. Don't read the table that way.
+- **Not a multi-IC story.** Only IC2 is wired up today. The bench
+  scaffolding accepts `--ic <n>`; once gqlite's parser supports more
+  ICs, the same `--ablate` flag surfaces them in the same table.
+
+The takeaway for the writeup is the first paragraph above:
+gqlite's headline number is the optimisations doing their job, not
+language choice. Both flags identify the same critical surface
+(indexed start-node lookup), and removing either makes gqlite
+slower than Kuzu/graphqlite — credit where it's due.
+
 ## Coverage of "alternative LDBC IC2 reference points"
 
 Reviewers asking "did you consider X?" — we considered:
