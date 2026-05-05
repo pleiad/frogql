@@ -8,21 +8,63 @@ subsection for any writeup; the per-system `DIVERGENCES.md` and
 
 ## Outcome at a glance
 
+### Headline numbers (canonical — cite these)
+
+LDBC SNB SF0.1, 15 IC2 param rows, 5 measured iters + 2 warmup,
+`--rebuild-setup --ablate`, run captured at
+`bench/cross-system/results/20260505_124824/`. All 15 param rows
+count-and-shape consistent across every mode (`OK row N: count=20` ×
+15 in `comparison.txt`).
+
+| System / mode | Setup (s) | IC2 median (ms) | × gqlite-baseline |
+|---|---|---|---|
+| **gqlite** `lazy-baseline` (all opts on) | not-measurable† | **0.25** | **1×** |
+| gqlite `lazy-no-fold` | (same .gdb) | 187.20 | 749× slower |
+| gqlite `lazy-no-auto-indexes` | (same .gdb) | 184.51 | 738× slower |
+| gqlite `disk-baseline` | (same .gdb) | 191.91 | 768× slower |
+| **Kuzu** v0.11.3 | **2.57** | 6.31 | 25× slower |
+| **graphqlite** v0.4.4 | 30.26 | 11.04 | 44× slower |
+
+† gqlite's `bench_setup.exe` triggers Windows's installer-detection
+heuristic (binary name contains "setup") and demands UAC elevation
+regardless of shell, blocking automated timing on this Windows host.
+The CSV-import work is comparable in shape to the other systems'
+setup phases but a clean number is not measurable here. Linux/macOS
+hosts wouldn't hit this; the binary rename / manifest fix is upstream
+gqlite work, not bench work. Note that this only affects the
+*setup-time* reporting — the bench itself runs fine because gqlite's
+ldbc_bench reads an already-built `.gdb`.
+
+### Reading the table
+
+- **Setup is the once-per-DB cost** (load LDBC SF0.1 CSVs into the
+  system's native format). Kuzu's `COPY ... FROM 'csv'` is ~12×
+  faster than graphqlite's per-row insert. Both are dwarfed by query
+  latency cumulatively over a benchmark run.
+- **gqlite's headline 0.25 ms IC2 median** is bought entirely by
+  three architectural choices working together (auto-built `(label,
+  prop)` indexes, LTJ index-fold pass, TripleIndex cache). Disable
+  any of the first two and gqlite collapses to ~185 ms — *17-29×
+  slower than Kuzu and graphqlite.* Full ablation breakdown below.
+- **disk-baseline** is *not* a "disk I/O is slow" measurement; it's a
+  "the secondary-index machinery isn't wired into `DiskGraphStore`"
+  measurement. See "Ablation results" below.
+
+### One-line per system
+
 | System | Engine type | Outcome | Why |
 |---|---|---|---|
-| **gqlite** (us) | Rust + custom `.gdb`, ISO GQL | ✅ working | LTJ + auto-indexes + TripleIndex cache → 0.2-0.3 ms IC2 median |
-| **graphqlite** (colliery-io) | Python wrapper, SQLite extension, Cypher | ✅ working | SQLite rowid as internal node id; `insert_*_bulk` API skips MATCH lookups → 10-15 ms IC2 median |
-| **Kuzu** (kuzudb) | Vectorized columnar, openCypher | ✅ working (pinned) | CIDR 2023 paper, real engineering; archived Oct 2025; pinned to v0.11.3 → 6-7 ms IC2 median |
+| **gqlite** (us) | Rust + custom `.gdb`, ISO GQL | ✅ working | LTJ + auto-indexes + TripleIndex cache → 0.25 ms IC2 median |
+| **graphqlite** (colliery-io) | Python wrapper, SQLite extension, Cypher | ✅ working | SQLite rowid as internal node id; `insert_*_bulk` API skips MATCH lookups → 11 ms IC2 median |
+| **Kuzu** (kuzudb) | Vectorized columnar, openCypher | ✅ working (pinned) | CIDR 2023 paper, real engineering; archived Oct 2025; pinned to v0.11.3 → 6.3 ms IC2 median |
 | **GraphLite-AI/GraphLite** | Rust + Sled, ISO GQL | ❌ rejected | Per-edge linear scan over in-memory HashMap; bulk-load on roadmap, unbuilt; load hung after persons phase |
 | **auksys/gqlite** (gqlite.org) | Rust core, openCypher subset, SQLite/Redb | ❌ rejected | Properties stored as JSON in `TEXT`; no `CREATE INDEX`; no batched store calls; 5× past their largest tested data file |
 | **webbery/gqlite** | C++ + libmdbx, custom JSON-shaped DSL | ❌ rejected | DSL grammar lacks `LIMIT` and label-disjunction; build fails 4 ways on Windows MSVC 2022; last commit 2023-04-08 |
 
-Numbers reported above: median IC2 latency at LDBC SF0.1, 5 measured
-iters per param row, 2 warmup, all 15 LDBC params count-and-shape
-consistent. Full bench output in
-`bench/cross-system/results/<timestamp>/comparison.txt`. See
-"[Measurement basis](README.md#measurement-basis-read-this-before-quoting-numbers)"
-in the top-level README before quoting these.
+See "[Measurement basis](README.md#measurement-basis-read-this-before-quoting-numbers)"
+in the top-level README before quoting these — particularly the FFI
+overhead disclosure (gqlite is benched via Rust CLI, the others via
+Python wheels) and the ORDER-BY divergence from spec IC2.
 
 ---
 
@@ -81,8 +123,8 @@ prefixing, smaller-id node types collide and the id_map silently
 corrupts. (Bug we hit and fixed during integration; see
 [`graphqlite/setup.py`](graphqlite/setup.py) module docstring.)
 
-Setup time at SF0.1: ~30 s for full load including MVAs.
-IC2 latency: ~10-15 ms median.
+Setup time at SF0.1: 30.26 s for full load including MVAs.
+IC2 latency: 11.04 ms cross-row median (canonical run).
 
 ### Kuzu (kuzudb)
 
@@ -115,8 +157,8 @@ Kuzu satisfies all three. Full archival framing in
 - Use the documented `Connection.execute(query_str, params)` API,
   not `PreparedStatement` (officially deprecated in 0.11.x).
 
-Setup time at SF0.1: ~2.6 s for full load + MVAs.
-IC2 latency: ~6-7 ms median.
+Setup time at SF0.1: 2.57 s for full load + MVAs.
+IC2 latency: 6.31 ms cross-row median (canonical run).
 
 ---
 
@@ -387,23 +429,23 @@ than graphqlite — it was never just "compiled-language wins."
 Run via `bench/cross-system/run_all.sh --ablate` (see the README's
 "Ablation mode" section for the orchestration shape and env-var
 table). Same SF0.1 dataset, same 15 IC2 param rows, 5 measured iters
-+ 2 warmup, the run captured below is at
-`bench/cross-system/results/20260505_121355/comparison.txt`.
++ 2 warmup, canonical run captured at
+`bench/cross-system/results/20260505_124824/comparison.txt`.
 
 ### Cross-row median IC2 latency
 
 | Mode | Env / args | Median (ms) | × baseline |
 |---|---|---|---|
-| `lazy-baseline` | (none) | **0.22** | 1× |
-| `lazy-no-auto-indexes` | `GQLITE_DISABLE_AUTO_INDEXES=1` | **184** | 836× slower |
-| `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | **185** | 841× slower |
-| `disk-baseline` | `--backend disk` | **175** | 795× slower |
+| `lazy-baseline` | (none) | **0.25** | 1× |
+| `lazy-no-auto-indexes` | `GQLITE_DISABLE_AUTO_INDEXES=1` | **184.51** | 738× slower |
+| `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | **187.20** | 749× slower |
+| `disk-baseline` | `--backend disk` | **191.91** | 768× slower |
 
 For context, on the same run:
-- kuzu-cypher: 6.4 ms median (29× slower than gqlite-baseline; ~27×
+- kuzu-cypher: 6.31 ms median (25× slower than gqlite-baseline; ~30×
   *faster* than any ablated gqlite mode)
-- graphqlite-cypher: 11.4 ms median (52× slower than gqlite-baseline;
-  ~16× faster than any ablated gqlite mode)
+- graphqlite-cypher: 11.04 ms median (44× slower than gqlite-baseline;
+  ~17× faster than any ablated gqlite mode)
 
 Result counts match across all 15 param rows in every mode (`OK row N:
 count=20` × 15) — disabling the optimisations or switching backends
@@ -435,7 +477,7 @@ slows the engine but doesn't change the answer set.
 The first two flags target the same hot path from different angles:
 the auto-build supplies the index, the fold pass *uses* it. The disk
 backend is missing both surfaces entirely. All three slowdowns
-(836×/841×/795×) cluster around the same magnitude — the signature
+(738×/749×/768×) cluster around the same magnitude — the signature
 of a single critical optimisation surface (the indexed start-node
 lookup) rather than three independent contributions.
 
@@ -452,7 +494,7 @@ lookup) rather than three independent contributions.
   It does NOT say "Rust without optimisations equals Python." We
   haven't isolated FFI overhead vs engine work in the external
   systems. Don't read the table that way.
-- **`disk-baseline` is not a "disk I/O cost" measurement.** The 795×
+- **`disk-baseline` is not a "disk I/O cost" measurement.** The 768×
   slowdown vs `lazy-baseline` is dominated by the missing index hook,
   not by disk reads. A future `DiskGraphStore` that implements
   `lookup_node_eq` would land somewhere between disk-baseline and

@@ -260,8 +260,8 @@ honestly.
    directly by `run_all.sh` and timed.
 6. **Pinned versions.** kuzu is pinned to `0.11.3` (the upstream
    project archived 2025-10-10; the wheel is frozen and reproducible).
-   graphqlite tracks its latest PyPI release. gqlite is whatever
-   the bench branch builds.
+   graphqlite is pinned to `0.4.4`. gqlite is whatever the bench
+   branch builds.
 
 ### What's INTENTIONALLY not measured
 
