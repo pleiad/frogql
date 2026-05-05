@@ -19,22 +19,30 @@ count=20` × 15 plus per-system 15/15 shape passes in
 
 | System / mode | Setup (s) | IC2 median (ms) | × gqlite-baseline |
 |---|---|---|---|
-| **gqlite** `lazy-baseline` (all opts on) | not-measurable† | **0.26** | **1×** |
+| **gqlite** `lazy-baseline` (all opts on) | **~29†** | **0.26** | **1×** |
 | gqlite `lazy-no-auto-indexes` | (same .gdb) | 184.20 | 708× slower |
 | gqlite `lazy-no-fold` | (same .gdb) | 188.48 | 725× slower |
 | gqlite `disk-baseline` | (same .gdb) | 189.74 | 730× slower |
 | **Kuzu** v0.11.3 | **2.67** | 6.57 | 25× slower |
 | **graphqlite** v0.4.4 | 30.07 | 11.47 | 44× slower |
 
-† gqlite's `bench_setup.exe` triggers Windows's installer-detection
-heuristic (binary name contains "setup") and demands UAC elevation
-regardless of shell, blocking automated timing on this Windows host.
-The CSV-import work is comparable in shape to the other systems'
-setup phases but a clean number is not measurable here. Linux/macOS
-hosts wouldn't hit this; the binary rename / manifest fix is upstream
-gqlite work, not bench work. Note that this only affects the
-*setup-time* reporting — the bench itself runs fine because gqlite's
-ldbc_bench reads an already-built `.gdb`.
+† gqlite setup measured separately via the `gqlite` CLI's
+`--import-ldbc-csv` mode (which doesn't hit the `bench_setup.exe`
+UAC issue described below). Breakdown of the ~29 s: 2.96 s CSV
+parse + ~26 s writing the 1.42 GB `.gdb` to disk. The `.gdb` is
+about 4× larger than graphqlite's SQLite (349 MB) and 16× larger
+than Kuzu's columnar files (95 MB), which explains most of the
+disk-write time. Open + TripleIndex warm at *query* time add
+~2.2 s; that's part of the per-bench cost, not setup.
+
+`run_all.sh` itself reports "user-managed" for gqlite because its
+own CSV→`.gdb` runner is `bench_setup.exe`, which Windows treats as
+an installer (binary name contains "setup") and demands UAC
+elevation regardless of shell. The clean fix is upstream — rename
+the binary or add a Windows manifest declaring
+`requestedExecutionLevel asInvoker` — and is out of scope for this
+PR. Linux/macOS hosts don't hit this. The number we report above
+(~29 s) is from the unaffected `gqlite --import-ldbc-csv` path.
 
 ### Reading the table
 
