@@ -554,6 +554,18 @@ fn raw_to_pylist<'py>(
     let out = PyList::empty_bound(py);
     for row in &ir.rows {
         let d = PyDict::new_bound(py);
+        // _paths: list of paths (one per pattern in a comma-join), each
+        // path a list of node/edge dicts in match order. Underscore
+        // prefix avoids collisions with user-defined variable names.
+        let paths = PyList::empty_bound(py);
+        for path in &row.paths {
+            let p = PyList::empty_bound(py);
+            for pv in &path.0 {
+                p.append(pathvalue_to_py(py, store, pv)?)?;
+            }
+            paths.append(p)?;
+        }
+        d.set_item("_paths", paths)?;
         for (var, pv) in row.assignment.m.iter() {
             d.set_item(var, pathvalue_to_py(py, store, pv)?)?;
         }

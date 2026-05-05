@@ -37,6 +37,23 @@ print(conn.node_count, conn.edge_count)
 print(conn.schema())
 ```
 
+### Bare patterns (no RETURN)
+
+A query without `RETURN` projects each row as a dict of the matched
+variables plus a special `_paths` key holding the full match:
+
+```python
+rows = conn.execute("(p:Person)-[:ACTED_IN]->(m:Movie)", limit=1)
+row = rows[0]
+row["p"]        # {"kind": "node", "id": ..., "labels": [...], "props": {...}}
+row["m"]        # the movie node
+row["_paths"]   # [[node_p, edge, node_m]] — list of paths, each a
+                # list of node/edge dicts in match order
+```
+
+`_paths` is a list because comma-joined patterns produce one path per
+joined sub-pattern. For a single pattern, `_paths[0]` is the full path.
+
 ## Data import
 
 ```python
@@ -67,7 +84,7 @@ A `DEFAULT` graph type is auto-inferred at import time. Auto-built secondary ind
 | `frogql.open(path)` | `Connection` |
 | `frogql.import_json(db_path, json_path)` | `None` |
 | `frogql.import_csv(db_path, csv_dir)` | `None` |
-| `Connection.execute(query, limit=100)` | `list[dict]` |
+| `Connection.execute(query, limit=100)` | `list[dict]` (with `RETURN`: keys = aliases or `colN`; without `RETURN`: keys = pattern variables plus `_paths`) |
 | `Connection.schema()` | `dict` |
 | `Connection.graph_types()` | `list[dict]` |
 | `Connection.node_count` / `Connection.edge_count` | `int` |
