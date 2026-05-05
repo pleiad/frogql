@@ -58,7 +58,11 @@ REPO_ROOT = HERE.parent.parent.parent
 
 DEFAULT_CSV_DIR = REPO_ROOT / "bench/data/ldbc-sf0.1/social_network-sf0.1-CsvBasic-LongDateFormatter/dynamic"
 DEFAULT_DB_DIR = REPO_ROOT / "bench/data/cross-system/graphqlite"
-DEFAULT_DB_PATH = DEFAULT_DB_DIR / "ic2.db"
+
+# Each IC gets its own pre-loaded DB (under DEFAULT_DB_DIR). For now
+# we only know how to load the IC2 subset; supporting another IC
+# means teaching this script which node/edge types it needs.
+SUPPORTED_ICS = {2}
 
 
 # NOTE on API choice: graphqlite has both upsert_*_batch and
@@ -152,14 +156,25 @@ def load_edges(g: Graph, path: Path, rel_type: str, id_map: dict[str, int]) -> i
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--ic", type=int, default=2,
+                    help="LDBC IC number (default: 2)")
     ap.add_argument("--force", action="store_true",
-                    help="rebuild even if the cached ic2.db exists")
+                    help="rebuild even if the cached db exists")
     ap.add_argument("--csv-dir", type=Path, default=DEFAULT_CSV_DIR)
-    ap.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    ap.add_argument("--db", type=Path, default=None,
+                    help="output db path; defaults to ic<n>.db under the cache dir")
     args = ap.parse_args()
 
+    if args.ic not in SUPPORTED_ICS:
+        print(
+            f"setup.py only knows how to load data for IC(s) {sorted(SUPPORTED_ICS)}.\n"
+            f"Add the per-IC loaders before benching ic{args.ic}.",
+            file=sys.stderr,
+        )
+        return 1
+
     csv_dir: Path = args.csv_dir
-    db_path: Path = args.db
+    db_path: Path = args.db or (DEFAULT_DB_DIR / f"ic{args.ic}.db")
 
     if not csv_dir.is_dir():
         print(

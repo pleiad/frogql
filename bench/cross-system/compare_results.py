@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Compare per-system IC2 latencies from a unified CSV.
+"""Compare per-system latencies from a unified CSV.
 
 Input: a single CSV in the schema emitted by `src/bin/ldbc_bench.rs`:
 
     query;backend;params;row;iter;result_count;elapsed_ns
 
-The `backend` column is the system label (`lazy` for gqlite,
-`graphqlite-cypher` for graphqlite, etc.). `row` is the params-row
-index (0..14 for IC2). `params` is the raw pipe-joined param row from
-the LDBC param file, used as the join key across systems.
+The `query` column identifies the IC (e.g. `IC2`); the unified CSV
+typically holds a single IC's results from a single run_all.sh
+invocation. The `backend` column is the system label (`lazy` for
+gqlite, `graphqlite-cypher` for graphqlite, etc.). `row` is the
+params-row index. `params` is the raw pipe-joined param row from the
+LDBC param file, used as the join key across systems.
 
 Result-shape verification is logged by each runner to stderr (search
 for `SHAPE` lines in the per-system stderr output) and cross-checked
@@ -62,6 +64,7 @@ def main() -> int:
 
     by_cell: dict[tuple[int, str], list[tuple[int, int]]] = defaultdict(list)
     raw_params_by_row: dict[int, str] = {}
+    queries_seen: set[str] = set()
 
     with path.open() as f:
         reader = csv.DictReader(f, delimiter=";")
@@ -76,6 +79,7 @@ def main() -> int:
             backend = r["backend"]
             by_cell[(row_idx, backend)].append((elapsed, rc))
             raw_params_by_row.setdefault(row_idx, r["params"])
+            queries_seen.add(r.get("query", ""))
 
     if not by_cell:
         print("no rows found in input — nothing to compare.", file=sys.stderr)
@@ -83,9 +87,12 @@ def main() -> int:
 
     systems = sorted({b for (_, b) in by_cell.keys()})
     rows = sorted({r for (r, _) in by_cell.keys()})
+    query_label = sorted(queries_seen).pop() if len(queries_seen) == 1 else (
+        ",".join(sorted(queries_seen)) if queries_seen else "?"
+    )
 
     # ---- 1. Per-cell summary ----
-    print("=== Per-cell summary (latency, ms; result_count) ===")
+    print(f"=== Per-cell summary [{query_label}] (latency, ms; result_count) ===")
     print()
     header = ["params_row", "system", "iters", "median_ms", "p95_ms", "rc"]
     widths = [10, 18, 6, 10, 10, 4]
@@ -110,7 +117,7 @@ def main() -> int:
 
     # ---- 2. Result-count consistency check ----
     print()
-    print("=== Result-count consistency (per params_row across systems) ===")
+    print(f"=== Result-count consistency [{query_label}] (per params_row across systems) ===")
     print()
     mismatches: list[int] = []
     for rk in rows:
@@ -139,7 +146,7 @@ def main() -> int:
 
     # ---- 3. Side-by-side latency table ----
     print()
-    print("=== Side-by-side latency (median ms) ===")
+    print(f"=== Side-by-side latency [{query_label}] (median ms) ===")
     print()
     header = ["params_row"] + systems
     print("  " + "  ".join(f"{h:>14}" for h in header))

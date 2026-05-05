@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Cross-system IC2 bench — orchestrator.
+# Cross-system bench — orchestrator.
 #
-# Invokes every per-system runner in turn, captures their CSV output
-# into a timestamped results dir, then runs compare_results.py to
-# produce a side-by-side comparison table.
+# Invokes every per-system runner in turn for a chosen IC, captures
+# each runner's CSV into a timestamped results dir, then runs
+# compare_results.py to produce a side-by-side comparison table.
 #
 # Usage:
-#   bench/cross-system/run_all.sh [--iters N] [--warmup N] [--only <list>]
+#   bench/cross-system/run_all.sh [--ic <n>] [--iters N] [--warmup N] [--only <list>]
+#
+# Default --ic is 2. Each invocation runs one IC against every
+# (selected) system. For a multi-IC sweep, invoke this script once
+# per IC — each run lands in its own timestamped dir.
 #
 # --only takes a comma-separated subset of system names, e.g.
 #   --only gqlite        # just our system (debugging)
@@ -20,6 +24,7 @@
 #   webbery_gqlite.csv      (if integrated; SKIPPED.md otherwise)
 #   cross_system.csv        (concatenation of all the above)
 #   comparison.txt          (compare_results.py output)
+#   run_info.txt            (metadata: timestamp, host, ic, etc.)
 #
 # Prereq: ./target/release/bench_setup has been run so the LDBC SF0.1
 # dataset (~17 MiB) is downloaded and built into ldbc-sf0.1.gdb.
@@ -32,11 +37,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RESULTS_ROOT="$SCRIPT_DIR/results"
 
+IC=2
 ITERS=10
 WARMUP=2
 ONLY=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --ic)     IC="$2"; shift 2 ;;
         --iters)  ITERS="$2"; shift 2 ;;
         --warmup) WARMUP="$2"; shift 2 ;;
         --only)   ONLY="$2"; shift 2 ;;
@@ -58,6 +65,7 @@ START_EPOCH=$(date +%s)
 # missing fields surface as empty values, not errors.
 {
     echo "timestamp:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "ic:               $IC"
     echo "host:             $(hostname 2>/dev/null || echo unknown)"
     echo "uname:            $(uname -a 2>/dev/null || echo unknown)"
     echo "gqlite_branch:    $(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
@@ -80,8 +88,9 @@ else
 fi
 
 cd "$REPO_ROOT"
-echo "=== Cross-system IC2 bench — $TIMESTAMP ==="
+echo "=== Cross-system IC$IC bench — $TIMESTAMP ==="
 echo "  results: $OUT_DIR"
+echo "  ic:      $IC"
 echo "  iters:   $ITERS"
 echo "  warmup:  $WARMUP"
 echo "  systems: ${SYSTEMS[*]}"
@@ -112,10 +121,10 @@ for sys in "${SYSTEMS[@]}"; do
     stderr_log="$OUT_DIR/${sys}.stderr.log"
 
     case "$sys" in
-        graphqlite) python "$runner" "$out_csv" --iters "$ITERS" --warmup "$WARMUP" \
+        graphqlite) python "$runner" "$out_csv" --ic "$IC" --iters "$ITERS" --warmup "$WARMUP" \
                         2>"$stderr_log" || \
             echo "[FAIL] $sys runner returned non-zero" | tee -a "$OUT_DIR/skipped.log" ;;
-        *)          bash "$runner" "$out_csv" --iters "$ITERS" --warmup "$WARMUP" \
+        *)          bash "$runner" "$out_csv" --ic "$IC" --iters "$ITERS" --warmup "$WARMUP" \
                         2>"$stderr_log" || \
             echo "[FAIL] $sys runner returned non-zero" | tee -a "$OUT_DIR/skipped.log" ;;
     esac
