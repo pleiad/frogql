@@ -14,8 +14,9 @@ across all (selected) systems.
 |---|---|---|
 | gqlite (lazy backend) | [`gqlite/`](gqlite/) | ✅ implemented |
 | GraphQLite — colliery-io/graphqlite (Cypher, SQLite-backed) | [`graphqlite/`](graphqlite/) | ✅ implemented |
-| GraphLite — GraphLite-AI/GraphLite (ISO GQL, Sled-backed) | — | not yet integrated |
-| GQLite — webbery/gqlite (custom DSL, dead since April 2023) | — | not yet integrated |
+| GQLite — auksys/gqlite, [gqlite.org](https://gqlite.org/) (OpenCypher, SQLite/Redb/Postgres backends; PyPI: `gqlitedb`) | [`auksys_gqlite/`](auksys_gqlite/) | ⚠ integration scaffolded; **fails to load LDBC SF0.1 in reasonable time** — see [`auksys_gqlite/DIVERGENCES.md`](auksys_gqlite/DIVERGENCES.md) |
+| GraphLite — GraphLite-AI/GraphLite (ISO GQL, Sled-backed) | [`graphlite/`](graphlite/) | ⚠ integration scaffolded; **load hangs on the comments phase** — see [`graphlite/DIVERGENCES.md`](graphlite/DIVERGENCES.md) |
+| GQLite — webbery/gqlite (custom DSL, dead since April 2023) | — | not integrated; `auksys/gqlite` above is the actively-maintained successor |
 
 ## Setup
 
@@ -86,12 +87,19 @@ the comment-link explains.
 
 ## Reading the results
 
-`comparison.txt` has three sections:
+`comparison.txt` has four sections:
 
+0. **Errored param rows** — for each system, the count of param rows
+   where any iter returned `result_count = -1` (sentinel for runner-
+   level failure: SDK error, panic, etc.). A high tally means the
+   latency table below is over a partial sample. The integrated-but-
+   blocked systems (graphlite, auksys_gqlite) document their failure
+   modes in their per-system DIVERGENCES.md.
 1. **Per-cell summary** — for each (params_row, system) pair, median
    latency, p95, iter count, the result_count, and the result_shape
    (per-row type signatures, deduped — e.g. `i,s,s,i,s,i|i,s,s,i,n,i`
-   for IC2 where `c.content` is sometimes null).
+   for IC2 where `c.content` is sometimes null). Errored rows are
+   excluded.
 2. **Count + shape consistency** — for each params_row, do all systems
    agree on row count AND per-row column types? Without ORDER BY the
    actual row contents legitimately differ (each system picks a
@@ -99,7 +107,8 @@ the comment-link explains.
    types must match. `WARN` flags disagreement, which means a
    per-system query translation bug.
 3. **Side-by-side latency** — one row per params_row, one column per
-   system, median ms.
+   system, median ms. Cells where a system errored out show as `--`
+   (no successful samples to median).
 
 ## Out of scope
 

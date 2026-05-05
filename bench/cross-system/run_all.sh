@@ -21,6 +21,7 @@
 #   gqlite.csv
 #   graphqlite.csv          (if integrated)
 #   graphlite.csv           (if integrated)
+#   auksys_gqlite.csv       (if integrated; gqlite.org / gqlitedb on PyPI)
 #   webbery_gqlite.csv      (if integrated; SKIPPED.md otherwise)
 #   cross_system.csv        (concatenation of all the above)
 #   comparison.txt          (compare_results.py output)
@@ -78,7 +79,7 @@ START_EPOCH=$(date +%s)
 
 # Systems registered here. Order matters only for cosmetic per-system
 # stderr output; the comparison script sorts independently.
-ALL_SYSTEMS=(gqlite graphqlite graphlite webbery_gqlite)
+ALL_SYSTEMS=(gqlite graphqlite graphlite auksys_gqlite webbery_gqlite)
 
 # Filter via --only.
 if [[ -n "$ONLY" ]]; then
@@ -105,6 +106,7 @@ for sys in "${SYSTEMS[@]}"; do
         gqlite)         runner="$SCRIPT_DIR/gqlite/run.sh" ;;
         graphqlite)     runner="$SCRIPT_DIR/graphqlite/run.py" ;;
         graphlite)      runner="$SCRIPT_DIR/graphlite/run.sh" ;;  # wraps cargo run
+        auksys_gqlite)  runner="$SCRIPT_DIR/auksys_gqlite/run.py" ;;
         webbery_gqlite) runner="$SCRIPT_DIR/webbery_gqlite/run.sh" ;;
     esac
 
@@ -121,7 +123,8 @@ for sys in "${SYSTEMS[@]}"; do
     stderr_log="$OUT_DIR/${sys}.stderr.log"
 
     case "$sys" in
-        graphqlite) python "$runner" "$out_csv" --ic "$IC" --iters "$ITERS" --warmup "$WARMUP" \
+        graphqlite|auksys_gqlite)
+                    python "$runner" "$out_csv" --ic "$IC" --iters "$ITERS" --warmup "$WARMUP" \
                         2>"$stderr_log" || \
             echo "[FAIL] $sys runner returned non-zero" | tee -a "$OUT_DIR/skipped.log" ;;
         *)          bash "$runner" "$out_csv" --ic "$IC" --iters "$ITERS" --warmup "$WARMUP" \

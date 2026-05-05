@@ -1,0 +1,28 @@
+[package]
+name = "graphlite-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Cross-system bench harness for GraphLite-AI/GraphLite. Loads LDBC SF0.1 into a Sled-backed GraphLite database and runs the chosen IC, emitting per-iter CSV in the cross-system schema."
+
+# Standalone, NOT a workspace member of the parent gqlrust crate.
+# Keeping it isolated means graphlite-rust-sdk's deps don't pollute
+# the main crate's lockfile, and someone who only wants to bench
+# gqlite + graphqlite doesn't have to compile this.
+
+[workspace]
+
+[[bin]]
+name = "graphlite-setup"
+path = "src/setup.rs"
+
+[[bin]]
+name = "graphlite-run"
+path = "src/run.rs"
+
+[dependencies]
+graphlite-rust-sdk = "0.0.1"
+csv = "1"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
