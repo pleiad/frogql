@@ -129,37 +129,19 @@ impl Parser {
         }
     }
 
-    // full_query   = match_clause+ legacy_group_by?
-    //                ("RETURN" ("DISTINCT")? return_list group_by?)?
-    //                ("ORDER BY" sort_spec (, sort_spec)*)?
-    //                ("LIMIT" integer)?
-    // sort_spec    = expr ("ASC"|"DESC"|"ASCENDING"|"DESCENDING")?
-    //                ("NULLS FIRST"|"NULLS LAST")?
-    // match_clause = ("OPTIONAL" "MATCH" | "MATCH"?) query ("WHERE" expr)?
+    // ISO §14.3-14.4 + §14.9 + §14.11 + §16.17.
     //
-    // ISO §14.3-14.4 + §14.9 + §14.11 + §16.17. The `MATCH` keyword is
-    // optional only on the first clause for back-compat with bare-
-    // pattern queries (`(x)-[]->(y)`); an `OPTIONAL` always requires
-    // the explicit `MATCH` after it.
+    //   full_query   = match_clause+ legacy_group_by?
+    //                  ("RETURN" ("DISTINCT")? return_list group_by?)?
+    //                  ("ORDER BY" sort_spec (, sort_spec)*)?
+    //                  ("LIMIT" integer)?
+    //   sort_spec    = expr ("ASC"|"DESC"|"ASCENDING"|"DESCENDING")?
+    //                  ("NULLS FIRST"|"NULLS LAST")?
+    //   match_clause = ("OPTIONAL" "MATCH" | "MATCH"?) query ("WHERE" expr)?
     //
-    // GROUP BY position. ISO §14.11 places `<group by clause>` INSIDE
-    // the `<return statement body>`, after the `<return item list>`:
-    //
-    //     <return statement body> ::=
-    //       [<set quantifier>] {* | <return item list>} [<group by clause>]
-    //
-    // Earlier versions of this parser put GROUP BY between WHERE and
-    // RETURN (commit 72a6449e). To stay ISO-conformant without breaking
-    // the test corpus written against that older surface, BOTH
-    // positions are accepted: the canonical post-items position is the
-    // ISO-correct form and the one we recommend; the legacy pre-RETURN
-    // form is still parsed but flagged as the same clause. Specifying
-    // GROUP BY in both positions is a parse error.
-    //
-    // ORDER BY and LIMIT are both accepted with or without a preceding
-    // RETURN — the runtime applies them to whatever binding table the
-    // query produces. Their order matches §14.9 GR 5: ORDER BY happens
-    // BEFORE LIMIT.
+    // GROUP BY: ISO §14.11 places it INSIDE `<return statement body>`,
+    // after the item list. Pre-72a6449e gqlite put it between WHERE and
+    // RETURN; both positions are accepted (specifying both is an error).
     fn full_query(&mut self) -> Result<Query, String> {
         let first_optional = self.eat(&Token::Optional);
         if first_optional {
@@ -233,9 +215,6 @@ impl Parser {
         })
     }
 
-    /// Parse a `GROUP BY <expr> ("," <expr>)*` clause. Returns `None` if
-    /// the next token is not `GROUP BY`. Both the legacy pre-RETURN and
-    /// the canonical post-items positions go through this helper.
     fn parse_group_by_clause(&mut self) -> Result<Option<Vec<Expr>>, String> {
         if !self.eat(&Token::GroupBy) {
             return Ok(None);
@@ -264,14 +243,8 @@ impl Parser {
             .map_err(|_| format!("LIMIT {n} exceeds the supported u32 range"))
     }
 
-    /// Optional trailing `ORDER BY <sort spec list>`. Returns `None` if
-    /// absent. The list is non-empty when present (parse error if no
-    /// spec follows the keyword).
-    ///
-    /// `returns` is the already-parsed `<return item list>` from the
-    /// surrounding RETURN clause (or `None` for ORDER BY without
-    /// RETURN). It enables ISO §16.17 SR 5c — bare-name sort keys
-    /// resolve to RETURN aliases.
+    /// `returns` is the already-parsed `<return item list>` for §16.17
+    /// SR 5c alias resolution; pass `None` when there is no RETURN.
     fn parse_optional_order_by(
         &mut self,
         returns: Option<&[ReturnItem]>,
@@ -286,22 +259,6 @@ impl Parser {
         Ok(Some(specs))
     }
 
-    /// One `<sort specification>`: expr (or alias reference), optional
-    /// direction, optional null ordering. ISO §16.17 SR 5b: ASC is
-    /// implicit when omitted.
-    ///
-    /// Alias resolution (§16.17 SR 5c). When the next token is a bare
-    /// `Name` not followed by `Dot` (which would make it `var.attr`),
-    /// AND that name matches a `<return item alias>` from the RETURN
-    /// clause, the sort key resolves to a column reference into the
-    /// projected output row instead of a free expression. This lets:
-    ///
-    ///   RETURN x.name AS n ORDER BY n        -- alias of regular expr
-    ///   RETURN COUNT(*) AS c ORDER BY c DESC -- alias of aggregate
-    ///
-    /// both work without re-introducing the projected expression in
-    /// the sort key. Unmatched bare names fall through to `expr()`,
-    /// which produces the existing "unexpected bare variable" error.
     fn sort_spec(&mut self, returns: Option<&[ReturnItem]>) -> Result<SortSpec, String> {
         let key = self.parse_sort_key(returns)?;
         let dir = match self.peek() {
@@ -329,28 +286,12 @@ impl Parser {
         Ok(SortSpec { key, dir, nulls })
     }
 
-    /// Resolve a single sort key. Three resolution strategies fire in
-    /// order:
-    ///
-    /// 1. **Bare-name alias** (§16.17 SR 5c): if the next token is a
-    ///    Name not followed by `Dot` and the name matches a
-    ///    `<return item alias>`, return `SortKey::Column(idx)`.
-    /// 2. **Direct aggregate function** (§16.17 SR 1, §20.9): if the
-    ///    next tokens look like an aggregate call (`COUNT(...)`,
-    ///    `SUM(...)`, etc.), parse the aggregator and require it to
-    ///    match a `ReturnItem::Aggregate` structurally. Free-standing
-    ///    aggregates without a corresponding RETURN item are rejected
-    ///    — they have nothing to evaluate against (post-projection
-    ///    sort works by column index, and we will not re-aggregate).
-    /// 3. **Structural match against a RETURN item**: parse as Expr,
-    ///    then for aggregate queries check whether the parsed
-    ///    expression is identical to a non-aggregate RETURN item.
-    ///    Catches `RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY
-    ///    x.city`. Non-aggregate queries skip this — `Expr` sort keys
-    ///    evaluate against the binding table directly via the
-    ///    pre-projection sort fast path.
+    /// Resolve a sort key (ISO §16.17 SR 1 + 5c). Order: bare-name
+    /// alias → direct aggregate (must match a `ReturnItem::Aggregate`)
+    /// → free `Expr` (aggregate queries get a structural-match pass
+    /// against non-aggregate RETURN items so post-projection sort can
+    /// look them up).
     fn parse_sort_key(&mut self, returns: Option<&[ReturnItem]>) -> Result<SortKey, String> {
-        // Strategy 1: bare-name alias resolution.
         if let (Some(items), Token::Name(name)) = (returns, self.peek().clone()) {
             if !matches!(self.peek_at(1), Some(Token::Dot)) {
                 if let Some(idx) = items.iter().position(|it| it.alias() == Some(&name)) {
@@ -360,10 +301,6 @@ impl Parser {
             }
         }
 
-        // Strategy 2: direct aggregate function in the sort key. Only
-        // attempted when a RETURN clause is present; otherwise we let
-        // `expr()` produce its existing "expected expression, got
-        // Count/Sum/..." error for the no-RETURN case.
         if returns.is_some() && self.peek_aggregate_kind().is_some() {
             let agg = self.aggregate_function()?;
             if let Some(items) = returns {
@@ -377,17 +314,13 @@ impl Parser {
             }
             return Err(format!(
                 "ORDER BY {agg} is not in the RETURN list — direct aggregates in \
-                 sort keys must also appear as a RETURN item (alias optional). \
-                 If you wanted a different aggregate, project it explicitly."
+                 sort keys must also appear as a RETURN item (alias optional)."
             ));
         }
 
-        // Strategy 3: parse as Expr, then for aggregate queries try a
-        // structural match against the RETURN items.
         let expr = self.expr()?;
         if let Some(items) = returns {
-            let has_aggregate_in_returns = items.iter().any(|it| it.is_aggregate());
-            if has_aggregate_in_returns {
+            if items.iter().any(|it| it.is_aggregate()) {
                 for (idx, item) in items.iter().enumerate() {
                     if let ReturnItem::Expr { expr: ret_expr, .. } = item {
                         if *ret_expr == expr {
@@ -1486,11 +1419,7 @@ impl Parser {
                 Ok(e)
             }
             Token::Coalesce => {
-                // ISO §20.7 <case abbreviation>:
-                //   COALESCE ( <value expression> { , <value expression> }... )
-                // The grammar mandates at least two operands (`<comma>
-                // <value expression>` non-empty repetition); single-arg
-                // calls are a parse error per the spec.
+                // ISO §20.7: at least two args.
                 self.advance();
                 self.expect(&Token::LParen)?;
                 let mut args = vec![self.expr()?];

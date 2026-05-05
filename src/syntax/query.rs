@@ -28,25 +28,10 @@ pub enum NullsOrder {
     Last,
 }
 
-/// What to evaluate per row to obtain the sort value.
-///
-/// ISO §16.17 SR 1 admits any `<aggregating value expression>` as a
-/// sort key. In practice gqlite parses two distinct forms:
-///
-/// - **`Expr`** — a regular value expression (`x.attr`, `a + b`,
-///   etc.) evaluated against the binding-table row's assignment.
-///   This is the only form that works correctly when the query has
-///   no aggregation; the runtime sorts BEFORE projection so the sort
-///   sees every variable in the env.
-///
-/// - **`Column(idx)`** — a reference to the i-th column of the
-///   already-projected output row. Produced by the parser when a
-///   bare name in a sort key matches a `<return item alias>`
-///   (§16.17 SR 5c) and that alias points to a `ReturnItem`. Lets
-///   `RETURN x.name AS n ORDER BY n` and `RETURN COUNT(*) AS c
-///   ORDER BY c` work without re-introducing the projected
-///   expression in the sort key. The runtime sorts AFTER projection
-///   when any sort key is a column reference.
+/// `Expr` — evaluated against the binding-table assignment
+/// (pre-projection sort). `Column(idx)` — index into the projected
+/// row, produced by the parser when a sort key resolves to a RETURN
+/// alias or to an aggregate already in RETURN (post-projection sort).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SortKey {
     Expr(Expr),
@@ -322,10 +307,6 @@ impl fmt::Display for SortKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SortKey::Expr(e) => write!(f, "{e}"),
-            // `<return item alias>` references display as `#N` so the
-            // dump round-trips a structurally distinct token from any
-            // user-written expression. Surface syntax accepts the
-            // alias name; we resolve to a column index at parse time.
             SortKey::Column(idx) => write!(f, "#{idx}"),
         }
     }

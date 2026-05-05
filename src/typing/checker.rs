@@ -98,40 +98,15 @@ impl Typechecker {
         r
     }
 
-    /// ISO §16.17 + §22.14: each `<sort key>` is a value expression
-    /// evaluated in the working record context. The sort key is also
-    /// an *operand of an ordering operation* (§22.14 SR 2c), so per
-    /// §22.14 Conformance Rule 1 (without Feature GA04 "Universal
-    /// comparison") its declared type must be a comparable value type.
-    ///
-    /// gqlite does not implement Feature GA04, so non-scalar types
-    /// (lists, records, repetition groups) are rejected here. Scalars
-    /// (Z, F, B, S) and the wildcard `Star` (imprecise / dynamic)
-    /// pass; `Zero` (unsatisfiable type — typically a strict-schema
-    /// lookup of an undeclared attribute) is rejected so the user
-    /// finds the typo at compile time.
-    ///
-    /// Two key shapes:
-    /// - `SortKey::Expr` — checked via `check_expr` against the
-    ///   binding-table env. Output type runs through the orderability
-    ///   predicate.
-    /// - `SortKey::Column` — already validated by `check_returns` for
-    ///   the underlying `ReturnItem`. The column index is a
-    ///   parse-time invariant (in bounds by construction); we still
-    ///   look up the matching return item to enforce §22.14 against
-    ///   its declared type. Aggregate items receive a permissive
-    ///   `Star` for now (typing the aggregate output is a separate
-    ///   gap).
+    /// ISO §16.17 + §22.14: enforce comparable-value-type per CR 1
+    /// (no Feature GA04). Mixed Expr+Column sort keys cannot be
+    /// served by either pre- or post-projection sort.
     fn check_order_by(
         &mut self,
         specs: &[SortSpec],
         returns: Option<&[ReturnItem]>,
         env: &TypeEnvironment,
     ) {
-        // Mixed Expr+Column sort keys are rejected: post-projection
-        // sort has no assignment to evaluate Expr against, and pre-
-        // projection sort has no projected row to look up Column in.
-        // The user's workaround is to alias every sort target.
         let has_expr = specs.iter().any(|s| matches!(s.key, SortKey::Expr(_)));
         let has_column = specs.iter().any(|s| matches!(s.key, SortKey::Column(_)));
         if has_expr && has_column {
@@ -148,15 +123,9 @@ impl Typechecker {
                 SortKey::Expr(e) => self.check_expr(e, env),
                 SortKey::Column(idx) => match returns.and_then(|rs| rs.get(*idx)) {
                     Some(ReturnItem::Expr { expr, .. }) => self.check_expr(expr, env),
-                    // Aggregator output type is not propagated (separate
-                    // typecheck gap). Treat as Star so the comparable-
-                    // value check passes — runtime guarantees a scalar
-                    // for COUNT/SUM/AVG/MIN/MAX in the supported cases.
+                    // Aggregate output typing is a separate gap; pass-through.
                     Some(ReturnItem::Aggregate { .. }) => SimpleType::Star,
                     None => {
-                        // Index out of range — should not happen if the
-                        // parser produced this SortKey, but report as a
-                        // hard error rather than panicking.
                         self.errors.push(format!(
                             "ORDER BY column reference #{idx} is out of bounds for the \
                              RETURN clause (only {} item(s) projected)",
@@ -303,11 +272,8 @@ impl Typechecker {
             PathPattern::EdgeAnyDirection(desc) => self.check_edge(EdgeDir::Any, desc),
 
             PathPattern::Concat(p1, p2) => {
-                // Concat composes two path patterns over a shared
-                // endpoint — `(x:A)-[:R]->(y:B)` flattens through both
-                // sub-patterns. The path types DO compose: the right
-                // side's tail must agree with the left side's head, so
-                // a `PathType::meet` is the correct shape combinator.
+                // TConcat: paths share an endpoint, so `PathType::meet`
+                // composes their shapes.
                 let r1 = self.check_path_pattern(p1);
                 let r2 = self.check_path_pattern(p2);
 
@@ -327,26 +293,11 @@ impl Typechecker {
             }
 
             PathPattern::Join(p1, p2) => {
-                // Comma-join: `(x:A), (y:B)` describes two INDEPENDENT
-                // entities. Per the formal TJoin rule
-                //
-                //     S ⊢ Q1 : e1; Γ1     S ⊢ Q2 : e2; Γ2     S ⊢ Γ1 ⊓ Γ2 ▷ Γ
-                //     ──────────────────────────────────────────────────────
-                //     S ⊢ Q1, Q2 : e1 ∨ e2 ; Γ
-                //
-                // emptiness propagates as `e1 ∨ e2` (the join is empty
-                // when EITHER side is empty — cross-product semantics)
-                // and the environment is `Γ1 ⊓ Γ2`. There is no
-                // path-type meet in the rule.
-                //
-                // The earlier shared `Concat | Join` arm did
-                // `PathType::meet` for both, which intersected the
-                // labels of independent variables — `Comment ⊓ Person`
-                // collapses to Zero whenever no node carries both
-                // labels, falsely reporting `guaranteed_empty` for
-                // queries like `MATCH (x: Comment), (y: Person)`. This
-                // is the same class of bug Toro fixed for multi-MATCH
-                // chains in `354eaf6` (drop path-meet across matches).
+                // TJoin: emptiness is `e1 ∨ e2`, env is `Γ1 ⊓ Γ2`. No
+                // path-meet — `(x:A), (y:B)` describes independent
+                // variables; meeting their labels would falsely
+                // collapse to Zero. Same class of bug Toro fixed for
+                // multi-MATCH in `354eaf6`.
                 let r1 = self.check_path_pattern(p1);
                 let r2 = self.check_path_pattern(p2);
 
@@ -361,9 +312,6 @@ impl Typechecker {
 
                 self.warn_for_collapsed_bindings(&cm, &r1.env, &r2.env);
 
-                // `e1 ∨ e2` for emptiness; arbitrary representative
-                // path otherwise (the shape of a comma-join has no
-                // single canonical PathType).
                 let p = if r1.path.is_unsatisfiable() || r2.path.is_unsatisfiable() {
                     PathType::Zero
                 } else {
@@ -542,19 +490,9 @@ impl Typechecker {
             }
 
             Expr::Coalesce(args) => {
-                // ISO §20.7 SR 1c-1d: COALESCE(V1, V2, ..., Vn) is a
-                // recursive case expression that returns one of the Vi
-                // values. The result type is the union (least upper
-                // bound) of every operand's type. Every arg must
-                // typecheck individually so we can surface unbound
-                // variables and the like; we then fold types via
-                // `SimpleType::union` so that e.g. COALESCE(int, str)
-                // surfaces as Z|S — an upstream check (ORDER BY,
-                // comparisons) can still reject the union if needed.
+                // ISO §20.7 SR 1c-1d: result type is the union of arg types.
                 let mut iter = args.iter();
-                let first = iter
-                    .next()
-                    .expect("parser guarantees COALESCE has at least 2 args");
+                let first = iter.next().expect("parser ensures ≥ 2 args");
                 let mut acc = self.check_expr(first, env);
                 for a in iter {
                     let t = self.check_expr(a, env);
@@ -916,44 +854,14 @@ fn short_var_type(t: &VariableType) -> String {
     }
 }
 
-/// ISO §22.14 + §4.4.2: a `SimpleType` is *comparable* if every value
-/// it represents is essentially comparable (predefined scalar types)
-/// or is the imprecise / unsatisfiable case where the runtime decides
-/// dynamically.
-///
-/// Without Feature GA04 ("Universal comparison"), composite types
-/// — lists, records, and repetition-grouping types — are NOT
-/// comparable. Returning `false` for those triggers a typecheck
-/// error in `check_order_by` (and is the natural place to wire a
-/// future GA04 toggle).
+/// ISO §22.14 CR 1 + §4.4.2: `Star` deferred to runtime; `Zero` is
+/// surfaced as a typo / schema mismatch; lists / records / groups
+/// would need Feature GA04.
 fn is_orderable_per_iso_22_14(t: &SimpleType) -> bool {
     match t {
-        // Predefined scalars are essentially comparable per §4.4.2.
-        SimpleType::Z | SimpleType::F | SimpleType::B | SimpleType::S => true,
-        // `Star` is the gradual / dynamic type — value comes at
-        // runtime, so we accept the static check here.
-        SimpleType::Star => true,
-        // `Zero` is the unsatisfiable type — produced when a sort
-        // key references an attribute the strict schema does not
-        // declare, or any contradictory constraint. Typing the sort
-        // key as Zero means "this expression has no value the
-        // standard could compare against itself" — distinct from
-        // §4.4.2's null handling. We reject it so the user finds the
-        // typo (or schema mismatch) at compile time.
+        SimpleType::Z | SimpleType::F | SimpleType::B | SimpleType::S | SimpleType::Star => true,
         SimpleType::Zero => false,
-        // A union of orderable types is orderable iff both branches
-        // are. `int|str` is therefore rejected — at runtime that mix
-        // would degrade to "fall back to Equal" (§16.17 GR 1i,
-        // US007), which is the silent misbehavior we are trying to
-        // surface in compile time.
-        //
-        // Note: `union(a, Zero) = a` (see `SimpleType::union`), so a
-        // Zero branch never reaches this case via construction.
         SimpleType::Union(a, b) => is_orderable_per_iso_22_14(a) && is_orderable_per_iso_22_14(b),
-        // Lists, records, and repetition groups are not essentially
-        // comparable — there is no inherent total order on them. Per
-        // §22.14 Conformance Rule 1, an implementation that does not
-        // claim Feature GA04 must reject these.
         SimpleType::List(_) | SimpleType::Record(_) | SimpleType::Group(_) => false,
     }
 }

@@ -152,11 +152,8 @@ pub enum Expr {
         operand: Box<Expr>,
         negated: bool,
     },
-    /// ISO §20.7 `<case abbreviation>` — `COALESCE(v1, v2, ..., vN)`.
-    /// Returns the first operand whose value is not null, or null if
-    /// every operand is null. The grammar requires N ≥ 2 (the parser
-    /// enforces this); the recursive equivalence rule from the spec
-    /// (SR 1c-1d) is implemented as a left-to-right scan at runtime.
+    /// ISO §20.7 `<case abbreviation>` — `COALESCE(v1, ..., vN)`,
+    /// N ≥ 2 (parser-enforced). First non-null wins.
     Coalesce(Vec<Expr>),
     /// Right-hand side of `is`/`as` operators — a type, not a value.
     Type(SimpleType),

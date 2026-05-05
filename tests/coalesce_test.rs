@@ -1,17 +1,4 @@
-//! Tests for `COALESCE(v1, v2, ..., vN)` (ISO/IEC 39075:2024 §20.7
-//! `<case abbreviation>`).
-//!
-//! Specification (recursive equivalence, SR 1c-1d):
-//! ```text
-//! COALESCE(V1, V2)        ≡ CASE WHEN NOT V1 IS NULL THEN V1 ELSE V2 END
-//! COALESCE(V1, ..., Vn)   ≡ CASE WHEN NOT V1 IS NULL THEN V1
-//!                                ELSE COALESCE(V2, ..., Vn) END
-//! ```
-//!
-//! gqlite implements this directly as a left-to-right scan in the
-//! runtime: returns the first operand whose evaluation produces a
-//! non-null `Success`. `Failure` (missing attribute, unbound variable)
-//! is treated as null per the engine's existing 3VL convention.
+//! Tests for `COALESCE` (ISO/IEC 39075:2024 §20.7).
 
 use gqlrust::compile_query;
 use gqlrust::compile_query_unchecked;
@@ -21,9 +8,6 @@ use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 use gqlrust::syntax::expr::Expr;
 
-/// Three users: Alice has both name and email, Bob has only name,
-/// Carol has neither but exists. Designed for testing COALESCE
-/// fall-through.
 fn graph_with_optional_email() -> Graph {
     let json = r#"{
       "nodes": [
@@ -44,10 +28,6 @@ fn run_projected(g: &Graph, q: &str) -> Vec<Vec<Value>> {
         _ => panic!("expected projected"),
     }
 }
-
-// =====================================================================
-// Parser
-// =====================================================================
 
 #[test]
 fn parser_coalesce_two_args_produces_coalesce_expr() {
@@ -80,14 +60,9 @@ fn parser_coalesce_lowercase_works() {
 
 #[test]
 fn parser_coalesce_one_arg_is_error() {
-    // Per ISO §20.7: `COALESCE ( V1 { , V2 }... )` requires the
-    // repetition to fire at least once → minimum 2 operands.
     let r = compile_query_unchecked("MATCH (x) RETURN COALESCE(x.a)");
     let err = r.expect_err("single-arg COALESCE must be a parse error");
-    assert!(
-        err.contains("at least two arguments"),
-        "error must mention min-2-args rule, got: {err}"
-    );
+    assert!(err.contains("at least two arguments"), "got: {err}");
 }
 
 #[test]
@@ -98,22 +73,12 @@ fn parser_coalesce_zero_args_is_error() {
 
 #[test]
 fn parser_coalesce_keeps_lowercase_property_name_unaffected() {
-    // `coalesce` should remain a usable property name when not
-    // followed by `(`. The lexer's soft-keyword rule (Count/Sum/...)
-    // applies here too.
     let q = compile_query_unchecked("MATCH (x) RETURN x.coalesce");
     assert!(q.is_ok(), "got {q:?}");
 }
 
-// =====================================================================
-// Runtime — first-non-null semantics
-// =====================================================================
-
 #[test]
 fn runtime_returns_first_non_null_value() {
-    // Alice has both email and name; COALESCE picks email (first arg).
-    // Bob has only name; COALESCE falls through to name.
-    // Carol has neither; COALESCE returns the literal "fallback".
     let g = graph_with_optional_email();
     let mut rows = run_projected(
         &g,
@@ -121,7 +86,6 @@ fn runtime_returns_first_non_null_value() {
     );
     rows.sort_by(|a, b| match (&a[0], &b[0]) {
         (Value::Str(x), Value::Str(y)) => x.cmp(y),
-        // Carol has no name; sort her last.
         (Value::Str(_), Value::Null) => std::cmp::Ordering::Less,
         (Value::Null, Value::Str(_)) => std::cmp::Ordering::Greater,
         _ => std::cmp::Ordering::Equal,
@@ -149,9 +113,6 @@ fn runtime_returns_null_when_all_args_are_null() {
 
 #[test]
 fn runtime_explicit_null_literal_is_skipped() {
-    // ISO §20.7 SR 1d: nulls (any source — `null` literal, missing
-    // attr, unbound var) are skipped. The non-null literal that
-    // follows wins.
     let g = graph_with_optional_email();
     let rows = run_projected(
         &g,
@@ -163,23 +124,17 @@ fn runtime_explicit_null_literal_is_skipped() {
 
 #[test]
 fn runtime_short_circuits_on_first_non_null() {
-    // `x.name` is non-null for every User → COALESCE returns it
-    // before evaluating subsequent args. We can't observe the
-    // evaluation order directly, but we can check the result type.
     let g = graph_with_optional_email();
     let rows = run_projected(
         &g,
         "MATCH (x: User) WHERE x.name = 'Alice' \
          RETURN COALESCE(x.name, 999) AS first",
     );
-    // If short-circuited, the value is the string "Alice" not 999.
     assert_eq!(rows, vec![vec![Value::Str("Alice".into())]]);
 }
 
 #[test]
 fn runtime_in_where_predicate() {
-    // COALESCE in a WHERE expression: filter users whose effective
-    // contact is alice@a.com, where contact = email OR name fallback.
     let g = graph_with_optional_email();
     let rows = run_projected(
         &g,
@@ -192,12 +147,6 @@ fn runtime_in_where_predicate() {
 
 #[test]
 fn runtime_inside_order_by_via_alias_substitution() {
-    // Alias resolution from the ORDER BY work picks up COALESCE just
-    // like any other Expr. Sort users by their effective contact
-    // (email if present, else name). Result order:
-    //   Bob       → "Bob"
-    //   Alice     → "alice@a.com"
-    //   Carol     → null (NULLS LAST default)
     let g = graph_with_optional_email();
     let rows = run_projected(
         &g,
@@ -218,9 +167,6 @@ fn runtime_inside_order_by_via_alias_substitution() {
 
 #[test]
 fn runtime_int_promotion_in_coalesce_does_not_crash() {
-    // Mixed Int/Float in COALESCE: each arg evaluated independently;
-    // we just pick the first non-null. No promotion needed (the
-    // result keeps the type of whichever arg won).
     let json = r#"{
       "nodes": [
         {"id": "n1", "labels": ["X"], "props": {"a": 7, "b": 2.5}},
@@ -237,8 +183,6 @@ fn runtime_int_promotion_in_coalesce_does_not_crash() {
         _ => panic!("expected projected"),
     };
     assert_eq!(rows.len(), 3);
-    // n1 has a=7 → Int(7); n2 lacks a, has b=2.5 → Float(2.5);
-    // n3 lacks both → Int(0). Order may be any; assert content.
     let mut got: Vec<Value> = rows.into_iter().map(|r| r[0].clone()).collect();
     got.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
     let mut want = vec![Value::Int(7), Value::Float(2.5), Value::Int(0)];
