@@ -13,8 +13,11 @@ params-row index. `params` is the raw pipe-joined param row from the
 LDBC param file, used as the join key across systems.
 
 Result-shape verification is logged by each runner to stderr (search
-for `SHAPE` lines in the per-system stderr output) and cross-checked
-inline by `run_all.sh`. It is not stored or displayed here.
+for `SHAPE` lines in the per-system stderr output). When a results
+directory is passed alongside the unified CSV, this script also
+scans those `*.stderr.log` files and surfaces shape-verification
+failures as a fourth output section. Skipping this step (running
+without a results dir) preserves the original behaviour.
 
 Output (stdout):
 1. Per-(system, params_row) latency table — median + p95 + iter count
@@ -24,9 +27,13 @@ Output (stdout):
    with WARN.
 3. Side-by-side latency comparison — one row per params_row, one
    column per system, median latency.
+4. Shape-verification summary (only when a results dir is given) —
+   per-system pass/fail counts based on `SHAPE row=N status=...`
+   lines in the stderr.log files. Catches per-column type
+   mismatches that result_count alone misses.
 
 Usage:
-    python compare_results.py <unified_csv>
+    python compare_results.py <unified_csv> [<results_dir>]
 """
 
 from __future__ import annotations
@@ -52,15 +59,65 @@ def percentile(samples: list[float], p: float) -> float:
     return s[lo] * (1 - frac) + s[hi] * frac
 
 
+def collect_shape_status(results_dir: Path) -> dict[str, tuple[int, int, list[str]]]:
+    """For each `<name>.stderr.log` in `results_dir`, return the count of
+    `SHAPE row=N status=ok` lines and the list of failure reasons.
+    Returns: {logical_name: (ok_count, total_count, [unique_failure_reasons])}.
+    """
+    import re
+    shape_re = re.compile(r"^  SHAPE row=(\d+) count=\d+ shape=(\S+) status=(.+)$")
+    out: dict[str, tuple[int, int, list[str]]] = {}
+    for log in sorted(results_dir.glob("*.stderr.log")):
+        name = log.stem.replace(".stderr", "")
+        # Drop trailing `.icN` so e.g. `gqlite-baseline.ic2` becomes
+        # `gqlite-baseline` for the summary line.
+        name = re.sub(r"\.ic\d+$", "", name)
+        ok = 0
+        total = 0
+        reasons: list[str] = []
+        try:
+            with log.open(encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    m = shape_re.match(line.rstrip("\r\n"))
+                    if not m:
+                        continue
+                    total += 1
+                    status = m.group(3)
+                    if status == "ok":
+                        ok += 1
+                    else:
+                        reasons.append(status)
+        except OSError:
+            continue
+        if total > 0:
+            # Deduplicate reasons to keep the summary readable.
+            unique = []
+            seen = set()
+            for r in reasons:
+                if r in seen:
+                    continue
+                seen.add(r)
+                unique.append(r)
+            out[name] = (ok, total, unique)
+    return out
+
+
 def main() -> int:
-    if len(sys.argv) != 2:
-        print(f"usage: {sys.argv[0]} <unified_csv>", file=sys.stderr)
+    if len(sys.argv) not in (2, 3):
+        print(f"usage: {sys.argv[0]} <unified_csv> [<results_dir>]", file=sys.stderr)
         return 2
 
     path = Path(sys.argv[1])
     if not path.is_file():
         print(f"not a file: {path}", file=sys.stderr)
         return 2
+
+    results_dir: Path | None = None
+    if len(sys.argv) == 3:
+        results_dir = Path(sys.argv[2])
+        if not results_dir.is_dir():
+            print(f"not a directory: {results_dir}", file=sys.stderr)
+            return 2
 
     by_cell: dict[tuple[int, str], list[tuple[int, int]]] = defaultdict(list)
     raw_params_by_row: dict[int, str] = {}
@@ -162,6 +219,37 @@ def main() -> int:
                 med = statistics.median(elapsed_ms)
                 cells.append(f"{med:>14.2f}")
         print("  " + "  ".join(cells))
+
+    # ---- 4. Shape verification (only when results_dir is given) ----
+    if results_dir is not None:
+        print()
+        print(f"=== Shape verification [{query_label}] (per-system pass/fail) ===")
+        print()
+        statuses = collect_shape_status(results_dir)
+        if not statuses:
+            print("  (no SHAPE lines found in *.stderr.log — nothing to check)")
+        else:
+            any_failed = False
+            for name in sorted(statuses):
+                ok, total, reasons = statuses[name]
+                if ok == total:
+                    print(f"  OK   {name}: {ok}/{total} rows passed")
+                else:
+                    any_failed = True
+                    print(f"  WARN {name}: {ok}/{total} rows passed; "
+                          f"{total - ok} failed")
+                    for r in reasons[:3]:
+                        print(f"         reason: {r}")
+                    if len(reasons) > 3:
+                        print(f"         ... and {len(reasons) - 3} more "
+                              "distinct reason(s)")
+            if any_failed:
+                print()
+                print("  WARN at least one system returned columns whose "
+                      "types don't match the canonical shape from "
+                      "bench/ldbc-queries/<ic>.toml. count consistency "
+                      "alone won't catch this; the per-system query "
+                      "translation needs fixing.")
 
     return 0
 

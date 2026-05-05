@@ -381,11 +381,16 @@ done
 echo ""
 echo "--- Comparison ---"
 if command -v python >/dev/null 2>&1; then
-    python "$SCRIPT_DIR/compare_results.py" "$unified" \
+    # Pass the results dir as the second arg so compare_results.py can
+    # also surface shape-verification failures from the per-system
+    # *.stderr.log files. Without that, count-consistency passes can
+    # mask per-column type mismatches (e.g. graphqlite returning
+    # `"Person:933"` strings where the toml expected an int).
+    python "$SCRIPT_DIR/compare_results.py" "$unified" "$OUT_DIR" \
         | tee "$OUT_DIR/comparison.txt"
 else
     echo "  (python not on PATH; skipping comparison.py — run it manually:" >&2
-    echo "   python $SCRIPT_DIR/compare_results.py $unified)" >&2
+    echo "   python $SCRIPT_DIR/compare_results.py $unified $OUT_DIR)" >&2
 fi
 
 END_EPOCH=$(date +%s)
