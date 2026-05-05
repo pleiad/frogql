@@ -1079,6 +1079,59 @@ fn test_parse_exists_multi_match_body() {
 }
 
 #[test]
+fn test_lexer_line_comment_dash_dash() {
+    // `--` to end of line (ISO GQL §3.10).
+    let q = parse_query("-- header\nMATCH (p) RETURN p.x AS x").unwrap();
+    assert_eq!(q.matches.len(), 1);
+}
+
+#[test]
+fn test_lexer_block_comment() {
+    // `/* ... */` block, non-nesting.
+    let q = parse_query("/* a */ MATCH (p) /* b\nb */ RETURN p.x AS x").unwrap();
+    assert_eq!(q.matches.len(), 1);
+}
+
+#[test]
+fn test_lexer_dash_dash_arrow_is_edge_not_comment() {
+    // `-->` is the unlabeled forward-edge sugar from §5.x — it must
+    // tokenize as Minus + RightArrow, not be eaten by the `--` line
+    // comment. Without disambiguation in the lexer, the rest of the
+    // line gets consumed and parsing dies on EOF.
+    let _ = parse("-->{1,2}").expect("--> must lex as edge, not comment");
+}
+
+#[test]
+fn test_lexer_ne_alias_diamond() {
+    // `<>` is the ISO GQL not-equal alias for `!=`.
+    let q1 = parse_query("MATCH (a) WHERE a.x <> 1 RETURN a.x AS x").unwrap();
+    let q2 = parse_query("MATCH (a) WHERE a.x != 1 RETURN a.x AS x").unwrap();
+    let pat1 = q1.matches[0].pattern();
+    let pat2 = q2.matches[0].pattern();
+    let (PathPattern::Filter(_, e1), PathPattern::Filter(_, e2)) = (pat1, pat2) else {
+        panic!("expected Filter on both sides");
+    };
+    let (
+        Expr::Binop {
+            op: op1,
+            left: l1,
+            right: r1,
+        },
+        Expr::Binop {
+            op: op2,
+            left: l2,
+            right: r2,
+        },
+    ) = (e1, e2)
+    else {
+        panic!("expected Binop on both sides");
+    };
+    assert!(matches!(op1, BinOp::Ne));
+    assert!(matches!(op2, BinOp::Ne));
+    assert_eq!(format!("{l1:?} {r1:?}"), format!("{l2:?} {r2:?}"));
+}
+
+#[test]
 fn test_parse_exists_nested_in_unop_not() {
     // `NOT EXISTS` is parsed as the dedicated variant, but `NOT (EXISTS
     // { ... })` with parens — if someone writes the parens — would

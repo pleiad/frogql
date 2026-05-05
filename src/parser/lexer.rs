@@ -165,8 +165,14 @@ impl Lexer {
                 }
             }
 
-            // -- line comment
-            if self.peek() == Some('-') && self.input.get(self.pos + 1).copied() == Some('-') {
+            // -- line comment, but NOT --> (which is the unlabeled
+            // forward-edge sugar from §5.x path patterns). The third
+            // char disambiguates: `--` followed by `>` falls through
+            // to the `-` lexer arm and tokenizes as Minus + RightArrow.
+            if self.peek() == Some('-')
+                && self.input.get(self.pos + 1).copied() == Some('-')
+                && self.input.get(self.pos + 2).copied() != Some('>')
+            {
                 self.advance(); // first -
                 self.advance(); // second -
                 while let Some(c) = self.peek() {
