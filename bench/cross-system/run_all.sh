@@ -48,7 +48,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RESULTS_ROOT="$SCRIPT_DIR/results"
 
-ICS_ARG="2"
+ICS_ARG="2,8"   # default: every IC currently flipped to status="implemented" in bench/ldbc-queries/. Keep this in sync as ICs come online.
 ITERS=10
 WARMUP=2
 ONLY=""

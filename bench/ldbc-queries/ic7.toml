@@ -1,38 +1,70 @@
 # LDBC SNB Interactive Complex Read 7 — Recent likers.
 # Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-07.yaml
+# Reference Cypher: https://github.com/ldbc/ldbc_snb_interactive_v1_impls/blob/main/cypher/queries/interactive-complex-7.cypher
 
 id = 7
 name = "Recent likers of a person's messages"
-status = "implemented"
+status = "blocked"
 
-params_file = "interactive_7_param.txt"
-param_columns = ["personId"]
-param_types = ["int"]
+blocked_reason = """
+IC7 requires "the LATEST like per liker" — an arg-max per group. The
+canonical Cypher uses `WITH ... ORDER BY ... head(collect(...))` for
+this; ISO GQL has no `WITH` or `collect`, but it does provide a
+`<value query expression>` (`VALUE { MATCH ... ORDER BY ... LIMIT 1 }`)
+that produces the same arg-max with one returned record per liker.
+
+Earlier we tried shipping a "simplified" IC7 that dropped the
+arg-max entirely — returning one row per (liker, message, like)
+tuple instead of one row per liker. NotebookLLM (operating as the
+spec authority) flagged this correctly: a single liker who liked
+five messages would appear five times, and `LIMIT 20` then returned
+"the 20 most-recent likes", not "the 20 most-recent likers". That's
+not a simplification; it's a different query. Reverted.
+
+The canonical ISO GQL translation is below. gqlite's parser is
+missing every primitive it needs:
+"""
+
+# The faithful ISO GQL translation, kept here as the target shape so
+# the parser-feature work has a precise destination. Do NOT mark this
+# `query` field for execution — `status = "blocked"` keeps it out of
+# the runner.
 query = """
-MATCH (person:Person {id: $personId})<-[:hasCreator]-(message:Comment|Post)<-[like:likes]-(liker:Person)
-OPTIONAL MATCH (liker)~[:knows]~(person)
+MATCH (person:Person {id: $personId})<-[:hasCreator]-(:Comment|Post)<-[:likes]-(liker:Person)
 RETURN
     liker.id AS personId,
     liker.firstName AS personFirstName,
     liker.lastName AS personLastName,
-    like.creationDate AS likeCreationDate,
-    message.id AS commentOrPostId,
-    COALESCE(message.content, message.imageFile) AS commentOrPostContent,
+    VALUE {
+        MATCH (person)<-[:hasCreator]-(m:Comment|Post)<-[l:likes]-(liker)
+        RETURN RECORD {
+            likeCreationDate: l.creationDate,
+            commentOrPostId: m.id,
+            commentOrPostContent: COALESCE(m.content, m.imageFile),
+            minutesLatency: CAST(FLOOR(CAST(l.creationDate - m.creationDate AS FLOAT) / 60000.0) AS INTEGER)
+        } AS latest
+        ORDER BY latest.likeCreationDate DESC, latest.commentOrPostId ASC
+        LIMIT 1
+    } AS latestLike,
     NOT EXISTS { MATCH (liker)~[:knows]~(person) } AS isNew
-ORDER BY likeCreationDate DESC, personId ASC
+GROUP BY personId, personFirstName, personLastName, isNew
+ORDER BY latestLike.likeCreationDate DESC, personId ASC
 LIMIT 20
 """
 
-return_columns = [
-    "personId", "personFirstName", "personLastName",
-    "likeCreationDate", "commentOrPostId", "commentOrPostContent", "isNew",
+required_features = [
+    "VALUE { ... } scalar/record subquery (ISO GQL <value query expression>)",
+    "RECORD { k: v, ... } literal in expressions",
+    "CAST(... AS INTEGER) / CAST(... AS FLOAT) type conversions",
+    "FLOOR() builtin",
+    "division operator `/`",
+    "GROUP BY referencing RETURN-clause aliases",
 ]
 
-expected_shape = "i,s,s,i,i,n/s,b"
+params_file = "interactive_7_param.txt"
+param_columns = ["personId"]
+param_types = ["int"]
 
 [divergences]
-message-union = "spec uses (message:Message); we use (message:Comment|Post). Same as IC2."
+message-union = "spec uses (message:Message); we use (:Comment|Post). Loader-level."
 edge-casing = "loader produces lowercase :knows / :hasCreator / :likes. Spec uses uppercase. No semantic difference."
-no-per-liker-dedup = "spec uses `WITH liker, message, like.creationDate AS likeTime, person ORDER BY likeTime DESC, toInteger(message.id) ASC WITH liker, head(collect({msg: message, likeTime: likeTime})) AS latestLike, person` to keep ONLY the most-recent like per liker. Our query drops this dedup — returns one row per (liker, message, like) tuple instead of one row per liker. Result rows differ: spec returns up to 20 distinct likers (each with their latest like); we return up to 20 likes (a single liker who liked many messages can appear multiple times). gqlite's parser has no `WITH` (ISO GQL §16; would need explicit projection stage), no `collect()` aggregate, no `head()` list function — three feature gaps stack to make this canonical idiom unexpressible. Cross-system bench applies the same simplification to graphqlite and Kuzu's cypher files for apples-to-apples comparison; per-engine canonical Cypher would not run the same query across systems."
-no-minutes-latency = "spec returns `minutesLatency = toInteger(floor(toFloat(latestLike.likeTime - latestLike.msg.creationDate)/1000.0)/60.0)`. Dropped. gqlite parser doesn't tokenize `/` and has no `toFloat`/`floor`/`toInteger`. The remaining 7 columns are returned."
-no-tointeger = "ORDER BY tie-break is `toInteger(personId) ASC`. gqlite stores `Person.id` as native int; plain `personId ASC` sorts identically."
