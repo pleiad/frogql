@@ -6,23 +6,20 @@ name = "Tag co-occurrence"
 status = "blocked"
 
 blocked_reason = """
-Tested 2026-05-05:
-  - `WHERE person <> otherPerson` — bare-node comparison; needs the
-    `person.id != otherPerson.id` rewrite.
-  - `WHERE otherTag.name <> $tagName` — `<>` doesn't tokenize; `!=`
-    would parse (this one is property-comparison, no node-rewrite
-    needed).
+Tested 2026-05-05 (re-checked after `<>` alias landed):
+  - `WHERE person <> otherPerson` — bare-node comparison; needs
+    property access (`person.id <> otherPerson.id`).
+  - `WHERE otherTag.name <> $tagName` — works directly now
+    (string-property comparison; `<>` is fine post-fix).
   - `COUNT(post)` — bare-node aggregate; needs `COUNT(post.id)` or
     `COUNT(*)`.
-  - `GROUP BY otherTagName` — also failed in testing
-    (`unexpected bare variable 'otherTagName'`); aliases from RETURN
-    not visible in GROUP BY. Workaround: `GROUP BY otherTag.name`
-    (raw expression instead of alias).
+  - `GROUP BY otherTagName` — RETURN-clause alias not visible in
+    GROUP BY (`unexpected bare variable 'otherTagName'`). Workaround:
+    `GROUP BY otherTag.name` (raw expression instead of alias).
 """
 
 required_features = [
     "bare-node comparison (or property-access rewrite)",
-    "`<>` operator (or rewrite to `!=`)",
     "COUNT over bare node references",
     "GROUP BY by RETURN-clause alias",
 ]

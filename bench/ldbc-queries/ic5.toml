@@ -6,23 +6,22 @@ name = "New groups"
 status = "blocked"
 
 blocked_reason = """
-Tested 2026-05-05:
+Tested 2026-05-05 (re-checked after `<>` alias landed):
   - `WHERE person <> otherPerson` — bare-node comparison; needs
-    `person.id != otherPerson.id` rewrite (gqlite doesn't tokenize
-    `<>` either; `!=` works for properties).
+    property access (`person.id <> otherPerson.id`).
   - `COUNT(post)` — bare-node aggregate; needs `COUNT(post.id)` or
     `COUNT(*)` (post comes from OPTIONAL MATCH so semantics matter).
   - `CAST(forum.id AS INTEGER)` in ORDER BY — `CAST` syntax absent;
     plain `forum.id ASC` would sort identically since `Forum.id` is
     natively int.
 With those three rewrites the query would parse; we hold off on
-shipping any of them as 'minimal modifications' since the user
-deemed property-rewrites hacky.
+shipping as 'minimal modifications' — the property-access rewrite
+silently translates a bare-node comparison into ID comparison, which
+is semantically equivalent on LDBC IDs but loses spec faithfulness.
 """
 
 required_features = [
     "bare-node comparison (or property-access rewrite)",
-    "`<>` operator (or rewrite to `!=`)",
     "COUNT over bare node references",
     "CAST(... AS INTEGER) (or sort directly on int columns)",
 ]

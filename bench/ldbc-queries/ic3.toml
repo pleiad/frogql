@@ -6,11 +6,11 @@ name = "Friends and friends of friends that have been to given countries"
 status = "blocked"
 
 blocked_reason = """
-Tested 2026-05-05:
+Tested 2026-05-05 (re-checked after `<>` alias landed):
   - `WHERE person <> otherPerson` — bare-node comparison; gqlite needs
-    property access (`person.id != otherPerson.id`). The `<>` token
-    also doesn't tokenize standalone — use `!=`. With both rewrites
-    this part would parse, but:
+    property access (`person.id <> otherPerson.id`). The operator
+    itself is fine now; what's missing is treating nodes as
+    expression operands.
   - `COUNT(DISTINCT messageX)` — `DISTINCT` over a bare node reference
     not supported. `COUNT(DISTINCT messageX.id)` would parse.
   - `$startDate + DURATION({days: $durationDays})` — `DURATION` literal
@@ -20,8 +20,7 @@ Tested 2026-05-05:
 """
 
 required_features = [
-    "bare-node comparison or property-access rewrite (`a.id != b.id`)",
-    "`<>` operator (or rewrite to `!=`)",
+    "bare-node comparison (or `a.id <> b.id` property rewrite)",
     "DISTINCT over bare node references in aggregates",
     "DURATION literal (or inline the millis)",
     "multiplication operator `*`",
