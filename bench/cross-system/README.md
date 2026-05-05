@@ -157,8 +157,13 @@ Output lands in `bench/cross-system/results/<timestamp>/`:
   schema `query;backend;params;row;iter;result_count;elapsed_ns`
 - `cross_system.csv` — concatenation of all the above
 - `comparison.txt` — `compare_results.py` output (latency table +
-  count/shape consistency check + side-by-side comparison)
-- `setup_times.txt` — per-system load wall time (when measurable)
+  count/shape consistency check + side-by-side comparison + memory
+  footprint + per-(system, IC) shape pass/fail)
+- `setup_times.txt` — per-system load wall time **and on-disk DB
+  size** (`db_bytes` column). Sizes are measured against each
+  system's `marker` path (see `SETUP_MARKER` in `run_all.sh`); for
+  Kuzu this is the single `.db` file, not the sibling
+  `_kuzu_work/` working dir.
 - `<system>.setup.log`, `<system>.ic<n>.stderr.log` — per-stage logs
 - `skipped.log` — any (system, IC) pair that couldn't run
 - `run_info.txt` — timestamp, host, gqlite commit, etc.
@@ -182,20 +187,31 @@ the comment-link explains.
 
 ## Reading the results
 
-`comparison.txt` has three sections:
+`comparison.txt` has five sections, each rendered per IC for
+multi-IC runs:
 
 1. **Per-cell summary** — for each (params_row, system) pair, median
-   latency, p95, iter count, the result_count, and the result_shape
-   (per-row type signatures, deduped — e.g. `i,s,s,i,s,i|i,s,s,i,n,i`
-   for IC2 where `c.content` is sometimes null).
-2. **Count + shape consistency** — for each params_row, do all systems
-   agree on row count AND per-row column types? Without ORDER BY the
-   actual row contents legitimately differ (each system picks a
-   different N rows from the full result), but the column count and
-   types must match. `WARN` flags disagreement, which means a
-   per-system query translation bug.
+   latency, p95, iter count, and the result_count. (Result shape is
+   verified separately; see section 5.)
+2. **Result-count consistency** — for each params_row, do all systems
+   agree on row count? Without ORDER BY the actual row contents
+   legitimately differ (each system picks a different N rows from
+   the full result), but counts must match. `WARN` flags
+   disagreement, which means a per-system query translation bug.
 3. **Side-by-side latency** — one row per params_row, one column per
    system, median ms.
+4. **Memory footprint** — peak RSS during the query loop per
+   (system, IC), parsed from `*.stderr.log` files. The `over
+   baseline` column subtracts the runner's at-startup RSS so the
+   delta is roughly "engine + DB state" across runners (see Notes
+   in the section header for caveats — graphqlite's RSS is small
+   because SQLite uses mmap; data lives in OS page cache, not
+   process RSS).
+5. **Shape verification** — per-(system, IC) pass/fail tally
+   against the toml's `expected_shape`. Catches per-column type
+   mismatches that count consistency alone misses (we hit one of
+   these with graphqlite's `friend.id` returning prefixed strings;
+   see `graphqlite/DIVERGENCES.md`).
 
 ## Measurement basis (read this before quoting numbers)
 

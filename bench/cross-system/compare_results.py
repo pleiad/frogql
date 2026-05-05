@@ -59,6 +59,35 @@ def percentile(samples: list[float], p: float) -> float:
     return s[lo] * (1 - frac) + s[hi] * frac
 
 
+def collect_rss(results_dir: Path) -> dict[str, tuple[float, float]]:
+    """Extract `Peak RSS during query loop: X MiB (+Y MiB over baseline)`
+    lines from gqlite stderr.log files. Returns {logical_name: (peak,
+    delta_over_baseline)}. Skips logs without the RSS line (graphqlite
+    + kuzu Python runners don't emit it).
+
+    The Python systems' RSS would be dominated by interpreter + library
+    state, which isn't comparable to gqlite's pure engine RSS, so we
+    surface gqlite-only numbers. The interesting comparison anyway is
+    *across gqlite ablation modes* (lazy-baseline vs no-auto-indexes
+    vs no-fold vs disk) where the value-per-MiB tradeoff is internal
+    to gqlite and apples-to-apples.
+    """
+    import re
+    rss_re = re.compile(r"Peak RSS during query loop:\s+([\d.]+)\s+MiB\s+\(\+([\d.]+)\s+MiB")
+    out: dict[str, tuple[float, float]] = {}
+    for log in sorted(results_dir.glob("*.stderr.log")):
+        name = log.stem.replace(".stderr", "")
+        try:
+            for line in log.open(encoding="utf-8", errors="replace"):
+                m = rss_re.search(line)
+                if m:
+                    out[name] = (float(m.group(1)), float(m.group(2)))
+                    break
+        except OSError:
+            continue
+    return out
+
+
 def collect_shape_status(results_dir: Path) -> dict[str, tuple[int, int, list[str]]]:
     """For each `<name>.stderr.log` in `results_dir`, return the count of
     `SHAPE row=N status=ok` lines and the list of failure reasons.
@@ -224,7 +253,27 @@ def main() -> int:
             print("  " + "  ".join(cells))
         print()
 
-    # ---- 4. Shape verification (only when results_dir is given) ----
+    # ---- 4. Memory footprint (only when results_dir is given) ----
+    if results_dir is not None:
+        rss = collect_rss(results_dir)
+        if rss:
+            print()
+            print("=== Memory footprint (peak RSS during query loop, all ICs) ===")
+            print()
+            # Sort by name for stable ordering. Per-(system, IC) is the
+            # right granularity because each runner emits one RSS line.
+            print(f"  {'system':<32}  {'peak (MiB)':>11}  {'over baseline':>15}")
+            print("  " + "-" * 64)
+            for name in sorted(rss):
+                peak, delta = rss[name]
+                print(f"  {name:<32}  {peak:>11.1f}  {delta:>+15.1f}")
+            print()
+            print("  Notes: 'over baseline' subtracts the runner's at-startup")
+            print("  RSS (mostly Python interpreter + library imports for")
+            print("  graphqlite/kuzu; ~9 MiB for gqlite's Rust binary), so")
+            print("  the delta is roughly 'engine + DB state' across runners.")
+
+    # ---- 5. Shape verification (only when results_dir is given) ----
     if results_dir is not None:
         print()
         print(f"=== Shape verification [{query_label}] (per-system pass/fail) ===")

@@ -208,7 +208,28 @@ declare -A RUNNER=(
 )
 
 SETUP_TIMES_FILE="$OUT_DIR/setup_times.txt"
-echo "system    elapsed_seconds    status" > "$SETUP_TIMES_FILE"
+echo "system    elapsed_seconds    db_bytes        status" > "$SETUP_TIMES_FILE"
+
+# Native-DB size of `marker`. All three current backends write a
+# single file (gqlite's `.gdb`, graphqlite's SQLite `.db`, Kuzu's
+# embedded `.db` — Kuzu's WAL/work data lives in a sibling
+# `_kuzu_work/` we don't include because it isn't part of the loaded
+# DB). The dir branch is here for forward-compat: future backends
+# (e.g. RocksDB-based) ship multi-file directories. Returns "—" on
+# missing/unreadable paths so the column always has a value.
+db_size_bytes() {
+    local p="$1"
+    [[ -e "$p" ]] || { echo "—"; return; }
+    if [[ -d "$p" ]]; then
+        # `du -sb` works on MSYS bash + Linux; sums directory bytes.
+        # POSIX `du` returns blocks not bytes, so prefer the GNU -b
+        # extension (always available on bench hosts).
+        du -sb "$p" 2>/dev/null | awk '{print $1}' || echo "—"
+    else
+        # Single file — `stat -c %s` is the portable size accessor.
+        stat -c %s "$p" 2>/dev/null || echo "—"
+    fi
+}
 
 for sys in "${SYSTEMS[@]}"; do
     runner_cmd="${RUNNER[$sys]:-}"
@@ -262,7 +283,8 @@ for sys in "${SYSTEMS[@]}"; do
         setup_status="cached"
         echo "  setup: cached at $marker"
     fi
-    printf "%-12s %-18s %s\n" "$sys" "$elapsed_s" "$setup_status" \
+    db_bytes=$(db_size_bytes "$marker")
+    printf "%-12s %-18s %-15s %s\n" "$sys" "$elapsed_s" "$db_bytes" "$setup_status" \
         >> "$SETUP_TIMES_FILE"
 
     if [[ "$setup_status" == "fail" ]]; then

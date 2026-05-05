@@ -217,7 +217,31 @@ def main() -> int:
         f"(+ {args.warmup} warmup)\n"
     )
 
+    # RSS sampling: snapshot baseline (Python interpreter + import
+    # cost) BEFORE opening the DB so the "delta over baseline" mostly
+    # captures DB+engine state, not Python runtime. Uses psutil
+    # because it's cross-platform; resource.getrusage isn't on
+    # Windows. Same line format gqlite emits → compare_results.py
+    # parses uniformly.
+    try:
+        import psutil
+        _proc = psutil.Process()
+        _rss_baseline_mib = _proc.memory_info().rss / (1024 * 1024)
+        sys.stderr.write(f"RSS baseline: {_rss_baseline_mib:.1f} MiB\n")
+    except ImportError:
+        _proc = None
+        _rss_baseline_mib = 0.0
+        sys.stderr.write("RSS baseline: psutil not installed (skipping)\n")
+
     g = Graph(str(db_path))
+
+    if _proc is not None:
+        cur = _proc.memory_info().rss / (1024 * 1024)
+        sys.stderr.write(
+            f"  RSS after open: {cur:.1f} MiB (+{cur - _rss_baseline_mib:.1f} MiB)\n"
+        )
+
+    peak_rss_mib = _rss_baseline_mib
 
     with args.out_csv.open("w", encoding="utf-8", newline="") as out:
         out.write("query;backend;params;row;iter;result_count;elapsed_ns\n")
@@ -241,6 +265,13 @@ def main() -> int:
                 if n == 0:
                     iter0_result = result
 
+            # Sample RSS after each row (cheap; psutil reads /proc or
+            # the Win32 API once). Tracks peak for the run.
+            if _proc is not None:
+                cur = _proc.memory_info().rss / (1024 * 1024)
+                if cur > peak_rss_mib:
+                    peak_rss_mib = cur
+
             actual_shape = shape_of_rows(iter0_result, columns)
             actual_count = len(iter0_result)
             if expected_shape is None:
@@ -256,6 +287,12 @@ def main() -> int:
                 f"  row {row_idx}: rc={len(result)} "
                 f"last_iter_ms={elapsed_ns / 1e6:.2f}\n"
             )
+
+    if _proc is not None:
+        sys.stderr.write(
+            f"Peak RSS during query loop: {peak_rss_mib:.1f} MiB "
+            f"(+{peak_rss_mib - _rss_baseline_mib:.1f} MiB over baseline)\n"
+        )
 
     sys.stderr.write(f"  done -> {args.out_csv}\n")
     return 0
