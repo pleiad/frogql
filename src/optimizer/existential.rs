@@ -92,6 +92,11 @@ fn fold_in_expr(e: &mut Expr, schema: &Schema) {
         Expr::FieldAccess { base, .. } => {
             fold_in_expr(base, schema);
         }
+        Expr::Coalesce(args) => {
+            for a in args {
+                fold_in_expr(a, schema);
+            }
+        }
         Expr::Const(_) | Expr::AttrLookup { .. } | Expr::Type(_) => {}
     }
 

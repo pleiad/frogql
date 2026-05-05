@@ -74,6 +74,10 @@ pub enum Token {
     Avg,
     Min,
     Max,
+    /// ISO §20.7 `<case abbreviation>` — `COALESCE(v1, v2, ...)`.
+    /// Soft keyword: only emitted when followed by `(` so that
+    /// `coalesce` stays available as a property name.
+    Coalesce,
 
     // Symbols
     LParen,      // (
@@ -502,6 +506,9 @@ impl Lexer {
                         "AVG" | "avg" if self.peek_non_space() == Some('(') => Token::Avg,
                         "MIN" | "min" if self.peek_non_space() == Some('(') => Token::Min,
                         "MAX" | "max" if self.peek_non_space() == Some('(') => Token::Max,
+                        "COALESCE" | "coalesce" if self.peek_non_space() == Some('(') => {
+                            Token::Coalesce
+                        }
                         "int" => Token::Int,
                         "float" => Token::Float,
                         "bool" => Token::Bool,

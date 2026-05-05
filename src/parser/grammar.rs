@@ -1463,6 +1463,24 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(e)
             }
+            Token::Coalesce => {
+                // ISO §20.7 <case abbreviation>:
+                //   COALESCE ( <value expression> { , <value expression> }... )
+                // The grammar mandates at least two operands (`<comma>
+                // <value expression>` non-empty repetition); single-arg
+                // calls are a parse error per the spec.
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let mut args = vec![self.expr()?];
+                while self.eat(&Token::Comma) {
+                    args.push(self.expr()?);
+                }
+                self.expect(&Token::RParen)?;
+                if args.len() < 2 {
+                    return Err("COALESCE requires at least two arguments per ISO §20.7".into());
+                }
+                Ok(Expr::Coalesce(args))
+            }
             _ => Err(format!("expected expression, got {:?}", self.peek())),
         }
     }

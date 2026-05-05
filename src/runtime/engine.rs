@@ -1457,6 +1457,23 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 ExprResult::Success(Value::Bool(if *negated { !is_null } else { is_null }))
             }
 
+            Expr::Coalesce(args) => {
+                // ISO §20.7 SR 1c-1d: scan operands left to right and
+                // return the first non-null value. `Failure` (missing
+                // attribute, unbound variable) is treated as null
+                // — same 3VL convention as IsNull above. If every
+                // operand is null/Failure, the result is `Value::Null`
+                // (the recursive base case `COALESCE(Vn) ≡ Vn` with Vn
+                // = null collapses to null).
+                for a in args {
+                    match self.run_expr(mu, a) {
+                        ExprResult::Success(Value::Null) | ExprResult::Failure(_) => continue,
+                        ExprResult::Success(v) => return ExprResult::Success(v),
+                    }
+                }
+                ExprResult::Success(Value::Null)
+            }
+
             Expr::Type(_) => ExprResult::Failure("bare type in expression".into()),
 
             Expr::Exists { body } => self.eval_exists(mu, body, /*negated=*/ false),

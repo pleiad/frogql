@@ -302,12 +302,12 @@ impl Typechecker {
             PathPattern::EdgeUndirected(desc) => self.check_edge(EdgeDir::None, desc),
             PathPattern::EdgeAnyDirection(desc) => self.check_edge(EdgeDir::Any, desc),
 
-            PathPattern::Concat(p1, p2) | PathPattern::Join(p1, p2) => {
-                // Concat composes two patterns over a shared endpoint variable.
-                // Join is gqlite's comma-join — patterns sharing variables but
-                // not endpoint-glued. For typing both reduce to: meet the
-                // environments under the schema and meet the path shapes.
-                // The shape distinction matters at runtime, not for types.
+            PathPattern::Concat(p1, p2) => {
+                // Concat composes two path patterns over a shared
+                // endpoint — `(x:A)-[:R]->(y:B)` flattens through both
+                // sub-patterns. The path types DO compose: the right
+                // side's tail must agree with the left side's head, so
+                // a `PathType::meet` is the correct shape combinator.
                 let r1 = self.check_path_pattern(p1);
                 let r2 = self.check_path_pattern(p2);
 
@@ -323,6 +323,52 @@ impl Typechecker {
                 self.warn_for_collapsed_bindings(&cm, &r1.env, &r2.env);
 
                 let p = PathType::meet(&self.schema, &r1.path, &r2.path);
+                TypecheckResult::new(p, cm)
+            }
+
+            PathPattern::Join(p1, p2) => {
+                // Comma-join: `(x:A), (y:B)` describes two INDEPENDENT
+                // entities. Per the formal TJoin rule
+                //
+                //     S ⊢ Q1 : e1; Γ1     S ⊢ Q2 : e2; Γ2     S ⊢ Γ1 ⊓ Γ2 ▷ Γ
+                //     ──────────────────────────────────────────────────────
+                //     S ⊢ Q1, Q2 : e1 ∨ e2 ; Γ
+                //
+                // emptiness propagates as `e1 ∨ e2` (the join is empty
+                // when EITHER side is empty — cross-product semantics)
+                // and the environment is `Γ1 ⊓ Γ2`. There is no
+                // path-type meet in the rule.
+                //
+                // The earlier shared `Concat | Join` arm did
+                // `PathType::meet` for both, which intersected the
+                // labels of independent variables — `Comment ⊓ Person`
+                // collapses to Zero whenever no node carries both
+                // labels, falsely reporting `guaranteed_empty` for
+                // queries like `MATCH (x: Comment), (y: Person)`. This
+                // is the same class of bug Toro fixed for multi-MATCH
+                // chains in `354eaf6` (drop path-meet across matches).
+                let r1 = self.check_path_pattern(p1);
+                let r2 = self.check_path_pattern(p2);
+
+                let cm = match TypeEnvironment::meet(&self.schema, &r1.env, &r2.env) {
+                    Ok(env) => env,
+                    Err(e) => {
+                        self.errors
+                            .push(format!("Concatenation of contexts failed: {}", e));
+                        r1.env.clone()
+                    }
+                };
+
+                self.warn_for_collapsed_bindings(&cm, &r1.env, &r2.env);
+
+                // `e1 ∨ e2` for emptiness; arbitrary representative
+                // path otherwise (the shape of a comma-join has no
+                // single canonical PathType).
+                let p = if r1.path.is_unsatisfiable() || r2.path.is_unsatisfiable() {
+                    PathType::Zero
+                } else {
+                    r1.path
+                };
                 TypecheckResult::new(p, cm)
             }
 
@@ -493,6 +539,28 @@ impl Typechecker {
                 // Bool.
                 let _ = self.check_expr(operand, env);
                 SimpleType::B
+            }
+
+            Expr::Coalesce(args) => {
+                // ISO §20.7 SR 1c-1d: COALESCE(V1, V2, ..., Vn) is a
+                // recursive case expression that returns one of the Vi
+                // values. The result type is the union (least upper
+                // bound) of every operand's type. Every arg must
+                // typecheck individually so we can surface unbound
+                // variables and the like; we then fold types via
+                // `SimpleType::union` so that e.g. COALESCE(int, str)
+                // surfaces as Z|S — an upstream check (ORDER BY,
+                // comparisons) can still reject the union if needed.
+                let mut iter = args.iter();
+                let first = iter
+                    .next()
+                    .expect("parser guarantees COALESCE has at least 2 args");
+                let mut acc = self.check_expr(first, env);
+                for a in iter {
+                    let t = self.check_expr(a, env);
+                    acc = SimpleType::union(&acc, &t);
+                }
+                acc
             }
 
             Expr::Exists { body } | Expr::NotExists { body } => {
