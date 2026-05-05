@@ -19,12 +19,13 @@
 #       [--only gqlite,kuzu]          # subset of systems
 #       [--rebuild-setup]             # force per-system setup re-run
 #                                     # (default: skip setup if DB exists)
-#       [--ablate]                    # run gqlite in 3 modes: baseline,
-#                                     # GQLITE_DISABLE_AUTO_INDEXES=1,
-#                                     # GQLITE_DISABLE_INDEX_FOLD=1.
-#                                     # Each mode emits its own per-iter
-#                                     # CSV with a distinct backend label.
-#                                     # Other systems run normally.
+#       [--ablate]                    # run gqlite in 4 modes: lazy
+#                                     # baseline, GQLITE_DISABLE_AUTO_INDEXES=1,
+#                                     # GQLITE_DISABLE_INDEX_FOLD=1, and
+#                                     # --backend disk. Each mode emits
+#                                     # its own per-iter CSV with a
+#                                     # distinct backend label. Other
+#                                     # systems run normally.
 #
 # Output: bench/cross-system/results/<timestamp>/
 #   setup_times.txt         metadata: per-system setup wall time
@@ -92,6 +93,12 @@ START_EPOCH=$(date +%s)
     echo "gqlite_dirty:     $(git -C "$REPO_ROOT" diff --quiet 2>/dev/null && echo no || echo yes)"
     echo "rustc:            $(rustc --version 2>&1 || echo missing)"
     echo "python:           $(python --version 2>&1 || echo missing)"
+    # Per-system versions — pinned in requirements.txt but capturing
+    # the resolved version per run guards against accidental drift
+    # (e.g. a fresh `pip install` resolving an unpinned transitive).
+    echo "graphqlite_ver:   $(python -c 'import importlib.metadata as m; print(m.version("graphqlite"))' 2>/dev/null || echo missing)"
+    echo "kuzu_ver:         $(python -c 'import importlib.metadata as m; print(m.version("kuzu"))' 2>/dev/null || echo missing)"
+    echo "psutil_ver:       $(python -c 'import importlib.metadata as m; print(m.version("psutil"))' 2>/dev/null || echo missing)"
     echo "ldbc_dataset:     SF0.1"
 } > "$OUT_DIR/run_info.txt"
 
@@ -113,7 +120,7 @@ echo "  iters:   $ITERS"
 echo "  warmup:  $WARMUP"
 echo "  systems: ${SYSTEMS[*]}"
 [[ $REBUILD -eq 1 ]] && echo "  setup:   --rebuild-setup (force fresh per-system load)"
-[[ $ABLATE -eq 1 ]] && echo "  ablate:  --ablate (gqlite runs in baseline + 2 disabled-optimization modes)"
+[[ $ABLATE -eq 1 ]] && echo "  ablate:  --ablate (gqlite runs in 4 modes: lazy-baseline, no-auto-indexes, no-fold, disk-baseline)"
 echo ""
 
 # ---- gqlite ablation modes -----------------------------------------
