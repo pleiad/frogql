@@ -381,6 +381,13 @@ impl Lexer {
                             self.advance();
                             self.tokens.push(Token::Le);
                         }
+                        // ISO GQL §3.10 — `<>` is the standard not-equal
+                        // operator. Lexes to the same token as `!=` so
+                        // the grammar handles both transparently.
+                        Some('>') => {
+                            self.advance();
+                            self.tokens.push(Token::Ne);
+                        }
                         _ => self.tokens.push(Token::Lt),
                     }
                 }
