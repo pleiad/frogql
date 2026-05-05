@@ -15,9 +15,8 @@
 //! Currently ignored:
 //! - `typecheck_gap_unknown_attr_under_strict_schema` — strict schema
 //!   does not promote the missing-attribute warning to error (Gap 3).
-//! - `typecheck_gap_direct_aggregate_in_sort_key` — `ORDER BY COUNT(*)`
-//!   without an intermediate alias still fails at parse, would need
-//!   an `Expr::Aggregate` variant.
+//!   The only remaining gap from the original four; Gaps 1, 2, 4 are
+//!   all fixed.
 
 use gqlrust::compile_query;
 use gqlrust::compile_query_with;
@@ -85,18 +84,55 @@ fn typecheck_resolves_aggregate_alias_in_sort_key() {
 
 /// `MATCH (x: User) RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY COUNT(*) DESC`
 ///
-/// Direct aggregate in a sort key (no alias indirection). Still a
-/// parse error today — `expr()` does not accept aggregate-function
-/// calls. Marked ignored so the requirement remains on record.
+/// **Status: FIXED via parser-time structural match**. Direct
+/// aggregates in sort keys are now legal as long as the same
+/// aggregator appears in the RETURN list. `parse_sort_key` peeks
+/// for `COUNT(...)` / `SUM(...)` / etc. and, when it finds one,
+/// looks the parsed `Aggregator` up against `ReturnItem::Aggregate`
+/// items by structural equality. Match → `SortKey::Column(idx)` and
+/// the runtime sorts post-projection by that column.
+///
+/// Free-standing aggregates that are NOT in the RETURN list are
+/// rejected with a clear error directing the user to project the
+/// aggregate (alias optional) — see
+/// `typecheck_rejects_direct_aggregate_not_in_return` below.
 #[test]
-#[ignore = "Direct aggregate in sort key (without alias) — needs Expr::Aggregate variant"]
-fn typecheck_gap_direct_aggregate_in_sort_key() {
+fn typecheck_resolves_direct_aggregate_in_sort_key() {
     let r = compile_query(
         "MATCH (x: User) RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY COUNT(*) DESC",
     );
     assert!(
         r.is_ok(),
-        "direct ORDER BY COUNT(*) should eventually be accepted, got: {:?}",
+        "direct ORDER BY COUNT(*) should be accepted when COUNT(*) is in RETURN, got: {:?}",
+        r.err()
+    );
+}
+
+/// Free-standing aggregate in a sort key that does NOT appear in
+/// the RETURN list. The parser cannot rewrite to `SortKey::Column`
+/// without a target column, and we will not re-aggregate during
+/// post-projection sort, so this is rejected with an explanatory
+/// error.
+#[test]
+fn typecheck_rejects_direct_aggregate_not_in_return() {
+    let r = compile_query("MATCH (x: User) RETURN x.city GROUP BY x.city ORDER BY COUNT(*) DESC");
+    let err = r.expect_err("ORDER BY COUNT(*) without RETURN COUNT(*) must be rejected");
+    assert!(
+        err.contains("not in the RETURN list") || err.contains("COUNT"),
+        "error must explain the rule, got: {err}"
+    );
+}
+
+/// SUM-form direct aggregate in sort key. Same path as COUNT(*)
+/// but exercises the `GeneralSet` aggregator variant.
+#[test]
+fn typecheck_resolves_direct_sum_aggregate_in_sort_key() {
+    let r = compile_query(
+        "MATCH (x: User) RETURN x.city, SUM(x.age) GROUP BY x.city ORDER BY SUM(x.age) DESC",
+    );
+    assert!(
+        r.is_ok(),
+        "ORDER BY SUM(x.age) should be accepted, got: {:?}",
         r.err()
     );
 }
@@ -296,6 +332,41 @@ fn runtime_alias_of_aggregate_orders_groups_by_count() {
         counts,
         vec![&Value::Int(3), &Value::Int(2), &Value::Int(1)],
         "groups must be ordered by COUNT(*) DESC"
+    );
+}
+
+/// Direct aggregate `ORDER BY COUNT(*) DESC` (no alias) sorts the
+/// aggregated rows by group cardinality. Pre-fix the parser
+/// rejected this; post-fix the structural-match path picks up
+/// `COUNT(*)` and resolves to `SortKey::Column(1)`.
+#[test]
+fn runtime_direct_count_star_sorts_groups_by_cardinality() {
+    let json = r#"{
+      "nodes": [
+        {"id": "u1", "labels": ["User"], "props": {"city": "Santiago"}},
+        {"id": "u2", "labels": ["User"], "props": {"city": "Santiago"}},
+        {"id": "u3", "labels": ["User"], "props": {"city": "Santiago"}},
+        {"id": "u4", "labels": ["User"], "props": {"city": "Valpo"}},
+        {"id": "u5", "labels": ["User"], "props": {"city": "Concepcion"}},
+        {"id": "u6", "labels": ["User"], "props": {"city": "Concepcion"}}
+      ],
+      "edges": []
+    }"#;
+    let g = Graph::from_json_str(json).unwrap();
+    let rt = Runtime::new(&g);
+    let q = compile_query(
+        "MATCH (x: User) RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY COUNT(*) DESC",
+    )
+    .unwrap();
+    let rows = match rt.run_query(&q, 0) {
+        QueryResult::Projected(rs) => rs,
+        _ => panic!("expected projected"),
+    };
+    let counts: Vec<&Value> = rows.iter().map(|r| &r[1]).collect();
+    assert_eq!(
+        counts,
+        vec![&Value::Int(3), &Value::Int(2), &Value::Int(1)],
+        "direct ORDER BY COUNT(*) DESC must order groups by cardinality"
     );
 }
 

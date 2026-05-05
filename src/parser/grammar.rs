@@ -329,26 +329,26 @@ impl Parser {
         Ok(SortSpec { key, dir, nulls })
     }
 
-    /// Resolve a single sort key. Two resolution strategies fire in
+    /// Resolve a single sort key. Three resolution strategies fire in
     /// order:
     ///
     /// 1. **Bare-name alias** (§16.17 SR 5c): if the next token is a
     ///    Name not followed by `Dot` and the name matches a
     ///    `<return item alias>`, return `SortKey::Column(idx)`.
-    /// 2. **Structural match against a non-aggregate RETURN item**: only
-    ///    activated when the query has at least one aggregate. Sorts
-    ///    like `RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY x.city`
-    ///    parse `x.city` as an `Expr` because there is no alias to
-    ///    look up; we then check whether that expression is
-    ///    structurally identical to one of the RETURN items and, if
-    ///    so, rewrite to `SortKey::Column(idx)`. The aggregate path
-    ///    needs this because post-projection sort has no assignment
-    ///    to evaluate the Expr against.
-    ///
-    /// Non-aggregate queries skip strategy 2 — sorting by an Expr
-    /// against the binding table is faster and lossless, and
-    /// rewriting to a column would force the slower post-projection
-    /// path for no benefit.
+    /// 2. **Direct aggregate function** (§16.17 SR 1, §20.9): if the
+    ///    next tokens look like an aggregate call (`COUNT(...)`,
+    ///    `SUM(...)`, etc.), parse the aggregator and require it to
+    ///    match a `ReturnItem::Aggregate` structurally. Free-standing
+    ///    aggregates without a corresponding RETURN item are rejected
+    ///    — they have nothing to evaluate against (post-projection
+    ///    sort works by column index, and we will not re-aggregate).
+    /// 3. **Structural match against a RETURN item**: parse as Expr,
+    ///    then for aggregate queries check whether the parsed
+    ///    expression is identical to a non-aggregate RETURN item.
+    ///    Catches `RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY
+    ///    x.city`. Non-aggregate queries skip this — `Expr` sort keys
+    ///    evaluate against the binding table directly via the
+    ///    pre-projection sort fast path.
     fn parse_sort_key(&mut self, returns: Option<&[ReturnItem]>) -> Result<SortKey, String> {
         // Strategy 1: bare-name alias resolution.
         if let (Some(items), Token::Name(name)) = (returns, self.peek().clone()) {
@@ -360,7 +360,29 @@ impl Parser {
             }
         }
 
-        // Strategy 2: parse as Expr, then for aggregate queries try a
+        // Strategy 2: direct aggregate function in the sort key. Only
+        // attempted when a RETURN clause is present; otherwise we let
+        // `expr()` produce its existing "expected expression, got
+        // Count/Sum/..." error for the no-RETURN case.
+        if returns.is_some() && self.peek_aggregate_kind().is_some() {
+            let agg = self.aggregate_function()?;
+            if let Some(items) = returns {
+                for (idx, item) in items.iter().enumerate() {
+                    if let ReturnItem::Aggregate { agg: ret_agg, .. } = item {
+                        if *ret_agg == agg {
+                            return Ok(SortKey::Column(idx));
+                        }
+                    }
+                }
+            }
+            return Err(format!(
+                "ORDER BY {agg} is not in the RETURN list — direct aggregates in \
+                 sort keys must also appear as a RETURN item (alias optional). \
+                 If you wanted a different aggregate, project it explicitly."
+            ));
+        }
+
+        // Strategy 3: parse as Expr, then for aggregate queries try a
         // structural match against the RETURN items.
         let expr = self.expr()?;
         if let Some(items) = returns {
