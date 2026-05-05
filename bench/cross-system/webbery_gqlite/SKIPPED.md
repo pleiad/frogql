@@ -28,11 +28,11 @@ C++17 graph database, bundled libmdbx (LMDB-derivative) for storage.
 - README states the DSL is "Unstable"; CHANGELOG.md is one line:
   "vertex operation support"
 
-## Blocker 1 — DSL cannot express `LIMIT`
+## Blocker 1 — DSL cannot express top-level `LIMIT`
 
 The bison grammar (`src/gql.y`) DECLARES a `limit` token (line 115)
-and the lexer (`src/gql.l` line 147) emits it for the literal
-`"limit"` keyword:
+and the lexer (`src/gql.l` line 147) emits it inside the `<GQL>`
+exclusive-state block whenever it sees the literal `"limit"` keyword:
 
 ```yacc
 %token limit profile property
@@ -41,8 +41,13 @@ and the lexer (`src/gql.l` line 147) emits it for the literal
 "limit"             { stm._errIndx += yyleng; return limit;};
 ```
 
-But **NO grammar production rule references it.** The complete query
-production is (`gql.y` lines 362-379):
+But **NO grammar production rule references the `limit` token in
+`src/gql.y`.** Verified by both `grep -n 'limit' src/gql.y`
+(returns 4 hits, all of which are: line 59/62/65 `numeric_limits`
+from C++ stdlib calls, and line 115 the `%token` declaration
+itself) and an `awk` pass that found zero production-rule bodies
+mentioning `limit`. The complete query production is
+(`gql.y` lines 362-379):
 
 ```yacc
 '{' query_kind '}'                                    // query w/o graph or where
@@ -51,9 +56,23 @@ production is (`gql.y` lines 362-379):
 ```
 
 That's the entire query grammar. No `LIMIT N`, no projection beyond
-`query_kind`, no `ORDER BY`. The `limit` keyword is half-implemented:
-it lexes but won't parse. We confirmed by grep — `limit` does not
-appear in any production rule.
+`query_kind`, no `ORDER BY`.
+
+> **Caveat noticed:** `test/vertex/grammar.gql:35` contains
+> `{query: '废墟', in: 'vertex_db', where: {feature_name: {limit: 3,
+> $near: [...]}}};` — suggesting `limit` is intended as an option
+> *inside* the `$near` (vector-similarity) operator clause. But
+> tracing through `condition_property → right_value → condition_object
+> → condition_properties → condition_property → ... → OP_NEAR ':' '{'
+> geometry_condition '}'` and reading `geometry_condition` (gql.y:813,
+> `OP_GEOMETRY ':' a_vector ',' range_comparable`), we find no
+> production that allows the `limit` token to appear there either.
+> The test is likely either aspirational (future-version syntax) or
+> a known-failure regression case. Even if `limit:` somehow did
+> parse inside `$near`, that would be vector-search top-k semantics
+> ("k nearest neighbors"), which is **not** the result-set LIMIT
+> that IC2 requires (`LIMIT 20` after the projection of arbitrary
+> matched rows).
 
 **For LDBC IC2, which requires `LIMIT 20`**, this is a hard blocker.
 Without LIMIT, every IC2 invocation would return thousands of rows
@@ -73,8 +92,23 @@ The other systems express this in their native idioms:
 | auksys/gqlite | `WHERE c:Comment OR c:Post` |
 | Kuzu | unlabeled `(c)` constrained by multi-typed REL TABLE |
 
-webbery/gqlite's WHERE clause grammar (`gql.y` lines 448-449,
-700-743) is structured as MongoDB-style operator predicates:
+webbery/gqlite's `query_kind_expr` rule (`gql.y:436`) is:
+
+```yacc
+query_kind_expr:
+      KW_EDGE
+    | LITERAL_STRING
+    | a_graph_properties
+```
+
+i.e. the query target is exactly one of: the `edge` keyword (all
+edges), a single string label like `'movie'`, or a property
+accessor like `movie.title`. **No production accepts an array of
+label names.** The `in:` clause (gql.y:442 — `KW_IN ':'
+LITERAL_STRING`) is also single-string — the graph instance.
+
+WHERE clauses (gql.y:448-449, 700-790) are MongoDB-style operator
+predicates on property values:
 
 ```javascript
 {
@@ -83,12 +117,12 @@ webbery/gqlite's WHERE clause grammar (`gql.y` lines 448-449,
 }
 ```
 
-with `$lt`, `$gt`, `$and`, `$or` as operators on property values.
-**There is no syntax for "this entity belongs to label A or label
-B"** — `query` and `in` clauses each take ONE group/label. Querying
-two labels requires two separate query-statements, with results
-combined externally. This is structurally different from what the
-other systems run, breaking the bench's "same logical shape" rule.
+with `$lt`, `$gt`, `$gte`, `$lte`, `$and`, `$or`, `$near`,
+`$geometry`. **None of them are label predicates** — there's no
+`{label: 'Comment' or 'Post'}` form. Querying two labels would
+require two separate query-statements with results combined in
+client code, which is structurally different from what the other
+systems run and breaks the bench's "same logical shape" rule.
 
 ## Blocker 3 — No bulk-load API
 
