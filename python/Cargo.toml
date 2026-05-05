@@ -8,5 +8,9 @@ name = "frogql"
 crate-type = ["cdylib"]
 
 [dependencies]
-gqlrust = { path = ".." }
+# default-features = false drops REPL (rustyline) and bench (ureq, zstd,
+# tar, sysinfo, toml) deps. The wheel only needs the library half of
+# gqlrust. Keeps the cdylib small and avoids ring's aarch64 cross build
+# issue on manylinux2014.
+gqlrust = { path = "..", default-features = false }
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }

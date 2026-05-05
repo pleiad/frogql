@@ -3,28 +3,55 @@ name = "gqlrust"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Defaults keep `cargo build` and CI behaviour identical to before.
+# The Python crate (`python/`) opts out via `default-features = false`
+# so the wheel doesn't drag in REPL / bench dependencies (notably
+# `ring` via `ureq`, which fails to cross-compile on manylinux2014).
+default = ["repl", "bench"]
+repl = ["dep:rustyline"]
+bench = ["dep:sysinfo", "dep:toml", "dep:ureq", "dep:zstd", "dep:tar"]
+
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2"
-rustyline = "15"
+rustyline = { version = "15", optional = true }
 # sysinfo: cross-platform RSS reading for the LDBC bench's
 # Memory vs Lazy vs Disk RAM-cost comparison.
-sysinfo = "0.30"
+sysinfo = { version = "0.30", optional = true }
 # toml: per-IC query definitions in `bench/ldbc-queries/`.
 # Multiline strings in TOML are nicer than JSON for spec-quoted
 # query text. Used only by `src/bin/ldbc_bench.rs`.
-toml = "0.8"
+toml = { version = "0.8", optional = true }
 # Used by `src/bin/bench_setup.rs` to download + extract the LDBC
 # dataset and substitution-params archives. ureq is a small blocking
 # HTTP client (no async, no executor); zstd + tar handle the
 # `.tar.zst` archives LDBC ships.
-ureq = { version = "2.12", default-features = false, features = ["tls"] }
-zstd = "0.13"
-tar = "0.4"
+ureq = { version = "2.12", default-features = false, features = ["tls"], optional = true }
+zstd = { version = "0.13", optional = true }
+tar = { version = "0.4", optional = true }
 
 [dev-dependencies]
 proptest = "1"
+
+# Bins that need optional deps. Auto-discovery still picks up the
+# remaining bins (bench_queries, bench_repeat, convert_edgelist,
+# typecheck_bench) which use only the always-on dependencies.
+[[bin]]
+name = "frogql"
+path = "src/bin/frogql.rs"
+required-features = ["repl"]
+
+[[bin]]
+name = "bench_setup"
+path = "src/bin/bench_setup.rs"
+required-features = ["bench"]
+
+[[bin]]
+name = "ldbc_bench"
+path = "src/bin/ldbc_bench.rs"
+required-features = ["bench"]
 
 [workspace]
 members = [".", "python"]
