@@ -10,19 +10,23 @@
 // the full audit. Short version: Kuzu's openCypher dialect rejects
 // `(message:Comment|Post)` (no pipe-disjunction in patterns) and
 // `WHERE message:Comment OR message:Post` (no `node:Label` runtime
-// predicate). The `label()` builtin works but Kuzu's optimizer
-// doesn't push it through multi-hop joins (~175× slower on IC8).
-// We rely on the schema-level constraint from the multi-typed
-// `hasCreator` REL TABLE: declared FROM Comment AND FROM Post in
-// setup.py, so any node X reachable via `<-[:hasCreator]-` is
-// implicitly Comment-or-Post. Same numbers as the explicit-predicate
-// form on our data load, but the constraint lives in the schema
-// (CREATE REL TABLE), not in the query body. Reviewers should know
-// the cypher doesn't itself say "Comment or Post" — that's
-// declared once at load time.
+// predicate). The `label()` builtin works and is what we use:
+// `WHERE label(message) IN ["Comment", "Post"]`. This is a real
+// query-level predicate, evaluated per row, not a schema-level
+// data-shape constraint. Equivalent semantically to gqlite's
+// `(message:Comment|Post)` and graphqlite's `WHERE c:Comment OR
+// c:Post`.
+//
+// NOTE: Kuzu 0.11.3's optimizer doesn't push `label()` through
+// multi-hop joins. IC2 (1-hop friend) is moderate (~520 ms vs
+// ~30 ms with schema-constrained form). IC8 (4-hop chain) is
+// pathological (~14 s/iter). These are honest measurements of
+// Kuzu's plan-time + execution behavior on the spec-faithful
+// predicate; we don't mask them with a schema-level workaround.
 //   - Edge labels lowercase per loader convention.
 MATCH (:Person {id: $personId})-[:knows]-(friend:Person)<-[:hasCreator]-(message)
-WHERE message.creationDate <= $maxDate
+WHERE label(message) IN ["Comment", "Post"]
+  AND message.creationDate <= $maxDate
 RETURN friend.id AS personId,
        friend.firstName AS personFirstName,
        friend.lastName AS personLastName,

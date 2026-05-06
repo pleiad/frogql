@@ -82,7 +82,7 @@ RETURN ... LIMIT 20
 | gqlite (us) | `(c: Comment \| Post)` (native ISO GQL) | Query level |
 | graphqlite | `WHERE c:Comment OR c:Post` (Cypher 4.x dialect rejects pipe) | Query level |
 | auksys/gqlite | `WHERE c:Comment OR c:Post` (planner bug on pipe in multi-hop) | Query level |
-| **Kuzu** | **`(c)` unlabeled, schema-constrained** | **Schema level (REL TABLE)** |
+| **Kuzu** | **`WHERE label(c) IN ["Comment", "Post"]`** (Kuzu builtin) | **Query level** |
 
 ### Kuzu's situation in detail
 
@@ -100,50 +100,50 @@ forms the other systems use:
 - `CALL { ... UNION ALL ... }` subquery wrap → no `CALL{}` grammar
 - `WITH ... after UNION ALL` → parser error
 
-There is one form that does work: the **`label(node)` builtin**
-returns the node's NODE TABLE name as a string. `WHERE label(m) IN
-["Comment", "Post"]` is a real query-level predicate, evaluated
-per row. It's exactly equivalent to gqlite's `(m:Comment|Post)`
-or graphqlite's `WHERE m:Comment OR m:Post` semantically.
+The form that **does work and is what we ship**: the `label(node)`
+builtin returns the node's NODE TABLE name as a string. `WHERE
+label(m) IN ["Comment", "Post"]` is a real query-level predicate,
+evaluated per row. Semantically equivalent to gqlite's
+`(m:Comment|Post)` and graphqlite's `WHERE m:Comment OR m:Post`.
 
-**But it's catastrophically slow on multi-hop queries.** Measured
-on Kuzu 0.11.3:
-- IC2 (single label() check, 1-hop friends + hasCreator): ~520 ms
-  (vs ~30 ms with schema constraint — 17× slower)
-- IC8 (label() check inside a 4-hop chain through replyOf): **~14 s
-  per iter** (vs ~80 ms with schema constraint — 175× slower)
+### Performance cost of the honest form, measured on Kuzu 0.11.3
 
-Kuzu's optimizer doesn't push the `label()` predicate through
-multi-hop joins — it materializes the full join result first, then
-filters by label. The schema-constrained form, in contrast, lets
-the multi-typed `hasCreator(FROM Comment, FROM Post)` REL TABLE
-limit the message-side at edge traversal time.
+| Query | rt with `label()` (spec-faithful) | rt with schema-constrained `(message)` (data-shape) |
+|---|---|---|
+| IC2 (1-hop friend + hasCreator) | ~520 ms | ~30 ms |
+| IC8 (4-hop chain through replyOf) | **~14 s/iter** | ~80 ms |
 
-### Why we ship the schema-constrained form
+Kuzu 0.11.3's optimizer doesn't push the `label()` predicate
+through multi-hop joins — it materializes the full join result
+first, then filters by label. The schema-level alternative would
+let the multi-typed `hasCreator(FROM Comment, FROM Post)` REL
+TABLE constrain the message-side at edge traversal time, ~175×
+faster.
 
-We use `(message)` unlabeled, relying on the multi-typed
-`hasCreator` REL TABLE schema declaration to constrain the message
-endpoint to Comment-or-Post.
+### Why we ship the slower honest form anyway
 
-**Reading the cypher file alone, you cannot tell that `(message)`
-is restricted to Comment-or-Post.** The constraint comes from
-`setup.py`'s `CREATE REL TABLE hasCreator(FROM Comment TO Person,
-FROM Post TO Person)`. If the loader were changed to also create
-`hasCreator(FROM Forum TO Person)`, this query would silently match
-Forums too, while gqlite/graphqlite/the spec would not. **The two
-queries are equivalent only on our specific data load.**
+A previous round of this bench used the schema-constrained form
+(`(message)` unlabeled, relying on REL TABLE constraints) for its
+17-175× speedup. **That was a corner-cut.** The query body didn't
+say "Comment-or-Post"; it said "anything reachable via hasCreator,"
+and only happened to mean Comment-or-Post because of how
+`setup.py` declared the REL TABLE. A reviewer auditing whether the
+benchmark queries match the spec would have had to read setup.py
+to verify the predicate — that's audit-trail rot the
+DIVERGENCES.md couldn't paper over.
 
-We accept this audit-trail divergence because:
-1. The fast `label()`-based alternative is 17-175× slower in Kuzu
-   0.11.3's optimizer, making the bench unwieldy (30+ min per run).
-2. The schema-constrained form has been the bench's behavior since
-   the kuzu integration PR landed. Numbers haven't changed.
-3. On our actual data, both forms produce identical result rows.
-4. The slow optimizer behavior is Kuzu's, not something we can fix
-   in our bench harness.
+The bench's job is to measure what each engine actually does on
+the spec-faithful query. If Kuzu's optimizer doesn't push label()
+through multi-hop joins, that's **a real Kuzu finding worth
+measuring**, not a number to mask by changing the query. Reporting
+"Kuzu IC8 ~14 s/iter on the spec-faithful predicate" is more
+useful to a reviewer (and more comparable to gqlite's plan-time
+characteristics) than "Kuzu IC8 ~80 ms but only because we
+silently pre-encoded the predicate at load time."
 
-A reviewer wanting a strictly-query-level translation can swap to
-the `label()` form; the trade-off is documented here.
+The bench wall-time goes up substantially (~30+ min per full run)
+under this form. Acceptable: the bench is run on merge cadence,
+not every dev iteration.
 
 What does NOT work in Kuzu (tested):
 - `(m:Comment|Post)` pattern disjunction → parser error
