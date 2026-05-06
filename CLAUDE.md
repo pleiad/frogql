@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-GQLite — a Rust graph database implementing ISO GQL path pattern matching with single-file storage. Built around an interactive REPL (`gqlite`, modelled on `sqlite3`), an embeddable library, and PyO3 Python bindings. Part of an academic research project (test names occasionally reference paper sections, e.g. `test_paper_example_s2_4`); a separate Python reference interpreter exists in a sister project but is not required to develop or use this crate.
+froGQL — a Rust graph database implementing ISO GQL path pattern matching with single-file storage. Distributed as a CLI binary (`frogql`, modelled on `sqlite3`), an embeddable library, and PyO3 Python bindings published to PyPI as `frogql`. Part of an academic research project (test names occasionally reference paper sections, e.g. `test_paper_example_s2_4`); a separate Python reference interpreter exists in a sister project but is not required to develop or use this crate.
+
+The crate package is still named `gqlrust` for legacy reasons; the user-facing binary, Python module, and PyPI package are all `frogql`. Many internal identifiers, env vars (`GQLITE_TRACE_OPEN`, `GQLITE_DISABLE_AUTO_INDEXES`, etc.), and doc-comments still say "gqlite" — they pre-date the rebrand and are not part of any user surface.
 
 ## Commands
 
@@ -26,30 +28,40 @@ cargo test --test runtime_test test_join_star_any_label -- --exact
 # Strict clippy (run before every commit)
 cargo clippy --workspace --all-targets -- -D clippy::all
 
-# Build all binaries
+# Build all binaries (defaults: `repl` + `bench` features on)
 cargo build --release
 
 # Interactive REPL
-./target/release/gqlite movies.gdb --import-csv path/to/csv_dir/   # create + open
-./target/release/gqlite movies.gdb                                 # open existing
+./target/release/frogql movies.gdb --import-csv path/to/csv_dir/   # create + open
+./target/release/frogql movies.gdb                                 # open existing
+./target/release/frogql movies.gdb --no-typecheck                  # skip typecheck for the session
 
-# Python bindings (builds cdylib, installs `gqlite` into the active venv)
+# Python bindings (builds cdylib, installs `frogql` into the active venv)
 cd python && source <your-venv>/bin/activate && pip install maturin && maturin develop --release
 # For wheels to ship to other machines:
 cd python && maturin build --release   # output in target/wheels/
 ```
 
+### Pre-commit checklist for Rust changes (non-negotiable)
+
+1. `cargo fmt --all`
+2. `cargo clippy --workspace --all-targets -- -D clippy::all`
+3. **`cargo test`** — run the full sweep above. Skipping this has burned commits before, e.g. a `--` line-comment lexer change broke `-->` edge sugar across three test suites. fmt + clippy alone do not catch lexer/grammar regressions.
+4. Stage + commit.
+
 ## Workspace layout
 
-Cargo workspace with two members:
+Cargo workspace with two members and `resolver = "2"`:
 - `.` (root) — the `gqlrust` library crate + CLI binaries under `src/bin/`:
-  - `gqlite` — interactive REPL with line editing (rustyline)
+  - `frogql` — interactive REPL with line editing (rustyline). **Requires `repl` feature.**
   - `bench_queries` — generic benchmark runner
-  - `bench_setup` — downloads + extracts LDBC datasets via ureq + zstd + tar
-  - `ldbc_bench` — LDBC interactive-complete benchmark driver (queries in `bench/ldbc-queries/*.toml`)
+  - `bench_setup` — downloads + extracts LDBC datasets via ureq + zstd + tar. **Requires `bench` feature.**
+  - `ldbc_bench` — LDBC interactive-complete benchmark driver (queries in `bench/ldbc-queries/*.toml`). **Requires `bench` feature.**
   - `typecheck_bench` — typechecker microbench
   - `convert_edgelist` — edge-list format converter
-- `python/` — the `gqlite-py` crate: a `cdylib` exposing a PyO3 extension module named `gqlite`. Depends on `gqlrust` via path. Built and installed with maturin (`maturin develop` for local dev, `maturin build --release` for wheels). Maturin installs into whichever venv is active.
+- `python/` — the `frogql-py` crate: a `cdylib` exposing a PyO3 extension module named `frogql`. Depends on `gqlrust = { path = "..", default-features = false }` so the wheel ships only the library half (no rustyline/ureq/etc.). Built and installed with maturin (`maturin develop` for local dev, `maturin build --release` for wheels). Maturin installs into whichever venv is active.
+
+`resolver = "2"` is required: with v1, building the python crate `--target X` (cross-compile) unifies features globally and drags in `gqlrust`'s default `repl` + `bench` features even when `default-features = false` is set on the dep. That pulled `ureq → ring`, which fails to cross-build on the manylinux2014 aarch64 container. Resolver v2 computes features per-target and isolates the wheel build.
 
 Other top-level directories:
 - `src/` — library crate (`parser/`, `elaborate/`, `typing/`, `optimizer/`, `runtime/`, `model/`, `store/`, `lib.rs`)
@@ -58,11 +70,31 @@ Other top-level directories:
 - `docs/` — `storage-architecture.md`, `JOIN_STRATEGY_NOTES.md`, `implemented-optimizations.md`, `iso-gql-gaps.md`, `graph-type-catalog-plan.md`, `typechecker_migration.md`, `rules.md`
 - `bench/` — benchmark scaffolding: `BENCHMARK_PLAN.md`, `LDBC_BENCH_PLAN.md`, `TYPECHECKER_BENCHMARK.md`, `ldbc-queries/*.toml`, `queries/`, `scripts/`, `results/` (benchmark datasets in `bench/data/` are gitignored and downloaded via `bench_setup`)
 
-Python API surface (`python/src/lib.rs`): `gqlite.open(path)`, `gqlite.import_json(db, json)`, `gqlite.import_csv(db, dir)`, and a `Connection` class with `execute(query, limit)`, `schema()`, `node_count`, `edge_count`. `execute` returns a list of dicts: RETURN clauses produce `{alias: value}` rows; queries without RETURN produce raw `{var: {kind, id, labels, props}}` dicts. `Connection` is `unsendable` (not thread-safe across Python threads).
+Python API surface (`python/src/lib.rs`): `frogql.open(path)`, `frogql.import_json(db, json)`, `frogql.import_csv(db, dir)`, and a `Connection` class with `execute(query, limit)`, `schema()`, `graph_types()`, `node_count`, `edge_count`. `execute` returns a list of dicts:
+- With `RETURN`: `{alias: value}` rows. Without an explicit `AS`, the runtime falls back to `col0`, `col1`, ... — the alias is what the parser stores via `it.alias()`, and unaliased projections have no canonical name.
+- Without `RETURN`: each row is `{var: {kind, id, labels, props}}` for every pattern variable, plus a special `_paths` key holding the matched path(s): `_paths` is a list (one entry per sub-pattern in a comma-join), each a list of node/edge dicts in match order. Mirrors what the REPL prints in its `path` column.
 
-## Dependencies
+`Connection` is `unsendable` (not thread-safe across Python threads). `frogql.open` eagerly warms the LTJ TripleIndex so the first `execute()` runs at warm-cache speed; the same Arc is reused across every subsequent call.
 
-Runtime: `serde` + `serde_json` (model serialization), `thiserror` (error types), `rustyline` (REPL line editing). Bench-only: `sysinfo` (RSS reporting for Memory/Lazy/Disk RAM-cost comparison), `toml` (LDBC query specs), `ureq` + `zstd` + `tar` (LDBC dataset download). Dev: `proptest` (used by `aggregates_proptest`, `lattice_proptest`, `multi_match_proptest`).
+## Dependencies and feature gating
+
+Always-on: `serde` + `serde_json` (model serialization), `thiserror` (error types). These are the only deps the Python wheel pulls.
+
+Optional, behind features (default on for local `cargo build`):
+- `repl = ["dep:rustyline"]` — only `src/bin/frogql.rs` uses it.
+- `bench = ["dep:sysinfo", "dep:toml", "dep:ureq", "dep:zstd", "dep:tar"]` — `bench_setup` (download/extract) and `ldbc_bench` (RSS reporting + TOML query specs) only.
+
+`default = ["repl", "bench"]` so plain `cargo build`, CI, and local dev see the same dependency surface as before. The `python/Cargo.toml` opts out via `default-features = false`; combined with workspace `resolver = "2"`, the wheel build never touches `ring/ureq/zstd/tar/rustyline/sysinfo/toml`. **Do not** add a new always-on dep for a bench- or REPL-only crate; gate it behind the appropriate feature and add `required-features = [...]` to the bin entry.
+
+Dev: `proptest` (used by `aggregates_proptest`, `lattice_proptest`, `multi_match_proptest`).
+
+## Releases (PyPI)
+
+Tag-driven publishing via `.github/workflows/release.yml`. Pushing a `v*` tag triggers builds for Linux x86_64+aarch64, macOS x86_64+arm64, Windows x86_64 (manylinux2014, abi3-py38: one wheel per (os, arch) covers CPython 3.8+) plus an sdist, then uploads to PyPI using the `MATURIN_PYPI_TOKEN` secret. The `release` job runs in the `pypi` GitHub Environment (configure required reviewers there for manual approval before publish).
+
+Cutting a release: bump three places in lock-step — `python/pyproject.toml`, `python/Cargo.toml`, and `Cargo.lock` (auto via any `cargo build`) — commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`. The version inside `pyproject.toml` is what PyPI receives; the tag name only triggers the workflow. PyPI rejects re-publishing a version, so bump even for hotfixes.
+
+For local downstream development against a not-yet-published change: `cd python && maturin develop --release` from the active venv of the downstream project. Replaces any pip-installed `frogql` with the local build; re-run after each Rust change. Use without `--release` for fast debug iteration (10-50× slower runtime but seconds to compile).
 
 ## Architecture
 
@@ -97,7 +129,7 @@ DDL surface today: `CREATE / USE / DROP GRAPH TYPE`, plus inspection / validatio
 
 `USE` does not validate. The walk is opt-in because it is O(N + E); the typechecker still constrains queries against the active schema either way.
 
-REPL meta-commands follow the SQLite dot-prefix convention (see `src/bin/gqlite.rs`): `.schema` aliases `SHOW GRAPH TYPE DEFAULT`, `.schema simple` switches to the grouped by-label renderer in `print_schema_simple` (which lists every node type unconditionally — the earlier "standalone-only" filter hid all nodes on connected graphs and was removed in commit `e23d04d`), `.graph-types` aliases `SHOW GRAPH TYPES`, `.help` lists meta-commands and DDL surface, and `.quit` / `.exit` (plus bare `quit` / `exit`) leave the REPL.
+REPL meta-commands follow the SQLite dot-prefix convention (see `src/bin/frogql.rs`): `.schema` aliases `SHOW GRAPH TYPE DEFAULT`, `.schema simple` switches to the grouped by-label renderer in `print_schema_simple` (which lists every node type unconditionally — the earlier "standalone-only" filter hid all nodes on connected graphs and was removed in commit `e23d04d`), `.graph-types` aliases `SHOW GRAPH TYPES`, `.help` lists meta-commands and DDL surface, and `.quit` / `.exit` (plus bare `quit` / `exit`) leave the REPL.
 
 ### ID system
 
@@ -123,6 +155,18 @@ path_factor = path_primary quantifier?              ← Repeat {n,m}
 `MATCH` keyword is optional — bare path patterns like `(x)-[]->(y)` still work. `OPTIONAL MATCH` is supported as a top-level match clause. `is` and `IS` are aliases for the `typed`/`TYPED` type-predicate keyword; `IS NULL` / `IS NOT NULL` are dedicated null tests detected via lookahead before the type-predicate path. The `AS` keyword is ambiguous between type cast (in expressions) and alias (in RETURN); `return_comparison()` excludes `AS` from operators so it's available for aliases.
 
 `LIMIT N` populates `Query.limit: Option<u32>`; the runtime combines it with any caller-supplied cap via `min` (smaller wins). `LIMIT 0` short-circuits to an empty binding table per ISO/IEC 39075:2024.
+
+#### Comments and operator aliases (ISO §3.10)
+
+The lexer's `skip_whitespace` consumes both forms of GQL comments:
+- `-- ...` to end of line. **Disambiguation:** `--` followed by `>` is NOT a comment — it's the start of `-->` (unlabeled forward-edge sugar from §5.x). The lexer peeks the third char and falls through to the `-` arm if it's `>`.
+- `/* ... */` block, non-nesting.
+
+Operator aliases lexed to the same token:
+- `<>` and `!=` both produce `Token::Ne` (ISO §3.10 lists `<>` as the canonical form).
+- `is` / `IS` are aliases for `typed`/`TYPED`; `IS NULL` / `IS NOT NULL` are dedicated null tests via lookahead.
+
+Regression tests for these live in `tests/parser_test.rs` (`test_lexer_*`).
 
 ### Typechecker
 
@@ -196,7 +240,7 @@ It never materialises "all (a, b) pairs" before considering `c`.
 Filters (node labels like `(x: Person)`, pushed-down property-type and value predicates) are placed at the VEO level where all their variables are bound. They evaluate before descending and prune entire sub-trees. Three `FilterKind` variants:
 - `NodeLabel { var, label }` — checks the bound node has the required label.
 - `NodeProperty { var, prop }` — checks the bound node has the named property.
-- `NodeAttrCmp { var, attr, op, value }` — checks `node.attr <op> value` for `=`, `!=`, `<`, `<=`, `>`, `>=`. Pushed down by the optimizer from WHERE conjuncts (see *Optimizer*).
+- `NodeAttrCmp { var, attr, op, value }` — checks `node.attr <op> value` for `=`, `!=` (also spelled `<>` per ISO §3.10), `<`, `<=`, `>`, `>=`. Pushed down by the optimizer from WHERE conjuncts (see *Optimizer*).
 
 #### When LTJ activates
 
@@ -349,8 +393,10 @@ For reference, GraphQLite (a SQLite extension with Cypher) measures 32.82 ms med
 ## Key conventions
 
 - Labels in patterns require the `:` prefix: `-[:Transfer]->`, not `-[Transfer]->`.
-- Run `cargo clippy --workspace --all-targets -- -D clippy::all` before every commit.
+- Run `cargo fmt --all`, then `cargo clippy --workspace --all-targets -- -D clippy::all`, then **`cargo test`** before every commit (see *Pre-commit checklist*). fmt + clippy alone do not catch parser/lexer regressions.
 - The `bench_test` integration target has pre-existing failures — exclude it from regular runs.
 - `bench/data/` is gitignored (large datasets, downloaded via `cargo run --bin bench_setup`).
 - Example databases in `examples/*.gdb` ARE committed (small, useful for testing).
 - Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6); changing the order is a breaking on-disk format change.
+- The Python wheel (`frogql` on PyPI) MUST stay independent of `repl` / `bench` features — never reference `rustyline`, `ureq`, `zstd`, `tar`, `sysinfo`, or `toml` from library code.
+- New bins that need optional deps: declare them as explicit `[[bin]]` entries in `Cargo.toml` with `required-features = [...]`. Auto-discovery still picks up bins that use only always-on deps.
