@@ -109,9 +109,10 @@ struct Case {
     query: &'static str,
 }
 
-/// 21 cases: 3 valid controls + 3 LDBC-IC valid (the IC2/IC8
-/// centerpieces) + 9 empty-by-typing + 6 invalid (rejected). See
-/// `bench/INTERNAL_BENCHMARK.md` for the case-set description.
+/// 25 cases: 3 valid controls + 3 LDBC-IC valid + 3 valid extras
+/// (empty-by-data, aggregate, variable-length) + 10 empty-by-typing
+/// + 6 invalid (rejected). See `bench/INTERNAL_BENCHMARK.md` for
+/// the case-set description.
 const CASES: &[Case] = &[
     // ---- Valid controls (3) ----
     Case {
@@ -171,7 +172,34 @@ const CASES: &[Case] = &[
                        comment.id AS commentId, comment.content AS commentContent \
                 ORDER BY commentCreationDate DESC, commentId ASC LIMIT 20",
     },
-    // ---- Empty by typing (9) ----
+    // v_empty_by_data: type-checks fine; the runtime lookup misses
+    // because the id literally isn't in the data. Pairs vs every
+    // `e_*` case to show the typechecker's *limit* — it can short-
+    // circuit type-driven emptiness, but data-driven emptiness has
+    // to go through the runtime.
+    Case {
+        category: Category::Valid,
+        id: "v_empty_by_data",
+        query: "MATCH (p: Person {id: 1234567890}) RETURN p.firstName",
+    },
+    // v_count_friends: aggregate. Different runtime cost profile from
+    // straight projection — forces full materialization, no LIMIT
+    // short-circuit. Bare-node aggregate (`COUNT(f)`) doesn't parse
+    // in gqlite today; we count `f.id` instead.
+    Case {
+        category: Category::Valid,
+        id: "v_count_friends",
+        query: "MATCH (p: Person {id: 933})~[:knows]~(f: Person) RETURN COUNT(f.id)",
+    },
+    // v_repeat: variable-length match (friends-of-friends, 1 or 2
+    // hops). Exercises gqlite's repetition runtime which IC2/IC8
+    // chains don't cover.
+    Case {
+        category: Category::Valid,
+        id: "v_repeat",
+        query: "MATCH (p: Person {id: 933})~[:knows]~{1,2}(f: Person) RETURN f.firstName",
+    },
+    // ---- Empty by typing (10) ----
     Case {
         category: Category::EmptyByTyping,
         id: "e_chain4_bad_leaf",
@@ -230,6 +258,18 @@ const CASES: &[Case] = &[
         category: Category::EmptyByTyping,
         id: "e_label_only",
         query: "MATCH (x: Wagumi) RETURN x.id",
+    },
+    // e_type_clash_arith: arithmetic between mismatched types
+    // (`p.firstName + p.id` is `string + int`). The schema knows
+    // both types; the typechecker should mark this guaranteed-empty
+    // (no value satisfies the predicate after the type clash).
+    // Different surface than e_type_mismatch_chain which uses
+    // equality (`c.firstName = 933`) — this one is in arithmetic
+    // followed by a comparison.
+    Case {
+        category: Category::EmptyByTyping,
+        id: "e_type_clash_arith",
+        query: "MATCH (p: Person) WHERE p.firstName + p.id > 0 RETURN p.id",
     },
     // ---- Invalid: rejected by the compile pipeline (6) ----
     Case {
