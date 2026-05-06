@@ -29,6 +29,22 @@ pub fn cmp_values(lhs: &Value, op: BinOp, rhs: &Value) -> bool {
                 _ => false,
             };
         }
+        // ISO §4.4.4: reference values are equal iff they refer to
+        // the same referent (same id). They are not orderable
+        // without Feature GA04. Cross-kind (node vs edge) is never
+        // equal regardless of id. The PartialEq on `Value` already
+        // implements the per-id identity, so `==` does the right
+        // thing here.
+        (Value::Node(_), Value::Node(_))
+        | (Value::Edge(_), Value::Edge(_))
+        | (Value::Node(_), Value::Edge(_))
+        | (Value::Edge(_), Value::Node(_)) => {
+            return match op {
+                BinOp::Eq => lhs == rhs,
+                BinOp::Ne => lhs != rhs,
+                _ => false,
+            };
+        }
         _ => {}
     }
     let ord = match (lhs, rhs) {

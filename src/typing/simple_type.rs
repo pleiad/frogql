@@ -28,6 +28,13 @@ pub enum SimpleType {
     /// `{k is T, k2 is T2}`. Distinct from a descriptor's PropertyType — this
     /// appears at value positions, and can nest (a field's type can itself be Record).
     Record(std::collections::BTreeMap<String, SimpleType>),
+    /// ISO §4.4.4 reference value type for nodes. Carries identity, not
+    /// structure. Two values of this type are equal iff their ids match
+    /// (same referent); they are not orderable without Feature GA04.
+    Node,
+    /// ISO §4.4.4 reference value type for edges. Same identity-based
+    /// equality and the same non-orderable restriction as `Node`.
+    Edge,
 }
 
 impl SimpleType {
@@ -138,6 +145,8 @@ impl fmt::Display for SimpleType {
                 let parts: Vec<String> = fields.iter().map(|(k, v)| format!("{k} {v}")).collect();
                 write!(f, "{{{}}}", parts.join(", "))
             }
+            SimpleType::Node => write!(f, "node"),
+            SimpleType::Edge => write!(f, "edge"),
         }
     }
 }

@@ -126,6 +126,12 @@ impl fmt::Display for UnOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Const(Value),
+    /// ISO §20.12 `<binding variable reference>` — a bare variable
+    /// name in expression position. Materializes to the variable's
+    /// value (a node / edge reference value, or `Null` if unbound at
+    /// runtime via OPTIONAL). Distinct from `AttrLookup`, which
+    /// requires a `.attr` projection.
+    Var(String),
     AttrLookup {
         var: String,
         attr: String,
@@ -190,6 +196,8 @@ impl Expr {
                         .iter()
                         .all(|(k, v)| t_fields.get(k).is_some_and(|ty| Expr::value_is_type(v, ty)))
             }
+            (Value::Node(_), SimpleType::Node) => true,
+            (Value::Edge(_), SimpleType::Edge) => true,
             (_, SimpleType::Star) => true,
             (_, SimpleType::Union(a, b)) => {
                 Expr::value_is_type(val, a) || Expr::value_is_type(val, b)
@@ -203,6 +211,7 @@ impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expr::Const(v) => write!(f, "{v}"),
+            Expr::Var(name) => write!(f, "{name}"),
             Expr::AttrLookup { var, attr } => write!(f, "{var}.{attr}"),
             Expr::FieldAccess { base, field } => write!(f, "{base}.{field}"),
             Expr::Binop { op, left, right } => write!(f, "({left} {op} {right})"),

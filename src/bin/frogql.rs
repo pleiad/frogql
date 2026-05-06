@@ -650,6 +650,8 @@ impl NodeType {
                 gqlrust::model::value::Value::Bool(_) => "bool",
                 gqlrust::model::value::Value::List(_) => "list",
                 gqlrust::model::value::Value::Record(_) => "record",
+                gqlrust::model::value::Value::Node(_) => "node",
+                gqlrust::model::value::Value::Edge(_) => "edge",
             };
             props.insert(k.clone(), t);
         }
@@ -716,6 +718,8 @@ fn print_schema(store: &LazyGraphStore) {
                 gqlrust::model::value::Value::Bool(_) => "bool",
                 gqlrust::model::value::Value::List(_) => "list",
                 gqlrust::model::value::Value::Record(_) => "record",
+                gqlrust::model::value::Value::Node(_) => "node",
+                gqlrust::model::value::Value::Edge(_) => "edge",
             };
             props.insert(k.clone(), t);
         }
@@ -807,6 +811,8 @@ fn print_schema_simple(store: &LazyGraphStore) {
                 gqlrust::model::value::Value::Bool(_) => "bool",
                 gqlrust::model::value::Value::List(_) => "list",
                 gqlrust::model::value::Value::Record(_) => "record",
+                gqlrust::model::value::Value::Node(_) => "node",
+                gqlrust::model::value::Value::Edge(_) => "edge",
             };
             prop_types.insert(k.clone(), t);
         }
@@ -881,6 +887,8 @@ fn print_schema_simple(store: &LazyGraphStore) {
                 gqlrust::model::value::Value::Bool(_) => "bool",
                 gqlrust::model::value::Value::List(_) => "list",
                 gqlrust::model::value::Value::Record(_) => "record",
+                gqlrust::model::value::Value::Node(_) => "node",
+                gqlrust::model::value::Value::Edge(_) => "edge",
             };
             prop_types.insert(k.clone(), t);
         }
@@ -1332,6 +1340,8 @@ fn color_simple_type(t: &SimpleType) -> String {
         SimpleType::List(inner) => format!("{C_GREEN}LIST{C_RESET}<{}>", color_simple_type(inner)),
         SimpleType::Group(inner) => format!("group<{}>", color_simple_type(inner)),
         SimpleType::Record(fields) => format!("{{{}}}", color_field_map(fields)),
+        SimpleType::Node => format!("{C_GREEN}NODE{C_RESET}"),
+        SimpleType::Edge => format!("{C_GREEN}EDGE{C_RESET}"),
     }
 }
 

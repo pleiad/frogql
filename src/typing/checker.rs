@@ -391,6 +391,19 @@ impl Typechecker {
 
             Expr::Type(t) => t.clone(),
 
+            // ISO §20.12: a `<binding variable reference>` resolves to
+            // the value type of the bound variable. `Group` (paths from
+            // repetition `{n,m}`) is not yet projectable as a value;
+            // documented as a future gap.
+            Expr::Var(name) => match env.get(name) {
+                Some(t) => variable_type_to_simple_type(t),
+                None => {
+                    self.errors
+                        .push(format!("Variable {} not found in context", name));
+                    SimpleType::Zero
+                }
+            },
+
             Expr::AttrLookup { var, attr } => match env.get(var) {
                 Some(t) => {
                     if matches!(t, VariableType::Zero) {
@@ -715,6 +728,33 @@ fn simple_type_of_value(v: &Value) -> SimpleType {
         Value::Bool(_) => SimpleType::B,
         Value::List(_) => SimpleType::List(Box::new(SimpleType::Star)),
         Value::Record(_) => SimpleType::Star,
+        Value::Node(_) => SimpleType::Node,
+        Value::Edge(_) => SimpleType::Edge,
+    }
+}
+
+/// Lift a `VariableType` to its `SimpleType` for `<binding variable
+/// reference>` (ISO §20.12). Edges of any direction collapse to
+/// `Edge`; reference values lose their descriptor here because the
+/// SimpleType lattice has no way to carry it (a future refinement
+/// could add `SimpleType::Node(DescriptorType)`).
+fn variable_type_to_simple_type(t: &VariableType) -> SimpleType {
+    match t {
+        VariableType::Node(_) => SimpleType::Node,
+        VariableType::EdgeDirectional { .. } | VariableType::EdgeNonDirectional { .. } => {
+            SimpleType::Edge
+        }
+        VariableType::Union(a, b) => SimpleType::union(
+            &variable_type_to_simple_type(a),
+            &variable_type_to_simple_type(b),
+        ),
+        VariableType::Null => SimpleType::Star,
+        VariableType::Zero => SimpleType::Zero,
+        // Repetition-grouping is not projectable as a single value;
+        // typing it as Star defers the runtime check (`Expr::Var` on
+        // a Group produces a Failure → Null, which is acceptable for
+        // expressions but not yet for projection).
+        VariableType::Group(_) => SimpleType::Star,
     }
 }
 
@@ -862,7 +902,14 @@ fn is_orderable_per_iso_22_14(t: &SimpleType) -> bool {
         SimpleType::Z | SimpleType::F | SimpleType::B | SimpleType::S | SimpleType::Star => true,
         SimpleType::Zero => false,
         SimpleType::Union(a, b) => is_orderable_per_iso_22_14(a) && is_orderable_per_iso_22_14(b),
-        SimpleType::List(_) | SimpleType::Record(_) | SimpleType::Group(_) => false,
+        // ISO §4.4.4 says reference values of the same base type are
+        // *equality*-comparable, not ordering-comparable; without GA04
+        // they cannot be sort keys.
+        SimpleType::List(_)
+        | SimpleType::Record(_)
+        | SimpleType::Group(_)
+        | SimpleType::Node
+        | SimpleType::Edge => false,
     }
 }
 

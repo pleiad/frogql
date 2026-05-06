@@ -1,10 +1,14 @@
 use std::fmt;
 
-/// A property value. Scalars (Int/Float/Str/Bool/Null) plus the GQL
-/// constructed types List (ordered collection) and Record (named fields, can
-/// nest). `Null` is the SQL-style absent value: comparisons with it produce
-/// false (predicate-is-null → row drops), aggregators skip it, and it is
-/// distinct from any string, including `"NULL"`.
+/// A property or projected value. ISO §4.4 distinguishes scalar values
+/// (`Int`/`Float`/`Str`/`Bool`), structured values (`List`, `Record`),
+/// the null value (`Null`), and reference values (`Node`, `Edge`).
+///
+/// Per §4.4.4 reference values encapsulate the global object identifier
+/// — `Node(id)` and `Edge(id)` are opaque identity values. Equality is
+/// defined as "iff they refer to the same referent" (same id). They are
+/// not orderable without Feature GA04. Properties are read from the
+/// graph by id at attribute-lookup time, never carried with the value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
@@ -14,6 +18,8 @@ pub enum Value {
     Bool(bool),
     List(Vec<Value>),
     Record(std::collections::BTreeMap<String, Value>),
+    Node(Id),
+    Edge(Id),
 }
 
 impl Value {
@@ -44,6 +50,8 @@ impl fmt::Display for Value {
                 let parts: Vec<String> = fields.iter().map(|(k, v)| format!("{k}: {v}")).collect();
                 write!(f, "{{{}}}", parts.join(", "))
             }
+            Value::Node(id) => write!(f, "n{id}"),
+            Value::Edge(id) => write!(f, "e{id}"),
         }
     }
 }

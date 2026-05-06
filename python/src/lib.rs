@@ -187,7 +187,7 @@ impl Connection {
                     let d = PyDict::new_bound(py);
                     for (i, v) in row.into_iter().enumerate() {
                         let key = headers.get(i).cloned().unwrap_or_else(|| format!("col{i}"));
-                        d.set_item(key, value_to_py(py, &v)?)?;
+                        d.set_item(key, value_to_py(py, &self.store, &v)?)?;
                     }
                     out.append(d)?;
                 }
@@ -522,7 +522,7 @@ fn import_csv(db_path: &str, csv_dir: &str) -> PyResult<()> {
     Ok(())
 }
 
-fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<PyObject> {
+fn value_to_py<'py>(py: Python<'py>, store: &LazyGraphStore, v: &Value) -> PyResult<PyObject> {
     Ok(match v {
         Value::Null => py.None(),
         Value::Int(n) => n.into_py(py),
@@ -532,15 +532,55 @@ fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<PyObject> {
         Value::List(items) => {
             let lst = PyList::empty_bound(py);
             for it in items {
-                lst.append(value_to_py(py, it)?)?;
+                lst.append(value_to_py(py, store, it)?)?;
             }
             lst.into_py(py)
         }
         Value::Record(fields) => {
             let d = PyDict::new_bound(py);
             for (k, v) in fields {
-                d.set_item(k, value_to_py(py, v)?)?;
+                d.set_item(k, value_to_py(py, store, v)?)?;
             }
+            d.into_py(py)
+        }
+        // ISO §4.4.4 reference values. Materialize the same dict
+        // shape the Raw path already uses for `pathvalue_to_py`:
+        // `{kind, id, labels, props}`. Round-trippable to Python and
+        // identifiable by the `kind` field.
+        Value::Node(id) => {
+            let d = PyDict::new_bound(py);
+            d.set_item("kind", "node")?;
+            d.set_item("id", *id)?;
+            let labels: Vec<String> = store
+                .node_labels(*id)
+                .required_labels()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+            d.set_item("labels", labels)?;
+            let props = PyDict::new_bound(py);
+            for (k, vv) in store.node_props(*id).iter() {
+                props.set_item(k, value_to_py(py, store, vv)?)?;
+            }
+            d.set_item("props", props)?;
+            d.into_py(py)
+        }
+        Value::Edge(id) => {
+            let d = PyDict::new_bound(py);
+            d.set_item("kind", "edge")?;
+            d.set_item("id", *id)?;
+            let labels: Vec<String> = store
+                .edge_labels(*id)
+                .required_labels()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+            d.set_item("labels", labels)?;
+            let props = PyDict::new_bound(py);
+            for (k, vv) in store.edge_props(*id).iter() {
+                props.set_item(k, value_to_py(py, store, vv)?)?;
+            }
+            d.set_item("props", props)?;
             d.into_py(py)
         }
     })
@@ -593,7 +633,7 @@ fn pathvalue_to_py<'py>(
             d.set_item("labels", labels)?;
             let props = PyDict::new_bound(py);
             for (k, v) in store.node_props(*id).iter() {
-                props.set_item(k, value_to_py(py, v)?)?;
+                props.set_item(k, value_to_py(py, store, v)?)?;
             }
             d.set_item("props", props)?;
             d.into_py(py)

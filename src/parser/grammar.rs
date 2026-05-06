@@ -1409,7 +1409,12 @@ impl Parser {
                     }
                     Ok(expr)
                 } else {
-                    Err(format!("unexpected bare variable '{name}' in expression"))
+                    // ISO §20.12 <binding variable reference>: a bare
+                    // name in expression position resolves to the
+                    // variable's value at runtime (a node / edge
+                    // reference value, or the projected column when
+                    // used as a sort key).
+                    Ok(Expr::Var(name))
                 }
             }
             Token::LParen => {

@@ -168,6 +168,8 @@ fn format_simple_type(t: &SimpleType) -> String {
         SimpleType::List(inner) => format!("LIST<{}>", format_simple_type(inner)),
         SimpleType::Group(inner) => format!("group<{}>", format_simple_type(inner)),
         SimpleType::Record(fields) => format!("{{{}}}", format_field_map(fields)),
+        SimpleType::Node => "NODE".to_string(),
+        SimpleType::Edge => "EDGE".to_string(),
     }
 }
 
