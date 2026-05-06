@@ -61,3 +61,69 @@ produce these strings is identical to the work it would do for ints
 — `friend.ldbcId` is a property lookup of the same shape. The
 canonical 11.04 ms cross-row median measured before the fix is
 unchanged after the fix (modulo run-to-run variance).
+
+## graphqlite RETURN-clause property accessor breaks int64 values
+
+**Symptom**: `RETURN p.ldbcId` and `RETURN p.creationDate` return
+WRONG int values for properties that are 64-bit integers in the
+LDBC dataset (Person.id, Comment.id, Post.id, all `creationDate` /
+`joinDate` / `birthday` timestamps in milliseconds).
+
+Verified directly against the loaded graphqlite SF0.1 DB:
+
+```python
+import graphqlite
+g = graphqlite.Graph('bench/data/cross-system/graphqlite/ldbc-sf01.db')
+
+# RETURN <node> serializes the WHOLE node correctly, all int64 props intact:
+g.query('MATCH (p:Person {ldbcId: 24189255811566}) RETURN p')
+# → [{'p': {'id': 26514, 'labels': ['Person'],
+#          'properties': {'ldbcId': 24189255811566,
+#                         'creationDate': 1322656837118, ...}}}]
+
+# RETURN <node>.<int64-prop> returns garbage for the same property:
+g.query('MATCH (p:Person {ldbcId: 24189255811566}) RETURN p.ldbcId AS lid')
+# → [{'lid': 494}]    ← WRONG. 494 is the rowid of an unrelated
+#                       Organisation node, not the LDBC id.
+
+g.query('MATCH (p:Person {ldbcId: 24189255811566}) RETURN p.creationDate AS cd')
+# → [{'cd': -193090050}]    ← WRONG. int32-truncated form of 1322656837118
+#                              (cast to signed 32-bit overflows negative).
+```
+
+So graphqlite **stores** int64 correctly (the SQLite `node_props_int`
+column is INTEGER, which is 64-bit) — the WHERE predicate in the
+MATCH clause finds the right node, and `RETURN p` (whole-node
+serialization path) preserves the int64 properties. The bug lives
+specifically in the RETURN-clause `<var>.<prop>` projection path.
+
+**Why not in graphqlite/DIVERGENCES.md as a "we work around it"?**
+We don't. Two reasons:
+
+1. **The bench's job is to measure what the engine does on the
+   spec-faithful query.** Every system runs the spec form of IC2 etc.
+   on its native dialect; the cross-system row-content hash oracle
+   either confirms agreement or surfaces a real finding. graphqlite's
+   IC2 result rows disagreeing with gqlite's and Kuzu's IS the real
+   finding here — engineering teams shipping graphqlite-on-LDBC
+   would hit this every time they project `.id` or `.creationDate`.
+   Hiding it behind a bench-side workaround (e.g. switching graphqlite
+   alone to `RETURN p` + post-processing in Python) would put
+   graphqlite on a code path none of its users would write, and the
+   resulting numbers would describe a system nobody actually runs.
+
+2. **It's the same anti-pattern as the rejected schema-constrained
+   Kuzu form** (`kuzu/DIVERGENCES.md` documents that whole story).
+   Make-it-look-correct is not the same as correct.
+
+**What this means for the bench output**: the cross-system
+row-content equivalence section ("Row-content equivalence" in
+`comparison.txt`) will report graphqlite hash mismatches against
+gqlite + Kuzu on every IC. The mismatches are real per-system
+behaviour, not bench bugs. gqlite ↔ Kuzu hashes should still agree
+(both have correct int64 RETURN). The MISS / WARN lines for
+graphqlite point at this divergence file.
+
+**Tested versions**: graphqlite 0.4.4 (PyPI, `pip install graphqlite`).
+If a future version fixes int64 RETURN, this divergence becomes
+moot and the cross-system comparison rises to 3/3 systems.

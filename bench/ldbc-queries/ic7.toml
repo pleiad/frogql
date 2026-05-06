@@ -7,7 +7,7 @@ name = "Recent likers of a person's messages"
 status = "blocked"
 
 blocked_reason = """
-IC7 requires "the LATEST like per liker" — an arg-max per group. The
+Re-audited 2026-05-06. IC7 requires "the LATEST like per liker" — an arg-max per group. The
 canonical Cypher uses `WITH ... ORDER BY ... head(collect(...))` for
 this; ISO GQL has no `WITH` or `collect`, but it does provide a
 `<value query expression>` (`VALUE { MATCH ... ORDER BY ... LIMIT 1 }`)

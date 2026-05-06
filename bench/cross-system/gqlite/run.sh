@@ -54,7 +54,12 @@ if [[ ! -x ./target/release/ldbc_bench ]]; then
 fi
 
 echo "  --- gqlite/$BACKEND ic$IC ---" >&2
-./target/release/ldbc_bench "$GDB" \
+# Row-equivalence dump: ldbc_bench appends a per-(params_row) envelope
+# to this JSONL so compare_results.py can diff actual rows when hashes
+# disagree. Sibling of the CSV; matches the Python runners' shape.
+ROWS_JSONL="${OUT_CSV%.csv}.rows.jsonl"
+rm -f "$ROWS_JSONL"  # fresh per run
+GQLITE_BENCH_ROWS_JSONL="$ROWS_JSONL" ./target/release/ldbc_bench "$GDB" \
     --ic "$IC" --backend "$BACKEND" \
     --iters "$ITERS" --warmup "$WARMUP" \
     > "$OUT_CSV"

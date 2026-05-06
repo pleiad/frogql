@@ -299,23 +299,28 @@ def load_edges(
           file=sys.stderr)
 
 
-def load_knows_both_directions(g: Graph, csv_dir: Path, id_map: dict) -> None:
-    """LDBC `person_knows_person_0_0.csv`: `Person.id|Person.id|creationDate`,
-    each pair once. Materialize both directions for undirected
-    (p)-[:knows]-(f) matching. Same convention as every other system."""
-    edges_fwd = []
-    edges_rev = []
+def load_knows(g: Graph, csv_dir: Path, id_map: dict) -> None:
+    """LDBC `person_knows_person_0_0.csv` stores each (Person, friend)
+    pair once; `:knows` is semantically undirected. We store ONLY the
+    forward direction. Cypher's `-[:knows]-` (any-direction match)
+    finds each stored edge in either direction → 1 row per pair, which
+    is what the spec query "messages by your friends" asks for.
+
+    An earlier version of this loader inserted both directions (`(a,b)`
+    AND `(b,a)`) — combined with `-[:knows]-` matching the stored edge
+    in either direction, that yielded 2× rows per pair. The
+    cross-system row-content hash oracle caught it (gqlite uses an
+    undirected primitive `~[:knows]~` on single-direction storage,
+    which is the spec-faithful behaviour). Same fix lives in
+    bench/cross-system/kuzu/setup.py."""
+    edges = []
     for row in _csv_pos_rows(csv_dir / "dynamic" / "person_knows_person_0_0.csv"):
         cdate = int(row[2]) if len(row) > 2 else 0
         a, b = _key("Person", row[0]), _key("Person", row[1])
-        edges_fwd.append((a, b, {"creationDate": cdate}, "knows"))
-        edges_rev.append((b, a, {"creationDate": cdate}, "knows"))
-    n_fwd = g.insert_edges_bulk(edges_fwd, id_map)
-    n_rev = g.insert_edges_bulk(edges_rev, id_map)
-    print(
-        f"      knows: {n_fwd} forward + {n_rev} reverse = {n_fwd + n_rev}",
-        file=sys.stderr,
-    )
+        edges.append((a, b, {"creationDate": cdate}, "knows"))
+    n = g.insert_edges_bulk(edges, id_map)
+    print(f"      knows: {n} edges (forward only; -[:knows]- matches both ways)",
+          file=sys.stderr)
 
 
 # ---- Driver --------------------------------------------------------
@@ -385,7 +390,7 @@ def main() -> int:
                "isSubclassOf", "TagClass", "TagClass", id_map)
 
     # Dynamic edges (some have edge attrs)
-    load_knows_both_directions(g, csv_dir, id_map)
+    load_knows(g, csv_dir, id_map)
     load_edges(g, csv_dir / "dynamic" / "comment_hasCreator_person_0_0.csv",
                "hasCreator", "Comment", "Person", id_map)
     load_edges(g, csv_dir / "dynamic" / "post_hasCreator_person_0_0.csv",

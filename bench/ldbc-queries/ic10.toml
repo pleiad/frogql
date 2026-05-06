@@ -6,21 +6,20 @@ name = "Friend recommendation"
 status = "blocked"
 
 blocked_reason = """
-Tested 2026-05-05. Heaviest-blocked IC; needs four parser features
-that gqlite doesn't have:
-  - `WHERE person <> foaf` — bare-node comparison; needs property
-    access. Same fix as IC3/5/6/9.
+Re-audited 2026-05-06. Three parser gaps remain:
   - `EXTRACT(MONTH FROM foaf.birthday)` — `EXTRACT(... FROM ...)`
     syntax not in parser.
   - `$month MOD 12` — `MOD` operator not in parser.
   - `CASE WHEN ... THEN ... ELSE ... END` — `CASE` expression not
     in parser. Used inside `SUM(CASE WHEN ... THEN 1 ELSE -1 END)`,
     so removing it isn't trivial — would need to rewrite with two
-    separate counts joined by `-`.
+    separate COUNTs joined by `-`.
+
+What's now fine (was wrong in the previous audit):
+  - `WHERE person <> foaf` — bare-node `<>` works since PR #42.
 """
 
 required_features = [
-    "bare-node comparison (or property-access rewrite)",
     "EXTRACT(date-part FROM date)",
     "MOD operator",
     "CASE WHEN ... END expression",

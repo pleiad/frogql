@@ -48,6 +48,13 @@ except ImportError:
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent.parent
 
+# Row-hashing helper shared with the graphqlite runner; mirrors the
+# Rust canonicalization in src/bin/ldbc_bench.rs so all three runners
+# produce byte-identical blobs (and thus identical sha256 hashes) for
+# the same logical row set.
+sys.path.insert(0, str(HERE.parent / "_lib"))
+from row_hash import canonicalize_and_hash, append_rows_jsonl  # noqa: E402
+
 PARAMS_DIR = (
     REPO_ROOT
     / "bench/data/substitution_parameters-sf0.1/substitution_parameters-sf0.1"
@@ -93,18 +100,6 @@ def shape_of_rows(rows: list[list], n_columns: int) -> str:
         for i in range(min(n_columns, len(r))):
             cols[i].add(shape_of_value(r[i]))
     return ",".join("/".join(sorted(s)) for s in cols)
-
-
-def verify_shape(actual: str, expected: str) -> str | None:
-    a = [set(c.split("/")) for c in actual.split(",")]
-    e = [set(c.split("/")) for c in expected.split(",")]
-    if len(a) != len(e):
-        return f"column count: actual={len(a)}, expected={len(e)}"
-    for i, (ac, ec) in enumerate(zip(a, e)):
-        if not ac.issubset(ec):
-            extras = sorted(ac - ec)
-            return f"col {i}: actual {sorted(ac)} not subset of expected {sorted(ec)} (extra: {extras})"
-    return None
 
 
 def load_query(path: Path) -> str:
@@ -208,7 +203,6 @@ def main() -> int:
         )
         return 1
 
-    expected_shape = toml.get("expected_shape")
     columns = derive_columns(toml.get("return_columns", []))
     query_label = f"IC{ic}"
 
@@ -251,6 +245,13 @@ def main() -> int:
 
     peak_rss_mib = _rss_baseline_mib
 
+    # Row-equivalence dump path: sibling JSONL alongside the CSV.
+    # `<out_csv stem>.rows.jsonl`. compare_results.py uses these for
+    # human diff when hashes mismatch across systems.
+    rows_jsonl = args.out_csv.with_suffix(".rows.jsonl")
+    if rows_jsonl.exists():
+        rows_jsonl.unlink()  # fresh per run
+
     with args.out_csv.open("w", encoding="utf-8", newline="") as out:
         out.write("query;backend;params;row;iter;result_count;elapsed_ns\n")
 
@@ -284,14 +285,26 @@ def main() -> int:
 
             actual_shape = shape_of_rows(iter0_rows or [], len(columns))
             actual_count = len(iter0_rows or [])
-            if expected_shape is None:
-                status = "no-expected"
-            else:
-                why = verify_shape(actual_shape, expected_shape)
-                status = "ok" if why is None else f'fail reason="{why}"'
+            # Row-content hash for the cross-system row-equivalence
+            # oracle. Kuzu's `result.get_next()` returns positional
+            # lists — pass them straight through to the canonicalizer.
+            #
+            # Single ROW line: count + shape (informational) + hash
+            # (the strong cross-system oracle). The hash subsumes
+            # any per-column-type shape contract — see Rust mirror.
+            rows_blob, row_hash = canonicalize_and_hash(iter0_rows or [])
             sys.stderr.write(
-                f"  SHAPE row={row_idx} count={actual_count} "
-                f"shape={actual_shape} status={status}\n"
+                f"  ROW row={row_idx} count={actual_count} "
+                f"shape={actual_shape} hash={row_hash}\n"
+            )
+            append_rows_jsonl(
+                rows_jsonl,
+                ic,
+                joined,
+                row_idx,
+                actual_count,
+                rows_blob,
+                row_hash,
             )
             sys.stderr.write(
                 f"  row {row_idx}: rc={actual_count} "

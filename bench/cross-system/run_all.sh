@@ -56,7 +56,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RESULTS_ROOT="$SCRIPT_DIR/results"
 
-ICS_ARG="2,8"   # default: every IC currently flipped to status="implemented" in bench/ldbc-queries/. Keep this in sync as ICs come online.
+ICS_ARG="2,5,6,8,9,11"   # default: every IC currently flipped to status="implemented" in bench/ldbc-queries/. Keep this in sync as ICs come online.
 ITERS=10
 WARMUP=2
 ONLY=""
@@ -385,25 +385,6 @@ echo "  unified: $unified ($(wc -l <"$unified") lines, $produced per-(sys,ic) CS
 echo ""
 echo "--- Setup times ---"
 column -t "$SETUP_TIMES_FILE" 2>/dev/null || cat "$SETUP_TIMES_FILE"
-
-# ---- Shape verification ---------------------------------------------
-
-echo ""
-echo "--- Shape verification ---"
-for log in "$OUT_DIR"/*.stderr.log; do
-    [[ -f "$log" ]] || continue
-    name=$(basename "$log" .stderr.log)
-    total=$(grep -c "^  SHAPE row=" "$log" || true)
-    ok=$(grep -c "^  SHAPE row=.* status=ok$" "$log" || true)
-    if [[ "$total" -eq 0 ]]; then
-        continue
-    fi
-    if [[ "$ok" -eq "$total" ]]; then
-        echo "  $name: $ok/$total rows passed"
-    else
-        echo "  $name: $ok/$total rows passed; $((total - ok)) failed (see $log)"
-    fi
-done
 
 # ---- Comparison -----------------------------------------------------
 

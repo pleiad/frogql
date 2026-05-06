@@ -22,18 +22,21 @@ ablation env vars. Those were diagnostic; the cross-system bench's
 (auto-indexes on/off). `ldbc_bench` stays in the tree but isn't the
 focus going forward.
 
-> **Reading this for the first time?** [`SURVEY.md`](SURVEY.md) is
-> the single-page narrative covering every system we evaluated
-> (working AND rejected), the architectural pattern across the
-> rejections, and what's intentionally out of scope. This README is
-> the operational doc — how to set up, run, and read the results.
+> **Reading this for the first time?** Three companion docs.
+> [`SURVEY.md`](SURVEY.md) — single-page narrative covering every
+> system we evaluated (working AND rejected), why we picked the ones
+> we did, what's intentionally out of scope. [`QUERIES.md`](QUERIES.md)
+> — the methodology behind every IC translation: fairness across
+> systems, spec-faithfulness in two dimensions, the divergence
+> taxonomy, the audit process. This README is the operational doc —
+> how to set up, run, and read the results.
 
 ## What gets compared
 
 | System | Subdir | Status |
 |---|---|---|
-| gqlite (lazy backend) | [`gqlite/`](gqlite/) | ✅ implemented |
-| GraphQLite — colliery-io/graphqlite (Cypher, SQLite-backed) | [`graphqlite/`](graphqlite/) | ✅ implemented |
+| gqlite (lazy backend) | [`gqlite/`](gqlite/) | ✅ implemented; see [`gqlite/KNOWN_ISSUES.md`](gqlite/KNOWN_ISSUES.md) for the `Comment \| Post` label-disjunction filter bug surfaced by the row-equivalence oracle (affects IC2/IC8/IC9 result rows; latency unaffected) |
+| GraphQLite — colliery-io/graphqlite (Cypher, SQLite-backed) | [`graphqlite/`](graphqlite/) | ✅ implemented; see [`graphqlite/DIVERGENCES.md`](graphqlite/DIVERGENCES.md) for the int64 RETURN-projection bug surfaced by the row-equivalence oracle |
 | Kuzu — kuzudb (vectorized columnar engine, CIDR 2023; pinned to v0.11.3 since [upstream archived 2025-10-10](https://github.com/kuzudb/kuzu)) | [`kuzu/`](kuzu/) | ✅ implemented; see [`kuzu/DIVERGENCES.md`](kuzu/DIVERGENCES.md) for the archival-status framing and the `label()`-predicate query-shape divergence (Kuzu's optimizer doesn't push `label()` through multi-hop joins → IC8 ~14s/iter, an honest finding) |
 | GraphLite — GraphLite-AI/GraphLite (ISO GQL, Sled-backed) | — | not yet integrated |
 | GQLite — webbery/gqlite (custom DSL, dead since April 2023) | — | not yet integrated |
@@ -181,25 +184,30 @@ Output lands in `bench/cross-system/results/<timestamp>/`:
 - `skipped.log` — any (system, IC) pair that couldn't run
 - `run_info.txt` — timestamp, host, gqlite commit, etc.
 
-## The query
+## The queries
 
-The canonical IC2 lives in [`bench/ldbc-queries/ic2.toml`](../ldbc-queries/ic2.toml)
-— same TOML our regular `ldbc_bench` consumes. Per-system harnesses
-translate it into their native query syntax (`graphqlite/ic2.cypher`,
-`kuzu/ic2.cypher`, etc.); each translation file's first comment
-points back to the toml.
+Each IC's canonical form lives in `bench/ldbc-queries/icN.toml` —
+the same TOML our regular `ldbc_bench` consumes. Per-system Cypher
+files (`graphqlite/icN.cypher`, `kuzu/icN.cypher`) are translations
+of the toml; each one's first comment-block points back to the toml.
 
-The shipped query is **spec-faithful**: ORDER BY, COALESCE, label
-disjunction. Earlier rounds of this bench dropped ORDER BY and
-COALESCE because gqlite's parser didn't support them; both have
-since landed (see `tests/order_by_test.rs`, `tests/coalesce_test.rs`)
-and the tomls now carry the spec form. The remaining toml-level
-divergences are loader-level (lowercase edge labels like `:knows`
-instead of `:KNOWS`) and have no semantic effect.
+The shipped queries are **spec-faithful**: ORDER BY, COALESCE, label
+disjunction, bare-node compare, variable-length hops, sub-labels for
+Company/Country. Currently implemented: IC2, IC5, IC6, IC8, IC9, IC11.
+Still blocked by missing parser features: IC1, IC3, IC4, IC7, IC10,
+IC12, IC13, IC14 — each blocked toml's `blocked_reason` field lists
+the specific gaps.
 
-Per-system divergences from the canonical toml (Kuzu's `label()`
-predicate, graphqlite's `.ldbcId` accessor) are documented in each
-subdir's `DIVERGENCES.md`.
+The methodology behind these translations — what fairness means
+across systems, how we taxonomize divergences (loader-level vs
+dialect-level vs parser-gap vs semantic), and how the audit proceeds
+when parser features land — is in [`QUERIES.md`](QUERIES.md). Read
+that if you want to extend the IC catalog or argue with a particular
+divergence.
+
+Per-system divergences spanning multiple ICs (Kuzu's `label()`
+predicate, graphqlite's `.ldbcId` accessor, etc.) are documented in
+each subdir's `DIVERGENCES.md`.
 
 ## Reading the results
 
@@ -207,13 +215,11 @@ subdir's `DIVERGENCES.md`.
 multi-IC runs:
 
 1. **Per-cell summary** — for each (params_row, system) pair, median
-   latency, p95, iter count, and the result_count. (Result shape is
-   verified separately; see section 5.)
+   latency, p95, iter count, and the result_count.
 2. **Result-count consistency** — for each params_row, do all systems
    agree on row count? With ORDER BY in the canonical toml the
    row contents are deterministic, so counts must match exactly
-   across systems. `WARN` flags disagreement, which means a
-   per-system query translation bug.
+   across systems. `WARN` flags disagreement.
 3. **Side-by-side latency** — one row per params_row, one column per
    system, median ms.
 4. **Memory footprint** — peak RSS during the query loop per
@@ -223,11 +229,17 @@ multi-IC runs:
    in the section header for caveats — graphqlite's RSS is small
    because SQLite uses mmap; data lives in OS page cache, not
    process RSS).
-5. **Shape verification** — per-(system, IC) pass/fail tally
-   against the toml's `expected_shape`. Catches per-column type
-   mismatches that count consistency alone misses (we hit one of
-   these with graphqlite's `friend.id` returning prefixed strings;
-   see `graphqlite/DIVERGENCES.md`).
+5. **Row-content equivalence** — per (IC, params_row), do all
+   systems produce byte-identical canonical rows? Each runner
+   sha256-hashes its iter-0 result and emits a `ROW row=N count=N
+   shape=<...> hash=<hex>` stderr line; this section compares the
+   hashes across systems. Mismatch → real per-system translation
+   bug; the section points at the sibling `<system>.icN.rows.jsonl`
+   files for diff. With ORDER BY in every toml the iter-0 result
+   is deterministic, so byte-equal blobs across systems mean
+   byte-equal results. Hash subsumes a per-column-type shape check
+   — any column-count or per-cell-type drift changes the hash, so
+   the older "Shape verification" section was retired.
 
 ## Measurement basis (read this before quoting numbers)
 
@@ -250,9 +262,12 @@ honestly.
   `DIVERGENCES.md`.
 - **Same warmup + iter counts.** Every system gets the same `--warmup`
   iters discarded before measurement and the same `--iters` measured.
-- **Same result-shape verification.** Every system's runner emits
-  `SHAPE row=N count=N shape=<sig>` lines compared against the toml's
-  `expected_shape`; `run_all.sh` tallies pass/fail per system.
+- **Same row-content oracle.** Every system's runner emits
+  `ROW row=N count=N shape=<sig> hash=<sha256-hex>` lines plus a
+  sibling `<system>.icN.rows.jsonl` envelope per params-row. The
+  hash is the cross-system equivalence check; with ORDER BY in
+  every toml the iter-0 results are deterministic, so byte-equal
+  rows → identical hashes.
 
 ### What's DIFFERENT across systems (and why)
 

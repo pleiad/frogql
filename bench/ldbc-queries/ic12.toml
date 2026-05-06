@@ -6,22 +6,21 @@ name = "Expert search"
 status = "blocked"
 
 blocked_reason = """
-Tested 2026-05-05:
-  - `COLLECT_LIST(DISTINCT tag.name)` — `COLLECT_LIST` aggregate not
-    in parser. Tested also `collect`, `array_agg`, `ARRAY_AGG` —
-    none recognized. No equivalent function exists today.
-  - `COUNT(comment)` — bare-node aggregate; `COUNT(comment.id)` or
-    `COUNT(*)` would parse.
+Re-audited 2026-05-06. Two real blockers:
+  - `COLLECT_LIST(DISTINCT tag.name)` — list-aggregate not in
+    parser. Tested also `collect`, `array_agg`, `ARRAY_AGG` —
+    none recognized.
   - `[:isSubclassOf]->{0,}` — zero-or-more reflexive transitive
-    closure; could be supported via `{0,N}` for some N, but the
-    open-ended {0,} form is the spec.
-The COLLECT_LIST gap is the main blocker — the query's whole point
-is to multiset-aggregate the tag names per friend.
+    closure; runtime panics with `unbounded repeat not supported`.
+    `{0,N}` for some bounded N would work, but the spec form is
+    truly open-ended.
+
+What's now fine (was wrong in the previous audit):
+  - `COUNT(comment)` — bare-node aggregates work since PR #42.
 """
 
 required_features = [
     "COLLECT_LIST / multiset aggregate (any name)",
-    "COUNT over bare node references",
     "{0,} unbounded transitive closure (or {0,N} approximation)",
 ]
 
