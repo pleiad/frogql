@@ -35,6 +35,14 @@ const DATASET_URL_TEMPLATE: &str =
 const PARAMS_URL_TEMPLATE: &str =
     "https://datasets.ldbcouncil.org/snb-interactive-v1/substitution_parameters-sf{SF}.tar.zst";
 
+/// Scale factors LDBC publishes substitution params for at the canonical
+/// URL (probed 2026-05-06 against `datasets.ldbcouncil.org/snb-interactive-v1/`).
+/// SF0.3 and SF1 have datasets but no params; for those, bench_setup
+/// fetches the dataset and skips params with a warning. typecheck_bench
+/// works without params; ldbc_bench would fail later when it tries to
+/// load the params file (its own concern).
+const SFS_WITH_PARAMS: &[&str] = &["0.1", "3", "10", "30", "100", "300", "1000"];
+
 fn print_usage(prog: &str) {
     eprintln!(
         "Usage: {prog} [--data-dir <dir>] [--sf <factor>] [--rebuild] [--skip-download]\n\
@@ -46,7 +54,8 @@ fn print_usage(prog: &str) {
          \n\
          Defaults:\n\
          \t--data-dir bench/data\n\
-         \t--sf 0.1 (LDBC scale factor; pass 0.3, 1, 3, 10, ... for larger)\n\
+         \t--sf 0.1 (any LDBC SF; params auto-downloaded for\n\
+         \t           0.1, 3, 10, 30, 100, 300, 1000 — others get dataset only)\n\
          \t--skip-download is off (set to use only already-present archives)\n\
          \t--rebuild is off (force-rebuild the .gdb even if present)"
     );
@@ -100,6 +109,15 @@ fn main() {
         .unwrap_or_else(|e| fail(&format!("create data-dir {}: {e}", data_dir.display())));
     eprintln!("data-dir: {}", data_dir.display());
     eprintln!("scale:    sf{sf}");
+    let params_available = SFS_WITH_PARAMS.contains(&sf.as_str());
+    if !params_available {
+        eprintln!(
+            "note: LDBC has no substitution params for sf{sf} at the canonical URL.\n\
+             Will fetch the dataset only — typecheck_bench works without\n\
+             params, ldbc_bench will need user-supplied params (provide\n\
+             via --params-dir)."
+        );
+    }
 
     let dataset_url = DATASET_URL_TEMPLATE.replace("{SF}", &sf);
     let params_url = PARAMS_URL_TEMPLATE.replace("{SF}", &sf);
@@ -132,13 +150,15 @@ fn main() {
         extract_tar_zst(&dataset_archive, &dataset_dir);
     }
 
-    // Step 2: substitution params.
+    // Step 2: substitution params (skip when LDBC publishes none for this SF).
     let params_archive = data_dir.join(format!("substitution_parameters-sf{sf}.tar.zst"));
     let params_dir = data_dir.join(format!("substitution_parameters-sf{sf}"));
     let params_inner = params_dir.join(format!("substitution_parameters-sf{sf}"));
     let params_extracted =
         params_inner.is_dir() && params_inner.join("interactive_2_param.txt").is_file();
-    if params_extracted {
+    if !params_available {
+        eprintln!("[skip] no params published for sf{sf}; user must supply via --params-dir");
+    } else if params_extracted {
         eprintln!(
             "[skip] params already extracted at {}",
             params_inner.display()
@@ -161,7 +181,8 @@ fn main() {
         extract_tar_zst(&params_archive, &params_dir);
     }
 
-    // Step 3: .gdb.
+    // Step 3: .gdb. Shells out to the frogql binary's --import-ldbc-csv
+    // path so the .gdb is built by exactly the same code the REPL uses.
     let gdb_path = data_dir.join(format!("ldbc-sf{sf}.gdb"));
     if gdb_path.exists() && !rebuild {
         eprintln!(
