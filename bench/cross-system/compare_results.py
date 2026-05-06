@@ -294,15 +294,32 @@ def main() -> int:
     # encoding → identical sha256 hashes. Mismatch = real
     # translation drift (a wrong column, a missing predicate, an
     # ordering bug).
+    #
+    # Section is keyed by (query, params_row) — for each such cell we
+    # require ALL systems that have CSV measurements to also have ROW
+    # hashes; a system present in the CSV but missing from the ROW
+    # log is a partial-run failure (runner crashed mid-IC, stderr
+    # buffer lost, harness change skipped emit). Surface it as MISSING
+    # rather than silently reporting "1/1 systems agree".
     if results_dir is not None:
         print()
         print("=== Row-content equivalence (per (IC, params_row), all systems) ===")
         print()
         per_system = collect_row_hashes(results_dir)
+
+        # Set of systems we EXPECT to see a hash for, derived from
+        # the CSV column 2 grouped by query. A system listed here but
+        # missing from per_system[s][(q, r)] is flagged.
+        expected_systems_per_query: dict[str, set[str]] = {}
+        for (q, _r, sys_name), _samples in by_cell.items():
+            expected_systems_per_query.setdefault(q, set()).add(sys_name)
+
         if not per_system:
-            print("  (no HASH lines found in *.stderr.log — nothing to check.")
-            print("   Older runners that pre-date the row-equivalence oracle")
-            print("   only emit SHAPE; rerun with the current binaries.)")
+            print("  (no ROW lines found in *.stderr.log — nothing to check.")
+            print("   The expected stderr line is `  ROW row=N count=N "
+                  "shape=<sig> hash=<hex>`;")
+            print("   verify each runner's stderr.log has it. Older binaries"
+                  " that emit SHAPE/HASH separately are not parsed here.)")
         else:
             # Index by (query, row) → {system: (count, hash)}.
             by_cell_h: dict[tuple[str, int], dict[str, tuple[int, str]]] = {}
@@ -310,18 +327,58 @@ def main() -> int:
                 for (q, r), (count, h) in per_row.items():
                     by_cell_h.setdefault((q, r), {})[sys_name] = (count, h)
 
+            # Map a CSV `backend` column or a stderr-log filename
+            # stem to the runner's logical system identity. The CSV
+            # column and the stderr filename use DIFFERENT identifiers
+            # for the same runner: e.g. graphqlite's CSV backend is
+            # `graphqlite-cypher` but its stderr filename is
+            # `graphqlite.icN.stderr.log` → both must normalize to
+            # `graphqlite` so the missing-system check sees them as
+            # the same runner. gqlite ablation modes are similar:
+            # CSV `lazy-no-fold` and stderr `gqlite.icN.stderr.log`
+            # both map to `gqlite` (one physical run rewrites the CSV
+            # column post-hoc; the stderr stays with the runner name).
+            def _normalize(s: str) -> str:
+                if s in (
+                    "lazy",
+                    "lazy-baseline",
+                    "lazy-no-fold",
+                    "disk",
+                    "disk-baseline",
+                    "memory",
+                ):
+                    return "gqlite"
+                if s == "graphqlite-cypher":
+                    return "graphqlite"
+                if s == "kuzu-cypher":
+                    return "kuzu"
+                return s
+
             queries_h = sorted({q for (q, _) in by_cell_h})
             mismatches_total = 0
             agree_total = 0
+            missing_total = 0
             for q in queries_h:
                 cells = sorted(
                     [(r, vmap) for (qq, r), vmap in by_cell_h.items() if qq == q]
                 )
                 print(f"  [{q}]")
+                expected_norm = {_normalize(s) for s in expected_systems_per_query.get(q, set())}
                 for r, vmap in cells:
+                    actual_norm = {_normalize(s) for s in vmap.keys()}
+                    missing = expected_norm - actual_norm
                     hashes = {h for (_c, h) in vmap.values()}
-                    if len(hashes) == 1:
-                        # All systems agree → strongest possible signal.
+
+                    if missing:
+                        missing_total += 1
+                        print(f"    MISS row {r}: hashes from "
+                              f"{sorted(actual_norm)} but CSV has "
+                              f"measurements from {sorted(expected_norm)}; "
+                              f"missing: {sorted(missing)}. The runner(s) "
+                              f"likely crashed mid-IC or never emitted ROW "
+                              f"lines — check the stderr.log.")
+                    elif len(hashes) == 1:
+                        # All expected systems agree → strongest possible signal.
                         agree_total += 1
                         h = next(iter(hashes))
                         n_systems = len(vmap)
@@ -338,16 +395,28 @@ def main() -> int:
                         for s in sorted(vmap):
                             print(f"             {results_dir}/{s}.{q.lower()}.rows.jsonl")
             print()
-            if mismatches_total == 0:
-                print(f"  OK row-content equivalence: {agree_total}/{agree_total} "
+            total_cells = agree_total + mismatches_total + missing_total
+            if mismatches_total == 0 and missing_total == 0:
+                print(f"  OK row-content equivalence: {agree_total}/{total_cells} "
                       f"(IC, params_row) cells agreed across systems.")
             else:
-                print(f"  WARN row-content equivalence: {mismatches_total} "
-                      f"(IC, params_row) cell(s) disagreed; "
-                      f"{agree_total} agreed. With ORDER BY in the toml the")
-                print("  iter-0 results are deterministic, so any mismatch is "
-                      "a real per-system translation bug — diff the listed")
-                print("  *.rows.jsonl files to see which row/cell drifted.")
+                parts = []
+                if mismatches_total:
+                    parts.append(f"{mismatches_total} disagreed")
+                if missing_total:
+                    parts.append(f"{missing_total} had missing-system hashes")
+                print(f"  WARN row-content equivalence: {'; '.join(parts)}; "
+                      f"{agree_total} agreed (of {total_cells} total cells).")
+                if mismatches_total:
+                    print("  Mismatches: with ORDER BY in the toml the iter-0 "
+                          "results are deterministic, so any disagreement is "
+                          "a real per-system translation bug — diff the listed")
+                    print("  *.rows.jsonl files to see which row/cell drifted.")
+                if missing_total:
+                    print("  Missing-system hashes mean a runner produced "
+                          "latency CSV rows but no ROW stderr line for that "
+                          "(IC, row); usually a mid-IC crash. Check the "
+                          "*.stderr.log for the missing system.")
 
     return 0
 
