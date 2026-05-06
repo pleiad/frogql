@@ -27,10 +27,20 @@ Output (stdout):
    with WARN.
 3. Side-by-side latency comparison — one row per params_row, one
    column per system, median latency.
-4. Shape-verification summary (only when a results dir is given) —
+4. Memory footprint (only when a results dir is given) — peak RSS
+   per (system, IC) parsed from the runners' stderr logs.
+5. Shape-verification summary (only when a results dir is given) —
    per-system pass/fail counts based on `SHAPE row=N status=...`
    lines in the stderr.log files. Catches per-column type
    mismatches that result_count alone misses.
+6. Row-content equivalence (only when a results dir is given) —
+   per (IC, params_row), do all systems produce byte-identical
+   canonical rows? Each runner sha256-hashes its iter-0 result
+   and emits `HASH row=N count=N hash=<hex>`; this section
+   compares hashes across systems. With ORDER BY in every IC's
+   toml the iter-0 result is deterministic, so any mismatch is a
+   real per-system translation bug — diff the sibling
+   `<system>.ic<n>.rows.jsonl` files to localize the drift.
 
 Usage:
     python compare_results.py <unified_csv> [<results_dir>]
@@ -83,6 +93,50 @@ def collect_rss(results_dir: Path) -> dict[str, tuple[float, float]]:
                 if m:
                     out[name] = (float(m.group(1)), float(m.group(2)))
                     break
+        except OSError:
+            continue
+    return out
+
+
+def collect_row_hashes(
+    results_dir: Path,
+) -> dict[str, dict[tuple[str, int], tuple[int, str]]]:
+    """For each `<system>.ic<n>.stderr.log`, parse `HASH row=N count=M
+    hash=<hex>` lines emitted per params-row by the runner.
+
+    Returns: `{logical_name: {(query, params_row_idx): (count, hex)}}`.
+    `query` is normalized as `IC<n>` (the same form the CSV uses)
+    inferred from the log's filename. compare's caller groups across
+    systems by `(query, params_row_idx)` and flags any mismatch.
+
+    Why a hash and not full rows: with ORDER BY in every IC's toml the
+    iter-0 result is deterministic, so byte-equal canonical text →
+    identical sha256 across systems. The full text is in the sibling
+    `<system>.ic<n>.rows.jsonl` for diff on mismatch — the hash here
+    is just the fast-equivalence check.
+    """
+    import re
+    hash_re = re.compile(r"^  HASH row=(\d+) count=(\d+) hash=([0-9a-f]+)$")
+    name_re = re.compile(r"^(.+?)\.ic(\d+)$")
+    out: dict[str, dict[tuple[str, int], tuple[int, str]]] = {}
+    for log in sorted(results_dir.glob("*.stderr.log")):
+        name = log.stem.replace(".stderr", "")
+        m_name = name_re.match(name)
+        if not m_name:
+            # Non-(system).ic(N) shape — skip; we can't tell which IC.
+            continue
+        system = m_name.group(1)
+        query = f"IC{m_name.group(2)}"
+        try:
+            with log.open(encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    m = hash_re.match(line.rstrip("\r\n"))
+                    if not m:
+                        continue
+                    row_idx = int(m.group(1))
+                    count = int(m.group(2))
+                    hex_hash = m.group(3)
+                    out.setdefault(system, {})[(query, row_idx)] = (count, hex_hash)
         except OSError:
             continue
     return out
@@ -303,6 +357,67 @@ def main() -> int:
                       "bench/ldbc-queries/<ic>.toml. count consistency "
                       "alone won't catch this; the per-system query "
                       "translation needs fixing.")
+
+    # ---- 6. Row-content equivalence (hash) ----
+    # The strongest oracle: every IC's toml has ORDER BY, so iter-0
+    # rows are deterministic across systems. A byte-equal canonical
+    # encoding → identical sha256 hashes. Mismatch = real
+    # translation drift (a wrong column, a missing predicate, an
+    # ordering bug).
+    if results_dir is not None:
+        print()
+        print("=== Row-content equivalence (per (IC, params_row), all systems) ===")
+        print()
+        per_system = collect_row_hashes(results_dir)
+        if not per_system:
+            print("  (no HASH lines found in *.stderr.log — nothing to check.")
+            print("   Older runners that pre-date the row-equivalence oracle")
+            print("   only emit SHAPE; rerun with the current binaries.)")
+        else:
+            # Index by (query, row) → {system: (count, hash)}.
+            by_cell_h: dict[tuple[str, int], dict[str, tuple[int, str]]] = {}
+            for sys_name, per_row in per_system.items():
+                for (q, r), (count, h) in per_row.items():
+                    by_cell_h.setdefault((q, r), {})[sys_name] = (count, h)
+
+            queries_h = sorted({q for (q, _) in by_cell_h})
+            mismatches_total = 0
+            agree_total = 0
+            for q in queries_h:
+                cells = sorted(
+                    [(r, vmap) for (qq, r), vmap in by_cell_h.items() if qq == q]
+                )
+                print(f"  [{q}]")
+                for r, vmap in cells:
+                    hashes = {h for (_c, h) in vmap.values()}
+                    if len(hashes) == 1:
+                        # All systems agree → strongest possible signal.
+                        agree_total += 1
+                        h = next(iter(hashes))
+                        n_systems = len(vmap)
+                        print(f"    OK   row {r}: {n_systems}/{n_systems} "
+                              f"systems agree (hash={h[:12]}...)")
+                    else:
+                        mismatches_total += 1
+                        print(f"    WARN row {r}: HASH DISAGREES across systems")
+                        for s in sorted(vmap):
+                            count, h = vmap[s]
+                            print(f"           {s}: count={count} "
+                                  f"hash={h[:12]}...")
+                        print(f"           diff actual rows in:")
+                        for s in sorted(vmap):
+                            print(f"             {results_dir}/{s}.{q.lower()}.rows.jsonl")
+            print()
+            if mismatches_total == 0:
+                print(f"  OK row-content equivalence: {agree_total}/{agree_total} "
+                      f"(IC, params_row) cells agreed across systems.")
+            else:
+                print(f"  WARN row-content equivalence: {mismatches_total} "
+                      f"(IC, params_row) cell(s) disagreed; "
+                      f"{agree_total} agreed. With ORDER BY in the toml the")
+                print("  iter-0 results are deterministic, so any mismatch is "
+                      "a real per-system translation bug — diff the listed")
+                print("  *.rows.jsonl files to see which row/cell drifted.")
 
     return 0
 

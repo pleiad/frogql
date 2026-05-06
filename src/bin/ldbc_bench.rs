@@ -135,6 +135,106 @@ fn verify_shape(actual: &str, expected: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ----------------------------------------------------- Row-content hashing ---
+
+// Canonical per-cell encoding for the cross-system row-equivalence
+// oracle. The Python runners (`graphqlite/run.py`, `kuzu/run.py`)
+// implement the same encoding so all three systems produce
+// byte-identical strings for the same logical row → identical
+// sha256 hashes when results match.
+//
+// Choice of format: a custom unit-separator-delimited line beats
+// JSON because Rust's serde_json and Python's json disagree on
+// non-ASCII escaping by default. With LDBC strings being short
+// names that contain neither `\x1f` (US) nor `\x1e` (RS), join-
+// without-escape is unambiguous and trivial to mirror in both
+// languages.
+//
+// Cell encoding:
+//   Null         → "\x00"        (single sentinel byte)
+//   Bool(true)   → "true"
+//   Bool(false)  → "false"
+//   Int(n)       → decimal, e.g. "42"
+//   Float(f)     → Rust default `{}` formatting (Python `repr(f)`
+//                   matches for finite values; LDBC ICs don't have
+//                   float columns so this branch is rarely hit)
+//   Str(s)       → s, raw UTF-8 (no escaping)
+//   List/Record/Node/Edge → debug-format (rare in IC RETURNs;
+//                   mismatches across systems would surface as
+//                   hash WARN with the .rows.jsonl available for
+//                   diff)
+//
+// Cells joined with "\x1f" (US, unit separator); rows joined with
+// "\n". sha256 the whole blob, hex-encode.
+fn canonicalize_cell(v: &Value) -> String {
+    match v {
+        Value::Null => "\x00".to_string(),
+        Value::Bool(true) => "true".to_string(),
+        Value::Bool(false) => "false".to_string(),
+        Value::Int(n) => n.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Str(s) => s.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
+fn canonicalize_row(row: &[Value]) -> String {
+    row.iter()
+        .map(canonicalize_cell)
+        .collect::<Vec<_>>()
+        .join("\x1f")
+}
+
+/// `(canonical_blob, sha256_hex)` for the projected rows. Returns
+/// `("", empty_hash)` for non-projected results so the oracle line
+/// is always emitted (the runner has nothing useful to compare on
+/// `Raw` results, but the SHAPE/HASH symmetry stays).
+fn canonicalize_and_hash(rows: &[Vec<Value>]) -> (String, String) {
+    use sha2::{Digest, Sha256};
+    let blob = rows
+        .iter()
+        .map(|row| canonicalize_row(row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let hash = format!("{:x}", Sha256::digest(blob.as_bytes()));
+    (blob, hash)
+}
+
+/// Append a JSONL envelope for one params-row's iter-0 result to
+/// `path`. One line per call. `rows_blob` is the canonical text
+/// (a copy in case the user wants to spot-check); `hash` is the
+/// hex sha256 of that text.
+fn append_rows_jsonl(
+    path: &Path,
+    ic: u32,
+    params: &str,
+    row_idx: usize,
+    count: usize,
+    hash: &str,
+    rows_blob: &str,
+) {
+    use serde_json::json;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    let envelope = json!({
+        "ic": ic,
+        "params": params,
+        "row": row_idx,
+        "count": count,
+        "hash": hash,
+        // `rows` is the canonicalized text — same input the hash
+        // is computed over. Splitting by '\n' restores the per-row
+        // "\x1f"-separated cells. Diff this between systems on
+        // hash mismatch.
+        "rows": rows_blob,
+    });
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{}", envelope);
+    } else {
+        eprintln!("  WARN failed to append rows-jsonl to {}", path.display());
+    }
+}
+
 // ---------------------------------------------------------------- Backend ---
 
 #[derive(Clone, Copy, Debug)]
@@ -981,6 +1081,30 @@ fn run_one_ic<G: GraphAccess>(
         eprintln!(
             "  SHAPE row={row_idx} count={actual_count} shape={actual_shape} status={status}"
         );
+        // Row-content hash for the cross-system row-equivalence oracle.
+        // Canonicalize iter-0 rows, sha256, log to stderr; if the
+        // GQLITE_BENCH_ROWS_JSONL env var points at a path, also dump
+        // the per-row envelope there so compare_results.py can diff
+        // mismatches. Mirror the Python runners' logic in
+        // `graphqlite/run.py` and `kuzu/run.py` so the three runners
+        // produce byte-identical canonicalized blobs.
+        let projected_rows: &[Vec<Value>] = match &iter0_result {
+            Some(QueryResult::Projected(rs)) => rs.as_slice(),
+            _ => &[],
+        };
+        let (rows_blob, row_hash) = canonicalize_and_hash(projected_rows);
+        eprintln!("  HASH row={row_idx} count={actual_count} hash={row_hash}");
+        if let Ok(jsonl_path) = env::var("GQLITE_BENCH_ROWS_JSONL") {
+            append_rows_jsonl(
+                Path::new(&jsonl_path),
+                q.id,
+                &row.join("|"),
+                row_idx,
+                actual_count,
+                &row_hash,
+                &rows_blob,
+            );
+        }
         let cur_rss = rss_mb(sys);
         if cur_rss > *peak_rss {
             *peak_rss = cur_rss;

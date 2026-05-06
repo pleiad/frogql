@@ -45,6 +45,13 @@ except ImportError:
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent.parent
 
+# Row-hashing helper shared with the Kuzu runner; mirrors the Rust
+# canonicalization in src/bin/ldbc_bench.rs so all three runners
+# produce byte-identical blobs (and thus identical sha256 hashes)
+# for the same logical row set.
+sys.path.insert(0, str(HERE.parent / "_lib"))
+from row_hash import canonicalize_and_hash, append_rows_jsonl  # noqa: E402
+
 PARAMS_DIR = (
     REPO_ROOT
     / "bench/data/substitution_parameters-sf0.1/substitution_parameters-sf0.1"
@@ -243,6 +250,13 @@ def main() -> int:
 
     peak_rss_mib = _rss_baseline_mib
 
+    # Row-equivalence dump path: sibling JSONL alongside the CSV.
+    # `<out_csv stem>.rows.jsonl`. compare_results.py uses these for
+    # human diff when hashes mismatch across systems.
+    rows_jsonl = args.out_csv.with_suffix(".rows.jsonl")
+    if rows_jsonl.exists():
+        rows_jsonl.unlink()  # fresh per run
+
     with args.out_csv.open("w", encoding="utf-8", newline="") as out:
         out.write("query;backend;params;row;iter;result_count;elapsed_ns\n")
 
@@ -282,6 +296,25 @@ def main() -> int:
             sys.stderr.write(
                 f"  SHAPE row={row_idx} count={actual_count} "
                 f"shape={actual_shape} status={status}\n"
+            )
+            # Row-content hash for the cross-system row-equivalence
+            # oracle. graphqlite returns rows as dicts keyed by alias;
+            # canonicalize positionally per `columns` so the encoding
+            # matches gqlite/Kuzu (which return positional rows).
+            rows_blob, row_hash = canonicalize_and_hash(
+                iter0_result or [], columns
+            )
+            sys.stderr.write(
+                f"  HASH row={row_idx} count={actual_count} hash={row_hash}\n"
+            )
+            append_rows_jsonl(
+                rows_jsonl,
+                ic,
+                joined,
+                row_idx,
+                actual_count,
+                rows_blob,
+                row_hash,
             )
             sys.stderr.write(
                 f"  row {row_idx}: rc={len(result)} "
