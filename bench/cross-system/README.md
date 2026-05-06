@@ -22,11 +22,14 @@ ablation env vars. Those were diagnostic; the cross-system bench's
 (auto-indexes on/off). `ldbc_bench` stays in the tree but isn't the
 focus going forward.
 
-> **Reading this for the first time?** [`SURVEY.md`](SURVEY.md) is
-> the single-page narrative covering every system we evaluated
-> (working AND rejected), the architectural pattern across the
-> rejections, and what's intentionally out of scope. This README is
-> the operational doc — how to set up, run, and read the results.
+> **Reading this for the first time?** Three companion docs.
+> [`SURVEY.md`](SURVEY.md) — single-page narrative covering every
+> system we evaluated (working AND rejected), why we picked the ones
+> we did, what's intentionally out of scope. [`QUERIES.md`](QUERIES.md)
+> — the methodology behind every IC translation: fairness across
+> systems, spec-faithfulness in two dimensions, the divergence
+> taxonomy, the audit process. This README is the operational doc —
+> how to set up, run, and read the results.
 
 ## What gets compared
 
@@ -181,25 +184,30 @@ Output lands in `bench/cross-system/results/<timestamp>/`:
 - `skipped.log` — any (system, IC) pair that couldn't run
 - `run_info.txt` — timestamp, host, gqlite commit, etc.
 
-## The query
+## The queries
 
-The canonical IC2 lives in [`bench/ldbc-queries/ic2.toml`](../ldbc-queries/ic2.toml)
-— same TOML our regular `ldbc_bench` consumes. Per-system harnesses
-translate it into their native query syntax (`graphqlite/ic2.cypher`,
-`kuzu/ic2.cypher`, etc.); each translation file's first comment
-points back to the toml.
+Each IC's canonical form lives in `bench/ldbc-queries/icN.toml` —
+the same TOML our regular `ldbc_bench` consumes. Per-system Cypher
+files (`graphqlite/icN.cypher`, `kuzu/icN.cypher`) are translations
+of the toml; each one's first comment-block points back to the toml.
 
-The shipped query is **spec-faithful**: ORDER BY, COALESCE, label
-disjunction. Earlier rounds of this bench dropped ORDER BY and
-COALESCE because gqlite's parser didn't support them; both have
-since landed (see `tests/order_by_test.rs`, `tests/coalesce_test.rs`)
-and the tomls now carry the spec form. The remaining toml-level
-divergences are loader-level (lowercase edge labels like `:knows`
-instead of `:KNOWS`) and have no semantic effect.
+The shipped queries are **spec-faithful**: ORDER BY, COALESCE, label
+disjunction, bare-node compare, variable-length hops, sub-labels for
+Company/Country. Currently implemented: IC2, IC5, IC6, IC8, IC9, IC11.
+Still blocked by missing parser features: IC1, IC3, IC4, IC7, IC10,
+IC12, IC13, IC14 — each blocked toml's `blocked_reason` field lists
+the specific gaps.
 
-Per-system divergences from the canonical toml (Kuzu's `label()`
-predicate, graphqlite's `.ldbcId` accessor) are documented in each
-subdir's `DIVERGENCES.md`.
+The methodology behind these translations — what fairness means
+across systems, how we taxonomize divergences (loader-level vs
+dialect-level vs parser-gap vs semantic), and how the audit proceeds
+when parser features land — is in [`QUERIES.md`](QUERIES.md). Read
+that if you want to extend the IC catalog or argue with a particular
+divergence.
+
+Per-system divergences spanning multiple ICs (Kuzu's `label()`
+predicate, graphqlite's `.ldbcId` accessor, etc.) are documented in
+each subdir's `DIVERGENCES.md`.
 
 ## Reading the results
 
