@@ -144,7 +144,7 @@ echo ""
 #
 # Other gqlite-internal characterizations (lazy-vs-disk backend, the
 # auto-index build itself, TripleIndex cache, ...) belong in the
-# internal bench (bench/typecheck-bench, soon-to-be-broader). The
+# internal bench (internal_bench, see bench/INTERNAL_BENCHMARK.md). The
 # external bench's job is to compare gqlite to other systems on
 # user-facing query latency; gqlite-internal sub-knob ablations are
 # off-charter here.

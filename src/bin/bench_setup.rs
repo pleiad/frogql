@@ -15,7 +15,7 @@
 //! ...) to fetch a larger dataset. The output paths and URLs are
 //! parametrized on the SF string so different scales coexist under
 //! the same `--data-dir`. The companion bench (`ldbc_bench`,
-//! `typecheck_bench`) reads the same `--sf` flag and points at the
+//! `internal_bench`) reads the same `--sf` flag and points at the
 //! per-SF artifacts.
 //!
 //! Layout produced (with `<SF>` replaced by the `--sf` value):
@@ -38,7 +38,7 @@ const PARAMS_URL_TEMPLATE: &str =
 /// Scale factors LDBC publishes substitution params for at the canonical
 /// URL (probed 2026-05-06 against `datasets.ldbcouncil.org/snb-interactive-v1/`).
 /// SF0.3 and SF1 have datasets but no params; for those, bench_setup
-/// fetches the dataset and skips params with a warning. typecheck_bench
+/// fetches the dataset and skips params with a warning. internal_bench
 /// works without params; ldbc_bench would fail later when it tries to
 /// load the params file (its own concern).
 const SFS_WITH_PARAMS: &[&str] = &["0.1", "3", "10", "30", "100", "300", "1000"];
@@ -113,7 +113,7 @@ fn main() {
     if !params_available {
         eprintln!(
             "note: LDBC has no substitution params for sf{sf} at the canonical URL.\n\
-             Will fetch the dataset only — typecheck_bench works without\n\
+             Will fetch the dataset only — internal_bench works without\n\
              params, ldbc_bench will need user-supplied params (provide\n\
              via --params-dir)."
         );

@@ -1,20 +1,22 @@
-//! Typechecker benchmark.
+//! Internal bench — gqlite-only diagnostics.
 //!
 //! Compares wall time of the LDBC SF0.1 case set with vs without the
-//! typechecker. The typechecker can short-circuit doomed queries
-//! (empty-by-typing, free variable, type mismatch) before the runtime
-//! ever runs — see rules.md §10 Theorem 6.5 for the soundness
-//! argument behind the guaranteed-empty short-circuit. This bench
-//! measures both paths per case and reports the difference.
+//! typechecker, across lazy and disk backends. The typechecker can
+//! short-circuit doomed queries (empty-by-typing, free variable, type
+//! mismatch) before the runtime ever runs — see rules.md §10
+//! Theorem 6.5 for the soundness argument behind the guaranteed-empty
+//! short-circuit. This bench measures both paths per case and reports
+//! the difference.
 //!
 //! Usage:
 //!
 //!     ./target/release/bench_setup       # one-time: download + build .gdb
-//!     ./target/release/typecheck_bench   # run the bench
+//!     ./target/release/internal_bench    # run the bench
 //!
-//! Flags: `--iters N` (default 3) and `--warmup N` (default 1). No
-//! dataset path arg — opens `bench/data/ldbc-sf0.1.gdb` from a
-//! hardcoded path; case set references LDBC labels by name.
+//! Flags: `--iters N` (default 3), `--warmup N` (default 1), and
+//! `--sf 0.1|0.3` (default 0.1). No dataset path arg — opens
+//! `bench/data/ldbc-sf<SF>.gdb` from a hardcoded path; case set
+//! references LDBC labels by name.
 //!
 //! See `bench/INTERNAL_BENCHMARK.md` for output format, case set
 //! details, and stream cross-checking.

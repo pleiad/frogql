@@ -57,7 +57,7 @@ Cargo workspace with two members and `resolver = "2"`:
   - `bench_queries` — generic benchmark runner
   - `bench_setup` — downloads + extracts LDBC datasets via ureq + zstd + tar. **Requires `bench` feature.**
   - `ldbc_bench` — LDBC interactive-complete benchmark driver (queries in `bench/ldbc-queries/*.toml`). **Requires `bench` feature.**
-  - `typecheck_bench` — typechecker microbench
+  - `internal_bench` — gqlite-only diagnostic bench (typechecker on/off, lazy/disk backend, RSS, scaling)
   - `convert_edgelist` — edge-list format converter
 - `python/` — the `frogql-py` crate: a `cdylib` exposing a PyO3 extension module named `frogql`. Depends on `gqlrust = { path = "..", default-features = false }` so the wheel ships only the library half (no rustyline/ureq/etc.). Built and installed with maturin (`maturin develop` for local dev, `maturin build --release` for wheels). Maturin installs into whichever venv is active.
 
