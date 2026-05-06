@@ -103,6 +103,10 @@ def shape_of_rows(rows: list[list], n_columns: int) -> str:
 
 
 def verify_shape(actual: str, expected: str) -> str | None:
+    """Empty results pass trivially. See the Rust mirror in
+    src/bin/ldbc_bench.rs for rationale."""
+    if actual == "empty":
+        return None
     a = [set(c.split("/")) for c in actual.split(",")]
     e = [set(c.split("/")) for c in expected.split(",")]
     if len(a) != len(e):

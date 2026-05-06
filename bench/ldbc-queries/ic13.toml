@@ -6,7 +6,7 @@ name = "Single shortest path"
 status = "blocked"
 
 blocked_reason = """
-Tested 2026-05-05:
+Re-audited 2026-05-06:
   - `MATCH path = ANY SHORTEST (...)` — neither path naming
     (`MATCH path = ...`) nor the `ANY SHORTEST` quantifier are in
     the parser. Without these, `PATH_LENGTH(path)` has no path to

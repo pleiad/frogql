@@ -103,7 +103,12 @@ def shape_of_rows(rows: list, columns: list[str]) -> str:
 def verify_shape(actual: str, expected: str) -> str | None:
     """Mirror of `verify_shape` in src/bin/ldbc_bench.rs. Returns
     None if `actual ⊆ expected` per column, else a short diagnosis.
+
+    Empty results pass trivially (`actual == "empty"` from
+    `shape_of_rows`) — see the Rust mirror's docstring for rationale.
     """
+    if actual == "empty":
+        return None
     a = [set(c.split("/")) for c in actual.split(",")]
     e = [set(c.split("/")) for c in expected.split(",")]
     if len(a) != len(e):

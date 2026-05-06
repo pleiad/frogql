@@ -6,22 +6,20 @@ name = "New topics"
 status = "blocked"
 
 blocked_reason = """
-Tested 2026-05-05. Most of the query parses (NOT EXISTS works, ORDER BY
-works). The remaining gaps:
-  - `$startDate + DURATION({days: $durationDays})` — `DURATION` literal
-    not in parser.
+Re-audited 2026-05-06. Most of the query parses (NOT EXISTS works,
+ORDER BY works, COUNT over bare nodes works post-PR-#42). What
+remains:
+  - `$startDate + DURATION({days: $durationDays})` — `DURATION`
+    literal not in parser.
   - Inlining as `$startDate + $durationDays * 86400000` doesn't help
-    because `*` (multiplication) also doesn't tokenize. Would need to
-    pre-compute the millis offset in the substitution layer per param
-    row (turn the second WHERE bound into a precomputed integer).
-  - `COUNT(post)` — bare-node aggregate; `COUNT(post.id)` or `COUNT(*)`
-    would parse.
+    because `*` (multiplication) doesn't tokenize either. Need
+    substitution-time pre-computation of the millis offset (turn the
+    second WHERE bound into a precomputed integer).
 """
 
 required_features = [
     "DURATION literal (or substitution-time pre-computation)",
     "multiplication operator `*`",
-    "COUNT over bare node references",
 ]
 
 params_file = "interactive_4_param.txt"

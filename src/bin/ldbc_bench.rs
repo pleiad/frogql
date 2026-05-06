@@ -108,8 +108,19 @@ fn shape_of_result(result: &QueryResult) -> String {
 /// its expected type-set (so `expected="n/s"` accepts both `s` and
 /// `n/s`). Python mirror at `bench/cross-system/graphqlite/run.py` —
 /// keep in sync.
+///
+/// Empty results pass trivially: `actual == "empty"` (the sentinel
+/// `shape_of_result` emits for `rows.is_empty()`) is compatible with
+/// any expected shape, since there are no rows to violate the
+/// per-column type contract. LDBC IC11 demonstrates the case — some
+/// (personId, country, year) param combinations legitimately yield
+/// 0 friends; flagging those as shape failures would falsely mask
+/// real type-disagreement findings on non-empty rows.
 fn verify_shape(actual: &str, expected: &str) -> Result<(), String> {
     use std::collections::HashSet;
+    if actual == "empty" {
+        return Ok(());
+    }
     let parse = |s: &str| -> Vec<HashSet<String>> {
         s.split(',')
             .map(|c| c.split('/').map(str::to_string).collect())
