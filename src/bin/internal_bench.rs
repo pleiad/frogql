@@ -38,10 +38,12 @@ use gqlrust::typing::variable_type::Schema;
 const SF01_GDB: &str = "bench/data/ldbc-sf0.1.gdb";
 const SF03_GDB: &str = "bench/data/ldbc-sf0.3.gdb";
 
-// Default of 3 matches the LDBC bench. The slowest doomed cases
-// take ~50s/iter on the unchecked path, so 30 iters would be a
-// ~1.5h run; 3 keeps a default invocation under ~15 min.
-const DEFAULT_ITERS: usize = 3;
+// 5 gives a real median and a usable p95 from a sorted-sample
+// estimator. The slowest doomed cases (`e_chain4_bad_leaf`,
+// `e_repeat_bad_leaf`) take ~40s/iter unchecked, so 5 iters lands
+// the default invocation around ~40 min on SF0.1; iters=10 doubles
+// that. Pass --iters 3 for a quicker dev-iteration loop.
+const DEFAULT_ITERS: usize = 5;
 const DEFAULT_WARMUP: usize = 1;
 // Result-row cap per runtime call.
 const LIMIT: usize = 100;
