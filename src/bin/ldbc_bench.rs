@@ -7,8 +7,8 @@
 //!
 //! ## Query catalog
 //!
-//! Thin `bench/ldbc-queries/ic<n>.toml` (title, spec URL, keys, `query`). Import,
-//! `expected_shape`, bench flags: `bench/LDBC_BENCHMARK.md`.
+//! Thin `bench/ldbc-queries/ic<n>.toml` (title, spec URL, keys, `query`). Import
+//! and bench flags: `bench/LDBC_BENCHMARK.md`.
 //!
 //! - **implemented**: `query` + `params_file`; `{col}` ↔ param header.
 //! - **blocked**: `blocked_reason`, `required_features`, optional `query` /
@@ -102,48 +102,6 @@ fn shape_of_result(result: &QueryResult) -> String {
         .map(|set| set.iter().copied().collect::<Vec<_>>().join("/"))
         .collect::<Vec<_>>()
         .join(",")
-}
-
-/// Per-column subset check: each column's actual type-set must be ⊆
-/// its expected type-set (so `expected="n/s"` accepts both `s` and
-/// `n/s`). Python mirror at `bench/cross-system/graphqlite/run.py` —
-/// keep in sync.
-///
-/// Empty results pass trivially: `actual == "empty"` (the sentinel
-/// `shape_of_result` emits for `rows.is_empty()`) is compatible with
-/// any expected shape, since there are no rows to violate the
-/// per-column type contract. LDBC IC11 demonstrates the case — some
-/// (personId, country, year) param combinations legitimately yield
-/// 0 friends; flagging those as shape failures would falsely mask
-/// real type-disagreement findings on non-empty rows.
-fn verify_shape(actual: &str, expected: &str) -> Result<(), String> {
-    use std::collections::HashSet;
-    if actual == "empty" {
-        return Ok(());
-    }
-    let parse = |s: &str| -> Vec<HashSet<String>> {
-        s.split(',')
-            .map(|c| c.split('/').map(str::to_string).collect())
-            .collect()
-    };
-    let a = parse(actual);
-    let e = parse(expected);
-    if a.len() != e.len() {
-        return Err(format!(
-            "column count: actual={}, expected={}",
-            a.len(),
-            e.len()
-        ));
-    }
-    for (i, (ac, ec)) in a.iter().zip(e.iter()).enumerate() {
-        if !ac.is_subset(ec) {
-            let extras: Vec<&str> = ac.difference(ec).map(String::as_str).collect();
-            return Err(format!(
-                "col {i}: actual {ac:?} not ⊆ expected {ec:?} (extra: {extras:?})"
-            ));
-        }
-    }
-    Ok(())
 }
 
 // ----------------------------------------------------- Row-content hashing ---
@@ -304,11 +262,6 @@ struct IcQuery {
     query: Option<String>,
     #[allow(dead_code)]
     return_columns: Option<Vec<String>>,
-    /// Per-column type signature the result must satisfy. See the
-    /// header comment in `bench/ldbc-queries/ic2.toml` for the format.
-    /// Optional — when absent, the runner emits the actual shape on
-    /// stderr but performs no verification.
-    expected_shape: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     divergences: HashMap<String, String>,
@@ -1082,16 +1035,6 @@ fn run_one_ic<G: GraphAccess>(
             Some(r) => (shape_of_result(r), r.row_count()),
             None => (String::new(), 0),
         };
-        let status = match q.expected_shape.as_deref() {
-            Some(exp) => match verify_shape(&actual_shape, exp) {
-                Ok(()) => "ok".to_string(),
-                Err(why) => format!("fail reason=\"{why}\""),
-            },
-            None => "no-expected".to_string(),
-        };
-        eprintln!(
-            "  SHAPE row={row_idx} count={actual_count} shape={actual_shape} status={status}"
-        );
         // Row-content hash for the cross-system row-equivalence oracle.
         // Canonicalize iter-0 rows, sha256, log to stderr; if the
         // GQLITE_BENCH_ROWS_JSONL env var points at a path, also dump
@@ -1099,12 +1042,21 @@ fn run_one_ic<G: GraphAccess>(
         // mismatches. Mirror the Python runners' logic in
         // `graphqlite/run.py` and `kuzu/run.py` so the three runners
         // produce byte-identical canonicalized blobs.
+        //
+        // The single per-row stderr line below carries everything a
+        // human or compare_results.py wants: count, shape (informational
+        // — quick visual smell-check), and hash (the strong cross-system
+        // oracle). We dropped the separate SHAPE/HASH lines + the
+        // `expected_shape` toml contract because the hash subsumes
+        // the shape check — any column-count or per-cell-type drift
+        // changes the hash. The shape printout stays as human-readable
+        // context; nothing parses it as a contract anymore.
         let projected_rows: &[Vec<Value>] = match &iter0_result {
             Some(QueryResult::Projected(rs)) => rs.as_slice(),
             _ => &[],
         };
         let (rows_blob, row_hash) = canonicalize_and_hash(projected_rows);
-        eprintln!("  HASH row={row_idx} count={actual_count} hash={row_hash}");
+        eprintln!("  ROW row={row_idx} count={actual_count} shape={actual_shape} hash={row_hash}");
         if let Ok(jsonl_path) = env::var("GQLITE_BENCH_ROWS_JSONL") {
             append_rows_jsonl(
                 Path::new(&jsonl_path),

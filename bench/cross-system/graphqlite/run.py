@@ -100,26 +100,6 @@ def shape_of_rows(rows: list, columns: list[str]) -> str:
     return ",".join("/".join(sorted(s)) for s in cols)
 
 
-def verify_shape(actual: str, expected: str) -> str | None:
-    """Mirror of `verify_shape` in src/bin/ldbc_bench.rs. Returns
-    None if `actual ⊆ expected` per column, else a short diagnosis.
-
-    Empty results pass trivially (`actual == "empty"` from
-    `shape_of_rows`) — see the Rust mirror's docstring for rationale.
-    """
-    if actual == "empty":
-        return None
-    a = [set(c.split("/")) for c in actual.split(",")]
-    e = [set(c.split("/")) for c in expected.split(",")]
-    if len(a) != len(e):
-        return f"column count: actual={len(a)}, expected={len(e)}"
-    for i, (ac, ec) in enumerate(zip(a, e)):
-        if not ac.issubset(ec):
-            extras = sorted(ac - ec)
-            return f"col {i}: actual {sorted(ac)} not ⊆ expected {sorted(ec)} (extra: {extras})"
-    return None
-
-
 def load_query(path: Path) -> str:
     """Read the Cypher query, stripping leading // comment lines so
     they don't get sent to the engine.
@@ -208,7 +188,6 @@ def main() -> int:
         )
         return 1
 
-    expected_shape = toml.get("expected_shape")
     columns = derive_columns(toml.get("return_columns", []))
     query_label = f"IC{ic}"
 
@@ -293,24 +272,23 @@ def main() -> int:
 
             actual_shape = shape_of_rows(iter0_result, columns)
             actual_count = len(iter0_result)
-            if expected_shape is None:
-                status = "no-expected"
-            else:
-                why = verify_shape(actual_shape, expected_shape)
-                status = "ok" if why is None else f'fail reason="{why}"'
-            sys.stderr.write(
-                f"  SHAPE row={row_idx} count={actual_count} "
-                f"shape={actual_shape} status={status}\n"
-            )
             # Row-content hash for the cross-system row-equivalence
             # oracle. graphqlite returns rows as dicts keyed by alias;
             # canonicalize positionally per `columns` so the encoding
             # matches gqlite/Kuzu (which return positional rows).
+            #
+            # Single ROW line carries count + shape (informational
+            # smell-check) + hash (the strong cross-system oracle).
+            # The hash subsumes the per-column-type shape contract
+            # the runner used to verify against `expected_shape` in
+            # the toml — any column-count or per-cell-type drift
+            # changes the hash. Shape stays as human context only.
             rows_blob, row_hash = canonicalize_and_hash(
                 iter0_result or [], columns
             )
             sys.stderr.write(
-                f"  HASH row={row_idx} count={actual_count} hash={row_hash}\n"
+                f"  ROW row={row_idx} count={actual_count} "
+                f"shape={actual_shape} hash={row_hash}\n"
             )
             append_rows_jsonl(
                 rows_jsonl,

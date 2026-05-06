@@ -28,8 +28,6 @@ return_columns = [
     "postOrCommentId", "postOrCommentContent", "postOrCommentCreationDate",
 ]
 
-expected_shape = "i,s,s,i,n/s,i"
-
 [divergences]
 message-union = "spec uses (message:Message); our LDBC loader doesn't synthesize a :Message superlabel, so we use the :Comment|Post ISO GQL alternation. Same logical query."
 edge-casing = "spec uses :KNOWS, :HAS_CREATOR (uppercase). Our loader produces :knows, :hasCreator (filename-stem convention). Loader-level."

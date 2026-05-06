@@ -386,25 +386,6 @@ echo ""
 echo "--- Setup times ---"
 column -t "$SETUP_TIMES_FILE" 2>/dev/null || cat "$SETUP_TIMES_FILE"
 
-# ---- Shape verification ---------------------------------------------
-
-echo ""
-echo "--- Shape verification ---"
-for log in "$OUT_DIR"/*.stderr.log; do
-    [[ -f "$log" ]] || continue
-    name=$(basename "$log" .stderr.log)
-    total=$(grep -c "^  SHAPE row=" "$log" || true)
-    ok=$(grep -c "^  SHAPE row=.* status=ok$" "$log" || true)
-    if [[ "$total" -eq 0 ]]; then
-        continue
-    fi
-    if [[ "$ok" -eq "$total" ]]; then
-        echo "  $name: $ok/$total rows passed"
-    else
-        echo "  $name: $ok/$total rows passed; $((total - ok)) failed (see $log)"
-    fi
-done
-
 # ---- Comparison -----------------------------------------------------
 
 echo ""

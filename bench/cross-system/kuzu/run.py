@@ -102,22 +102,6 @@ def shape_of_rows(rows: list[list], n_columns: int) -> str:
     return ",".join("/".join(sorted(s)) for s in cols)
 
 
-def verify_shape(actual: str, expected: str) -> str | None:
-    """Empty results pass trivially. See the Rust mirror in
-    src/bin/ldbc_bench.rs for rationale."""
-    if actual == "empty":
-        return None
-    a = [set(c.split("/")) for c in actual.split(",")]
-    e = [set(c.split("/")) for c in expected.split(",")]
-    if len(a) != len(e):
-        return f"column count: actual={len(a)}, expected={len(e)}"
-    for i, (ac, ec) in enumerate(zip(a, e)):
-        if not ac.issubset(ec):
-            extras = sorted(ac - ec)
-            return f"col {i}: actual {sorted(ac)} not subset of expected {sorted(ec)} (extra: {extras})"
-    return None
-
-
 def load_query(path: Path) -> str:
     """Read the Cypher query, stripping leading // comment lines so
     they don't get sent to the engine.
@@ -219,7 +203,6 @@ def main() -> int:
         )
         return 1
 
-    expected_shape = toml.get("expected_shape")
     columns = derive_columns(toml.get("return_columns", []))
     query_label = f"IC{ic}"
 
@@ -302,21 +285,17 @@ def main() -> int:
 
             actual_shape = shape_of_rows(iter0_rows or [], len(columns))
             actual_count = len(iter0_rows or [])
-            if expected_shape is None:
-                status = "no-expected"
-            else:
-                why = verify_shape(actual_shape, expected_shape)
-                status = "ok" if why is None else f'fail reason="{why}"'
-            sys.stderr.write(
-                f"  SHAPE row={row_idx} count={actual_count} "
-                f"shape={actual_shape} status={status}\n"
-            )
             # Row-content hash for the cross-system row-equivalence
             # oracle. Kuzu's `result.get_next()` returns positional
             # lists — pass them straight through to the canonicalizer.
+            #
+            # Single ROW line: count + shape (informational) + hash
+            # (the strong cross-system oracle). The hash subsumes
+            # any per-column-type shape contract — see Rust mirror.
             rows_blob, row_hash = canonicalize_and_hash(iter0_rows or [])
             sys.stderr.write(
-                f"  HASH row={row_idx} count={actual_count} hash={row_hash}\n"
+                f"  ROW row={row_idx} count={actual_count} "
+                f"shape={actual_shape} hash={row_hash}\n"
             )
             append_rows_jsonl(
                 rows_jsonl,

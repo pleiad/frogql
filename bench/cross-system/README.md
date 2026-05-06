@@ -207,13 +207,11 @@ subdir's `DIVERGENCES.md`.
 multi-IC runs:
 
 1. **Per-cell summary** — for each (params_row, system) pair, median
-   latency, p95, iter count, and the result_count. (Result shape is
-   verified separately; see section 5.)
+   latency, p95, iter count, and the result_count.
 2. **Result-count consistency** — for each params_row, do all systems
    agree on row count? With ORDER BY in the canonical toml the
    row contents are deterministic, so counts must match exactly
-   across systems. `WARN` flags disagreement, which means a
-   per-system query translation bug.
+   across systems. `WARN` flags disagreement.
 3. **Side-by-side latency** — one row per params_row, one column per
    system, median ms.
 4. **Memory footprint** — peak RSS during the query loop per
@@ -223,11 +221,17 @@ multi-IC runs:
    in the section header for caveats — graphqlite's RSS is small
    because SQLite uses mmap; data lives in OS page cache, not
    process RSS).
-5. **Shape verification** — per-(system, IC) pass/fail tally
-   against the toml's `expected_shape`. Catches per-column type
-   mismatches that count consistency alone misses (we hit one of
-   these with graphqlite's `friend.id` returning prefixed strings;
-   see `graphqlite/DIVERGENCES.md`).
+5. **Row-content equivalence** — per (IC, params_row), do all
+   systems produce byte-identical canonical rows? Each runner
+   sha256-hashes its iter-0 result and emits a `ROW row=N count=N
+   shape=<...> hash=<hex>` stderr line; this section compares the
+   hashes across systems. Mismatch → real per-system translation
+   bug; the section points at the sibling `<system>.icN.rows.jsonl`
+   files for diff. With ORDER BY in every toml the iter-0 result
+   is deterministic, so byte-equal blobs across systems mean
+   byte-equal results. Hash subsumes a per-column-type shape check
+   — any column-count or per-cell-type drift changes the hash, so
+   the older "Shape verification" section was retired.
 
 ## Measurement basis (read this before quoting numbers)
 
@@ -250,9 +254,12 @@ honestly.
   `DIVERGENCES.md`.
 - **Same warmup + iter counts.** Every system gets the same `--warmup`
   iters discarded before measurement and the same `--iters` measured.
-- **Same result-shape verification.** Every system's runner emits
-  `SHAPE row=N count=N shape=<sig>` lines compared against the toml's
-  `expected_shape`; `run_all.sh` tallies pass/fail per system.
+- **Same row-content oracle.** Every system's runner emits
+  `ROW row=N count=N shape=<sig> hash=<sha256-hex>` lines plus a
+  sibling `<system>.icN.rows.jsonl` envelope per params-row. The
+  hash is the cross-system equivalence check; with ORDER BY in
+  every toml the iter-0 results are deterministic, so byte-equal
+  rows → identical hashes.
 
 ### What's DIFFERENT across systems (and why)
 

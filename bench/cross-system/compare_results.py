@@ -29,18 +29,17 @@ Output (stdout):
    column per system, median latency.
 4. Memory footprint (only when a results dir is given) — peak RSS
    per (system, IC) parsed from the runners' stderr logs.
-5. Shape-verification summary (only when a results dir is given) —
-   per-system pass/fail counts based on `SHAPE row=N status=...`
-   lines in the stderr.log files. Catches per-column type
-   mismatches that result_count alone misses.
-6. Row-content equivalence (only when a results dir is given) —
+5. Row-content equivalence (only when a results dir is given) —
    per (IC, params_row), do all systems produce byte-identical
    canonical rows? Each runner sha256-hashes its iter-0 result
-   and emits `HASH row=N count=N hash=<hex>`; this section
-   compares hashes across systems. With ORDER BY in every IC's
-   toml the iter-0 result is deterministic, so any mismatch is a
-   real per-system translation bug — diff the sibling
-   `<system>.ic<n>.rows.jsonl` files to localize the drift.
+   and emits `ROW row=N count=N shape=<...> hash=<hex>`; this
+   section compares hashes across systems. With ORDER BY in every
+   IC's toml the iter-0 result is deterministic, so any mismatch
+   is a real per-system translation bug — diff the sibling
+   `<system>.ic<n>.rows.jsonl` files to localize the drift. Hash
+   subsumes the per-column-type shape check: any column-count or
+   per-cell-type drift changes the hash, so a separate shape-
+   verification section was retired.
 
 Usage:
     python compare_results.py <unified_csv> [<results_dir>]
@@ -101,8 +100,8 @@ def collect_rss(results_dir: Path) -> dict[str, tuple[float, float]]:
 def collect_row_hashes(
     results_dir: Path,
 ) -> dict[str, dict[tuple[str, int], tuple[int, str]]]:
-    """For each `<system>.ic<n>.stderr.log`, parse `HASH row=N count=M
-    hash=<hex>` lines emitted per params-row by the runner.
+    """For each `<system>.ic<n>.stderr.log`, parse `ROW row=N count=M
+    shape=<...> hash=<hex>` lines emitted per params-row by the runner.
 
     Returns: `{logical_name: {(query, params_row_idx): (count, hex)}}`.
     `query` is normalized as `IC<n>` (the same form the CSV uses)
@@ -116,7 +115,11 @@ def collect_row_hashes(
     is just the fast-equivalence check.
     """
     import re
-    hash_re = re.compile(r"^  HASH row=(\d+) count=(\d+) hash=([0-9a-f]+)$")
+    # Permissive: tolerate any whitespace+kv pairs between count and hash
+    # (currently `shape=...` from each runner; future fields would slot
+    # in without breaking the parser). The structural anchor is the
+    # `hash=<hex>` at the end.
+    row_re = re.compile(r"^  ROW row=(\d+) count=(\d+) .*hash=([0-9a-f]+)\s*$")
     name_re = re.compile(r"^(.+?)\.ic(\d+)$")
     out: dict[str, dict[tuple[str, int], tuple[int, str]]] = {}
     for log in sorted(results_dir.glob("*.stderr.log")):
@@ -130,7 +133,7 @@ def collect_row_hashes(
         try:
             with log.open(encoding="utf-8", errors="replace") as f:
                 for line in f:
-                    m = hash_re.match(line.rstrip("\r\n"))
+                    m = row_re.match(line.rstrip("\r\n"))
                     if not m:
                         continue
                     row_idx = int(m.group(1))
@@ -139,48 +142,6 @@ def collect_row_hashes(
                     out.setdefault(system, {})[(query, row_idx)] = (count, hex_hash)
         except OSError:
             continue
-    return out
-
-
-def collect_shape_status(results_dir: Path) -> dict[str, tuple[int, int, list[str]]]:
-    """For each `<name>.stderr.log` in `results_dir`, return the count of
-    `SHAPE row=N status=ok` lines and the list of failure reasons.
-    Returns: {logical_name: (ok_count, total_count, [unique_failure_reasons])}.
-    """
-    import re
-    shape_re = re.compile(r"^  SHAPE row=(\d+) count=\d+ shape=(\S+) status=(.+)$")
-    out: dict[str, tuple[int, int, list[str]]] = {}
-    for log in sorted(results_dir.glob("*.stderr.log")):
-        # Keep the full `<system>.icN` name so multi-IC runs surface
-        # per-(system, IC) pass/fail. Strip only the `.stderr` suffix.
-        name = log.stem.replace(".stderr", "")
-        ok = 0
-        total = 0
-        reasons: list[str] = []
-        try:
-            with log.open(encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    m = shape_re.match(line.rstrip("\r\n"))
-                    if not m:
-                        continue
-                    total += 1
-                    status = m.group(3)
-                    if status == "ok":
-                        ok += 1
-                    else:
-                        reasons.append(status)
-        except OSError:
-            continue
-        if total > 0:
-            # Deduplicate reasons to keep the summary readable.
-            unique = []
-            seen = set()
-            for r in reasons:
-                if r in seen:
-                    continue
-                seen.add(r)
-                unique.append(r)
-            out[name] = (ok, total, unique)
     return out
 
 
@@ -327,38 +288,7 @@ def main() -> int:
             print("  graphqlite/kuzu; ~9 MiB for gqlite's Rust binary), so")
             print("  the delta is roughly 'engine + DB state' across runners.")
 
-    # ---- 5. Shape verification (only when results_dir is given) ----
-    if results_dir is not None:
-        print()
-        print(f"=== Shape verification [{query_label}] (per-system pass/fail) ===")
-        print()
-        statuses = collect_shape_status(results_dir)
-        if not statuses:
-            print("  (no SHAPE lines found in *.stderr.log — nothing to check)")
-        else:
-            any_failed = False
-            for name in sorted(statuses):
-                ok, total, reasons = statuses[name]
-                if ok == total:
-                    print(f"  OK   {name}: {ok}/{total} rows passed")
-                else:
-                    any_failed = True
-                    print(f"  WARN {name}: {ok}/{total} rows passed; "
-                          f"{total - ok} failed")
-                    for r in reasons[:3]:
-                        print(f"         reason: {r}")
-                    if len(reasons) > 3:
-                        print(f"         ... and {len(reasons) - 3} more "
-                              "distinct reason(s)")
-            if any_failed:
-                print()
-                print("  WARN at least one system returned columns whose "
-                      "types don't match the canonical shape from "
-                      "bench/ldbc-queries/<ic>.toml. count consistency "
-                      "alone won't catch this; the per-system query "
-                      "translation needs fixing.")
-
-    # ---- 6. Row-content equivalence (hash) ----
+    # ---- 5. Row-content equivalence (hash) ----
     # The strongest oracle: every IC's toml has ORDER BY, so iter-0
     # rows are deterministic across systems. A byte-equal canonical
     # encoding → identical sha256 hashes. Mismatch = real

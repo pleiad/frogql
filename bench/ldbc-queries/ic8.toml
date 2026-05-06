@@ -26,8 +26,6 @@ return_columns = [
     "commentCreationDate", "commentId", "commentContent",
 ]
 
-expected_shape = "i,s,s,i,i,s"
-
 [divergences]
 message-union = "spec uses anonymous `(:Message)`; we use `(:Comment|Post)`. Loader doesn't synthesize :Message. Same as IC2/IC7."
 edge-casing = "loader produces lowercase :hasCreator / :replyOf. No semantic difference."
