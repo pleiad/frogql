@@ -77,18 +77,39 @@ WHERE c.creationDate <= $maxDate
 RETURN ... LIMIT 20
 ```
 
-So the cross-system comparison stays apples-to-apples on query
-shape — every system runs "one MATCH + relationship-type-implicit
-label constraint." Kuzu just expresses it more elegantly because
-the REL TABLE schema does the work that the other systems push into
-the WHERE clause or the parser.
+| System | Label disjunction form | Constraint expressed at... |
+|---|---|---|
+| gqlite (us) | `(c: Comment \| Post)` (native ISO GQL) | Query level |
+| graphqlite | `WHERE c:Comment OR c:Post` (Cypher 4.x dialect rejects pipe) | Query level |
+| auksys/gqlite | `WHERE c:Comment OR c:Post` (planner bug on pipe in multi-hop) | Query level |
+| **Kuzu** | **`(c)` unlabeled** | **Schema level (REL TABLE)** |
 
-| System | Label disjunction form |
-|---|---|
-| gqlite (us) | `(c: Comment \| Post)` (native form, our parser) |
-| graphqlite | `WHERE c:Comment OR c:Post` (their dialect rejects pipe) |
-| auksys/gqlite | `WHERE c:Comment OR c:Post` (planner bug on pipe in multi-hop) |
-| **Kuzu** | **`(c)` unlabeled, constrained by multi-typed `hasCreator` REL TABLE** |
+**This Kuzu form is a divergence, not equivalence.** Kuzu's query
+body doesn't say "node is Comment-or-Post"; it says "node is anything
+reachable via hasCreator". The Comment-or-Post restriction comes from
+our LOADER declaring `hasCreator` as `FROM Comment TO Person, FROM
+Post TO Person`. If we'd loaded hasCreator from any other label type
+(say Forum), Kuzu's query would happily match those too — gqlite's
+and graphqlite's wouldn't. The two queries are equivalent **only on
+our specific data load**.
+
+We accept this divergence because Kuzu has no syntactic alternative.
+Tested 2026-05:
+- `(m:Comment|Post)` pattern disjunction → parser error
+- `WHERE m:Comment OR m:Post` predicate → parser error (no runtime
+  label-predicate in Kuzu — Kuzu's data model has every node in
+  exactly one NODE TABLE, so the engine never needs to ask "what
+  label is this node" at query time)
+- `UNION ALL ... LIMIT N` (canonical Cypher form) → silently broken;
+  LIMIT applies per-branch only, not globally (returned 151K rows for
+  LIMIT 5 in our test)
+- `CALL { ... UNION ALL ... }` subquery wrap → no `CALL{}` grammar
+- `WITH ... after UNION ALL` → parser error
+
+The schema-level constraint is the only viable form for Kuzu IC2/IC8.
+Reviewers comparing Kuzu's IC2/IC8 numbers to gqlite/graphqlite's
+should keep this in mind: same logical work *on our data*, different
+constraint mechanism.
 
 ### 2. Multi-typed REL TABLE requires FROM/TO hints in COPY
 
