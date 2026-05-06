@@ -7,23 +7,28 @@ status = "implemented"
 
 params_file = "interactive_2_param.txt"
 param_columns = ["personId", "maxDate"]
+param_types = ["int", "int"]
 
 query = """
-MATCH (p: Person {id: {personId}})~[:knows]~(friend: Person)<-[:hasCreator]-(c: Comment | Post) \
-WHERE c.creationDate <= {maxDate} \
-RETURN friend.id, friend.firstName, friend.lastName, c.id, c.content, c.creationDate \
+MATCH (:Person {id: {personId}})~[:knows]~(friend:Person)<-[:hasCreator]-(message:Comment|Post)
+WHERE message.creationDate <= {maxDate}
+RETURN
+    friend.id AS personId,
+    friend.firstName AS personFirstName,
+    friend.lastName AS personLastName,
+    message.id AS postOrCommentId,
+    COALESCE(message.content, message.imageFile) AS postOrCommentContent,
+    message.creationDate AS postOrCommentCreationDate
+ORDER BY postOrCommentCreationDate DESC, postOrCommentId ASC
 LIMIT 20
 """
 
 return_columns = [
-    "friend.id", "friend.firstName", "friend.lastName",
-    "c.id", "c.content", "c.creationDate",
+    "personId", "personFirstName", "personLastName",
+    "postOrCommentId", "postOrCommentContent", "postOrCommentCreationDate",
 ]
 
-expected_shape = "i,s,s,i,n/s,i"
-
 [divergences]
-no-coalesce  = "spec returns coalesce(message.content, message.imageFile); we return c.content"
-no-order-by  = "spec ORDER BY message.creationDate DESC, message.id ASC; we don't sort"
-edge-casing  = "imported rel types are lowercase filename stems (:knows, :hasCreator); many IC writeups use different casing"
-message-union = "spec uses (message:Message) Cypher label inheritance; we use Comment | Post path-pattern alternation"
+message-union = "spec uses (message:Message); our LDBC loader doesn't synthesize a :Message superlabel, so we use the :Comment|Post ISO GQL alternation. Same logical query."
+edge-casing = "spec uses :KNOWS, :HAS_CREATOR (uppercase). Our loader produces :knows, :hasCreator (filename-stem convention). Loader-level."
+no-tointeger = "spec ORDER BY tie-break is `toInteger(postOrCommentId) ASC`. gqlite stores LDBC IDs as native int, so `postOrCommentId ASC` sorts identically. `toInteger()` isn't in the parser; not needed here."

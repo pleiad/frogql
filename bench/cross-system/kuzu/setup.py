@@ -338,27 +338,24 @@ def copy_edge_csv(
         )
 
 
-def load_knows_both_directions(conn, csv_dir: Path, work_dir: Path) -> None:
-    """LDBC stores each `knows` pair once. The bench's IC translations
-    use `(p)-[:knows]-(f)` undirected; Kuzu has no undirected REL TABLE
-    so we materialize both directions. Generate a reversed CSV under
-    work_dir (gitignored bench/data/ subtree) and COPY both files.
+def load_knows(conn, csv_dir: Path, work_dir: Path) -> None:
+    """LDBC stores each `knows` pair once; the relationship is
+    semantically undirected. We COPY only the forward CSV — Cypher's
+    `(p)-[:knows]-(f)` (any-direction match) finds each stored edge
+    in either direction → 1 row per pair, matching the spec.
+
+    An earlier version of this loader generated a reversed CSV and
+    COPYed both files. Combined with `-[:knows]-` matching each
+    stored edge in either direction, that yielded 2× rows per pair.
+    The cross-system row-content hash oracle caught the doubling
+    against gqlite (which uses an undirected primitive `~[:knows]~`
+    on single-direction storage). Same fix lives in
+    bench/cross-system/graphqlite/setup.py.
     """
+    _ = work_dir  # no longer needed; kept for callsite compatibility
     src = csv_dir / "dynamic" / "person_knows_person_0_0.csv"
-    work_dir.mkdir(parents=True, exist_ok=True)
-    rev = work_dir / "person_knows_person_reversed.csv"
-    with src.open(encoding="utf-8") as f_in, \
-         rev.open("w", encoding="utf-8", newline="") as f_out:
-        f_out.write(f_in.readline())  # header passes through
-        for line in f_in:
-            parts = line.rstrip("\n\r").split("|")
-            if len(parts) < 2:
-                continue
-            f_out.write("|".join([parts[1], parts[0]] + parts[2:]) + "\n")
     src_str = str(src).replace("\\", "/")
-    rev_str = str(rev).replace("\\", "/")
     conn.execute(f"COPY knows FROM '{src_str}' (DELIM='|', HEADER=true)")
-    conn.execute(f"COPY knows FROM '{rev_str}' (DELIM='|', HEADER=true)")
 
 
 # ---- Driver ----------------------------------------------------------
@@ -453,15 +450,12 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    # Materialize knows in both directions (LDBC stores each pair once;
-    # the bench's IC translations use undirected `(p)-[:knows]-(f)`).
-    print("    materializing knows in both directions...", file=sys.stderr)
+    # Forward-only :knows; `-[:knows]-` (any-direction match) finds
+    # each stored edge in either direction → 1 row per pair.
+    print("    loading knows (forward only)...", file=sys.stderr)
     t = time.perf_counter()
-    load_knows_both_directions(conn, csv_dir, work_dir)
-    print(
-        f"      knows (both): {time.perf_counter() - t:.2f}s",
-        file=sys.stderr,
-    )
+    load_knows(conn, csv_dir, work_dir)
+    print(f"      knows: {time.perf_counter() - t:.2f}s", file=sys.stderr)
 
     # Final stats
     n_nodes = conn.execute("MATCH (n) RETURN count(n)").get_next()[0]

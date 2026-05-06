@@ -3,20 +3,31 @@
 
 id = 6
 name = "Tag co-occurrence"
-status = "blocked"
-
-blocked_reason = """
-Ranked result: `ORDER BY` per spec.
-"""
-
-required_features = [
-    "ORDER BY",
-]
+status = "implemented"
 
 params_file = "interactive_6_param.txt"
 param_columns = ["personId", "tagName"]
 param_types = ["int", "string"]
+
 query = """
-IC06_QUERY_PLACEHOLDER
-Params (interactive_6_param.txt header): personId | tagName
+MATCH (person:Person {id: {personId}})~[:knows]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)<-[:hasCreator]-(post:Post)-[:hasTag]->(tag:Tag {name: {tagName}}),
+      (post)-[:hasTag]->(otherTag:Tag)
+WHERE otherTag <> tag
+RETURN
+    otherTag.name AS tagName,
+    COUNT(post) AS postCount
+GROUP BY otherTag.name
+ORDER BY postCount DESC, otherTag.name ASC
+LIMIT 10
 """
+
+return_columns = ["tagName", "postCount"]
+
+[divergences]
+group-by-raw-expr = "spec writes `GROUP BY tagName` referencing the RETURN-alias. gqlite's parser doesn't visit RETURN aliases when resolving GROUP BY items, so we use `GROUP BY otherTag.name` (raw expression). Same group key, same rows. Same divergence as IC5."
+comma-join-tag-otherTag = "spec separates `MATCH (...post...)-[:hasTag]->(tag:Tag {name})` and `MATCH (post)-[:hasTag]->(otherTag:Tag)` into two MATCH clauses, then `WHERE otherTag <> tag` references both. gqlite's typechecker doesn't propagate `tag` from the first to the second MATCH's WHERE scope, so we comma-join the two patterns into one MATCH (`A, B`). Logically identical join."
+order-by-raw-expr = "spec writes `ORDER BY postCount DESC, tagName ASC`. We keep `postCount` as the alias (alias resolution works for ORDER BY) but use `otherTag.name ASC` for the tie-break to match the GROUP BY rewrite. Identical sort key."
+edge-casing = "loader produces lowercase :knows, :hasCreator, :hasTag. Loader-level."
+bare-node-compare = "spec uses `WHERE person <> otherPerson` and `WHERE otherTag <> tag`. gqlite's `<>` on bound nodes is now first-class (PR #42); both compare verbatim."

@@ -6,17 +6,26 @@ name = "Single shortest path"
 status = "blocked"
 
 blocked_reason = """
-Single-source / single-pair shortest path or hop count between two `Person`
-nodes over `:knows` (no `shortestPath()`-style primitive yet).
+Re-audited 2026-05-06:
+  - `MATCH path = ANY SHORTEST (...)` — neither path naming
+    (`MATCH path = ...`) nor the `ANY SHORTEST` quantifier are in
+    the parser. Without these, `PATH_LENGTH(path)` has no path to
+    refer to.
+  - `CASE WHEN ... END` — also missing (used here for the IS NULL
+    branch: return -1 if unreachable).
 """
 
 required_features = [
-    "shortest-path (single-pair distance or path)",
+    "named path patterns (MATCH path = ...)",
+    "ANY SHORTEST quantifier",
+    "PATH_LENGTH path function",
+    "CASE WHEN ... END expression",
 ]
 
 params_file = "interactive_13_param.txt"
 param_columns = ["person1Id", "person2Id"]
 query = """
-IC13_QUERY_PLACEHOLDER
-Params (interactive_13_param.txt header): person1Id | person2Id
+MATCH path = ANY SHORTEST (p1:Person {id: $person1Id})~[:knows]~*(p2:Person {id: $person2Id})
+RETURN 
+    CASE WHEN PATH_LENGTH(path) IS NULL THEN -1 ELSE PATH_LENGTH(path) END AS shortestPathLength
 """

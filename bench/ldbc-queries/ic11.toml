@@ -3,20 +3,32 @@
 
 id = 11
 name = "Job referral"
-status = "blocked"
-
-blocked_reason = """
-Ranked result: `ORDER BY` per spec.
-"""
-
-required_features = [
-    "ORDER BY",
-]
+status = "implemented"
 
 params_file = "interactive_11_param.txt"
 param_columns = ["personId", "countryName", "workFromYear"]
 param_types = ["int", "string", "int"]
+
 query = """
-IC11_QUERY_PLACEHOLDER
-Params (interactive_11_param.txt header): personId | countryName | workFromYear
+MATCH (person:Person {id: {personId}})~[:knows]~{1, 2}(otherPerson:Person)-[workAt:workAt]->(company:Company)-[:isLocatedIn]->(country:Country)
+WHERE person <> otherPerson
+  AND country.name = {countryName}
+  AND workAt.workFrom < {workFromYear}
+RETURN
+    otherPerson.id AS personId,
+    otherPerson.firstName AS personFirstName,
+    otherPerson.lastName AS personLastName,
+    company.name AS organizationName,
+    workAt.workFrom AS organizationWorkFromYear
+ORDER BY organizationWorkFromYear ASC, personId ASC, organizationName DESC
+LIMIT 10
 """
+
+return_columns = ["personId", "personFirstName", "personLastName", "organizationName", "organizationWorkFromYear"]
+
+[divergences]
+no-cast = "spec ORDER BY tie-break is `CAST(personId AS INTEGER) ASC`. gqlite stores Person.id as native int, so plain `personId ASC` sorts identically. CAST isn't in the parser; not needed here. Same divergence as IC8/IC9."
+order-by-aliases = "spec writes `ORDER BY organizationWorkFromYear ASC, CAST(personId AS INTEGER) ASC, organizationName DESC`. We use the same RETURN aliases — gqlite's parser doesn't currently accept mixed alias-and-raw-expression ORDER BY items (panics with `Expr sort key reached post-projection path`), and using all aliases is the spec form anyway."
+sub-label = "spec uses `(:Company)` and `(:Country)`. The LDBC loader synthesizes these sub-labels from the `type` column on Organisation and Place (Company: 1575, University: 6380, Country: 111, City: 1343, Continent: 6 in SF0.1). No divergence at the query level."
+edge-casing = "loader produces lowercase :knows, :workAt, :isLocatedIn. Loader-level."
+bare-node-compare = "spec uses `WHERE person <> otherPerson`. gqlite's `<>` on bound nodes is now first-class (PR #42); we run the spec verbatim."

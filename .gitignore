@@ -11,6 +11,9 @@ __pycache__/
 # format under bench/data/cross-system/<system>/).
 /bench/cross-system/results/
 /bench/data/cross-system/
+# Internal bench (typecheck_bench) outputs: full.csv/txt + smoke.csv/txt
+# captured per local run. Regeneration is fast; not useful in git.
+/bench/internal-results/
 /python/.venv/
 /python/foo.py
 /python/pypi_token

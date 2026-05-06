@@ -1,26 +1,43 @@
-# Cross-system benchmark
+# Cross-system benchmark — the "external bench"
 
 Side-by-side latency for LDBC SNB Interactive Complex queries on
 gqlite + a set of external graph systems, against the same SF0.1
-dataset and the same substitution-parameter rows. Currently only IC2
-is wired up (it's the only IC whose `bench/ldbc-queries/ic<n>.toml`
-has `status = "implemented"`); more come online as the parser gains
-features. The runner accepts `--ic <n>`; each invocation runs one IC
+dataset and the same substitution-parameter rows. The runner
+accepts `--ics <list>`; each invocation runs the selected ICs
 across all (selected) systems.
 
-> **Reading this for the first time?** [`SURVEY.md`](SURVEY.md) is
-> the single-page narrative covering every system we evaluated
-> (working AND rejected), the architectural pattern across the
-> rejections, and what's intentionally out of scope. This README is
-> the operational doc — how to set up, run, and read the results.
+This is the **external** bench in the project's two-bench split:
+
+- **External bench** (this dir): how does gqlite compare to other
+  graph databases on user-facing query latency. The headline numbers.
+- **Internal bench** ([`bench/INTERNAL_BENCHMARK.md`](../INTERNAL_BENCHMARK.md)):
+  how do gqlite's own components (the typechecker today; potentially
+  other compiler microbenches later) perform in isolation. Engine
+  diagnostics, not engine comparisons.
+
+`src/bin/ldbc_bench.rs` predates this split — it ran LDBC ICs on
+gqlite alone with backend selection (`memory|lazy|disk`) and
+ablation env vars. Those were diagnostic; the cross-system bench's
+`--ablate` covers the part that matters for the external comparison
+(auto-indexes on/off). `ldbc_bench` stays in the tree but isn't the
+focus going forward.
+
+> **Reading this for the first time?** Three companion docs.
+> [`SURVEY.md`](SURVEY.md) — single-page narrative covering every
+> system we evaluated (working AND rejected), why we picked the ones
+> we did, what's intentionally out of scope. [`QUERIES.md`](QUERIES.md)
+> — the methodology behind every IC translation: fairness across
+> systems, spec-faithfulness in two dimensions, the divergence
+> taxonomy, the audit process. This README is the operational doc —
+> how to set up, run, and read the results.
 
 ## What gets compared
 
 | System | Subdir | Status |
 |---|---|---|
-| gqlite (lazy backend) | [`gqlite/`](gqlite/) | ✅ implemented |
-| GraphQLite — colliery-io/graphqlite (Cypher, SQLite-backed) | [`graphqlite/`](graphqlite/) | ✅ implemented |
-| Kuzu — kuzudb (vectorized columnar engine, CIDR 2023; pinned to v0.11.3 since [upstream archived 2025-10-10](https://github.com/kuzudb/kuzu)) | [`kuzu/`](kuzu/) | ✅ implemented; see [`kuzu/DIVERGENCES.md`](kuzu/DIVERGENCES.md) for the archival-status framing and the `UNION ALL` query-shape divergence |
+| gqlite (lazy backend) | [`gqlite/`](gqlite/) | ✅ implemented; see [`gqlite/KNOWN_ISSUES.md`](gqlite/KNOWN_ISSUES.md) for the `Comment \| Post` label-disjunction filter bug surfaced by the row-equivalence oracle (affects IC2/IC8/IC9 result rows; latency unaffected) |
+| GraphQLite — colliery-io/graphqlite (Cypher, SQLite-backed) | [`graphqlite/`](graphqlite/) | ✅ implemented; see [`graphqlite/DIVERGENCES.md`](graphqlite/DIVERGENCES.md) for the int64 RETURN-projection bug surfaced by the row-equivalence oracle |
+| Kuzu — kuzudb (vectorized columnar engine, CIDR 2023; pinned to v0.11.3 since [upstream archived 2025-10-10](https://github.com/kuzudb/kuzu)) | [`kuzu/`](kuzu/) | ✅ implemented; see [`kuzu/DIVERGENCES.md`](kuzu/DIVERGENCES.md) for the archival-status framing and the `label()`-predicate query-shape divergence (Kuzu's optimizer doesn't push `label()` through multi-hop joins → IC8 ~14s/iter, an honest finding) |
 | GraphLite — GraphLite-AI/GraphLite (ISO GQL, Sled-backed) | — | not yet integrated |
 | GQLite — webbery/gqlite (custom DSL, dead since April 2023) | — | not yet integrated |
 
@@ -120,25 +137,24 @@ bench/cross-system/run_all.sh --iters 30 --warmup 3
 # (captures real setup time; default skips setup if DB exists):
 bench/cross-system/run_all.sh --rebuild-setup
 
-# Ablation mode — gqlite runs in three modes (baseline + two
-# disabled-optimization variants), each emitted as a separate
-# `backend` label. Other systems run normally; the comparison
-# table renders the ablation modes as additional columns.
+# Ablation mode — gqlite runs twice (baseline + LTJ index-fold
+# disabled), each emitted with a distinct `backend` label. Other
+# systems run normally.
 bench/cross-system/run_all.sh --ablate
-bench/cross-system/run_all.sh --ablate --only gqlite   # ablation table only
+bench/cross-system/run_all.sh --ablate --only gqlite
 ```
 
-**Ablation mode** (`--ablate`): when set, gqlite runs four times
-across two axes (optimization knobs on the lazy backend, plus the
-disk backend as a separate storage shape) and emits per-iter rows
-with distinct backend labels:
+**Ablation mode** (`--ablate`): one knob, two modes:
 
-| Mode | Env / args | Tests |
+| Mode | Env | Tests |
 |---|---|---|
 | `lazy-baseline` | (none) | All optimizations on (LTJ + auto-indexes + index folding + TripleIndex cache) |
-| `lazy-no-auto-indexes` | `GQLITE_DISABLE_AUTO_INDEXES=1` | Skip the `(label, prop)` secondary-index auto-build at open |
-| `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | Disable LTJ index-driven constant folding (the pre-pass that turns `MATCH (n {id:X})` into a single-NodeId pre-bind) |
-| `disk-baseline` | `--backend disk` | DiskGraphStore (no LRU page cache, no secondary indexes today) — RAM/disk tradeoff vs lazy |
+| `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | Disable LTJ index-driven constant folding (the pre-pass that turns `MATCH (n {id:X})` into a single-NodeId pre-bind). The auto-indexes are still built; they just don't get used in the LTJ pre-pass. |
+
+This is the only gqlite-internal knob the external bench tracks —
+the surgical "did the LTJ fold optimization actually buy anything"
+comparison. Other gqlite ablations (lazy-vs-disk RAM tradeoff, full
+auto-index disable, etc.) belong in the internal bench, not here.
 
 The ablation modes show up as additional `backend` columns in
 `comparison.txt` so the same `compare_results.py` machinery
@@ -168,22 +184,30 @@ Output lands in `bench/cross-system/results/<timestamp>/`:
 - `skipped.log` — any (system, IC) pair that couldn't run
 - `run_info.txt` — timestamp, host, gqlite commit, etc.
 
-## The query
+## The queries
 
-The canonical IC2 lives in [`bench/ldbc-queries/ic2.toml`](../ldbc-queries/ic2.toml)
-— same TOML our regular `ldbc_bench` consumes. Per-system harnesses
-translate it into their native query syntax (`graphqlite/ic2.cypher`,
-`graphlite/ic2.gql`, etc.); each translation file's first comment
-points back to the toml.
+Each IC's canonical form lives in `bench/ldbc-queries/icN.toml` —
+the same TOML our regular `ldbc_bench` consumes. Per-system Cypher
+files (`graphqlite/icN.cypher`, `kuzu/icN.cypher`) are translations
+of the toml; each one's first comment-block points back to the toml.
 
-The toml documents divergences from the LDBC spec (no ORDER BY, no
-`coalesce`, lowercase edge labels) — these are gqlite parser
-limitations. Per the plan: every system runs **our** divergent IC2,
-not the spec version. That keeps the comparison apples-to-apples
-even though the other systems could technically execute spec IC2.
-The doc-pointer convention makes this honest: if you read
-`graphqlite/ic2.cypher` and wonder why it doesn't have `ORDER BY`,
-the comment-link explains.
+The shipped queries are **spec-faithful**: ORDER BY, COALESCE, label
+disjunction, bare-node compare, variable-length hops, sub-labels for
+Company/Country. Currently implemented: IC2, IC5, IC6, IC8, IC9, IC11.
+Still blocked by missing parser features: IC1, IC3, IC4, IC7, IC10,
+IC12, IC13, IC14 — each blocked toml's `blocked_reason` field lists
+the specific gaps.
+
+The methodology behind these translations — what fairness means
+across systems, how we taxonomize divergences (loader-level vs
+dialect-level vs parser-gap vs semantic), and how the audit proceeds
+when parser features land — is in [`QUERIES.md`](QUERIES.md). Read
+that if you want to extend the IC catalog or argue with a particular
+divergence.
+
+Per-system divergences spanning multiple ICs (Kuzu's `label()`
+predicate, graphqlite's `.ldbcId` accessor, etc.) are documented in
+each subdir's `DIVERGENCES.md`.
 
 ## Reading the results
 
@@ -191,13 +215,11 @@ the comment-link explains.
 multi-IC runs:
 
 1. **Per-cell summary** — for each (params_row, system) pair, median
-   latency, p95, iter count, and the result_count. (Result shape is
-   verified separately; see section 5.)
+   latency, p95, iter count, and the result_count.
 2. **Result-count consistency** — for each params_row, do all systems
-   agree on row count? Without ORDER BY the actual row contents
-   legitimately differ (each system picks a different N rows from
-   the full result), but counts must match. `WARN` flags
-   disagreement, which means a per-system query translation bug.
+   agree on row count? With ORDER BY in the canonical toml the
+   row contents are deterministic, so counts must match exactly
+   across systems. `WARN` flags disagreement.
 3. **Side-by-side latency** — one row per params_row, one column per
    system, median ms.
 4. **Memory footprint** — peak RSS during the query loop per
@@ -207,11 +229,17 @@ multi-IC runs:
    in the section header for caveats — graphqlite's RSS is small
    because SQLite uses mmap; data lives in OS page cache, not
    process RSS).
-5. **Shape verification** — per-(system, IC) pass/fail tally
-   against the toml's `expected_shape`. Catches per-column type
-   mismatches that count consistency alone misses (we hit one of
-   these with graphqlite's `friend.id` returning prefixed strings;
-   see `graphqlite/DIVERGENCES.md`).
+5. **Row-content equivalence** — per (IC, params_row), do all
+   systems produce byte-identical canonical rows? Each runner
+   sha256-hashes its iter-0 result and emits a `ROW row=N count=N
+   shape=<...> hash=<hex>` stderr line; this section compares the
+   hashes across systems. Mismatch → real per-system translation
+   bug; the section points at the sibling `<system>.icN.rows.jsonl`
+   files for diff. With ORDER BY in every toml the iter-0 result
+   is deterministic, so byte-equal blobs across systems mean
+   byte-equal results. Hash subsumes a per-column-type shape check
+   — any column-count or per-cell-type drift changes the hash, so
+   the older "Shape verification" section was retired.
 
 ## Measurement basis (read this before quoting numbers)
 
@@ -234,9 +262,12 @@ honestly.
   `DIVERGENCES.md`.
 - **Same warmup + iter counts.** Every system gets the same `--warmup`
   iters discarded before measurement and the same `--iters` measured.
-- **Same result-shape verification.** Every system's runner emits
-  `SHAPE row=N count=N shape=<sig>` lines compared against the toml's
-  `expected_shape`; `run_all.sh` tallies pass/fail per system.
+- **Same row-content oracle.** Every system's runner emits
+  `ROW row=N count=N shape=<sig> hash=<sha256-hex>` lines plus a
+  sibling `<system>.icN.rows.jsonl` envelope per params-row. The
+  hash is the cross-system equivalence check; with ORDER BY in
+  every toml the iter-0 results are deterministic, so byte-equal
+  rows → identical hashes.
 
 ### What's DIFFERENT across systems (and why)
 
@@ -256,43 +287,43 @@ honestly.
    plan caches keyed by query string — repeated calls don't re-parse.
    No system pays per-iter compile cost in the measurement.
 3. **Query shapes within IC2.** Each system uses its native idiom
-   for the label-disjunction step (`(c:Comment|Post)` for gqlite,
-   `WHERE c:Comment OR c:Post` for graphqlite, multi-typed REL TABLE
-   `(c)` unlabeled for Kuzu). Different shapes → different optimizer
-   paths within each engine, but logically the same query. We do NOT
-   constrain engines to a foreign shape. Per-system shape divergences
-   are listed in each subdir's `DIVERGENCES.md`.
-4. **No ORDER BY anywhere.** The canonical IC2 in
-   `bench/ldbc-queries/ic2.toml` drops `ORDER BY` because gqlite's
-   parser doesn't support it yet. We apply the same drop to every
-   system for fairness with our own engine. **This means our IC2
-   numbers are NOT comparable to published LDBC IC2 numbers** (which
-   include ORDER BY). Document this anywhere external comparison is
-   made.
-5. **Setup time.** Reported in `setup_times.txt` per system.
+   for the label-disjunction step: `(c:Comment|Post)` (gqlite, ISO
+   GQL pattern alternation), `WHERE c:Comment OR c:Post` (graphqlite,
+   Cypher 4.x label predicate), `WHERE label(c) IN ["Comment","Post"]`
+   (Kuzu, single-NODE-TABLE-per-node data model means it has no
+   `node:Label` predicate; the `label()` builtin is the closest
+   spec-faithful equivalent). All three are query-level predicates,
+   semantically equivalent. Per-system shape divergences are listed
+   in each subdir's `DIVERGENCES.md`.
+4. **Setup time.** Reported in `setup_times.txt` per system.
    gqlite's setup is user-managed (the `bench_setup` binary can't
    be invoked from MSYS bash on Windows due to UAC); it shows
    "user-managed" in the table. The other systems' setup is invoked
    directly by `run_all.sh` and timed.
-6. **Pinned versions.** kuzu is pinned to `0.11.3` (the upstream
+5. **Pinned versions.** kuzu is pinned to `0.11.3` (the upstream
    project archived 2025-10-10; the wheel is frozen and reproducible).
    graphqlite is pinned to `0.4.4`. gqlite is whatever the bench
    branch builds.
 
 ### What's INTENTIONALLY not measured
 
-- Memory footprint
-- Cold-cache (first-iter) vs warm-cache breakdown
+- Cold-cache (first-iter) vs warm-cache breakdown — every runner
+  takes `--warmup` iters and discards them; only the warm path is
+  in the per-iter CSV.
 - Multiple scale factors (SF1, SF10, SF100). LDBC SF0.1 is the
   smallest; we'd add larger SFs if a finding requires them.
-- Concurrency / multi-thread query throughput
+- Concurrency / multi-thread query throughput.
+
+(Memory footprint *is* measured — peak RSS during the query loop,
+in section 4 of `comparison.txt`. graphqlite's RSS is small because
+SQLite uses mmap; data lives in OS page cache, not process RSS, so
+the cross-system column isn't strictly apples-to-apples — see the
+section's own caveats.)
 
 ## Out of scope
 
 - Other ICs (IC1, IC3...IC14, BI*) — adding them is mechanical
   (new translation file per system) but defer until requested.
-- Spec-faithful IC2 (ORDER BY, coalesce) — needs gqlite parser
-  features first; revisit when those land.
 - LDBC-driver-mediated audited compliance — that's a different
   deliverable (~3 weeks more work). This bench is research-paper-tier.
 - CI integration — bench machines vary too much to threshold on.

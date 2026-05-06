@@ -7,18 +7,55 @@ name = "Trusted connection paths (v1)"
 status = "blocked"
 
 blocked_reason = """
-All shortest paths on `:knows` with interaction weights and aggregation along
-paths - beyond single-pair shortest path; needs dedicated path algorithms + surface.
+Re-audited 2026-05-06. The most-blocked IC of the catalog. Stack of
+gaps that all need parser work:
+  - `MATCH path = ALL SHORTEST (...)` — path naming + ALL SHORTEST
+    quantifier missing.
+  - `[n IN NODES(path) | n.id]` — list comprehension `[x IN list | f(x)]`
+    not in parser. Also `NODES(path)` would need path naming first.
+  - `VALUE { ... }` — inline subquery returning a scalar; not in parser.
+  - `COUNT(c) * 1.0`, `COUNT(c1) * 0.5` — `*` (multiplication) doesn't
+    tokenize.
+
+What's now fine (was wrong in the previous audit):
+  - `pe1 <> pe2` — bare-node `<>` works since PR #42.
+
+This query is structurally beyond the current parser surface; needs
+a roadmap rather than incremental tweaks.
 """
 
 required_features = [
-    "all-shortest-paths",
-    "weighted-path / path aggregation",
+    "named path patterns (MATCH path = ...)",
+    "ALL SHORTEST quantifier",
+    "PATH_LENGTH / NODES path functions",
+    "list comprehension `[x IN list | expr]`",
+    "VALUE { ... } scalar subquery",
+    "IN over list expressions",
+    "bare-node comparison",
+    "multiplication operator `*`",
 ]
 
 params_file = "interactive_14_param.txt"
 param_columns = ["person1Id", "person2Id"]
 query = """
-IC14_QUERY_PLACEHOLDER
-Params (interactive_14_param.txt header): person1Id | person2Id
+MATCH path = ALL SHORTEST (p1:Person {id: $person1Id})~[:knows]~*(p2:Person {id: $person2Id})
+RETURN 
+    [n IN NODES(path) | n.id] AS personIdsInPath,
+    SUM(
+        VALUE {
+            /* Case 1: Post replies */
+            MATCH (pe1:Person)~[:knows]~(pe2:Person)
+            WHERE pe1 IN NODES(path) AND pe2 IN NODES(path) AND pe1 <> pe2
+            OPTIONAL MATCH (pe1)<-[:hasCreator]-(c:Comment)-[:replyOf]->(po:Post)-[:hasCreator]->(pe2)
+            RETURN COUNT(c) * 1.0
+        } + 
+        VALUE {
+            /* Case 2: Comment replies */
+            MATCH (pe1:Person)~[:knows]~(pe2:Person)
+            WHERE pe1 IN NODES(path) AND pe2 IN NODES(path) AND pe1 <> pe2
+            OPTIONAL MATCH (pe1)<-[:hasCreator]-(c1:Comment)-[:replyOf]->(c2:Comment)-[:hasCreator]->(pe2)
+            RETURN COUNT(c1) * 0.5
+        }
+    ) AS pathWeight
+ORDER BY pathWeight DESC
 """

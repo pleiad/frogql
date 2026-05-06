@@ -183,16 +183,21 @@ Kuzu satisfies all three. Full archival framing in
   loader; multi-typed REL TABLEs (e.g. `hasCreator(FROM Comment TO
   Person, FROM Post TO Person)`) need `(FROM='X', TO='Y')` hints in
   COPY.
-- IC2's label-disjunction is expressed by leaving `(c)` unlabeled —
-  Kuzu's multi-typed REL TABLE constrains it implicitly. (We tried
-  `UNION ALL` first and ran into a `LIMIT`-after-`UNION ALL` semantic
-  trap; the unlabeled-`(c)` form is documented in
-  [`kuzu/DIVERGENCES.md`](kuzu/DIVERGENCES.md).)
+- IC2's label-disjunction is expressed via the `label()` builtin:
+  `WHERE label(message) IN ["Comment", "Post"]`. Kuzu's openCypher
+  rejects pattern disjunction (`(c:Comment|Post)`) and the
+  `node:Label` predicate, so this is the spec-faithful query-level
+  form; details and the rejected alternatives (`UNION ALL` LIMIT
+  trap, the schema-constrained form) are in
+  [`kuzu/DIVERGENCES.md`](kuzu/DIVERGENCES.md).
 - Use the documented `Connection.execute(query_str, params)` API,
   not `PreparedStatement` (officially deprecated in 0.11.x).
 
-Setup time at SF0.1: 2.67 s for full load + MVAs.
-IC2 latency: 6.52 ms cross-row median (canonical run).
+Setup time at SF0.1: ~2.7 s for full load + MVAs.
+IC2 latency: ~520 ms cross-row median on the spec-faithful
+`label()` form (Kuzu 0.11.3's optimizer doesn't push `label()`
+through joins). IC8 ~14 s/iter for the same reason — an honest
+finding, not a number to mask.
 Peak RSS over baseline: ~108 MiB.
 
 ---

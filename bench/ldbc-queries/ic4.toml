@@ -6,18 +6,33 @@ name = "New topics"
 status = "blocked"
 
 blocked_reason = """
-Anti-join: in-window friend posts with a tag, excluding tags that ever appeared on
-any friend's post before the window. Ranked result: `ORDER BY`.
+Re-audited 2026-05-06. Most of the query parses (NOT EXISTS works,
+ORDER BY works, COUNT over bare nodes works post-PR-#42). What
+remains:
+  - `$startDate + DURATION({days: $durationDays})` — `DURATION`
+    literal not in parser.
+  - Inlining as `$startDate + $durationDays * 86400000` doesn't help
+    because `*` (multiplication) doesn't tokenize either. Need
+    substitution-time pre-computation of the millis offset (turn the
+    second WHERE bound into a precomputed integer).
 """
 
 required_features = [
-    "graph NOT EXISTS / existential subquery",
-    "ORDER BY",
+    "DURATION literal (or substitution-time pre-computation)",
+    "multiplication operator `*`",
 ]
 
 params_file = "interactive_4_param.txt"
 param_columns = ["personId", "startDate", "endDate"]
 query = """
-IC04_QUERY_PLACEHOLDER
-Params (interactive_4_param.txt header): personId | startDate | endDate
+MATCH (person:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(post:Post)-[:hasTag]->(tag:Tag)
+WHERE post.creationDate >= $startDate AND post.creationDate < $startDate + DURATION({days: $durationDays})
+  AND NOT EXISTS {
+      MATCH (friend)<-[:hasCreator]-(post2:Post)-[:hasTag]->(tag)
+      WHERE post2.creationDate < $startDate
+  }
+RETURN tag.name AS tagName, COUNT(post) AS postCount
+GROUP BY tagName
+ORDER BY postCount DESC, tagName ASC
+LIMIT 10
 """

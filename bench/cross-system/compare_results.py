@@ -27,10 +27,19 @@ Output (stdout):
    with WARN.
 3. Side-by-side latency comparison — one row per params_row, one
    column per system, median latency.
-4. Shape-verification summary (only when a results dir is given) —
-   per-system pass/fail counts based on `SHAPE row=N status=...`
-   lines in the stderr.log files. Catches per-column type
-   mismatches that result_count alone misses.
+4. Memory footprint (only when a results dir is given) — peak RSS
+   per (system, IC) parsed from the runners' stderr logs.
+5. Row-content equivalence (only when a results dir is given) —
+   per (IC, params_row), do all systems produce byte-identical
+   canonical rows? Each runner sha256-hashes its iter-0 result
+   and emits `ROW row=N count=N shape=<...> hash=<hex>`; this
+   section compares hashes across systems. With ORDER BY in every
+   IC's toml the iter-0 result is deterministic, so any mismatch
+   is a real per-system translation bug — diff the sibling
+   `<system>.ic<n>.rows.jsonl` files to localize the drift. Hash
+   subsumes the per-column-type shape check: any column-count or
+   per-cell-type drift changes the hash, so a separate shape-
+   verification section was retired.
 
 Usage:
     python compare_results.py <unified_csv> [<results_dir>]
@@ -88,45 +97,51 @@ def collect_rss(results_dir: Path) -> dict[str, tuple[float, float]]:
     return out
 
 
-def collect_shape_status(results_dir: Path) -> dict[str, tuple[int, int, list[str]]]:
-    """For each `<name>.stderr.log` in `results_dir`, return the count of
-    `SHAPE row=N status=ok` lines and the list of failure reasons.
-    Returns: {logical_name: (ok_count, total_count, [unique_failure_reasons])}.
+def collect_row_hashes(
+    results_dir: Path,
+) -> dict[str, dict[tuple[str, int], tuple[int, str]]]:
+    """For each `<system>.ic<n>.stderr.log`, parse `ROW row=N count=M
+    shape=<...> hash=<hex>` lines emitted per params-row by the runner.
+
+    Returns: `{logical_name: {(query, params_row_idx): (count, hex)}}`.
+    `query` is normalized as `IC<n>` (the same form the CSV uses)
+    inferred from the log's filename. compare's caller groups across
+    systems by `(query, params_row_idx)` and flags any mismatch.
+
+    Why a hash and not full rows: with ORDER BY in every IC's toml the
+    iter-0 result is deterministic, so byte-equal canonical text →
+    identical sha256 across systems. The full text is in the sibling
+    `<system>.ic<n>.rows.jsonl` for diff on mismatch — the hash here
+    is just the fast-equivalence check.
     """
     import re
-    shape_re = re.compile(r"^  SHAPE row=(\d+) count=\d+ shape=(\S+) status=(.+)$")
-    out: dict[str, tuple[int, int, list[str]]] = {}
+    # Permissive: tolerate any whitespace+kv pairs between count and hash
+    # (currently `shape=...` from each runner; future fields would slot
+    # in without breaking the parser). The structural anchor is the
+    # `hash=<hex>` at the end.
+    row_re = re.compile(r"^  ROW row=(\d+) count=(\d+) .*hash=([0-9a-f]+)\s*$")
+    name_re = re.compile(r"^(.+?)\.ic(\d+)$")
+    out: dict[str, dict[tuple[str, int], tuple[int, str]]] = {}
     for log in sorted(results_dir.glob("*.stderr.log")):
-        # Keep the full `<system>.icN` name so multi-IC runs surface
-        # per-(system, IC) pass/fail. Strip only the `.stderr` suffix.
         name = log.stem.replace(".stderr", "")
-        ok = 0
-        total = 0
-        reasons: list[str] = []
+        m_name = name_re.match(name)
+        if not m_name:
+            # Non-(system).ic(N) shape — skip; we can't tell which IC.
+            continue
+        system = m_name.group(1)
+        query = f"IC{m_name.group(2)}"
         try:
             with log.open(encoding="utf-8", errors="replace") as f:
                 for line in f:
-                    m = shape_re.match(line.rstrip("\r\n"))
+                    m = row_re.match(line.rstrip("\r\n"))
                     if not m:
                         continue
-                    total += 1
-                    status = m.group(3)
-                    if status == "ok":
-                        ok += 1
-                    else:
-                        reasons.append(status)
+                    row_idx = int(m.group(1))
+                    count = int(m.group(2))
+                    hex_hash = m.group(3)
+                    out.setdefault(system, {})[(query, row_idx)] = (count, hex_hash)
         except OSError:
             continue
-        if total > 0:
-            # Deduplicate reasons to keep the summary readable.
-            unique = []
-            seen = set()
-            for r in reasons:
-                if r in seen:
-                    continue
-                seen.add(r)
-                unique.append(r)
-            out[name] = (ok, total, unique)
     return out
 
 
@@ -273,36 +288,135 @@ def main() -> int:
             print("  graphqlite/kuzu; ~9 MiB for gqlite's Rust binary), so")
             print("  the delta is roughly 'engine + DB state' across runners.")
 
-    # ---- 5. Shape verification (only when results_dir is given) ----
+    # ---- 5. Row-content equivalence (hash) ----
+    # The strongest oracle: every IC's toml has ORDER BY, so iter-0
+    # rows are deterministic across systems. A byte-equal canonical
+    # encoding → identical sha256 hashes. Mismatch = real
+    # translation drift (a wrong column, a missing predicate, an
+    # ordering bug).
+    #
+    # Section is keyed by (query, params_row) — for each such cell we
+    # require ALL systems that have CSV measurements to also have ROW
+    # hashes; a system present in the CSV but missing from the ROW
+    # log is a partial-run failure (runner crashed mid-IC, stderr
+    # buffer lost, harness change skipped emit). Surface it as MISSING
+    # rather than silently reporting "1/1 systems agree".
     if results_dir is not None:
         print()
-        print(f"=== Shape verification [{query_label}] (per-system pass/fail) ===")
+        print("=== Row-content equivalence (per (IC, params_row), all systems) ===")
         print()
-        statuses = collect_shape_status(results_dir)
-        if not statuses:
-            print("  (no SHAPE lines found in *.stderr.log — nothing to check)")
+        per_system = collect_row_hashes(results_dir)
+
+        # Set of systems we EXPECT to see a hash for, derived from
+        # the CSV column 2 grouped by query. A system listed here but
+        # missing from per_system[s][(q, r)] is flagged.
+        expected_systems_per_query: dict[str, set[str]] = {}
+        for (q, _r, sys_name), _samples in by_cell.items():
+            expected_systems_per_query.setdefault(q, set()).add(sys_name)
+
+        if not per_system:
+            print("  (no ROW lines found in *.stderr.log — nothing to check.")
+            print("   The expected stderr line is `  ROW row=N count=N "
+                  "shape=<sig> hash=<hex>`;")
+            print("   verify each runner's stderr.log has it. Older binaries"
+                  " that emit SHAPE/HASH separately are not parsed here.)")
         else:
-            any_failed = False
-            for name in sorted(statuses):
-                ok, total, reasons = statuses[name]
-                if ok == total:
-                    print(f"  OK   {name}: {ok}/{total} rows passed")
-                else:
-                    any_failed = True
-                    print(f"  WARN {name}: {ok}/{total} rows passed; "
-                          f"{total - ok} failed")
-                    for r in reasons[:3]:
-                        print(f"         reason: {r}")
-                    if len(reasons) > 3:
-                        print(f"         ... and {len(reasons) - 3} more "
-                              "distinct reason(s)")
-            if any_failed:
-                print()
-                print("  WARN at least one system returned columns whose "
-                      "types don't match the canonical shape from "
-                      "bench/ldbc-queries/<ic>.toml. count consistency "
-                      "alone won't catch this; the per-system query "
-                      "translation needs fixing.")
+            # Index by (query, row) → {system: (count, hash)}.
+            by_cell_h: dict[tuple[str, int], dict[str, tuple[int, str]]] = {}
+            for sys_name, per_row in per_system.items():
+                for (q, r), (count, h) in per_row.items():
+                    by_cell_h.setdefault((q, r), {})[sys_name] = (count, h)
+
+            # Map a CSV `backend` column or a stderr-log filename
+            # stem to the runner's logical system identity. The CSV
+            # column and the stderr filename use DIFFERENT identifiers
+            # for the same runner: e.g. graphqlite's CSV backend is
+            # `graphqlite-cypher` but its stderr filename is
+            # `graphqlite.icN.stderr.log` → both must normalize to
+            # `graphqlite` so the missing-system check sees them as
+            # the same runner. gqlite ablation modes are similar:
+            # CSV `lazy-no-fold` and stderr `gqlite.icN.stderr.log`
+            # both map to `gqlite` (one physical run rewrites the CSV
+            # column post-hoc; the stderr stays with the runner name).
+            def _normalize(s: str) -> str:
+                if s in (
+                    "lazy",
+                    "lazy-baseline",
+                    "lazy-no-fold",
+                    "disk",
+                    "disk-baseline",
+                    "memory",
+                ):
+                    return "gqlite"
+                if s == "graphqlite-cypher":
+                    return "graphqlite"
+                if s == "kuzu-cypher":
+                    return "kuzu"
+                return s
+
+            queries_h = sorted({q for (q, _) in by_cell_h})
+            mismatches_total = 0
+            agree_total = 0
+            missing_total = 0
+            for q in queries_h:
+                cells = sorted(
+                    [(r, vmap) for (qq, r), vmap in by_cell_h.items() if qq == q]
+                )
+                print(f"  [{q}]")
+                expected_norm = {_normalize(s) for s in expected_systems_per_query.get(q, set())}
+                for r, vmap in cells:
+                    actual_norm = {_normalize(s) for s in vmap.keys()}
+                    missing = expected_norm - actual_norm
+                    hashes = {h for (_c, h) in vmap.values()}
+
+                    if missing:
+                        missing_total += 1
+                        print(f"    MISS row {r}: hashes from "
+                              f"{sorted(actual_norm)} but CSV has "
+                              f"measurements from {sorted(expected_norm)}; "
+                              f"missing: {sorted(missing)}. The runner(s) "
+                              f"likely crashed mid-IC or never emitted ROW "
+                              f"lines — check the stderr.log.")
+                    elif len(hashes) == 1:
+                        # All expected systems agree → strongest possible signal.
+                        agree_total += 1
+                        h = next(iter(hashes))
+                        n_systems = len(vmap)
+                        print(f"    OK   row {r}: {n_systems}/{n_systems} "
+                              f"systems agree (hash={h[:12]}...)")
+                    else:
+                        mismatches_total += 1
+                        print(f"    WARN row {r}: HASH DISAGREES across systems")
+                        for s in sorted(vmap):
+                            count, h = vmap[s]
+                            print(f"           {s}: count={count} "
+                                  f"hash={h[:12]}...")
+                        print(f"           diff actual rows in:")
+                        for s in sorted(vmap):
+                            print(f"             {results_dir}/{s}.{q.lower()}.rows.jsonl")
+            print()
+            total_cells = agree_total + mismatches_total + missing_total
+            if mismatches_total == 0 and missing_total == 0:
+                print(f"  OK row-content equivalence: {agree_total}/{total_cells} "
+                      f"(IC, params_row) cells agreed across systems.")
+            else:
+                parts = []
+                if mismatches_total:
+                    parts.append(f"{mismatches_total} disagreed")
+                if missing_total:
+                    parts.append(f"{missing_total} had missing-system hashes")
+                print(f"  WARN row-content equivalence: {'; '.join(parts)}; "
+                      f"{agree_total} agreed (of {total_cells} total cells).")
+                if mismatches_total:
+                    print("  Mismatches: with ORDER BY in the toml the iter-0 "
+                          "results are deterministic, so any disagreement is "
+                          "a real per-system translation bug — diff the listed")
+                    print("  *.rows.jsonl files to see which row/cell drifted.")
+                if missing_total:
+                    print("  Missing-system hashes mean a runner produced "
+                          "latency CSV rows but no ROW stderr line for that "
+                          "(IC, row); usually a mid-IC crash. Check the "
+                          "*.stderr.log for the missing system.")
 
     return 0
 

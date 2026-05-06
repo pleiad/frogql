@@ -19,13 +19,21 @@
 #       [--only gqlite,kuzu]          # subset of systems
 #       [--rebuild-setup]             # force per-system setup re-run
 #                                     # (default: skip setup if DB exists)
-#       [--ablate]                    # run gqlite in 4 modes: lazy
-#                                     # baseline, GQLITE_DISABLE_AUTO_INDEXES=1,
-#                                     # GQLITE_DISABLE_INDEX_FOLD=1, and
-#                                     # --backend disk. Each mode emits
-#                                     # its own per-iter CSV with a
-#                                     # distinct backend label. Other
-#                                     # systems run normally.
+#       [--ablate]                    # run gqlite in 2 modes: baseline
+#                                     # (all opts on) and
+#                                     # GQLITE_DISABLE_INDEX_FOLD=1.
+#                                     # The fold pass turns
+#                                     # `MATCH (n {id:X})` into a single
+#                                     # NodeId pre-bind via the secondary
+#                                     # index. With it disabled, the
+#                                     # variable enters the LTJ join
+#                                     # normally and gets scanned. This
+#                                     # is the surgical "did the LTJ
+#                                     # optimization buy anything"
+#                                     # comparison. Other gqlite
+#                                     # ablations (lazy-vs-disk
+#                                     # backend, etc.) belong in the
+#                                     # internal bench, not here.
 #
 # Output: bench/cross-system/results/<timestamp>/
 #   setup_times.txt         metadata: per-system setup wall time
@@ -48,7 +56,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RESULTS_ROOT="$SCRIPT_DIR/results"
 
-ICS_ARG="2"
+ICS_ARG="2,5,6,8,9,11"   # default: every IC currently flipped to status="implemented" in bench/ldbc-queries/. Keep this in sync as ICs come online.
 ITERS=10
 WARMUP=2
 ONLY=""
@@ -120,47 +128,39 @@ echo "  iters:   $ITERS"
 echo "  warmup:  $WARMUP"
 echo "  systems: ${SYSTEMS[*]}"
 [[ $REBUILD -eq 1 ]] && echo "  setup:   --rebuild-setup (force fresh per-system load)"
-[[ $ABLATE -eq 1 ]] && echo "  ablate:  --ablate (gqlite runs in 4 modes: lazy-baseline, no-auto-indexes, no-fold, disk-baseline)"
+[[ $ABLATE -eq 1 ]] && echo "  ablate:  --ablate (gqlite: baseline + lazy-no-fold)"
 echo ""
 
 # ---- gqlite ablation modes -----------------------------------------
 #
-# When --ablate is set, gqlite runs once per mode below. Modes vary
-# along two axes:
-#   1. ABLATION_ENV — inline env vars passed to ldbc_bench. Used for
-#      GQLITE_DISABLE_* knobs that turn off individual optimizations
-#      while keeping the same backend.
-#   2. ABLATION_ARGS — extra args appended to gqlite/run.sh. Used for
-#      backend selection (lazy vs disk — different RAM/disk tradeoff,
-#      not an optimization flag).
-# Per-mode rows are tagged with a distinct backend label (rewritten
-# via awk after ldbc_bench finishes). compare_results.py surfaces the
-# modes as separate columns in the latency table — the ablation result
-# drops out of the existing comparison machinery without any
-# compare_results.py changes.
+# When --ablate is set, gqlite runs in two modes: baseline (all opts
+# on) and no-fold (GQLITE_DISABLE_INDEX_FOLD=1). The fold pass turns
+# `MATCH (n {id:X})` into a single-NodeId pre-bind via the secondary
+# index; without it the variable enters the LTJ join normally and
+# gets scanned. This is the surgical "did the LTJ optimization buy
+# anything" comparison — and it's the only gqlite-internal knob the
+# external bench cares about. Two modes is all we need for the
+# headline.
 #
-# (TripleIndex disable would be a fifth mode but no env var exists
-# for it today; would need a small ldbc_bench / Runtime change.
-# Documented as a future ablation in SURVEY.md.)
+# Other gqlite-internal characterizations (lazy-vs-disk backend, the
+# auto-index build itself, TripleIndex cache, ...) belong in the
+# internal bench (bench/typecheck-bench, soon-to-be-broader). The
+# external bench's job is to compare gqlite to other systems on
+# user-facing query latency; gqlite-internal sub-knob ablations are
+# off-charter here.
 declare -A ABLATION_LABELS=(
     [baseline]="lazy-baseline"
-    [no-auto-indexes]="lazy-no-auto-indexes"
     [no-fold]="lazy-no-fold"
-    [disk]="disk-baseline"
 )
 declare -A ABLATION_ENV=(
     [baseline]=""
-    [no-auto-indexes]="GQLITE_DISABLE_AUTO_INDEXES=1"
     [no-fold]="GQLITE_DISABLE_INDEX_FOLD=1"
-    [disk]=""
 )
 declare -A ABLATION_ARGS=(
     [baseline]=""
-    [no-auto-indexes]=""
     [no-fold]=""
-    [disk]="--backend disk"
 )
-ABLATION_MODES=(baseline no-auto-indexes no-fold disk)
+ABLATION_MODES=(baseline no-fold)
 
 # ---- Per-system loop ------------------------------------------------
 
@@ -385,25 +385,6 @@ echo "  unified: $unified ($(wc -l <"$unified") lines, $produced per-(sys,ic) CS
 echo ""
 echo "--- Setup times ---"
 column -t "$SETUP_TIMES_FILE" 2>/dev/null || cat "$SETUP_TIMES_FILE"
-
-# ---- Shape verification ---------------------------------------------
-
-echo ""
-echo "--- Shape verification ---"
-for log in "$OUT_DIR"/*.stderr.log; do
-    [[ -f "$log" ]] || continue
-    name=$(basename "$log" .stderr.log)
-    total=$(grep -c "^  SHAPE row=" "$log" || true)
-    ok=$(grep -c "^  SHAPE row=.* status=ok$" "$log" || true)
-    if [[ "$total" -eq 0 ]]; then
-        continue
-    fi
-    if [[ "$ok" -eq "$total" ]]; then
-        echo "  $name: $ok/$total rows passed"
-    else
-        echo "  $name: $ok/$total rows passed; $((total - ok)) failed (see $log)"
-    fi
-done
 
 # ---- Comparison -----------------------------------------------------
 

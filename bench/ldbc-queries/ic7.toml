@@ -1,23 +1,70 @@
 # LDBC SNB Interactive Complex Read 7 — Recent likers.
 # Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-07.yaml
+# Reference Cypher: https://github.com/ldbc/ldbc_snb_interactive_v1_impls/blob/main/cypher/queries/interactive-complex-7.cypher
 
 id = 7
 name = "Recent likers of a person's messages"
 status = "blocked"
 
 blocked_reason = """
-Latest like per liker: global `ORDER BY` is not enough; need per-group top row
-(or equivalent subquery / window).
+Re-audited 2026-05-06. IC7 requires "the LATEST like per liker" — an arg-max per group. The
+canonical Cypher uses `WITH ... ORDER BY ... head(collect(...))` for
+this; ISO GQL has no `WITH` or `collect`, but it does provide a
+`<value query expression>` (`VALUE { MATCH ... ORDER BY ... LIMIT 1 }`)
+that produces the same arg-max with one returned record per liker.
+
+Earlier we tried shipping a "simplified" IC7 that dropped the
+arg-max entirely — returning one row per (liker, message, like)
+tuple instead of one row per liker. NotebookLLM (operating as the
+spec authority) flagged this correctly: a single liker who liked
+five messages would appear five times, and `LIMIT 20` then returned
+"the 20 most-recent likes", not "the 20 most-recent likers". That's
+not a simplification; it's a different query. Reverted.
+
+The canonical ISO GQL translation is below. gqlite's parser is
+missing every primitive it needs:
+"""
+
+# The faithful ISO GQL translation, kept here as the target shape so
+# the parser-feature work has a precise destination. Do NOT mark this
+# `query` field for execution — `status = "blocked"` keeps it out of
+# the runner.
+query = """
+MATCH (person:Person {id: $personId})<-[:hasCreator]-(:Comment|Post)<-[:likes]-(liker:Person)
+RETURN
+    liker.id AS personId,
+    liker.firstName AS personFirstName,
+    liker.lastName AS personLastName,
+    VALUE {
+        MATCH (person)<-[:hasCreator]-(m:Comment|Post)<-[l:likes]-(liker)
+        RETURN RECORD {
+            likeCreationDate: l.creationDate,
+            commentOrPostId: m.id,
+            commentOrPostContent: COALESCE(m.content, m.imageFile),
+            minutesLatency: CAST(FLOOR(CAST(l.creationDate - m.creationDate AS FLOAT) / 60000.0) AS INTEGER)
+        } AS latest
+        ORDER BY latest.likeCreationDate DESC, latest.commentOrPostId ASC
+        LIMIT 1
+    } AS latestLike,
+    NOT EXISTS { MATCH (liker)~[:knows]~(person) } AS isNew
+GROUP BY personId, personFirstName, personLastName, isNew
+ORDER BY latestLike.likeCreationDate DESC, personId ASC
+LIMIT 20
 """
 
 required_features = [
-    "ORDER BY",
-    "per-group latest / argmax (or windows / subqueries)",
+    "VALUE { ... } scalar/record subquery (ISO GQL <value query expression>)",
+    "RECORD { k: v, ... } literal in expressions",
+    "CAST(... AS INTEGER) / CAST(... AS FLOAT) type conversions",
+    "FLOOR() builtin",
+    "division operator `/`",
+    "GROUP BY referencing RETURN-clause aliases",
 ]
 
 params_file = "interactive_7_param.txt"
 param_columns = ["personId"]
-query = """
-IC07_QUERY_PLACEHOLDER
-Params (interactive_7_param.txt header): personId
-"""
+param_types = ["int"]
+
+[divergences]
+message-union = "spec uses (message:Message); we use (:Comment|Post). Loader-level."
+edge-casing = "loader produces lowercase :knows / :hasCreator / :likes. Spec uses uppercase. No semantic difference."
