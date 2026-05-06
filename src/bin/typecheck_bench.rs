@@ -23,6 +23,8 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
+use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+
 use gqlrust::model::graph_access::GraphAccess;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::store::disk::DiskGraphStore;
@@ -32,6 +34,7 @@ use gqlrust::typing::variable_type::Schema;
 // ---------------------------------------------------------------------------
 
 const SF01_GDB: &str = "bench/data/ldbc-sf0.1.gdb";
+const SF03_GDB: &str = "bench/data/ldbc-sf0.3.gdb";
 
 // Default of 3 matches the LDBC bench. The slowest doomed cases
 // take ~50s/iter on the unchecked path, so 30 iters would be a
@@ -283,12 +286,12 @@ fn ensure_dataset() {
 
 fn print_usage(prog: &str) {
     eprintln!(
-        "Usage: {prog} [--iters N] [--warmup N]\n\
+        "Usage: {prog} [--iters N] [--warmup N] [--sf 0.1|0.3]\n\
          \n\
-         Defaults: --iters {DEFAULT_ITERS}  --warmup {DEFAULT_WARMUP}\n\
+         Defaults: --iters {DEFAULT_ITERS}  --warmup {DEFAULT_WARMUP}  --sf 0.1\n\
          \n\
-         Dataset: bench/data/ldbc-sf0.1.gdb (run ./target/release/bench_setup\n\
-         once to build it)."
+         Datasets: bench/data/ldbc-sf{{0.1,0.3}}.gdb. SF0.1 is auto-built\n\
+         by bench_setup; SF0.3 must be built separately."
     );
 }
 
@@ -296,6 +299,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut iters = DEFAULT_ITERS;
     let mut warmup = DEFAULT_WARMUP;
+    let mut sf = "0.1".to_string();
     let mut i = 1;
     let need_value = |i: usize, flag: &str| -> &str {
         if i + 1 >= args.len() {
@@ -320,6 +324,10 @@ fn main() {
                 });
                 i += 2;
             }
+            "--sf" => {
+                sf = need_value(i, "--sf").to_string();
+                i += 2;
+            }
             "-h" | "--help" => {
                 print_usage(&args[0]);
                 return;
@@ -336,33 +344,69 @@ fn main() {
         std::process::exit(1);
     }
 
-    ensure_dataset();
+    let gdb_path: &str = match sf.as_str() {
+        "0.1" => SF01_GDB,
+        "0.3" => SF03_GDB,
+        other => {
+            eprintln!("--sf must be 0.1 or 0.3, got {other:?}");
+            std::process::exit(1);
+        }
+    };
+
+    if sf == "0.1" {
+        ensure_dataset();
+    } else if !Path::new(gdb_path).exists() {
+        eprintln!("missing {gdb_path} for SF{sf}; build it first via bench_setup or import.");
+        std::process::exit(1);
+    }
 
     println!("backend;db;category;case;phase;iter;ns;flags");
-    let db_path = Path::new(SF01_GDB);
-
-    // Open lazy first so we have the schema (DiskGraphStore doesn't
-    // own a catalog; the schema is data-shape-derived and identical
-    // across backends, so reusing the lazy store's active schema for
-    // the disk pass is correct).
+    let db_path = Path::new(gdb_path);
     let path_str = db_path.display().to_string();
+
+    // RSS sampler. Snapshot baseline now (pre-open) so deltas
+    // reflect engine + DB state, not Rust runtime + sysinfo overhead.
+    let mut sys = System::new_with_specifics(
+        RefreshKind::new().with_processes(ProcessRefreshKind::new().with_memory()),
+    );
+    let rss_baseline = rss_mb(&mut sys);
+    eprintln!("RSS baseline: {rss_baseline:.1} MiB");
+
+    // Capture .gdb size as a meta row (same value regardless of
+    // backend; we still emit per-backend for join-ability downstream).
+    let db_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+
+    // ---- lazy backend ----
     eprintln!("\n=== lazy: {path_str} ===");
     let t0 = Instant::now();
     let lazy = LazyGraphStore::open(db_path).unwrap_or_else(|e| {
         eprintln!("failed to open .gdb {path_str}: {e}");
         std::process::exit(1);
     });
+    let lazy_open_ns = t0.elapsed().as_nanos();
+    let rss_after_lazy_open = rss_mb(&mut sys);
     eprintln!(
-        "  {} nodes / {} edges in {:.2}s",
+        "  {} nodes / {} edges in {:.2}s, RSS {:.1} MiB (+{:.1})",
         lazy.node_count(),
         lazy.edge_count(),
-        t0.elapsed().as_secs_f64()
+        t0.elapsed().as_secs_f64(),
+        rss_after_lazy_open,
+        rss_after_lazy_open - rss_baseline,
     );
+    emit_meta(&path_str, "lazy", "open_ns", lazy_open_ns);
+    emit_meta(&path_str, "lazy", "rss_after_open_mb", (rss_after_lazy_open * 1000.0) as u128);
+    emit_meta(&path_str, "lazy", "db_bytes", db_bytes as u128);
     let active = lazy.catalog().active_schema().clone();
     let rt_lazy = Runtime::new(&lazy);
-    bench_db("lazy", &path_str, &active, &rt_lazy, iters, warmup);
+    let mut peak_rss_lazy = rss_after_lazy_open;
+    bench_db("lazy", &path_str, &active, &rt_lazy, iters, warmup, &mut sys, &mut peak_rss_lazy);
+    emit_meta(&path_str, "lazy", "peak_rss_during_loop_mb", (peak_rss_lazy * 1000.0) as u128);
+    eprintln!(
+        "Peak RSS lazy: {peak_rss_lazy:.1} MiB (+{:.1} over baseline)",
+        peak_rss_lazy - rss_baseline,
+    );
 
-    // Disk backend — same .gdb, same schema, no LRU page cache.
+    // ---- disk backend ----
     drop(rt_lazy);
     drop(lazy);
     eprintln!("\n=== disk: {path_str} ===");
@@ -371,9 +415,52 @@ fn main() {
         eprintln!("failed to open .gdb {path_str} (disk backend): {e}");
         std::process::exit(1);
     });
-    eprintln!("  opened in {:.2}s", t0.elapsed().as_secs_f64());
+    let disk_open_ns = t0.elapsed().as_nanos();
+    let rss_after_disk_open = rss_mb(&mut sys);
+    eprintln!(
+        "  opened in {:.2}s, RSS {:.1} MiB (+{:.1})",
+        t0.elapsed().as_secs_f64(),
+        rss_after_disk_open,
+        rss_after_disk_open - rss_baseline,
+    );
+    emit_meta(&path_str, "disk", "open_ns", disk_open_ns);
+    emit_meta(&path_str, "disk", "rss_after_open_mb", (rss_after_disk_open * 1000.0) as u128);
+    emit_meta(&path_str, "disk", "db_bytes", db_bytes as u128);
     let rt_disk = Runtime::new(&disk);
-    bench_db("disk", &path_str, &active, &rt_disk, iters, warmup);
+    let mut peak_rss_disk = rss_after_disk_open;
+    bench_db("disk", &path_str, &active, &rt_disk, iters, warmup, &mut sys, &mut peak_rss_disk);
+    emit_meta(&path_str, "disk", "peak_rss_during_loop_mb", (peak_rss_disk * 1000.0) as u128);
+    eprintln!(
+        "Peak RSS disk: {peak_rss_disk:.1} MiB (+{:.1} over baseline)",
+        peak_rss_disk - rss_baseline,
+    );
+}
+
+// `value_milli` carries either an integer in nanoseconds (open_ns,
+// db_bytes — used as raw counts) or RSS-MB×1000 for the *_rss_*_mb
+// rows; the column is `ns` for schema compatibility but holds whatever
+// scalar the metric needs. Downstream parsers split on the case/phase
+// columns, not the value type.
+fn emit_meta(db_path: &str, backend: &str, phase: &str, value_milli: u128) {
+    println!(
+        "{};{};{};{};{};{};{};{}",
+        backend,
+        db_path,
+        "meta",
+        "_setup",
+        phase,
+        0,
+        value_milli,
+        "",
+    );
+}
+
+fn rss_mb(sys: &mut System) -> f64 {
+    let pid = Pid::from_u32(std::process::id());
+    sys.refresh_process_specifics(pid, ProcessRefreshKind::new().with_memory());
+    sys.process(pid)
+        .map(|p| p.memory() as f64 / (1024.0 * 1024.0))
+        .unwrap_or(0.0)
 }
 
 fn bench_db<G: GraphAccess>(
@@ -383,6 +470,8 @@ fn bench_db<G: GraphAccess>(
     rt: &Runtime<'_, G>,
     iters: usize,
     warmup: usize,
+    sys: &mut System,
+    peak_rss: &mut f64,
 ) {
 
     const TABLE_WIDTH: usize = 103; // sum of the format widths below + separators
@@ -400,6 +489,12 @@ fn bench_db<G: GraphAccess>(
     for case in CASES {
         if run_case(backend, path_str, active, rt, case, iters, warmup) {
             warned_count += 1;
+        }
+        // Sample RSS per case (cheap; once per ~iters runs). Tracks
+        // the high-water mark for the per-backend peak emit.
+        let cur = rss_mb(sys);
+        if cur > *peak_rss {
+            *peak_rss = cur;
         }
     }
     eprintln!("{}", "-".repeat(TABLE_WIDTH));
