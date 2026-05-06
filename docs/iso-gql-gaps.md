@@ -1,140 +1,99 @@
-# ISO GQL: qué falta en gqlite
+# ISO GQL: qué falta en froGQL
 
-Este documento lista lo que falta en gqlite respecto al estándar ISO GQL, ordenado por impacto en las queries que los usuarios efectivamente escriben. Sirve como roadmap de features, no como checklist de conformidad.
+Este documento lista lo que falta en froGQL respecto al estándar ISO/IEC 39075:2024, ordenado por impacto en las queries que los usuarios efectivamente escriben. Sirve como roadmap de features pendientes; lo ya implementado vive bajo "Estado actual".
 
-## Estado actual
+## Estado actual (cierre de MVP-1)
 
-gqlite ya implementa:
+Implementado y cubierto por tests:
 
-- Parser: `MATCH`, `WHERE`, `RETURN` (con `DISTINCT` y alias `AS`), patterns de nodos/aristas con labels, descriptores de tipo.
-- Path patterns: concat, union (`|`), filter (`WHERE`), repetición `{n,m}`, optional `?`, join (`,`).
-- Valores: `Int`, `Float`, `Str`, `Bool`, `List`, `Record` (anidable).
-- Tipos: lattice con `Star`, `Zero`, `Union`, `List`, `Record`, `PropertyType` (open/closed).
-- Operadores: `+`, `-`, comparaciones, `=`, `!=`, `AND`, `OR`, `NOT` (sobre booleanos), `IS`, `AS`, `IN`.
-- Storage: formato `.gdb` de una sola página-file, embedded.
-- Optimizer: predicate pushdown, label index selection, Leapfrog Triejoin.
+- **Parser y query language**: `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN` (con `DISTINCT` y alias `AS`), `ORDER BY ... ASC|DESC NULLS FIRST|LAST`, `LIMIT`, `GROUP BY`, comma-join.
+- **Path patterns**: concat, union (`|`), filter (`WHERE`), repetición `{n,m}`, optional (`?`), aristas dirigidas, reversas y no dirigidas, labels conjuntivas (`A & B`), disyuntivas (`A | B`) y negadas (`!A`).
+- **Tipos y valores**: `Int`, `Float`, `Str`, `Bool`, `List`, `Record` (anidable), `Null` con lógica trivalente. `Value::Node` y `Value::Edge` como reference values de primera clase.
+- **Predicados existenciales**: `EXISTS { ... }` y `NOT EXISTS { ... }` con correlación, fold a literal cuando el body es trivialmente vacío.
+- **Aggregation (Feature GF10 parcial)**: `COUNT(*)`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`. Null elimination automática y agregados vacíos que producen `null`.
+- **DML (ISO §13)**: `INSERT`, `SET x.prop = expr`, `SET x = { ... }` (clear+set), `SET x:Label`, `REMOVE x.prop`, `REMOVE x:Label`, `[DETACH | NODETACH] DELETE <expr list>`, `RETURN` post-DM. Validación G2000 contra el GRAPH TYPE activo, atomicidad por statement vía overlay.
+- **DDL de catálogo**: `CREATE / USE / DROP / SHOW / VALIDATE GRAPH TYPE`, `CREATE / DROP / SHOW INDEX` (HASH y BTREE).
+- **Storage**: archivo único `.gdb` con páginas de 4KB, catálogo persistido, atomicidad de `.save` vía tmp+rename, dumps `.dump-json` y `.dump-gql`.
+- **Optimizer**: predicate pushdown, label index selection, Leapfrog Triejoin con índices secundarios.
 
-## Tier 1: expresividad que rompe cosas si falta
+## Pendiente
 
-### 1.1 Aggregation: COUNT, SUM, AVG, MIN, MAX, COLLECT
+### Tier 1: bloqueadores reales (vacío)
 
-Sin esto no hay reporting. Cualquier query que pregunte "cuántos", "promedio de", "lista de todos los X por Y" es imposible.
+Las cuatro features que quedaban en Tier 1 (aggregation, `NOT EXISTS`, `OPTIONAL MATCH`, `Null` con 3VL) ya están en `main`. Lo que sigue son features de calidad de vida.
 
-```
-MATCH (p: Person)-[:ACTED_IN]->(m: Movie)
-RETURN p.name, COUNT(m) AS movies, COLLECT(m.title) AS titles
-```
+### Tier 2: útiles, hay workaround
 
-Cambios necesarios:
+#### 2.1 WITH / NEXT / LET (pipelines)
 
-- `Expr::Aggregate { func, arg }` en el AST.
-- Pase en `elaborate/` que detecta aggregation en `RETURN` y agrupa por las columnas no-agregadas.
-- Runtime con acumuladores por grupo.
-
-### 1.2 Negación a nivel patrón: NOT EXISTS
-
-El `NOT` actual opera sobre valores booleanos (`WHERE NOT x.isBlocked`). Falta la negación estructural sobre patrones:
-
-```
-MATCH (a: Person)
-WHERE NOT EXISTS {
-  (a)-[:ACTED_IN]->(m: Movie)<-[:ACTED_IN]-(k: Person)
-  WHERE k.name = 'Keanu Reeves'
-}
-RETURN a.name
-```
-
-Cambios necesarios:
-
-- `PathPattern::NotExists(Box<PathPattern>)` como nueva variante.
-- Runtime: evaluar el patrón interno, descartar filas del externo cuando produzca al menos una.
-- Semánticamente es anti-join.
-
-### 1.3 OPTIONAL MATCH
-
-Outer join. "Usuarios, y si tienen dirección, la ciudad". La ISO lo llama `OPTIONAL MATCH`, Cypher usa la misma palabra:
-
-```
-MATCH (u: User)
-OPTIONAL MATCH (u)-[:LIVES_AT]->(a: Address)
-RETURN u.name, a.city
-```
-
-Sin OPTIONAL, la única forma de expresar "tal vez existe" es `UNION` de dos queries distintas.
-
-Cambios necesarios:
-
-- `PathPattern::Optional(Box<PathPattern>)` o nueva construcción en `Query`.
-- Runtime: left-join sobre las variables ya vinculadas, con NULL para las no-matcheadas.
-- Depende de 1.4.
-
-### 1.4 NULL y lógica trivalente
-
-El `Value` actual no tiene NULL. Atributos faltantes producen `ExprResult::Failure` y la fila se descarta. GQL y SQL usan lógica trivalente (`TRUE`/`FALSE`/`UNKNOWN`).
-
-Sin NULL, OPTIONAL MATCH y las comparaciones con datos faltantes quedan inconsistentes.
-
-Cambios necesarios:
-
-- `Value::Null`.
-- Reescribir `eval_binop` para propagar NULL (cualquier op con NULL da NULL, excepto `IS NULL`/`IS NOT NULL`).
-- `Value::Null` se trata como FALSE en contexto booleano (WHERE).
-
-## Tier 2: útiles, hay workaround
-
-### 2.1 ORDER BY / OFFSET / LIMIT como cláusulas
-
-Hoy `limit` es parámetro de `run_query`, no parte de la sintaxis. Agregar `ORDER BY`, `OFFSET`, `LIMIT` al AST de `Query` y ejecutarlos como post-proceso del proyectado.
-
-### 2.2 WITH / pipelines
-
-Encadenar etapas:
+ISO usa `NEXT` o `LET` para encadenar etapas; Cypher las llama `WITH`. Permite filtrar y reagrupar después de un `MATCH` sin recurrir a subqueries:
 
 ```
 MATCH (a: Person)-[:ACTED_IN]->(m)
-WITH a, COUNT(m) AS c
+NEXT WITH a, COUNT(m) AS c
 WHERE c > 10
 MATCH (a)-[:FOLLOWS]->(f)
 RETURN a.name, f.name
 ```
 
-En GQL es `NEXT` o `LET`. Permite queries complejas sin subqueries. Interactúa fuerte con aggregation (1.1).
+Es la pieza más reclamada, porque sin ella no se puede filtrar sobre el resultado de una agregación. Toca el AST (nuevo nodo `Pipeline`), el typechecker (la siguiente etapa hereda el binding table de la anterior) y el runtime (rebind del working table entre etapas).
 
-### 2.3 UNWIND
+#### 2.2 OFFSET / SKIP
 
-Inverso de COLLECT: dada una lista, emite una fila por elemento.
+`LIMIT` ya está en la sintaxis. Falta saltar las primeras N filas tras `ORDER BY`. Cambio acotado al post-procesado del proyectado en `Runtime::run_query`.
+
+#### 2.3 UNWIND
+
+Inverso de `COLLECT`: dada una lista, emite una fila por elemento.
 
 ```
 UNWIND [1, 2, 3] AS x
 RETURN x * 10
 ```
 
-Natural ahora que `List` es tipo de primera clase.
+Natural ahora que `List` es tipo de primera clase y que tenemos `WITH`-equivalente en el roadmap.
 
-### 2.4 Shortest path
+#### 2.4 Shortest path
 
-`shortestPath()`, `allShortestPaths()`. La repetición `{n,m}` actual hace paths de longitud acotada pero no "el más corto". Algorítmicamente, es BFS dirigido.
+`shortestPath()`, `allShortestPaths()`. La repetición `{n,m}` actual produce paths de longitud acotada y emite todos. Falta seleccionar "el más corto", lo que requiere BFS dirigido en el runtime (no decompone a triples LTJ).
 
-### 2.5 Funciones built-in
+#### 2.5 Funciones built-in
 
-`size(list)`, `length(path)`, `head`, `tail`, `nodes(p)`, `edges(p)`, `type(edge)`, `labels(node)`. Sin llamadas a funciones, muchas queries quedan awkward. Requiere agregar `Expr::Call { name, args }` y una tabla de funciones registradas.
+`size(list)`, `length(path)`, `head`, `tail`, `nodes(p)`, `edges(p)`, `type(edge)`, `labels(node)`. Hoy sólo `COALESCE` está soportada como Token dedicado. Sin tabla de funciones general muchas queries quedan awkward. Cambio: agregar `Expr::Call { name, args }` y un dispatch table en `runtime/engine.rs`.
 
-## Tier 3: relevante para producción, no para investigación
+#### 2.6 COLLECT y STDDEV (Feature GF10 completa)
 
-### 3.1 Mutación: INSERT / UPDATE / DELETE
+Las agregaciones que faltan respecto a la lista del estándar. `COLLECT_LIST(x)` arma un `Value::List` por grupo; `STDDEV` y `STDDEV_POP` son aritméticas. Encajan en la misma infraestructura `GeneralSetKind` que `SUM`/`AVG`.
 
-Necesario para un motor real, no para un prototipo de investigación sobre semántica de matching.
+#### 2.7 Multi-DML chains en un solo statement
 
-### 3.2 Transacciones, sesiones, DDL de grafos
+ISO §13.1 permite `MATCH α INSERT β SET γ MATCH δ DELETE ε` como una sola "linear data-modifying statement". El parser actual acepta a lo más un op DML por statement. Los tests de MVP-1.D actualmente parten en dos llamadas a `run_dm` lo que en ISO sería un único statement.
 
-Infraestructura de producción. Irrelevante para el paper.
+#### 2.8 String escapes en literales
+
+El lexer no admite escapes (`'don\'t'` no parsea, `''` se lee como string vacío). Bloquea `.dump-gql` para nodos cuyas propiedades string contengan `'`. Fix conceptualmente trivial; toca `Lexer::tokenize` y la simétrica en `format_gql_value`.
+
+### Tier 3: producción, no investigación
+
+#### 3.1 Transacciones reales (WAL, recovery)
+
+Hoy `.save` es la única primitiva de "commit"; entre saves la sesión acumula RAM proporcional al overlay. Un crash entre saves pierde toda la mutación posterior al último save. Una WAL real exigiría dirty page tracking, recovery loop al open, y locking inter-conexión. Trabajo de varias semanas, sin demanda en research.
+
+#### 3.2 Concurrencia inter-sesión
+
+`Connection` es `unsendable` en Python y la implementación es single-threaded por design. Habilitar lectores concurrentes pide MVCC sobre el page cache; escritores concurrentes piden además WAL.
+
+#### 3.3 Indexes incrementales bajo overlay
+
+Cuando hay overlay no vacío, `lookup_node_eq` y `lookup_node_range` retornan `None` y el caller hace scan. Mantener hash y btree incrementales durante DML cuesta O(log N) por mutación; cabe en MVP-2.
 
 ## Recomendación
 
-Si el paper es sobre semántica de path matching, priorizar en este orden:
+Si el orden es por valor para queries reales:
 
-1. **Negación** (Tier 1.2). Conceptualmente compacta, cabe en la lattice de tipos, la ISO la define como anti-join. Poca superficie, mucho poder expresivo.
-2. **OPTIONAL + NULL** (Tier 1.3 + 1.4). Van juntos: NULL sin OPTIONAL es raro, OPTIONAL sin NULL no tiene semántica limpia. Toca `Value`, `eval_binop` (trivalente), y el pattern runtime (outer-join).
-3. **Aggregation** (Tier 1.1). Más invasiva porque cambia el shape del pipeline, pero sin esto las demos se ven mal.
+1. **WITH / NEXT** (Tier 2.1). Sin esto no hay pipeline declarativo y todas las queries con agregación filtrada se vuelven imposibles. Mayor lever pendiente, mayor superficie de cambio (AST, typechecker, runtime).
+2. **Funciones built-in y UNWIND** (Tier 2.5 + 2.3). Bajo costo, alto retorno: completan el lenguaje sin tocar la semántica del matching.
+3. **OFFSET y multi-DML chains** (Tier 2.2 + 2.7). Cierre de huecos sintácticos pequeños que la gente espera.
+4. **Multi-DML + WAL** sólo si el caso de uso pasa de research a producción.
 
-Lo que **no** priorizar ahora: ORDER BY, WITH, UNWIND, funciones. Son quality-of-life pero no tocan semántica profunda.
+Lo que **no** priorizar todavía: shortest path (algorítmica fuera del foco del paper), transacciones reales (irrelevante para investigación de semántica), MVCC (lo mismo).
