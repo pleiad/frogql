@@ -1,12 +1,26 @@
-# Cross-system benchmark
+# Cross-system benchmark — the "external bench"
 
 Side-by-side latency for LDBC SNB Interactive Complex queries on
 gqlite + a set of external graph systems, against the same SF0.1
-dataset and the same substitution-parameter rows. Currently only IC2
-is wired up (it's the only IC whose `bench/ldbc-queries/ic<n>.toml`
-has `status = "implemented"`); more come online as the parser gains
-features. The runner accepts `--ic <n>`; each invocation runs one IC
+dataset and the same substitution-parameter rows. The runner
+accepts `--ics <list>`; each invocation runs the selected ICs
 across all (selected) systems.
+
+This is the **external** bench in the project's two-bench split:
+
+- **External bench** (this dir): how does gqlite compare to other
+  graph databases on user-facing query latency. The headline numbers.
+- **Internal bench** ([`bench/TYPECHECKER_BENCHMARK.md`](../TYPECHECKER_BENCHMARK.md)):
+  how do gqlite's own components (the typechecker today; potentially
+  other compiler microbenches later) perform in isolation. Engine
+  diagnostics, not engine comparisons.
+
+`src/bin/ldbc_bench.rs` predates this split — it ran LDBC ICs on
+gqlite alone with backend selection (`memory|lazy|disk`) and
+ablation env vars. Those were diagnostic; the cross-system bench's
+`--ablate` covers the part that matters for the external comparison
+(auto-indexes on/off). `ldbc_bench` stays in the tree but isn't the
+focus going forward.
 
 > **Reading this for the first time?** [`SURVEY.md`](SURVEY.md) is
 > the single-page narrative covering every system we evaluated
@@ -120,25 +134,24 @@ bench/cross-system/run_all.sh --iters 30 --warmup 3
 # (captures real setup time; default skips setup if DB exists):
 bench/cross-system/run_all.sh --rebuild-setup
 
-# Ablation mode — gqlite runs in three modes (baseline + two
-# disabled-optimization variants), each emitted as a separate
-# `backend` label. Other systems run normally; the comparison
-# table renders the ablation modes as additional columns.
+# Ablation mode — gqlite runs twice (baseline + LTJ index-fold
+# disabled), each emitted with a distinct `backend` label. Other
+# systems run normally.
 bench/cross-system/run_all.sh --ablate
-bench/cross-system/run_all.sh --ablate --only gqlite   # ablation table only
+bench/cross-system/run_all.sh --ablate --only gqlite
 ```
 
-**Ablation mode** (`--ablate`): when set, gqlite runs four times
-across two axes (optimization knobs on the lazy backend, plus the
-disk backend as a separate storage shape) and emits per-iter rows
-with distinct backend labels:
+**Ablation mode** (`--ablate`): one knob, two modes:
 
-| Mode | Env / args | Tests |
+| Mode | Env | Tests |
 |---|---|---|
 | `lazy-baseline` | (none) | All optimizations on (LTJ + auto-indexes + index folding + TripleIndex cache) |
-| `lazy-no-auto-indexes` | `GQLITE_DISABLE_AUTO_INDEXES=1` | Skip the `(label, prop)` secondary-index auto-build at open |
-| `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | Disable LTJ index-driven constant folding (the pre-pass that turns `MATCH (n {id:X})` into a single-NodeId pre-bind) |
-| `disk-baseline` | `--backend disk` | DiskGraphStore (no LRU page cache, no secondary indexes today) — RAM/disk tradeoff vs lazy |
+| `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | Disable LTJ index-driven constant folding (the pre-pass that turns `MATCH (n {id:X})` into a single-NodeId pre-bind). The auto-indexes are still built; they just don't get used in the LTJ pre-pass. |
+
+This is the only gqlite-internal knob the external bench tracks —
+the surgical "did the LTJ fold optimization actually buy anything"
+comparison. Other gqlite ablations (lazy-vs-disk RAM tradeoff, full
+auto-index disable, etc.) belong in the internal bench, not here.
 
 The ablation modes show up as additional `backend` columns in
 `comparison.txt` so the same `compare_results.py` machinery
