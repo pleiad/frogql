@@ -40,6 +40,14 @@ pub struct Graph {
 
     // --- Reverse lookup (user name → internal ID) ---
     node_name_to_id: HashMap<String, Id>,
+
+    // --- Mutation tombstones (ISO §13 DML) ---
+    /// Per-node liveness flag. Defaults to `true` (existing data is alive
+    /// at load time). Set to `false` by `delete_node_no_detach` /
+    /// `detach_delete_node`. Reads filter dead nodes; they get compacted
+    /// out at save() time.
+    node_alive: Vec<bool>,
+    edge_alive: Vec<bool>,
 }
 
 impl Graph {
@@ -177,6 +185,8 @@ impl Graph {
             edge_names.push(name);
         }
 
+        let node_alive = vec![true; node_names.len()];
+        let edge_alive = vec![true; edge_names.len()];
         Ok(Graph {
             node_names,
             edge_names,
@@ -194,6 +204,8 @@ impl Graph {
             incoming,
             undirected_adj,
             node_name_to_id,
+            node_alive,
+            edge_alive,
         })
     }
 
@@ -247,6 +259,8 @@ impl Graph {
             }
         }
 
+        let node_alive = vec![true; node_names.len()];
+        let edge_alive = vec![true; edge_names.len()];
         Graph {
             node_names,
             edge_names,
@@ -264,6 +278,8 @@ impl Graph {
             incoming,
             undirected_adj,
             node_name_to_id,
+            node_alive,
+            edge_alive,
         }
     }
 
@@ -343,16 +359,18 @@ impl Graph {
 
 impl super::graph_access::GraphAccess for Graph {
     fn nodes(&self) -> Vec<Id> {
-        (0..self.node_names.len() as Id).collect()
+        (0..self.node_names.len() as Id)
+            .filter(|&id| self.node_alive[id as usize])
+            .collect()
     }
     fn edges_directed(&self) -> Vec<Id> {
         (0..self.edge_names.len() as Id)
-            .filter(|&eid| self.edge_directed[eid as usize])
+            .filter(|&eid| self.edge_alive[eid as usize] && self.edge_directed[eid as usize])
             .collect()
     }
     fn edges_undirected(&self) -> Vec<Id> {
         (0..self.edge_names.len() as Id)
-            .filter(|&eid| !self.edge_directed[eid as usize])
+            .filter(|&eid| self.edge_alive[eid as usize] && !self.edge_directed[eid as usize])
             .collect()
     }
     fn node_labels(&self, id: Id) -> LabelType {
@@ -390,22 +408,105 @@ impl super::graph_access::GraphAccess for Graph {
         &self.edge_names[id as usize]
     }
     fn nodes_with_label(&self, label: &str) -> Option<Vec<Id>> {
-        self.label_to_nodes.get(label).cloned()
+        self.label_to_nodes.get(label).map(|v| {
+            v.iter()
+                .copied()
+                .filter(|id| self.node_alive[*id as usize])
+                .collect()
+        })
     }
     fn directed_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
-        self.label_to_edges_d.get(label).cloned()
+        self.label_to_edges_d.get(label).map(|v| {
+            v.iter()
+                .copied()
+                .filter(|id| self.edge_alive[*id as usize])
+                .collect()
+        })
     }
     fn undirected_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
-        self.label_to_edges_u.get(label).cloned()
+        self.label_to_edges_u.get(label).map(|v| {
+            v.iter()
+                .copied()
+                .filter(|id| self.edge_alive[*id as usize])
+                .collect()
+        })
     }
     fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {
-        self.outgoing[node_id as usize].clone()
+        self.outgoing[node_id as usize]
+            .iter()
+            .copied()
+            .filter(|id| self.edge_alive[*id as usize])
+            .collect()
     }
     fn incoming_edges(&self, node_id: Id) -> Vec<Id> {
-        self.incoming[node_id as usize].clone()
+        self.incoming[node_id as usize]
+            .iter()
+            .copied()
+            .filter(|id| self.edge_alive[*id as usize])
+            .collect()
     }
     fn undirected_edges_of(&self, node_id: Id) -> Vec<Id> {
-        self.undirected_adj[node_id as usize].clone()
+        self.undirected_adj[node_id as usize]
+            .iter()
+            .copied()
+            .filter(|id| self.edge_alive[*id as usize])
+            .collect()
+    }
+}
+
+impl super::graph_access::GraphAccessMut for Graph {
+    fn insert_node(&self, _labels: LabelType, _props: Props) -> Id {
+        // `Graph` is the in-RAM JSON-backed fixture used by tests; its
+        // fields are plain Vecs without RefCell, so true `&self`
+        // mutability would require a wider refactor that's not on the
+        // MVP-0 critical path. The user-visible motor is `LazyGraphStore`,
+        // and that one *does* implement `GraphAccessMut` correctly.
+        unimplemented!(
+            "Graph::insert_node: in-RAM Graph mutability is not wired in MVP-0 (use LazyGraphStore)"
+        );
+    }
+
+    fn insert_edge(
+        &self,
+        _src: Id,
+        _tgt: Id,
+        _directed: bool,
+        _labels: LabelType,
+        _props: Props,
+    ) -> Id {
+        unimplemented!(
+            "Graph::insert_edge: in-RAM Graph mutability is not wired in MVP-0 (use LazyGraphStore)"
+        );
+    }
+
+    fn delete_edge(&self, _id: Id) {
+        unimplemented!(
+            "Graph::delete_edge: in-RAM Graph mutability is not wired in MVP-0 (use LazyGraphStore)"
+        );
+    }
+
+    fn detach_delete_node(&self, _id: Id) {
+        unimplemented!(
+            "Graph::detach_delete_node: in-RAM Graph mutability is not wired in MVP-0 (use LazyGraphStore)"
+        );
+    }
+
+    fn delete_node_no_detach(&self, _id: Id) -> Result<(), super::graph_access::G1001> {
+        unimplemented!(
+            "Graph::delete_node_no_detach: in-RAM Graph mutability is not wired in MVP-0 (use LazyGraphStore)"
+        );
+    }
+
+    fn is_node_alive(&self, id: Id) -> bool {
+        self.node_alive.get(id as usize).copied().unwrap_or(false)
+    }
+
+    fn is_edge_alive(&self, id: Id) -> bool {
+        self.edge_alive.get(id as usize).copied().unwrap_or(false)
+    }
+
+    fn rollback_session(&self) {
+        // No overlay to rewind; mutability is unimplemented in MVP-0.
     }
 }
 

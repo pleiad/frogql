@@ -112,6 +112,46 @@ pub fn validate_against_data<G: GraphAccess>(g: &G, schema: &Schema) -> Validati
     report
 }
 
+/// Per-element validation used by ISO §13 DML to surface G2000 right
+/// after an INSERT. Returns the human-readable failure message when the
+/// element does not satisfy any node type in `schema.nodes`.
+pub fn validate_node_against_schema(
+    labels: &LabelType,
+    props: &std::collections::HashMap<String, Value>,
+    schema: &Schema,
+) -> Result<(), String> {
+    let instance = VariableType::Node(element_descriptor(labels, &props_to_simple(props)));
+    if instance_admitted(&instance, &schema.nodes) {
+        Ok(())
+    } else {
+        let label_strs = sorted_label_strings(labels).join(",");
+        Err(format!(
+            "G2000 graph type violation: inserted node with labels {{{label_strs}}} \
+             does not match any node type in the active GRAPH TYPE"
+        ))
+    }
+}
+
+/// Edge equivalent of `validate_node_against_schema`. Endpoints are
+/// captured live so the schema's `(:Source)-[:Edge]->(:Target)` shape can
+/// be checked against the actual neighbours.
+pub fn validate_edge_against_schema<G: GraphAccess>(
+    g: &G,
+    eid: u32,
+    schema: &Schema,
+) -> Result<(), String> {
+    let instance = edge_instance_type(g, eid);
+    if instance_admitted(&instance, &schema.edges) {
+        Ok(())
+    } else {
+        let label_strs = sorted_label_strings(&g.edge_labels(eid)).join(",");
+        Err(format!(
+            "G2000 graph type violation: inserted edge with labels {{{label_strs}}} \
+             does not match any edge type in the active GRAPH TYPE"
+        ))
+    }
+}
+
 fn push_sample(samples: &mut Vec<Violation>, v: Violation) {
     let same_kind: usize = samples.iter().filter(|s| s.kind == v.kind).count();
     if same_kind < MAX_SAMPLES {

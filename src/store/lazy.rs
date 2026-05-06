@@ -22,6 +22,7 @@ use crate::typing::label_type::LabelType;
 
 use super::catalog_io;
 use super::disk_index;
+use super::overlay::MutationOverlay;
 use super::record::{self, PropValue};
 use super::secondary_index::SecondaryIndex;
 use super::string_table::StringTable;
@@ -129,6 +130,12 @@ pub struct LazyGraphStore {
     // properties. Memory-only for now (rebuilt every open). Used by the LTJ
     // optimizer to constant-fold `(x:L {prop: literal})` start lookups.
     secondary: RefCell<SecondaryIndex>,
+
+    /// In-RAM mutation overlay for ISO §13 DML (INSERT / DELETE / DETACH
+    /// DELETE in MVP-0). Empty during read-only sessions; non-empty after
+    /// the first DML statement. Persistence happens via `save()`, which
+    /// materializes the merged base+overlay view into a fresh `.gdb`.
+    overlay: RefCell<MutationOverlay>,
 }
 
 impl LazyGraphStore {
@@ -136,6 +143,29 @@ impl LazyGraphStore {
     /// Scans all pages to build compact indexes, but does NOT load record data.
     pub fn open(db_path: &Path) -> io::Result<Self> {
         Self::open_with_cache(db_path, 2000)
+    }
+
+    /// SQLite-style "create on open": if `db_path` does not exist, write
+    /// an empty `.gdb` to that path first, then open it. The empty file
+    /// has zero nodes / zero edges / empty catalog (DEFAULT auto-active);
+    /// the caller can then issue `INSERT` statements and persist via
+    /// `save()`. If the path exists, behaves identically to `open()`.
+    pub fn open_or_create(db_path: &Path) -> io::Result<Self> {
+        if !db_path.exists() {
+            let empty = crate::model::graph::Graph::from_raw(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            super::io::save_graph(&empty, db_path)?;
+        }
+        Self::open(db_path)
     }
 
     pub fn open_with_cache(db_path: &Path, cache_size: usize) -> io::Result<Self> {
@@ -189,6 +219,7 @@ impl LazyGraphStore {
             catalog: RefCell::new(GraphTypeCatalog::new()),
             catalog_root: Cell::new(catalog_root),
             secondary: RefCell::new(SecondaryIndex::new()),
+            overlay: RefCell::new(MutationOverlay::default()),
         };
 
         let t2 = std::time::Instant::now();
@@ -214,6 +245,10 @@ impl LazyGraphStore {
                 store.edge_count
             );
         }
+
+        // Seed the mutation overlay with the base counts so newly inserted
+        // ids land contiguously above the disk-backed range.
+        *store.overlay.borrow_mut() = MutationOverlay::new(store.node_count, store.edge_count);
 
         // Load the catalog chain (if any). A legacy file with
         // catalog_root=0 yields an empty catalog and stays permissive.
@@ -687,59 +722,216 @@ impl LazyGraphStore {
     pub fn cache_stats(&self) -> (u64, u64) {
         self.pager.borrow().cache_stats()
     }
+
+    /// Materialize the merged base+overlay view into an in-RAM `Graph`.
+    /// IDs get compacted (tombstoned slots disappear); edges remap their
+    /// endpoints accordingly. Used by `save()` and `dump_*()`.
+    pub fn materialize_to_graph(&self) -> crate::model::graph::Graph {
+        // Walk live nodes in current ID order; remember their original →
+        // new (dense) id mapping so edges can be remapped.
+        let mut id_map: HashMap<u32, u32> = HashMap::new();
+        let mut node_names: Vec<String> = Vec::new();
+        let mut node_labels: Vec<LabelType> = Vec::new();
+        let mut node_props: Vec<Props> = Vec::new();
+        for old_id in self.nodes() {
+            let new_id = node_names.len() as u32;
+            id_map.insert(old_id, new_id);
+            node_names.push(self.node_name(old_id).to_string());
+            node_labels.push(self.node_labels(old_id));
+            node_props.push(self.node_props(old_id));
+        }
+
+        // Edges: walk both directed and undirected, preserving direction.
+        let mut edge_names: Vec<String> = Vec::new();
+        let mut edge_labels: Vec<LabelType> = Vec::new();
+        let mut edge_props: Vec<Props> = Vec::new();
+        let mut edge_src: Vec<u32> = Vec::new();
+        let mut edge_tgt: Vec<u32> = Vec::new();
+        let mut edge_directed: Vec<bool> = Vec::new();
+        for old_id in self.edges_directed() {
+            let s = self.src(old_id);
+            let t = self.tgt(old_id);
+            // Tombstoned endpoints are filtered out by `nodes()`, so a
+            // stranded edge would produce a missing-key here. Skip it.
+            let (Some(&new_s), Some(&new_t)) = (id_map.get(&s), id_map.get(&t)) else {
+                continue;
+            };
+            edge_names.push(self.edge_name(old_id).to_string());
+            edge_labels.push(self.edge_labels(old_id));
+            edge_props.push(self.edge_props(old_id));
+            edge_src.push(new_s);
+            edge_tgt.push(new_t);
+            edge_directed.push(true);
+        }
+        for old_id in self.edges_undirected() {
+            let s = self.src(old_id);
+            let t = self.tgt(old_id);
+            let (Some(&new_s), Some(&new_t)) = (id_map.get(&s), id_map.get(&t)) else {
+                continue;
+            };
+            edge_names.push(self.edge_name(old_id).to_string());
+            edge_labels.push(self.edge_labels(old_id));
+            edge_props.push(self.edge_props(old_id));
+            edge_src.push(new_s);
+            edge_tgt.push(new_t);
+            edge_directed.push(false);
+        }
+
+        crate::model::graph::Graph::from_raw(
+            node_names,
+            node_labels,
+            node_props,
+            edge_names,
+            edge_labels,
+            edge_props,
+            edge_src,
+            edge_tgt,
+            edge_directed,
+        )
+    }
+
+    /// Refresh the catalog's `DEFAULT` schema from the live store iff the
+    /// dirty flag is set. Idempotent: every read path that fetches the
+    /// active schema or pretty-prints DEFAULT calls through here, so DML
+    /// statements get O(1) "mark dirty" while the schema-consulting paths
+    /// pay the O(N+E) inference at most once per dirty cycle.
+    pub fn refresh_default_if_dirty(&self) {
+        let dirty = self.catalog.borrow().is_default_dirty();
+        if !dirty {
+            return;
+        }
+        let schema = crate::typing::inference::infer_simple_schema(self);
+        let mut cat = self.catalog.borrow_mut();
+        // Don't activate or alter `active` here; just replace the entry.
+        // `install_default` would also flip `active`, which is wrong when
+        // the user is just inspecting DEFAULT without using it.
+        cat.types.insert(
+            super::super::runtime::catalog::DEFAULT_NAME.to_string(),
+            schema,
+        );
+        cat.validations
+            .remove(super::super::runtime::catalog::DEFAULT_NAME);
+        cat.default_dirty = false;
+    }
+
+    /// Persist the current state to `db_path`. ISO doesn't mandate this
+    /// surface — gqlite mirrors SQLite's "explicit save" model: until the
+    /// caller calls `save`, mutations live only in the in-RAM overlay.
+    ///
+    /// Atomicity: writes to `<db_path>.tmp` first and renames over the
+    /// destination, so a crash mid-write cannot corrupt the existing file.
+    /// The current `LazyGraphStore` keeps its old in-memory state pointing
+    /// at the pre-save pager (POSIX rename keeps the old inode alive while
+    /// our fd holds it open), so subsequent reads / mutations stay
+    /// coherent. Re-opening from the file in a new process yields the
+    /// post-save image.
+    pub fn save(&self, db_path: &Path) -> io::Result<()> {
+        // Refresh DEFAULT first so the persisted file's catalog matches
+        // the post-mutation data. (No-op when nothing's dirty.)
+        self.refresh_default_if_dirty();
+        let g = self.materialize_to_graph();
+        super::io::save_graph_atomic(&g, db_path)
+    }
 }
 
 impl GraphAccess for LazyGraphStore {
     fn nodes(&self) -> Vec<Id> {
-        (0..self.node_count).collect()
+        let overlay = self.overlay.borrow();
+        let mut out: Vec<Id> = (0..self.node_count)
+            .filter(|id| !overlay.is_node_deleted(*id))
+            .collect();
+        for offset in 0..overlay.new_nodes.len() as u32 {
+            let id = overlay.base_node_count + offset;
+            if !overlay.is_node_deleted(id) {
+                out.push(id);
+            }
+        }
+        out
     }
 
     fn edges_directed(&self) -> Vec<Id> {
-        (0..self.edge_count)
-            .filter(|&i| self.edge_directed[i as usize])
-            .collect()
+        let overlay = self.overlay.borrow();
+        let mut out: Vec<Id> = (0..self.edge_count)
+            .filter(|i| !overlay.is_edge_deleted(*i) && self.edge_directed[*i as usize])
+            .collect();
+        for (offset, e) in overlay.new_edges.iter().enumerate() {
+            let id = overlay.base_edge_count + offset as u32;
+            if !overlay.is_edge_deleted(id) && e.directed {
+                out.push(id);
+            }
+        }
+        out
     }
 
     fn edges_undirected(&self) -> Vec<Id> {
-        (0..self.edge_count)
-            .filter(|&i| !self.edge_directed[i as usize])
-            .collect()
+        let overlay = self.overlay.borrow();
+        let mut out: Vec<Id> = (0..self.edge_count)
+            .filter(|i| !overlay.is_edge_deleted(*i) && !self.edge_directed[*i as usize])
+            .collect();
+        for (offset, e) in overlay.new_edges.iter().enumerate() {
+            let id = overlay.base_edge_count + offset as u32;
+            if !overlay.is_edge_deleted(id) && !e.directed {
+                out.push(id);
+            }
+        }
+        out
     }
 
     fn node_labels(&self, id: Id) -> LabelType {
+        if let Some(n) = self.overlay.borrow().get_new_node(id) {
+            return n.labels.clone();
+        }
         let decoded = self.read_node_record(id);
         self.decode_labels_from_record(&decoded.label_str_ids)
     }
 
     fn edge_labels(&self, id: Id) -> LabelType {
+        if let Some(e) = self.overlay.borrow().get_new_edge(id) {
+            return e.labels.clone();
+        }
         let decoded = self.read_edge_record(id);
         self.decode_labels_from_record(&decoded.node.label_str_ids)
     }
 
     fn node_props(&self, id: Id) -> Props {
+        if let Some(n) = self.overlay.borrow().get_new_node(id) {
+            return n.props.clone();
+        }
         let decoded = self.read_node_record(id);
         self.decode_props_from_record(&decoded.props)
     }
 
     fn edge_props(&self, id: Id) -> Props {
+        if let Some(e) = self.overlay.borrow().get_new_edge(id) {
+            return e.props.clone();
+        }
         let decoded = self.read_edge_record(id);
         self.decode_props_from_record(&decoded.node.props)
     }
 
     fn src(&self, edge_id: Id) -> Id {
+        if let Some(e) = self.overlay.borrow().get_new_edge(edge_id) {
+            return e.src;
+        }
         self.edge_src[edge_id as usize]
     }
 
     fn tgt(&self, edge_id: Id) -> Id {
+        if let Some(e) = self.overlay.borrow().get_new_edge(edge_id) {
+            return e.tgt;
+        }
         self.edge_tgt[edge_id as usize]
     }
 
     fn is_directed(&self, edge_id: Id) -> bool {
+        if let Some(e) = self.overlay.borrow().get_new_edge(edge_id) {
+            return e.directed;
+        }
         self.edge_directed[edge_id as usize]
     }
 
     fn edge_path_value(&self, edge_id: Id) -> PathValue {
-        if self.edge_directed[edge_id as usize] {
+        if self.is_directed(edge_id) {
             PathValue::EdgeDirectional(edge_id)
         } else {
             PathValue::EdgeUndirectional(edge_id)
@@ -747,6 +939,12 @@ impl GraphAccess for LazyGraphStore {
     }
 
     fn node_name(&self, id: Id) -> &str {
+        if id >= self.overlay.borrow().base_node_count {
+            // Synthetic display name for overlay-tracked nodes — keeps
+            // node_count display + REPL "path" column working without
+            // round-tripping through the (still empty) string table.
+            return Box::leak(Box::new(format!("auto-n-{id}")));
+        }
         let decoded = self.read_node_record(id);
         let s = self.strings.resolve(decoded.user_id_str_id).unwrap();
         // Leak the string to return &str — only called for display, not hot path
@@ -754,34 +952,145 @@ impl GraphAccess for LazyGraphStore {
     }
 
     fn edge_name(&self, id: Id) -> &str {
+        if id >= self.overlay.borrow().base_edge_count {
+            return Box::leak(Box::new(format!("auto-e-{id}")));
+        }
         let decoded = self.read_edge_record(id);
         let s = self.strings.resolve(decoded.node.user_id_str_id).unwrap();
         Box::leak(Box::new(s.to_string()))
     }
 
     fn nodes_with_label(&self, label: &str) -> Option<Vec<Id>> {
-        self.label_to_nodes.get(label).cloned()
+        let overlay = self.overlay.borrow();
+        let base = self.label_to_nodes.get(label);
+        let overlay_dirty = !overlay.new_nodes.is_empty() || !overlay.deleted_nodes.is_empty();
+        if !overlay_dirty {
+            return base.cloned();
+        }
+        // Filter base list by tombstones, then append overlay nodes that
+        // carry this label.
+        let mut out: Vec<Id> = base
+            .map(|v| {
+                v.iter()
+                    .copied()
+                    .filter(|id| !overlay.is_node_deleted(*id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (offset, n) in overlay.new_nodes.iter().enumerate() {
+            let id = overlay.base_node_count + offset as u32;
+            if overlay.is_node_deleted(id) {
+                continue;
+            }
+            if crate::model::graph::Graph::label_strings(&n.labels)
+                .iter()
+                .any(|l| l == label)
+            {
+                out.push(id);
+            }
+        }
+        // The label index "exists" iff the base map carried this label OR
+        // any overlay node uses it. Otherwise return None so callers fall
+        // back to a full scan.
+        if base.is_some() || !out.is_empty() {
+            Some(out)
+        } else {
+            None
+        }
     }
 
     fn directed_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
-        self.label_to_edges.get(label).map(|ids| {
-            ids.iter()
-                .filter(|&&iid| self.edge_directed[iid as usize])
-                .copied()
-                .collect()
-        })
+        let overlay = self.overlay.borrow();
+        let base = self.label_to_edges.get(label);
+        let overlay_dirty = !overlay.new_edges.is_empty() || !overlay.deleted_edges.is_empty();
+        if !overlay_dirty {
+            return base.map(|ids| {
+                ids.iter()
+                    .filter(|&&iid| self.edge_directed[iid as usize])
+                    .copied()
+                    .collect()
+            });
+        }
+        let mut out: Vec<Id> = base
+            .map(|ids| {
+                ids.iter()
+                    .filter(|&&iid| {
+                        !overlay.is_edge_deleted(iid) && self.edge_directed[iid as usize]
+                    })
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (offset, e) in overlay.new_edges.iter().enumerate() {
+            let id = overlay.base_edge_count + offset as u32;
+            if overlay.is_edge_deleted(id) || !e.directed {
+                continue;
+            }
+            if crate::model::graph::Graph::label_strings(&e.labels)
+                .iter()
+                .any(|l| l == label)
+            {
+                out.push(id);
+            }
+        }
+        if base.is_some() || !out.is_empty() {
+            Some(out)
+        } else {
+            None
+        }
     }
 
     fn undirected_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
-        self.label_to_edges.get(label).map(|ids| {
-            ids.iter()
-                .filter(|&&iid| !self.edge_directed[iid as usize])
-                .copied()
-                .collect()
-        })
+        let overlay = self.overlay.borrow();
+        let base = self.label_to_edges.get(label);
+        let overlay_dirty = !overlay.new_edges.is_empty() || !overlay.deleted_edges.is_empty();
+        if !overlay_dirty {
+            return base.map(|ids| {
+                ids.iter()
+                    .filter(|&&iid| !self.edge_directed[iid as usize])
+                    .copied()
+                    .collect()
+            });
+        }
+        let mut out: Vec<Id> = base
+            .map(|ids| {
+                ids.iter()
+                    .filter(|&&iid| {
+                        !overlay.is_edge_deleted(iid) && !self.edge_directed[iid as usize]
+                    })
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (offset, e) in overlay.new_edges.iter().enumerate() {
+            let id = overlay.base_edge_count + offset as u32;
+            if overlay.is_edge_deleted(id) || e.directed {
+                continue;
+            }
+            if crate::model::graph::Graph::label_strings(&e.labels)
+                .iter()
+                .any(|l| l == label)
+            {
+                out.push(id);
+            }
+        }
+        if base.is_some() || !out.is_empty() {
+            Some(out)
+        } else {
+            None
+        }
     }
 
     fn lookup_node_eq(&self, label: &str, prop: &str, value: &Value) -> Option<Vec<Id>> {
+        // Secondary indexes capture only the base nodes. With overlay
+        // mutations in flight, returning a base-only set would silently
+        // hide newly inserted matches and pre-tombstone existing ones, so
+        // we conservatively force the caller to fall back to a scan
+        // (`None`). A future MVP-2 will maintain the indexes incrementally.
+        let overlay = self.overlay.borrow();
+        if !overlay.new_nodes.is_empty() || !overlay.deleted_nodes.is_empty() {
+            return None;
+        }
         self.secondary.borrow().lookup_eq(label, prop, value)
     }
 
@@ -792,19 +1101,150 @@ impl GraphAccess for LazyGraphStore {
         lo: std::ops::Bound<Value>,
         hi: std::ops::Bound<Value>,
     ) -> Option<Vec<Id>> {
+        let overlay = self.overlay.borrow();
+        if !overlay.new_nodes.is_empty() || !overlay.deleted_nodes.is_empty() {
+            return None;
+        }
         self.secondary.borrow().lookup_range(label, prop, lo, hi)
     }
 
     fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {
-        self.outgoing_csr.slice(node_id).to_vec()
+        let overlay = self.overlay.borrow();
+        let mut out: Vec<Id> = self
+            .outgoing_csr
+            .slice(node_id)
+            .iter()
+            .copied()
+            .filter(|id| !overlay.is_edge_deleted(*id))
+            .collect();
+        if let Some(extra) = overlay.new_outgoing.get(&node_id) {
+            for &eid in extra {
+                if !overlay.is_edge_deleted(eid) {
+                    out.push(eid);
+                }
+            }
+        }
+        out
     }
 
     fn incoming_edges(&self, node_id: Id) -> Vec<Id> {
-        self.incoming_csr.slice(node_id).to_vec()
+        let overlay = self.overlay.borrow();
+        let mut out: Vec<Id> = self
+            .incoming_csr
+            .slice(node_id)
+            .iter()
+            .copied()
+            .filter(|id| !overlay.is_edge_deleted(*id))
+            .collect();
+        if let Some(extra) = overlay.new_incoming.get(&node_id) {
+            for &eid in extra {
+                if !overlay.is_edge_deleted(eid) {
+                    out.push(eid);
+                }
+            }
+        }
+        out
     }
 
     fn undirected_edges_of(&self, node_id: Id) -> Vec<Id> {
-        self.undirected_csr.slice(node_id).to_vec()
+        let overlay = self.overlay.borrow();
+        let mut out: Vec<Id> = self
+            .undirected_csr
+            .slice(node_id)
+            .iter()
+            .copied()
+            .filter(|id| !overlay.is_edge_deleted(*id))
+            .collect();
+        if let Some(extra) = overlay.new_undirected.get(&node_id) {
+            for &eid in extra {
+                if !overlay.is_edge_deleted(eid) {
+                    out.push(eid);
+                }
+            }
+        }
+        out
+    }
+}
+
+impl crate::model::graph_access::GraphAccessMut for LazyGraphStore {
+    fn insert_node(&self, labels: LabelType, props: Props) -> Id {
+        let mut overlay = self.overlay.borrow_mut();
+        overlay.insert_node(labels, props)
+    }
+
+    fn insert_edge(&self, src: Id, tgt: Id, directed: bool, labels: LabelType, props: Props) -> Id {
+        // Endpoint validation lives in the runtime so the caller can
+        // raise the right ISO error code (G1002 / G1003). Here we just
+        // record the mutation.
+        let mut overlay = self.overlay.borrow_mut();
+        overlay.insert_edge(src, tgt, directed, labels, props)
+    }
+
+    fn delete_edge(&self, id: Id) {
+        let mut overlay = self.overlay.borrow_mut();
+        overlay.delete_edge(id);
+    }
+
+    fn detach_delete_node(&self, id: Id) {
+        // Collect incident edges from the merged view first; mutating
+        // the overlay invalidates `outgoing_edges` etc., so snapshot.
+        let incident: Vec<Id> = self
+            .outgoing_edges(id)
+            .into_iter()
+            .chain(self.incoming_edges(id))
+            .chain(self.undirected_edges_of(id))
+            .collect();
+        let mut overlay = self.overlay.borrow_mut();
+        for eid in incident {
+            overlay.delete_edge(eid);
+        }
+        overlay.delete_node(id);
+    }
+
+    fn delete_node_no_detach(&self, id: Id) -> Result<(), crate::model::graph_access::G1001> {
+        let remaining: Vec<Id> = self
+            .outgoing_edges(id)
+            .into_iter()
+            .chain(self.incoming_edges(id))
+            .chain(self.undirected_edges_of(id))
+            .collect();
+        if !remaining.is_empty() {
+            return Err(crate::model::graph_access::G1001 {
+                node: id,
+                remaining_edges: remaining,
+            });
+        }
+        self.overlay.borrow_mut().delete_node(id);
+        Ok(())
+    }
+
+    fn is_node_alive(&self, id: Id) -> bool {
+        let overlay = self.overlay.borrow();
+        if overlay.is_node_deleted(id) {
+            return false;
+        }
+        if id < overlay.base_node_count {
+            return true;
+        }
+        overlay.get_new_node(id).is_some()
+    }
+
+    fn is_edge_alive(&self, id: Id) -> bool {
+        let overlay = self.overlay.borrow();
+        if overlay.is_edge_deleted(id) {
+            return false;
+        }
+        if id < overlay.base_edge_count {
+            return true;
+        }
+        overlay.get_new_edge(id).is_some()
+    }
+
+    fn rollback_session(&self) {
+        let mut overlay = self.overlay.borrow_mut();
+        let bn = overlay.base_node_count;
+        let be = overlay.base_edge_count;
+        overlay.clear(bn, be);
     }
 }
 

@@ -2,6 +2,7 @@
 //! (CREATE / USE / DROP GRAPH TYPE) so the REPL and Python bindings can
 //! route to the right handler in a single call.
 
+use crate::syntax::dm::DmStatement;
 use crate::syntax::query::Query;
 use crate::typing::variable_type::VariableType;
 
@@ -10,6 +11,10 @@ use crate::typing::variable_type::VariableType;
 pub enum Statement {
     /// A regular GQL query (MATCH/WHERE/RETURN).
     Query(Query),
+    /// ISO 39075 §13 `<linear data-modifying statement>` — INSERT,
+    /// SET, REMOVE, DELETE, DETACH DELETE, optionally preceded by
+    /// MATCH clauses and followed by RETURN.
+    DataModification(DmStatement),
     /// `CREATE GRAPH TYPE <name> AS { <body> };`
     CreateGraphType {
         name: String,

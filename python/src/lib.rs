@@ -32,6 +32,9 @@ use gqlrust::typing::variable_type::{Schema, VariableType};
 #[pyclass(unsendable)]
 struct Connection {
     store: LazyGraphStore,
+    /// Path the connection was opened from. Used by `save()` to write
+    /// the merged base+overlay view back to the same file atomically.
+    db_path: std::path::PathBuf,
     /// Shared LTJ TripleIndex. Built lazily on the first `execute()` that
     /// needs it; reused across every subsequent call. Without this every
     /// `execute()` would rebuild the six-ordering edge index from scratch
@@ -75,8 +78,19 @@ impl Connection {
             } => self.exec_create_index(py, name, &label, &prop, kind),
             Statement::DropIndex { name } => self.exec_drop_index(py, &name),
             Statement::ShowIndexes => self.exec_show_indexes(py),
+            Statement::DataModification(dm) => self.exec_dm(py, dm),
             Statement::Query(_) => self.exec_query(py, query, limit),
         }
+    }
+
+    /// Persist the merged base+overlay state back to the file the
+    /// connection was opened from. Mirrors the `.save` REPL command and
+    /// SQLite's explicit-save model: until you call this, mutations live
+    /// only in the in-RAM overlay.
+    fn save(&self) -> PyResult<()> {
+        self.store
+            .save(&self.db_path)
+            .map_err(|e| PyRuntimeError::new_err(format!("save: {e}")))
     }
 
     /// List graph types currently in the catalog with active markers.
@@ -211,6 +225,38 @@ impl Connection {
             }
             QueryResult::Raw(ir) => Ok(raw_to_pylist(py, &self.store, &ir)?.into_py(py)),
         }
+    }
+
+    /// ISO §13 data-modification statement: INSERT / DELETE / DETACH
+    /// DELETE. Returns a dict with insertion/deletion counts plus the
+    /// post-mutation row count so callers can confirm the effect without
+    /// having to round-trip through a follow-up MATCH.
+    fn exec_dm<'py>(
+        &self,
+        py: Python<'py>,
+        dm: gqlrust::syntax::dm::DmStatement,
+    ) -> PyResult<PyObject> {
+        let active_name = self.store.catalog().active_name().map(str::to_string);
+        let schema_for_validation = match active_name.as_deref() {
+            None | Some("DEFAULT") => None,
+            _ => Some(self.store.catalog().active_schema()),
+        };
+        let exec = gqlrust::runtime::dm::run_dm(&self.store, &dm, schema_for_validation.as_ref())
+            .map_err(PyValueError::new_err)?;
+        // Any successful mutation invalidates the cached LTJ TripleIndex
+        // — the next query on this connection rebuilds it from the
+        // post-mutation graph.
+        *self.triple_index.borrow_mut() = None;
+        // Mark DEFAULT dirty so the next read of DEFAULT re-infers it
+        // from the live store (Fase 7).
+        self.store.catalog_mut().mark_default_dirty();
+        let d = PyDict::new_bound(py);
+        d.set_item("nodes_inserted", exec.nodes_inserted)?;
+        d.set_item("edges_inserted", exec.edges_inserted)?;
+        d.set_item("nodes_deleted", exec.nodes_deleted)?;
+        d.set_item("edges_deleted", exec.edges_deleted)?;
+        d.set_item("rows", exec.rows.len())?;
+        Ok(d.into_py(py))
     }
 
     fn exec_create<'py>(
@@ -516,6 +562,7 @@ fn open(path: &str) -> PyResult<Connection> {
     };
     Ok(Connection {
         store,
+        db_path: Path::new(path).to_path_buf(),
         triple_index: RefCell::new(Some(index)),
     })
 }

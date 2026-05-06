@@ -1,5 +1,6 @@
 use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
+use crate::syntax::dm::{validate_insert_pattern, DmOp, DmStatement};
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::{
@@ -159,8 +160,17 @@ impl Parser {
                 pattern: first_pattern,
             }
         };
-        let mut matches = vec![first_stmt];
+        let matches = self.continue_match_chain(vec![first_stmt])?;
+        self.finish_query_after_matches(matches)
+    }
 
+    /// Continue a partially-parsed `Vec<MatchStatement>` by consuming any
+    /// trailing `(OPTIONAL)? MATCH ...` clauses. Stops at the first token
+    /// that is neither MATCH nor OPTIONAL.
+    fn continue_match_chain(
+        &mut self,
+        mut matches: Vec<MatchStatement>,
+    ) -> Result<Vec<MatchStatement>, String> {
         loop {
             if self.eat(&Token::Optional) {
                 self.expect(&Token::Match)?;
@@ -173,7 +183,34 @@ impl Parser {
                 break;
             }
         }
+        Ok(matches)
+    }
 
+    /// Parse an explicit MATCH chain that starts with `MATCH` or
+    /// `OPTIONAL MATCH`. Used by the DML dispatcher; differs from
+    /// `full_query` in that the leading MATCH keyword is required.
+    fn parse_match_chain_explicit(&mut self) -> Result<Vec<MatchStatement>, String> {
+        let first_optional = self.eat(&Token::Optional);
+        self.expect(&Token::Match)?;
+        let first_pattern = self.match_clause_body()?;
+        let first_stmt = if first_optional {
+            MatchStatement::Optional {
+                pattern: first_pattern,
+            }
+        } else {
+            MatchStatement::Simple {
+                pattern: first_pattern,
+            }
+        };
+        self.continue_match_chain(vec![first_stmt])
+    }
+
+    /// Finish parsing a `<linear query statement>` once the MATCH chain
+    /// is in hand: GROUP BY (legacy or canonical), RETURN, ORDER BY, LIMIT.
+    fn finish_query_after_matches(
+        &mut self,
+        matches: Vec<MatchStatement>,
+    ) -> Result<Query, String> {
         // Legacy position: GROUP BY between the match chain and RETURN.
         // Pre-ISO form kept for back-compat (commit 72a6449e). The
         // canonical post-items position below is ISO §14.11.
@@ -1450,10 +1487,133 @@ impl Parser {
             Token::Drop => self.drop_statement(),
             Token::Show => self.show_statement(),
             Token::Validate => self.validate_graph_type(),
+            // ISO §13 DML keywords reserved but not implemented in MVP-0.
+            Token::Set => {
+                Err("SET statement (§13.3) is reserved but not implemented in this MVP".into())
+            }
+            Token::Remove => {
+                Err("REMOVE statement (§13.4) is reserved but not implemented in this MVP".into())
+            }
+            // Standalone INSERT (no MATCH chain).
+            Token::Insert => Ok(Statement::DataModification(
+                self.parse_dm_after_matches(Vec::new())?,
+            )),
+            // DETACH/NODETACH/DELETE alone are illegal: ISO §13.5 SR3
+            // requires the working table provided by a preceding MATCH.
+            Token::Detach | Token::NoDetach | Token::Delete => Err(format!(
+                "{:?} requires a preceding MATCH clause (§13.5)",
+                self.peek()
+            )),
+            // Either a normal Query or a MATCH-prefixed DM. Disambiguate
+            // by parsing the match chain first and then peeking.
+            Token::Match | Token::Optional => {
+                let matches = self.parse_match_chain_explicit()?;
+                match self.peek() {
+                    Token::Insert | Token::Detach | Token::NoDetach | Token::Delete => Ok(
+                        Statement::DataModification(self.parse_dm_after_matches(matches)?),
+                    ),
+                    Token::Set => Err(
+                        "SET statement (§13.3) is reserved but not implemented in this MVP".into(),
+                    ),
+                    Token::Remove => Err(
+                        "REMOVE statement (§13.4) is reserved but not implemented in this MVP"
+                            .into(),
+                    ),
+                    _ => {
+                        let q = self.finish_query_after_matches(matches)?;
+                        Ok(Statement::Query(q))
+                    }
+                }
+            }
             _ => {
                 let q = self.full_query()?;
                 Ok(Statement::Query(q))
             }
+        }
+    }
+
+    /// Parse the DML op + optional RETURN + LIMIT, given an already-parsed
+    /// MATCH chain (possibly empty for standalone INSERT). The next token
+    /// must be one of INSERT / DETACH / NODETACH / DELETE.
+    fn parse_dm_after_matches(
+        &mut self,
+        matches: Vec<MatchStatement>,
+    ) -> Result<DmStatement, String> {
+        let op = match self.peek() {
+            Token::Insert => self.parse_insert_op()?,
+            Token::Detach | Token::NoDetach | Token::Delete => self.parse_delete_op()?,
+            t => return Err(format!("expected INSERT or DELETE, got {t:?}")),
+        };
+        // ISO §14.10 optional RETURN trailing the DM.
+        let (returns, _distinct) = if self.eat(&Token::Return) {
+            // MVP-0: DISTINCT in DML RETURN is rare; accept it but discard.
+            let distinct = self.eat(&Token::Distinct);
+            let items = self.return_list()?;
+            (Some(items), distinct)
+        } else {
+            (None, false)
+        };
+        let limit = self.parse_optional_limit()?;
+        Ok(DmStatement {
+            matches,
+            op,
+            returns,
+            limit,
+        })
+    }
+
+    /// `INSERT <insert path pattern list>` — ISO §13.2 + §16.5.
+    fn parse_insert_op(&mut self) -> Result<DmOp, String> {
+        self.expect(&Token::Insert)?;
+        let mut patterns = vec![self.parse_insert_path_pattern()?];
+        while self.eat(&Token::Comma) {
+            patterns.push(self.parse_insert_path_pattern()?);
+        }
+        Ok(DmOp::Insert(patterns))
+    }
+
+    /// One `<insert path pattern>` — alternating insert nodes and edges.
+    /// We reuse the regular path-pattern parser and validate afterwards
+    /// that no MATCH-only constructs (filters, repetitions, unions, etc.)
+    /// snuck in. ISO §16.5 keeps INSERT patterns as a strict subset.
+    fn parse_insert_path_pattern(&mut self) -> Result<PathPattern, String> {
+        // Parse a single concat path (no top-level comma — that's the
+        // outer `<insert path pattern list>` separator).
+        let pattern = self.path_pattern()?;
+        validate_insert_pattern(&pattern)?;
+        Ok(pattern)
+    }
+
+    /// `[ DETACH | NODETACH ] DELETE <var> (, <var>)*` — ISO §13.5.
+    /// MVP-0 restricts the `<delete item>` to a `<binding variable
+    /// reference>` (Feature GD04 not enabled), so the targets are bare
+    /// names. NODETACH is the implicit default per §13.5 SR6.
+    fn parse_delete_op(&mut self) -> Result<DmOp, String> {
+        let detach = if self.eat(&Token::Detach) {
+            true
+        } else if self.eat(&Token::NoDetach) {
+            false
+        } else {
+            // No DETACH/NODETACH prefix → NODETACH per §13.5 SR6.
+            false
+        };
+        self.expect(&Token::Delete)?;
+        let mut targets = vec![self.expect_var_name("DELETE")?];
+        while self.eat(&Token::Comma) {
+            targets.push(self.expect_var_name("DELETE")?);
+        }
+        Ok(DmOp::Delete { detach, targets })
+    }
+
+    /// Helper: consume one `Token::Name` and return its string.
+    /// MVP-0 keeps DELETE targets to bare names (§13.5 GD04 disabled).
+    fn expect_var_name(&mut self, ctx: &str) -> Result<String, String> {
+        match self.advance() {
+            Token::Name(n) => Ok(n),
+            t => Err(format!(
+                "{ctx}: expected variable name, got {t:?} (Feature GD04 \
+                 'simple expression support' is not enabled in this MVP)"
+            )),
         }
     }
 

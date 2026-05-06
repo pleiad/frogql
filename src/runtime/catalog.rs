@@ -40,6 +40,13 @@ pub struct GraphTypeCatalog {
     /// `types`) so old catalogs without validation data deserialize.
     #[serde(default)]
     pub validations: BTreeMap<String, ValidationStatus>,
+    /// In-RAM only: set to `true` whenever the data underlying DEFAULT
+    /// changes (i.e. after every successful DML). Cleared when the next
+    /// access re-infers DEFAULT from the live store. Not serialized — a
+    /// freshly opened `.gdb` always starts clean (the on-disk DEFAULT
+    /// already reflects what's in the file).
+    #[serde(skip)]
+    pub default_dirty: bool,
 }
 
 /// Cached outcome of `VALIDATE GRAPH TYPE`. Lets re-USE of the same
@@ -70,7 +77,22 @@ impl GraphTypeCatalog {
             types: BTreeMap::new(),
             active: None,
             validations: BTreeMap::new(),
+            default_dirty: false,
         }
+    }
+
+    /// Flip the "DEFAULT needs re-inference" flag. Cheap: O(1). The
+    /// runtime calls this after every successful DML; the next
+    /// `SHOW GRAPH TYPE DEFAULT` / `USE GRAPH TYPE DEFAULT` /
+    /// `VALIDATE GRAPH TYPE DEFAULT` triggers the lazy refresh.
+    pub fn mark_default_dirty(&mut self) {
+        self.default_dirty = true;
+    }
+
+    /// `true` iff DEFAULT is stale relative to the store. Set by
+    /// `mark_default_dirty`, cleared by `install_default`.
+    pub fn is_default_dirty(&self) -> bool {
+        self.default_dirty
     }
 
     /// Register a user-defined graph type. Rejects the reserved DEFAULT
@@ -94,6 +116,7 @@ impl GraphTypeCatalog {
         self.validations.remove(DEFAULT_NAME);
         self.types.insert(DEFAULT_NAME.to_string(), schema);
         self.active = Some(DEFAULT_NAME.to_string());
+        self.default_dirty = false;
     }
 
     /// Drop a graph type. Rejects DEFAULT. If the dropped name was active,

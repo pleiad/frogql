@@ -64,22 +64,24 @@ fn main() {
     let db_path = Path::new(&args[1]);
 
     // Import if requested
-    if args.len() >= 4 {
+    let creating_fresh = if args.len() >= 4 {
         let mode = &args[2];
         let source = &args[3];
         import(db_path, mode, source);
-    } else if !db_path.exists() {
-        eprintln!(
-            "Error: {} does not exist. Use --import-csv or --import-json to create it.",
-            db_path.display()
-        );
-        std::process::exit(1);
+        false
+    } else {
+        // SQLite-style: opening a path that doesn't exist creates an
+        // empty database. The user can then INSERT and `.save`.
+        !db_path.exists()
+    };
+    if creating_fresh {
+        eprintln!("creating new database: {}", db_path.display());
     }
 
     // Open
     eprintln!("Opening {}...", db_path.display());
     let t0 = Instant::now();
-    let store = LazyGraphStore::open(db_path).expect("failed to open database");
+    let store = LazyGraphStore::open_or_create(db_path).expect("failed to open database");
     eprintln!(
         "Loaded {} nodes, {} edges in {:.2}s",
         store.node_count(),
@@ -158,6 +160,40 @@ fn main() {
             continue;
         }
 
+        // `.dump-json <path>` — pg_dump-style snapshot of the merged
+        // base+overlay view to a JSON file the same shape `import_json`
+        // consumes. Useful for backup / inter-version transport without
+        // depending on the binary `.gdb` format.
+        if let Some(rest) = line.strip_prefix(".dump-json") {
+            let target = rest.trim();
+            if target.is_empty() {
+                eprintln!("usage: .dump-json <path>");
+                continue;
+            }
+            let t = Instant::now();
+            match gqlrust::store::dump::dump_to_json_file(&store, Path::new(target)) {
+                Ok(()) => eprintln!("Dumped to {target} ({:.3}s).", t.elapsed().as_secs_f64()),
+                Err(e) => eprintln!("Dump failed: {e}"),
+            }
+            continue;
+        }
+
+        // SQLite-style `.save` — atomically writes the merged base+overlay
+        // state to `db_path`. Until the user invokes this, DML mutations
+        // live only in the in-RAM overlay (no auto-commit).
+        if line == ".save" {
+            let t = Instant::now();
+            match store.save(db_path) {
+                Ok(()) => eprintln!(
+                    "Saved {} ({:.3}s).",
+                    db_path.display(),
+                    t.elapsed().as_secs_f64()
+                ),
+                Err(e) => eprintln!("Save failed: {e}"),
+            }
+            continue;
+        }
+
         // Parse top-level statement: query or DDL.
         let stmt = match parse_statement(line) {
             Ok(s) => s,
@@ -214,6 +250,36 @@ fn main() {
             }
             Statement::ShowIndexes => {
                 print_indexes(&store);
+                continue;
+            }
+            Statement::DataModification(dm) => {
+                let t = Instant::now();
+                // ISO §13 G2000: validate against the active GRAPH TYPE
+                // unless it's DEFAULT (DEFAULT is data-derived; see Fase 7).
+                let active_name = store.catalog().active_name().map(str::to_string);
+                let schema_for_validation = match active_name.as_deref() {
+                    None | Some("DEFAULT") => None,
+                    _ => Some(store.catalog().active_schema()),
+                };
+                match gqlrust::runtime::dm::run_dm(&store, &dm, schema_for_validation.as_ref()) {
+                    Ok(exec) => {
+                        rt.invalidate_caches();
+                        // ISO §13 doesn't mention DEFAULT specifically, but
+                        // gqlite re-infers it lazily on next access (Fase 7).
+                        store.catalog_mut().mark_default_dirty();
+                        eprintln!(
+                            "OK ({} nodes inserted, {} edges inserted, {} nodes deleted, \
+                             {} edges deleted, {} rows; {:.3}s)",
+                            exec.nodes_inserted,
+                            exec.edges_inserted,
+                            exec.nodes_deleted,
+                            exec.edges_deleted,
+                            exec.rows.len(),
+                            t.elapsed().as_secs_f64()
+                        );
+                    }
+                    Err(e) => eprintln!("DML error: {e}"),
+                }
                 continue;
             }
             Statement::Query(q) => {
@@ -1144,6 +1210,11 @@ fn print_graph_types(store: &LazyGraphStore) {
 }
 
 fn handle_show(store: &LazyGraphStore, name: &str) {
+    if name.eq_ignore_ascii_case("DEFAULT") {
+        // Lazy refresh: pull the current schema from the live store
+        // before pretty-printing. No-op when nothing has changed.
+        store.refresh_default_if_dirty();
+    }
     let cat = store.catalog();
     let lookup_key = if name.eq_ignore_ascii_case("DEFAULT") {
         "DEFAULT"

@@ -1,4 +1,5 @@
 pub mod descriptor;
+pub mod dm;
 pub mod expr;
 pub mod path_pattern;
 pub mod query;

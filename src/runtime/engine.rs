@@ -123,6 +123,15 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         self.triple_index().clone()
     }
 
+    /// Drop the cached LTJ TripleIndex and EXISTS memo. The next query
+    /// that needs the index will rebuild it from the (possibly mutated)
+    /// graph. Callers invoke this after a successful DML so subsequent
+    /// reads see the post-mutation state.
+    pub fn invalidate_caches(&self) {
+        *self.triple_index.borrow_mut() = None;
+        self.exists_cache.borrow_mut().clear();
+    }
+
     /// Lazily build (or return) the cached LTJ TripleIndex. Idempotent —
     /// called from every `run_join` / `run_concat_pattern` site that needs
     /// the index, but the build only runs once per `Runtime` instance

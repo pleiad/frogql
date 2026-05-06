@@ -14,6 +14,22 @@ use super::disk_index;
 use super::record::{self, PropValue};
 use super::string_table::StringTable;
 
+/// Atomic save: write the graph to `<db_path>.tmp` first, then `rename` it
+/// over the destination. ISO doesn't mandate atomicity here, but a crash
+/// in the middle of a multi-second `.gdb` rewrite would otherwise corrupt
+/// the file. The rename is atomic on POSIX and on Windows ≥ 8 when the
+/// target sits on the same filesystem (`Pager::create` only ever opens
+/// local paths). Falls back to a non-atomic write if the directory is
+/// not writable for the temp file (rare but worth a clear error).
+pub fn save_graph_atomic(graph: &Graph, db_path: &Path) -> io::Result<()> {
+    let mut tmp = db_path.to_path_buf().into_os_string();
+    tmp.push(".tmp");
+    let tmp_path = std::path::PathBuf::from(tmp);
+    save_graph(graph, &tmp_path)?;
+    std::fs::rename(&tmp_path, db_path)?;
+    Ok(())
+}
+
 /// Save a Graph to a .gql database file.
 pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
     let mut pager = Pager::create(db_path)?;

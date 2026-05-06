@@ -89,3 +89,77 @@ pub trait GraphAccess {
         None
     }
 }
+
+/// Shape of a `dependent object error` raised by NODETACH DELETE when a
+/// node still has incident edges (ISO §13.5 GR5, SQLSTATE G1001).
+#[derive(Debug, Clone)]
+pub struct G1001 {
+    pub node: Id,
+    pub remaining_edges: Vec<Id>,
+}
+
+impl std::fmt::Display for G1001 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "G1001: dependent object error — node {} still has {} edge(s); use DETACH DELETE",
+            self.node,
+            self.remaining_edges.len()
+        )
+    }
+}
+
+impl std::error::Error for G1001 {}
+
+/// Mutation API for graph backends that accept `INSERT` / `DELETE` /
+/// `DETACH DELETE`. Methods take `&self` because the underlying mutation
+/// state lives behind a `RefCell` overlay; this preserves the existing
+/// `Runtime` lifetime that already plumbs `&G` through the engine.
+///
+/// MVP-0 surface (see plan §"Fase 2"). SET / REMOVE arrive in MVP-1.
+pub trait GraphAccessMut: GraphAccess {
+    /// Insert a brand-new node and return its allocated internal id. The
+    /// returned id is dense above the previous high watermark; deletions
+    /// create tombstones rather than gaps that future inserts can fill.
+    fn insert_node(&self, labels: LabelType, props: crate::model::graph::Props) -> Id;
+
+    /// Insert a directed (`directed = true`) or undirected edge between
+    /// two existing endpoints. `src` and `tgt` must satisfy
+    /// `is_node_alive`; otherwise the implementation raises
+    /// `dependent object error — endpoint node not in current working
+    /// graph (G1003)` per ISO §13.2 GR9.
+    fn insert_edge(
+        &self,
+        src: Id,
+        tgt: Id,
+        directed: bool,
+        labels: LabelType,
+        props: crate::model::graph::Props,
+    ) -> Id;
+
+    /// Tombstone an edge. Idempotent (re-deleting a tombstoned edge is a
+    /// no-op).
+    fn delete_edge(&self, id: Id);
+
+    /// Tombstone a node and every edge incident to it. ISO §13.5 SR6:
+    /// the implicit DELETE form is NODETACH; callers reach this entry
+    /// only when the parser saw an explicit `DETACH DELETE`.
+    fn detach_delete_node(&self, id: Id);
+
+    /// Tombstone a node only when it has zero live incident edges. Maps
+    /// directly to `NODETACH DELETE`. Returns `Err(G1001)` (without
+    /// mutating anything) when the node still has edges.
+    fn delete_node_no_detach(&self, id: Id) -> Result<(), G1001>;
+
+    /// `true` iff the node id resolves to a live node (existing on disk
+    /// and not tombstoned, or a freshly inserted overlay node).
+    fn is_node_alive(&self, id: Id) -> bool;
+
+    /// `true` iff the edge id resolves to a live edge.
+    fn is_edge_alive(&self, id: Id) -> bool;
+
+    /// Drop every overlay change since the store was opened or last
+    /// saved. Used by the runtime when a DML statement aborts midway
+    /// (atomicity per ISO §13.5 Note 196).
+    fn rollback_session(&self);
+}

@@ -65,6 +65,15 @@ pub enum Token {
     Using,
     Hash,
     BTree,
+    /// ISO 39075 §13 data-modification keywords (uppercase only — `set`,
+    /// `delete`, etc. are common property names so the canonical lower-
+    /// case forms stay reserved for identifiers).
+    Insert,
+    Set,
+    Remove,
+    Delete,
+    Detach,
+    NoDetach,
     /// `LIST` keyword for `LIST<T>` type-expression form.
     List,
     /// Compound: `group` and `by` stay valid as record/property names.
@@ -597,6 +606,15 @@ impl Lexer {
                         "USING" => Token::Using,
                         "HASH" => Token::Hash,
                         "BTREE" => Token::BTree,
+                        // ISO 39075 §13 DML keywords. Uppercase-only because
+                        // `set`, `delete`, `insert` are common property names
+                        // in legacy graphs.
+                        "INSERT" => Token::Insert,
+                        "SET" => Token::Set,
+                        "REMOVE" => Token::Remove,
+                        "DELETE" => Token::Delete,
+                        "DETACH" => Token::Detach,
+                        "NODETACH" => Token::NoDetach,
                         _ => Token::Name(name),
                     };
                     self.tokens.push(tok);
