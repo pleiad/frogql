@@ -126,6 +126,32 @@ impl SecondaryIndex {
         Some(out)
     }
 
+    /// True when a btree index exists for `(label, prop)`. Used by the
+    /// BTree-driven ORDER BY path to detect whether it can route through
+    /// `ordered_ids` instead of running a generic sort.
+    pub fn has_btree(&self, label: &str, prop: &str) -> bool {
+        self.btrees
+            .contains_key(&(label.to_string(), prop.to_string()))
+    }
+
+    /// All node IDs carrying `(label, prop)` in btree-key order.
+    /// `ascending = true` walks ASC, `false` walks DESC. None means no
+    /// btree exists — caller must fall back to a generic sort.
+    pub fn ordered_ids(&self, label: &str, prop: &str, ascending: bool) -> Option<Vec<Id>> {
+        let bucket = self.btrees.get(&(label.to_string(), prop.to_string()))?;
+        let mut out = Vec::with_capacity(bucket.values().map(|v| v.len()).sum());
+        if ascending {
+            for ids in bucket.values() {
+                out.extend_from_slice(ids);
+            }
+        } else {
+            for ids in bucket.values().rev() {
+                out.extend_from_slice(ids);
+            }
+        }
+        Some(out)
+    }
+
     /// True when *any* index (hash or btree) exists for the given
     /// (label, prop) pair.
     pub fn has(&self, label: &str, prop: &str) -> bool {

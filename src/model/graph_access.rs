@@ -88,6 +88,15 @@ pub trait GraphAccess {
     ) -> Option<Vec<Id>> {
         None
     }
+
+    /// All node IDs carrying `(label, prop)`, returned in sort order over
+    /// the btree's keys. `ascending = true` walks ASC, `false` walks DESC.
+    /// Returns None when no btree index exists for `(label, prop)` —
+    /// caller must fall back to a runtime sort. Used by the BTree-driven
+    /// ORDER BY path. Default impl: no indexes.
+    fn lookup_node_ordered(&self, _label: &str, _prop: &str, _ascending: bool) -> Option<Vec<Id>> {
+        None
+    }
 }
 
 /// Shape of a `dependent object error` raised by NODETACH DELETE when a
