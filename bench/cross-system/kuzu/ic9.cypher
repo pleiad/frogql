@@ -25,8 +25,8 @@ WHERE label(message) IN ["Comment", "Post"]
 RETURN otherPerson.id AS personId,
        otherPerson.firstName AS personFirstName,
        otherPerson.lastName AS personLastName,
-       message.id AS messageId,
-       COALESCE(message.content, message.imageFile) AS messageContent,
-       message.creationDate AS messageCreationDate
-ORDER BY messageCreationDate DESC, messageId ASC
+       message.id AS commentOrPostId,
+       COALESCE(message.content, message.imageFile) AS commentOrPostContent,
+       message.creationDate AS commentOrPostCreationDate
+ORDER BY commentOrPostCreationDate DESC, commentOrPostId ASC
 LIMIT 20

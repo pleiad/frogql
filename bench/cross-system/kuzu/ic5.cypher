@@ -9,9 +9,9 @@
 MATCH (person:Person {id: $personId})-[:knows*1..2]-(otherPerson:Person)
 WHERE person <> otherPerson
 MATCH (otherPerson)<-[hm:hasMember]-(forum:Forum)
-WHERE hm.creationDate > $minDate
+WHERE hm.joinDate > $minDate
 OPTIONAL MATCH (otherPerson)<-[:hasCreator]-(post:Post)<-[:containerOf]-(forum)
 WITH forum, COUNT(post) AS postCount
 ORDER BY postCount DESC, forum.id ASC
 LIMIT 20
-RETURN forum.title AS forumTitle, postCount
+RETURN forum.title AS forumName, forum.id AS forumId, postCount

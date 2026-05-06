@@ -15,7 +15,7 @@ WHERE person <> otherPerson
 RETURN otherPerson.ldbcId AS personId,
        otherPerson.firstName AS personFirstName,
        otherPerson.lastName AS personLastName,
-       company.name AS companyName,
-       workAt.workFrom AS workFromYear
-ORDER BY workFromYear ASC, personId ASC, companyName DESC
+       company.name AS organizationName,
+       workAt.workFrom AS organizationWorkFromYear
+ORDER BY organizationWorkFromYear ASC, personId ASC, organizationName DESC
 LIMIT 10

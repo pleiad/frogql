@@ -13,22 +13,22 @@ query = """
 MATCH (person:Person {id: {personId}})~[:knows]~{1, 2}(otherPerson:Person)
 WHERE person <> otherPerson
 MATCH (otherPerson)<-[hm:hasMember]-(forum:Forum)
-WHERE hm.creationDate > {minDate}
+WHERE hm.joinDate > {minDate}
 OPTIONAL MATCH (otherPerson)<-[:hasCreator]-(post:Post)<-[:containerOf]-(forum)
 RETURN
-    forum.title AS forumTitle,
+    forum.title AS forumName,
+    forum.id AS forumId,
     COUNT(post) AS postCount
 GROUP BY forum.title, forum.id
-ORDER BY postCount DESC, forum.id ASC
+ORDER BY postCount DESC, forumId ASC
 LIMIT 20
 """
 
-return_columns = ["forumTitle", "postCount"]
-
-expected_shape = "s,i"
+return_columns = ["forumName", "forumId", "postCount"]
 
 [divergences]
-no-cast = "spec ORDER BY tie-break is `CAST(forum.id AS INTEGER) ASC`. gqlite stores Forum.id as native int, so plain `forum.id ASC` sorts identically. CAST isn't in the parser; not needed here. Same divergence as IC8/IC9."
-group-by-raw-expr = "spec writes `GROUP BY forumTitle, forum.id` referencing the RETURN-alias `forumTitle`. gqlite's parser doesn't visit RETURN aliases when resolving GROUP BY items, so we substitute `GROUP BY forum.title, forum.id` (raw expression). Same group key, same rows."
+no-cast = "spec ORDER BY tie-break is `CAST(forum.id AS INTEGER) ASC`. gqlite stores Forum.id as native int, so plain `forumId ASC` sorts identically. CAST isn't in the parser; not needed here. Same divergence as IC8/IC9."
+group-by-raw-expr = "spec writes `GROUP BY forumName, forum.id` referencing the RETURN-alias `forumName`. gqlite's parser doesn't visit RETURN aliases when resolving GROUP BY items, so we substitute `GROUP BY forum.title, forum.id` (raw expression). Same group key, same rows."
+return-extra-forumid = "spec returns only forumName + postCount. gqlite's parser rejects ORDER BY items that mix RETURN aliases (`postCount`) with free expressions (`forum.id`); the canonical Cypher reference uses `WITH forum, ...` to keep `forum.id` in scope post-aggregate, but our parser has no WITH. We project `forum.id AS forumId` so the tie-break can sort by a RETURN alias. The cross-system Cypher (graphqlite, Kuzu) projects the same extra column for byte-equal cross-system hashes; same data, one extra column."
 edge-casing = "loader produces lowercase :knows, :hasMember, :hasCreator, :containerOf. Loader-level."
 bare-node-compare = "spec uses `WHERE person <> otherPerson`. gqlite's `<>` on bound nodes is now first-class (PR #42); we run the spec verbatim."

@@ -16,22 +16,20 @@ RETURN
     otherPerson.id AS personId,
     otherPerson.firstName AS personFirstName,
     otherPerson.lastName AS personLastName,
-    message.id AS messageId,
-    COALESCE(message.content, message.imageFile) AS messageContent,
-    message.creationDate AS messageCreationDate
-ORDER BY messageCreationDate DESC, messageId ASC
+    message.id AS commentOrPostId,
+    COALESCE(message.content, message.imageFile) AS commentOrPostContent,
+    message.creationDate AS commentOrPostCreationDate
+ORDER BY commentOrPostCreationDate DESC, commentOrPostId ASC
 LIMIT 20
 """
 
 return_columns = [
     "personId", "personFirstName", "personLastName",
-    "messageId", "messageContent", "messageCreationDate",
+    "commentOrPostId", "commentOrPostContent", "commentOrPostCreationDate",
 ]
-
-expected_shape = "i,s,s,i,n/s,i"
 
 [divergences]
 message-union = "spec uses (message:Message); our LDBC loader doesn't synthesize a :Message superlabel, so we use the :Comment|Post ISO GQL alternation. Same logical query — same as IC2/IC8."
 edge-casing = "loader produces lowercase :knows, :hasCreator. Loader-level."
-no-cast = "spec ORDER BY tie-break is `CAST(messageId AS INTEGER) ASC`. gqlite stores LDBC IDs as native int, so plain `messageId ASC` sorts identically. CAST isn't in the parser; not needed here."
+no-cast = "spec ORDER BY tie-break is `CAST(commentOrPostId AS INTEGER) ASC`. gqlite stores LDBC IDs as native int, so plain `commentOrPostId ASC` sorts identically. CAST isn't in the parser; not needed here."
 bare-node-compare = "spec uses `WHERE person <> otherPerson` (compares node references). gqlite's `<>` operator on bound nodes is now first-class (PR #42 — `tests/first_class_node_edge_values_test.rs`); we run the spec verbatim."

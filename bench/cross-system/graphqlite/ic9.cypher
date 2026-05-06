@@ -30,8 +30,8 @@ WHERE (message:Comment OR message:Post)
 RETURN otherPerson.ldbcId AS personId,
        otherPerson.firstName AS personFirstName,
        otherPerson.lastName AS personLastName,
-       message.ldbcId AS messageId,
-       COALESCE(message.content, message.imageFile) AS messageContent,
-       message.creationDate AS messageCreationDate
-ORDER BY messageCreationDate DESC, messageId ASC
+       message.ldbcId AS commentOrPostId,
+       COALESCE(message.content, message.imageFile) AS commentOrPostContent,
+       message.creationDate AS commentOrPostCreationDate
+ORDER BY commentOrPostCreationDate DESC, commentOrPostId ASC
 LIMIT 20
