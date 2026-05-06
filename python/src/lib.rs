@@ -21,6 +21,8 @@ use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::ltj::triple_index::TripleIndex;
 use gqlrust::runtime::result::{IntermediateResult, QueryResult};
 use gqlrust::store::lazy::LazyGraphStore;
+use gqlrust::syntax::expr::Expr;
+use gqlrust::syntax::query::ReturnItem;
 use gqlrust::syntax::statement::{Statement, TypeElement};
 use gqlrust::typing::format::format_schema;
 use gqlrust::typing::inference::infer_simple_schema;
@@ -174,9 +176,23 @@ impl Connection {
                             .iter()
                             .enumerate()
                             .map(|(i, it)| {
-                                it.alias()
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| format!("col{i}"))
+                                if let Some(a) = it.alias() {
+                                    return a.to_string();
+                                }
+                                // ISO §14.11 SR 8a: a bare `<binding
+                                // variable reference>` is shorthand for
+                                // `n AS n` — the implicit alias is the
+                                // variable name. Other expression
+                                // shapes (`x.attr`, COALESCE(...), etc.)
+                                // keep the positional `colN` default.
+                                if let ReturnItem::Expr {
+                                    expr: Expr::Var(name),
+                                    ..
+                                } = it
+                                {
+                                    return name.clone();
+                                }
+                                format!("col{i}")
                             })
                             .collect()
                     })

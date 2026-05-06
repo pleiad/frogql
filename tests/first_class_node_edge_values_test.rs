@@ -293,3 +293,93 @@ fn value_node_equality_is_by_id() {
     r.insert("id".to_string(), Value::Int(7));
     assert_ne!(Value::Node(7), Value::Record(r));
 }
+
+// =====================================================================
+// Edge cases surfaced by the post-implementation survey
+// =====================================================================
+
+/// `-[r]->{1,2}` binds `r` to a `PathValue::Group`. Projection of a
+/// group as a single reference value is not yet supported — runtime
+/// emits `Failure` which the projection layer maps to `Value::Null`.
+/// Pinned for the future "lift Group to List of refs".
+#[test]
+fn runtime_return_bare_repetition_var_yields_null() {
+    let g = graph_users_pets();
+    let rt = Runtime::new(&g);
+    let q = compile_query("MATCH ()-[r]->{1,2}() RETURN r").unwrap();
+    let rows = match rt.run_query(&q, 0) {
+        QueryResult::Projected(rs) => rs,
+        _ => panic!("expected projected"),
+    };
+    assert!(!rows.is_empty(), "the pattern itself matches");
+    for row in &rows {
+        assert_eq!(
+            row[0],
+            Value::Null,
+            "Group references project as Null until List-lifting lands"
+        );
+    }
+}
+
+/// `WHERE n = e` (node vs edge): per §4.4.4 reference values of
+/// different static base types are NOT essentially comparable; the
+/// comparison is false in 3VL → row drops.
+#[test]
+fn runtime_cross_kind_node_edge_comparison_drops_rows() {
+    let g = graph_users_pets();
+    let rt = Runtime::new(&g);
+    let q = compile_query("MATCH (n: User), ()-[e:OWNS]->() WHERE n = e RETURN n").unwrap();
+    let rows = match rt.run_query(&q, 0) {
+        QueryResult::Projected(rs) => rs,
+        _ => panic!("expected projected"),
+    };
+    assert!(rows.is_empty(), "node-vs-edge equality always false");
+}
+
+/// `ORDER BY n.scalar_attr` is the positive case complementing the
+/// reject test for `ORDER BY n` — sorting by an attribute that
+/// resolves to a scalar is fine even when the holder is a node.
+#[test]
+fn runtime_order_by_node_attribute_sorts_correctly() {
+    let g = graph_users_pets();
+    let rows = run_projected(&g, "MATCH (u: User) RETURN u.name ORDER BY u.name DESC");
+    let names: Vec<String> = rows
+        .iter()
+        .map(|r| match &r[0] {
+            Value::Str(s) => s.clone(),
+            v => panic!("expected str, got {v:?}"),
+        })
+        .collect();
+    assert_eq!(names, vec!["Bob", "Alice"]);
+}
+
+/// `RETURN [n, m]` — list literal with bare-variable elements.
+/// Today the list-literal parser only accepts constants, so this is
+/// a parse error. Pinned so any future relaxation produces a
+/// detectable test flip.
+#[test]
+fn parser_rejects_list_literal_with_bare_variables() {
+    let r = compile_query("MATCH (n: User), (m: User) RETURN [n, m]");
+    let err = r.expect_err("list literal with bare vars must be a parse error");
+    assert!(
+        err.contains("non-constant") || err.contains("list"),
+        "error message should mention the constraint, got: {err}"
+    );
+}
+
+/// ISO §14.11 SR 8a: `RETURN n` is shorthand for `RETURN n AS n`.
+/// The wire-format key in the Python binding now honors this. The
+/// AST itself does NOT rewrite (alias remains None); pinning the
+/// underlying `Expr::Var("n")` shape is what the Python layer reads.
+#[test]
+fn return_bare_var_keeps_var_in_ast_for_implicit_alias() {
+    let q = compile_query_unchecked("MATCH (n) RETURN n").unwrap();
+    let items = q.returns.unwrap();
+    assert_eq!(items.len(), 1);
+    if let gqlrust::syntax::query::ReturnItem::Expr { expr, alias } = &items[0] {
+        assert!(matches!(expr, Expr::Var(name) if name == "n"));
+        assert!(alias.is_none(), "implicit alias is applied at projection");
+    } else {
+        panic!("expected Expr return item");
+    }
+}
