@@ -1,0 +1,15 @@
+{
+  "nodes": [
+    { "id": "p1",  "labels": ["Person"],  "props": { "id": 1,   "name": "Alice" } },
+    { "id": "c1",  "labels": ["Comment"], "props": { "id": 100, "content": "hi" } },
+    { "id": "c2",  "labels": ["Comment"], "props": { "id": 101, "content": "hey" } },
+    { "id": "po1", "labels": ["Post"],    "props": { "id": 200, "content": "post1" } },
+    { "id": "f1",  "labels": ["Forum"],   "props": { "id": 999, "title": "Album" } }
+  ],
+  "edges": [
+    { "id": "e1", "labels": ["hasCreator"],   "props": {}, "endpoints": ["c1",  "p1"], "directionality": "->" },
+    { "id": "e2", "labels": ["hasCreator"],   "props": {}, "endpoints": ["c2",  "p1"], "directionality": "->" },
+    { "id": "e3", "labels": ["hasCreator"],   "props": {}, "endpoints": ["po1", "p1"], "directionality": "->" },
+    { "id": "e4", "labels": ["hasModerator"], "props": {}, "endpoints": ["f1",  "p1"], "directionality": "->" }
+  ]
+}

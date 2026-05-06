@@ -107,34 +107,12 @@ fn shape_of_result(result: &QueryResult) -> String {
 // ----------------------------------------------------- Row-content hashing ---
 
 // Canonical per-cell encoding for the cross-system row-equivalence
-// oracle. The Python runners (`graphqlite/run.py`, `kuzu/run.py`)
-// implement the same encoding so all three systems produce
-// byte-identical strings for the same logical row → identical
-// sha256 hashes when results match.
-//
-// Choice of format: a custom unit-separator-delimited line beats
-// JSON because Rust's serde_json and Python's json disagree on
-// non-ASCII escaping by default. With LDBC strings being short
-// names that contain neither `\x1f` (US) nor `\x1e` (RS), join-
-// without-escape is unambiguous and trivial to mirror in both
-// languages.
-//
-// Cell encoding:
-//   Null         → "\x00"        (single sentinel byte)
-//   Bool(true)   → "true"
-//   Bool(false)  → "false"
-//   Int(n)       → decimal, e.g. "42"
-//   Float(f)     → Rust default `{}` formatting (Python `repr(f)`
-//                   matches for finite values; LDBC ICs don't have
-//                   float columns so this branch is rarely hit)
-//   Str(s)       → s, raw UTF-8 (no escaping)
-//   List/Record/Node/Edge → debug-format (rare in IC RETURNs;
-//                   mismatches across systems would surface as
-//                   hash WARN with the .rows.jsonl available for
-//                   diff)
-//
-// Cells joined with "\x1f" (US, unit separator); rows joined with
-// "\n". sha256 the whole blob, hex-encode.
+// oracle. Mirror of `canonicalize_cell` in
+// `bench/cross-system/_lib/row_hash.py` — see that file's docstring
+// for the format choice and rationale; the two implementations must
+// stay byte-equivalent. Cells joined with "\x1f", rows with "\n",
+// sha256 over the concatenation. Strings are rstripped to normalize
+// loader-formatting drift between systems.
 fn canonicalize_cell(v: &Value) -> String {
     match v {
         Value::Null => "\x00".to_string(),
@@ -142,7 +120,7 @@ fn canonicalize_cell(v: &Value) -> String {
         Value::Bool(false) => "false".to_string(),
         Value::Int(n) => n.to_string(),
         Value::Float(f) => f.to_string(),
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.trim_end().to_string(),
         other => format!("{other:?}"),
     }
 }

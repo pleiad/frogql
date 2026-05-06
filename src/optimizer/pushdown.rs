@@ -307,31 +307,38 @@ fn merge_constraints(p: PathPattern, c: &Constraints) -> PathPattern {
     }
 }
 
-/// Merge type and value constraints into a node descriptor.
+/// Merge type and value constraints into a node descriptor. Anonymous
+/// nodes have no `var` to match WHERE conjuncts against; we still must
+/// return the descriptor unchanged so its own pattern-derived label/type
+/// constraints reach the LTJ extractor.
 fn merge_into_node_desc(desc: Option<Descriptor>, c: &Constraints) -> Option<Descriptor> {
     let mut d = desc?;
-    let var_name = d.var.clone()?;
 
-    if let Some(attrs) = c.types.get(&var_name) {
-        for (attr, ty) in attrs {
-            d.dtype.props.extend(attr.clone(), ty.clone());
+    if let Some(var_name) = d.var.clone() {
+        if let Some(attrs) = c.types.get(&var_name) {
+            for (attr, ty) in attrs {
+                d.dtype.props.extend(attr.clone(), ty.clone());
+            }
         }
-    }
-    if let Some(preds) = c.values.get(&var_name) {
-        d.value_preds.extend(preds.iter().cloned());
+        if let Some(preds) = c.values.get(&var_name) {
+            d.value_preds.extend(preds.iter().cloned());
+        }
     }
     Some(d)
 }
 
 /// Merge only type constraints into an edge descriptor; value predicates on
-/// edges are left in the residual WHERE for now.
+/// edges are left in the residual WHERE for now. Anonymous edges (no `var`)
+/// follow the same rule as anonymous nodes: nothing to merge, but the
+/// descriptor must survive so its label reaches the LTJ extractor.
 fn merge_into_edge_desc(desc: Option<Descriptor>, c: &Constraints) -> Option<Descriptor> {
     let mut d = desc?;
-    let var_name = d.var.clone()?;
 
-    if let Some(attrs) = c.types.get(&var_name) {
-        for (attr, ty) in attrs {
-            d.dtype.props.extend(attr.clone(), ty.clone());
+    if let Some(var_name) = d.var.clone() {
+        if let Some(attrs) = c.types.get(&var_name) {
+            for (attr, ty) in attrs {
+                d.dtype.props.extend(attr.clone(), ty.clone());
+            }
         }
     }
     Some(d)
