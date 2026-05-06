@@ -152,21 +152,23 @@ fn insert_with_return_projects_post_mutation_row() {
 }
 
 #[test]
-fn insert_rejects_non_literal_property() {
-    // MVP-0 only supports literal property values. `a.name` requires the
-    // expression evaluator that ships with MVP-1.
-    let store = fraud_store("insert_non_literal.gdb");
-    // Use a real Account binding so the expression evaluator would have
-    // something to work with — even so, MVP-0 must reject.
-    let _ = store;
-    let stmt = "MATCH (a:Account) INSERT (b:Tag {who: a.name})";
+fn insert_resolves_attribute_expression_per_binding() {
+    // MVP-1.A: `INSERT (b:Tag {who: a.owner})` evaluates `a.owner`
+    // against the binding row (the fraud fixture's Account nodes carry
+    // `owner: "Aretha"` etc.). Every matched Account produces one Tag
+    // whose `who` mirrors that Account's `owner`.
+    let store = fraud_store("insert_attr_expr.gdb");
+    let pre_tags = store.nodes_with_label("Tag").map(|v| v.len()).unwrap_or(0);
+    let stmt = "MATCH (a:Account) INSERT (b:Tag {who: a.owner})";
     let dm = parse_dm_or_panic(stmt);
-    let store = fraud_store("insert_non_literal_run.gdb");
-    let err = run_dm(&store, &dm, None).unwrap_err();
-    assert!(
-        err.contains("literal") || err.contains("MVP-0"),
-        "expected MVP-0 literal-only error, got: {err}"
-    );
+    let exec = run_dm(&store, &dm, None).unwrap();
+    let post_tags = store.nodes_with_label("Tag").map(|v| v.len()).unwrap_or(0);
+    assert_eq!(post_tags, pre_tags + exec.nodes_inserted);
+    let any_tag = store.nodes_with_label("Tag").unwrap()[0];
+    assert!(matches!(
+        store.node_props(any_tag).get("who"),
+        Some(gqlrust::model::value::Value::Str(_))
+    ));
 }
 
 #[test]
@@ -184,15 +186,19 @@ fn brand_new_label_visible_via_match_after_insert() {
 
 #[test]
 fn rollback_on_failure_leaves_graph_unchanged() {
+    // MVP-1.A keeps the existing atomicity contract: a DML that fails
+    // mid-flight must leave the graph unchanged. Trigger via NODETACH
+    // DELETE on a connected node — the G1001 dependent-object check
+    // fires after the engine has already begun staging, so this path
+    // exercises the rollback hook end-to-end.
     let store = fraud_store("rollback_atomicity.gdb");
     let pre_persons = count_nodes_with_label(&store, "Person");
-    // The first pattern succeeds, the second fails (non-literal prop).
-    // Atomicity: the whole statement must roll back, so no Person added.
+    let pre_accounts = count_nodes_with_label(&store, "Account");
     let dm = parse_dm_or_panic(
-        "MATCH (a:Account) INSERT (p:Person {name: 'Will'}), (q:Tag {who: a.name})",
+        "MATCH (a:Account) DELETE a", // NODETACH (default) → fails on connected nodes
     );
     let err = run_dm(&store, &dm, None).unwrap_err();
-    assert!(!err.is_empty());
+    assert!(err.contains("G1001"), "expected G1001, got: {err}");
+    assert_eq!(count_nodes_with_label(&store, "Account"), pre_accounts);
     assert_eq!(count_nodes_with_label(&store, "Person"), pre_persons);
-    assert_eq!(count_nodes_with_label(&store, "Tag"), 0);
 }

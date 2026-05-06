@@ -18,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::model::graph::Props;
-use crate::model::value::Id;
+use crate::model::value::{Id, Value};
 use crate::typing::label_type::LabelType;
 
 /// Decoded representation of a freshly inserted node.
@@ -38,6 +38,21 @@ pub struct OverlayEdge {
     pub props: Props,
 }
 
+/// Per-record property mutation accumulated during a session. Set on a
+/// base-id node/edge once the user runs `SET` or `REMOVE` against it.
+/// New (overlay-allocated) records modify their `OverlayNode`/`OverlayEdge`
+/// entry in place rather than going through `PropMods`.
+#[derive(Debug, Default, Clone)]
+pub struct PropMods {
+    /// `true` after `SET x = { ... }` cleared the base property set.
+    /// Reads then return only the entries in `set` (with `Some` values),
+    /// ignoring disk-side props entirely.
+    pub cleared: bool,
+    /// Per-prop ops: `Some(v)` overwrites, `None` removes (used by
+    /// MVP-1.C `REMOVE x.prop`).
+    pub set: HashMap<String, Option<Value>>,
+}
+
 /// All mutations applied since the store was opened or last saved.
 ///
 /// IDs handed out for new nodes / edges are dense above the base counts,
@@ -52,6 +67,13 @@ pub struct MutationOverlay {
 
     pub deleted_nodes: HashSet<Id>,
     pub deleted_edges: HashSet<Id>,
+
+    /// Property-mutation overlay over base records. Reads of node/edge
+    /// props that hit a base id consult these maps after fetching disk
+    /// props. New (overlay-allocated) records mutate their
+    /// `OverlayNode`/`OverlayEdge` directly and bypass these.
+    pub mod_node_props: HashMap<Id, PropMods>,
+    pub mod_edge_props: HashMap<Id, PropMods>,
 
     /// Outgoing directed edges per source node, only for edges with
     /// `id >= base_edge_count`. Base edges live in the CSR and the
@@ -168,6 +190,8 @@ impl MutationOverlay {
         self.new_edges.clear();
         self.deleted_nodes.clear();
         self.deleted_edges.clear();
+        self.mod_node_props.clear();
+        self.mod_edge_props.clear();
         self.new_outgoing.clear();
         self.new_incoming.clear();
         self.new_undirected.clear();

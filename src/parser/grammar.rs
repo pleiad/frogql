@@ -1,6 +1,6 @@
 use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
-use crate::syntax::dm::{validate_insert_pattern, DmOp, DmStatement};
+use crate::syntax::dm::{validate_insert_pattern, DmOp, DmStatement, RemoveItem, SetItem};
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::{
@@ -1487,15 +1487,11 @@ impl Parser {
             Token::Drop => self.drop_statement(),
             Token::Show => self.show_statement(),
             Token::Validate => self.validate_graph_type(),
-            // ISO §13 DML keywords reserved but not implemented in MVP-0.
-            Token::Set => {
-                Err("SET statement (§13.3) is reserved but not implemented in this MVP".into())
-            }
-            Token::Remove => {
-                Err("REMOVE statement (§13.4) is reserved but not implemented in this MVP".into())
-            }
-            // Standalone INSERT (no MATCH chain).
-            Token::Insert => Ok(Statement::DataModification(
+            // Standalone INSERT / SET / REMOVE (no MATCH chain). SET
+            // and REMOVE without a MATCH usually have nothing to bind,
+            // but parsing still succeeds — the runtime runs zero
+            // iterations and reports counts of zero.
+            Token::Insert | Token::Set | Token::Remove => Ok(Statement::DataModification(
                 self.parse_dm_after_matches(Vec::new())?,
             )),
             // DETACH/NODETACH/DELETE alone are illegal: ISO §13.5 SR3
@@ -1509,16 +1505,14 @@ impl Parser {
             Token::Match | Token::Optional => {
                 let matches = self.parse_match_chain_explicit()?;
                 match self.peek() {
-                    Token::Insert | Token::Detach | Token::NoDetach | Token::Delete => Ok(
-                        Statement::DataModification(self.parse_dm_after_matches(matches)?),
-                    ),
-                    Token::Set => Err(
-                        "SET statement (§13.3) is reserved but not implemented in this MVP".into(),
-                    ),
-                    Token::Remove => Err(
-                        "REMOVE statement (§13.4) is reserved but not implemented in this MVP"
-                            .into(),
-                    ),
+                    Token::Insert
+                    | Token::Set
+                    | Token::Remove
+                    | Token::Detach
+                    | Token::NoDetach
+                    | Token::Delete => Ok(Statement::DataModification(
+                        self.parse_dm_after_matches(matches)?,
+                    )),
                     _ => {
                         let q = self.finish_query_after_matches(matches)?;
                         Ok(Statement::Query(q))
@@ -1541,8 +1535,10 @@ impl Parser {
     ) -> Result<DmStatement, String> {
         let op = match self.peek() {
             Token::Insert => self.parse_insert_op()?,
+            Token::Set => self.parse_set_op()?,
+            Token::Remove => self.parse_remove_op()?,
             Token::Detach | Token::NoDetach | Token::Delete => self.parse_delete_op()?,
-            t => return Err(format!("expected INSERT or DELETE, got {t:?}")),
+            t => return Err(format!("expected INSERT, SET, REMOVE or DELETE, got {t:?}")),
         };
         // ISO §14.10 optional RETURN trailing the DM.
         let (returns, _distinct) = if self.eat(&Token::Return) {
@@ -1603,6 +1599,99 @@ impl Parser {
             targets.push(self.expect_var_name("DELETE")?);
         }
         Ok(DmOp::Delete { detach, targets })
+    }
+
+    /// `SET <set item list>` — ISO §13.3. MVP-1.B handles property and
+    /// all-properties items; the label form (`SET x:Label`) belongs to
+    /// MVP-1.D and is rejected here.
+    fn parse_set_op(&mut self) -> Result<DmOp, String> {
+        self.expect(&Token::Set)?;
+        let mut items = vec![self.parse_set_item()?];
+        while self.eat(&Token::Comma) {
+            items.push(self.parse_set_item()?);
+        }
+        Ok(DmOp::Set(items))
+    }
+
+    fn parse_set_item(&mut self) -> Result<SetItem, String> {
+        let var = self.expect_var_name("SET")?;
+        if self.eat(&Token::Eq) {
+            // <set all properties item>: x = { props }
+            self.expect(&Token::LBrace)?;
+            let props = if self.check(&Token::RBrace) {
+                Vec::new()
+            } else {
+                self.parse_pkv_list()?
+            };
+            self.expect(&Token::RBrace)?;
+            return Ok(SetItem::AllProperties { var, props });
+        }
+        if self.eat(&Token::Dot) {
+            // <set property item>: x.prop = value
+            let prop = match self.advance() {
+                Token::Name(n) => n,
+                t => return Err(format!("SET: expected property name after '.', got {t:?}")),
+            };
+            self.expect(&Token::Eq)?;
+            let value = self.expr()?;
+            return Ok(SetItem::Property { var, prop, value });
+        }
+        // <set label item> would land here (`x:Label` / `x IS Label`).
+        // ISO §13.3 conformance feature GD02; MVP-1.D wires it.
+        Err(format!(
+            "SET: expected '=' (set all properties) or '.<prop> = value' after '{var}'; \
+             label form is reserved for MVP-1.D"
+        ))
+    }
+
+    /// `REMOVE <remove item list>` — ISO §13.4. MVP-1.C handles
+    /// `<remove property item>`; the label form lands in MVP-1.D.
+    fn parse_remove_op(&mut self) -> Result<DmOp, String> {
+        self.expect(&Token::Remove)?;
+        let mut items = vec![self.parse_remove_item()?];
+        while self.eat(&Token::Comma) {
+            items.push(self.parse_remove_item()?);
+        }
+        Ok(DmOp::Remove(items))
+    }
+
+    fn parse_remove_item(&mut self) -> Result<RemoveItem, String> {
+        let var = self.expect_var_name("REMOVE")?;
+        if self.eat(&Token::Dot) {
+            let prop = match self.advance() {
+                Token::Name(n) => n,
+                t => {
+                    return Err(format!(
+                        "REMOVE: expected property name after '.', got {t:?}"
+                    ))
+                }
+            };
+            return Ok(RemoveItem::Property { var, prop });
+        }
+        Err(format!(
+            "REMOVE: expected '.<prop>' after '{var}'; label form (REMOVE x:Label) \
+             is reserved for MVP-1.D"
+        ))
+    }
+
+    /// `<property key value pair list>` — comma-separated `name: expr`.
+    /// Caller is expected to have eaten the opening `{` and to eat the
+    /// closing `}` itself; this helper just walks the contents.
+    fn parse_pkv_list(&mut self) -> Result<Vec<(String, Expr)>, String> {
+        let mut out = Vec::new();
+        loop {
+            let name = match self.advance() {
+                Token::Name(n) => n,
+                t => return Err(format!("expected property name, got {t:?}")),
+            };
+            self.expect(&Token::Colon)?;
+            let value = self.expr()?;
+            out.push((name, value));
+            if !self.eat(&Token::Comma) {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     /// Helper: consume one `Token::Name` and return its string.

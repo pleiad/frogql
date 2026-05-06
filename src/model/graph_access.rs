@@ -162,4 +162,35 @@ pub trait GraphAccessMut: GraphAccess {
     /// saved. Used by the runtime when a DML statement aborts midway
     /// (atomicity per ISO §13.5 Note 196).
     fn rollback_session(&self);
+
+    // --- ISO §13.3 SET (MVP-1.B) -------------------------------------
+
+    /// `SET x.prop = value` on a node. Idempotent within a session: a
+    /// later `SET` on the same `(id, prop)` overwrites the earlier
+    /// staged value.
+    fn set_node_prop(&self, id: Id, prop: &str, value: crate::model::value::Value);
+
+    /// `SET x.prop = value` on an edge.
+    fn set_edge_prop(&self, id: Id, prop: &str, value: crate::model::value::Value);
+
+    /// `SET x = { ... }` (clear+set) on a node. ISO §13.3 GR8 b.i:
+    /// every existing property of `x` is removed first, then the given
+    /// map is applied. The implementation marks the record as cleared
+    /// in the overlay; readers ignore disk props and only see the new
+    /// set. New (overlay-allocated) nodes overwrite their props in
+    /// place.
+    fn replace_node_props(&self, id: Id, props: crate::model::graph::Props);
+
+    /// `SET x = { ... }` (clear+set) on an edge.
+    fn replace_edge_props(&self, id: Id, props: crate::model::graph::Props);
+
+    // --- ISO §13.4 REMOVE (MVP-1.C) ----------------------------------
+
+    /// `REMOVE x.prop` on a node. Idempotent: removing a missing
+    /// property is a no-op (matches ISO §13.4 GR4 a — the property is
+    /// only removed "if it is contained in the property set").
+    fn remove_node_prop(&self, id: Id, prop: &str);
+
+    /// `REMOVE x.prop` on an edge.
+    fn remove_edge_prop(&self, id: Id, prop: &str);
 }

@@ -158,21 +158,26 @@ fn match_then_insert_with_return() {
 }
 
 #[test]
-fn set_is_reserved_not_implemented() {
-    let err = parse_statement("MATCH (a:Person) SET a.name = 'B'").unwrap_err();
-    assert!(
-        err.contains("SET") && err.contains("not implemented"),
-        "got: {err}"
-    );
+fn set_property_parses_in_mvp1() {
+    // MVP-1.B: `SET x.prop = expr` parses cleanly; the runtime side is
+    // covered by `dm_set_test.rs`.
+    let dm = parse_dm("MATCH (a:Person) SET a.name = 'B'");
+    assert_eq!(dm.matches.len(), 1);
+    assert!(matches!(dm.op, DmOp::Set(_)));
 }
 
 #[test]
-fn remove_is_reserved_not_implemented() {
-    let err = parse_statement("MATCH (a:Person) REMOVE a.name").unwrap_err();
-    assert!(
-        err.contains("REMOVE") && err.contains("not implemented"),
-        "got: {err}"
-    );
+fn set_all_properties_parses_in_mvp1() {
+    let dm = parse_dm("MATCH (a:Person) SET a = { name: 'X', age: 7 }");
+    assert!(matches!(dm.op, DmOp::Set(_)));
+}
+
+#[test]
+fn remove_property_parses_in_mvp1() {
+    // MVP-1.C: REMOVE x.prop parses cleanly; runtime side covered by
+    // dm_remove_test.rs.
+    let dm = parse_dm("MATCH (a:Person) REMOVE a.name");
+    assert!(matches!(dm.op, DmOp::Remove(_)));
 }
 
 #[test]

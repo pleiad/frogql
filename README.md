@@ -59,8 +59,20 @@ The REPL follows the SQLite convention: every meta-command starts with `.`.
 | `.schema` | alias for `SHOW GRAPH TYPE DEFAULT` (the auto-inferred schema) |
 | `.schema simple` | grouped by-label renderer of the inferred schema |
 | `.graph-types` | alias for `SHOW GRAPH TYPES` |
+| `.indexes` | alias for `SHOW INDEXES` |
+| `.save` | atomically persist the in-RAM mutations to the open `.gdb` (tmp+rename) |
+| `.dump-json <path>` | pg_dump-style JSON snapshot of the merged graph |
 | `.help` | list meta-commands and quick query syntax |
 | `.quit` / `.exit` | exit (bare `quit` / `exit` also work) |
+
+Opening a path that does not exist creates an empty database (sqlite3 convention):
+
+```bash
+./target/release/frogql /tmp/fresh.gdb
+creating new database: /tmp/fresh.gdb
+gql> INSERT (a:Person {name: 'Alice'})
+gql> .save
+```
 
 Everything else is parsed as either a GQL query or a catalog DDL statement (see [Graph Types](#graph-types) below).
 
@@ -243,6 +255,70 @@ Two regimes at runtime:
 (:Person & Teacher)             conjunction (both)
 (:Person | Company)             disjunction (either)
 (:!Admin)                       negation (not)
+```
+
+## Data Modification (ISO §13)
+
+froGQL implements the MVP-0 surface of ISO/IEC 39075:2024 §13: standalone
+`INSERT`, `MATCH ... DETACH DELETE`, optional `RETURN` after a DM, plus
+explicit `.save` and pg_dump-style snapshots.
+
+```
+gql> INSERT (alice:Person {name: 'Alice', age: 30})
+OK (1 nodes inserted, 0 edges inserted, 0 nodes deleted, 0 edges deleted, 1 rows; 0.000s)
+
+gql> INSERT (bob:Person {name: 'Bob', age: 25})
+gql> MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+     INSERT (a)-[:KNOWS {since: 2020}]->(b)
+OK (0 nodes inserted, 1 edges inserted, 0 nodes deleted, 0 edges deleted, 1 rows; 0.000s)
+
+gql> MATCH (p:Person)-[k:KNOWS]->(q:Person) RETURN p, k, q
+
+gql> MATCH (a:Person {name: 'Alice'}) DETACH DELETE a
+OK (0 nodes inserted, 0 edges inserted, 1 nodes deleted, 1 edges deleted, 1 rows; 0.000s)
+
+gql> .save
+Saved /tmp/fresh.gdb (0.001s).
+```
+
+Surface accepted today:
+
+| Construct | Example |
+|---|---|
+| Standalone `INSERT` | `INSERT (a:Person {name: 'Alice'})` |
+| Multiple paths in one statement | `INSERT (a:A), (b:B), (a)-[:E]->(b)` |
+| `MATCH` + `INSERT` (bound vars are reused) | `MATCH (a:Person) INSERT (a)-[:K]->(b:Tag)` |
+| `DETACH DELETE` | `MATCH (n:Person {name: 'X'}) DETACH DELETE n` |
+| `NODETACH DELETE` (default; rejects if edges remain) | `MATCH (n) DELETE n` |
+| Optional `RETURN` after the DM | `INSERT (:Tag {n: 'x'}) RETURN n` |
+
+ISO compliance highlights:
+- `MATCH (a:Person) INSERT (a)-[:K]->(b:Tag)` creates **one fresh `b` per matched `a`** (§13.2 GR4), not a single shared Tag.
+- `NODETACH DELETE` raises `G1001 dependent object error — edges still exist` when the node has incident edges; statements roll back atomically (§13.5 GR5 + Note 196).
+- When a non-DEFAULT GRAPH TYPE is active, every inserted element is validated against it; mismatches raise `G2000 graph type violation` and the statement aborts. DEFAULT skips validation (it is data-derived) and gets re-inferred lazily on the next `SHOW GRAPH TYPE DEFAULT` / `USE GRAPH TYPE DEFAULT`.
+
+Persistence:
+- Mutations live in an **in-RAM overlay** until `.save` (or `connection.save()` from Python). No auto-commit, mirroring SQLite.
+- `.save` writes to `<path>.tmp` and atomically renames over the destination, so a crash mid-save cannot corrupt the existing file.
+
+Limitations in MVP-0:
+- Property values in `INSERT` must be literals: `{name: 'Alice', age: 30}` works; `MATCH (a) INSERT (b {who: a.name})` is rejected with a clear error.
+- `SET` and `REMOVE` are reserved keywords in the lexer but the parser rejects them with "not implemented in this version".
+- `DELETE` only accepts bare variable references; `DELETE n.parent` (Feature GD04) is deferred.
+- Statement-level atomicity. The whole DML statement either commits to the overlay or rolls back; on failure the **entire session overlay** is discarded (no transaction boundary smaller than the connection until WAL).
+
+### Python bindings
+
+```python
+import frogql
+conn = frogql.open("/tmp/fresh.gdb")  # opens or creates
+conn.execute("INSERT (a:Person {name: 'Alice'})")
+# → {"nodes_inserted": 1, "edges_inserted": 0, "nodes_deleted": 0, "edges_deleted": 0, "rows": 1}
+
+conn.execute("MATCH (p:Person) RETURN p.name")
+# → [{"name": "Alice"}]
+
+conn.save()  # persist the overlay to /tmp/fresh.gdb
 ```
 
 ## Graph Types
@@ -475,7 +551,10 @@ cargo test --test parser_test --test runtime_test --test store_runtime_test \
            --test graph_type_test --test typecheck_smoke --test typecheck_test \
            --test optional_match_test --test multi_match_test \
            --test aggregates_proptest --test lattice_proptest --test multi_match_proptest \
-           --test exists_fold_test --test exists_runtime_test
+           --test exists_fold_test --test exists_runtime_test \
+           --test parser_dm_test --test lazy_mut_test --test dm_runtime_test \
+           --test dm_persistence_test --test dm_schema_test --test dm_default_test \
+           --test dump_test
 
 # Single test
 cargo test --test runtime_test test_join_star_any_label -- --exact

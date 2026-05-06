@@ -24,7 +24,7 @@ use crate::model::graph_access::{GraphAccess, GraphAccessMut, G1001};
 use crate::model::value::{Id, PathValue};
 use crate::runtime::assignment::Assignment;
 use crate::syntax::descriptor::Descriptor;
-use crate::syntax::dm::{DmOp, DmStatement};
+use crate::syntax::dm::{DmOp, DmStatement, RemoveItem, SetItem};
 use crate::syntax::expr::Expr;
 use crate::syntax::path_pattern::PathPattern;
 use crate::typing::label_type::LabelType;
@@ -37,7 +37,7 @@ use crate::typing::label_type::LabelType;
 /// (with new bindings from INSERT). When the statement carries a RETURN
 /// it gets projected the same way `Runtime::run_query` projects regular
 /// queries; when there is no RETURN the table is returned as-is.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct DmExecution {
     /// Working table after applying the DML, one row per surviving binding.
     pub rows: Vec<Assignment>,
@@ -46,6 +46,9 @@ pub struct DmExecution {
     pub edges_inserted: usize,
     pub nodes_deleted: usize,
     pub edges_deleted: usize,
+    /// MVP-1.B: number of `SET` items that touched a node / edge.
+    pub nodes_modified: usize,
+    pub edges_modified: usize,
 }
 
 /// Execute one DML statement against a mutable store.
@@ -71,6 +74,11 @@ pub fn run_dm<G>(
 where
     G: GraphAccess + GraphAccessMut,
 {
+    // The runtime stays alive through both phases so the apply step can
+    // call `runtime.run_expr` on property expressions like `{who: a.name}`
+    // (MVP-1 INSERT non-literal property values).
+    let runtime = crate::runtime::engine::Runtime::new(graph);
+
     // 1. Resolve the MATCH chain (read-only). Standalone INSERT runs once
     // with a single empty assignment.
     let bindings: Vec<Assignment> = if dm.matches.is_empty() {
@@ -90,17 +98,13 @@ where
         // actually filter rows. Without this the Descriptor's
         // `value_filters` field would be silently ignored at runtime.
         let elaborated = crate::elaborate::elaborate_query(q);
-        let runtime = crate::runtime::engine::Runtime::new(graph);
         let ir = runtime.run(&elaborated.collapsed_pattern());
         ir.rows.into_iter().map(|r| r.assignment).collect()
     };
 
     let mut exec = DmExecution {
         rows: Vec::with_capacity(bindings.len()),
-        nodes_inserted: 0,
-        edges_inserted: 0,
-        nodes_deleted: 0,
-        edges_deleted: 0,
+        ..Default::default()
     };
 
     // 2. Per-binding apply. The rollback hook lives on the store; on
@@ -111,8 +115,13 @@ where
                 DmOp::Insert(patterns) => {
                     let mut new_mu = mu.clone();
                     for pattern in patterns {
-                        let stats =
-                            apply_insert_pattern(graph, pattern, &mut new_mu, validation_schema)?;
+                        let stats = apply_insert_pattern(
+                            graph,
+                            &runtime,
+                            pattern,
+                            &mut new_mu,
+                            validation_schema,
+                        )?;
                         exec.nodes_inserted += stats.nodes;
                         exec.edges_inserted += stats.edges;
                     }
@@ -122,6 +131,18 @@ where
                     let stats = apply_delete(graph, *detach, targets, mu)?;
                     exec.nodes_deleted += stats.nodes;
                     exec.edges_deleted += stats.edges;
+                    exec.rows.push(mu.clone());
+                }
+                DmOp::Set(items) => {
+                    let stats = apply_set(graph, &runtime, items, mu, validation_schema)?;
+                    exec.nodes_modified += stats.nodes;
+                    exec.edges_modified += stats.edges;
+                    exec.rows.push(mu.clone());
+                }
+                DmOp::Remove(items) => {
+                    let stats = apply_remove(graph, items, mu, validation_schema)?;
+                    exec.nodes_modified += stats.nodes;
+                    exec.edges_modified += stats.edges;
                     exec.rows.push(mu.clone());
                 }
             }
@@ -160,6 +181,7 @@ struct DeleteStats {
 /// visible to a later RETURN clause.
 fn apply_insert_pattern<G>(
     graph: &G,
+    runtime: &crate::runtime::engine::Runtime<'_, G>,
     pattern: &PathPattern,
     mu: &mut Assignment,
     schema: Option<&crate::typing::variable_type::Schema>,
@@ -178,6 +200,7 @@ where
         if let FlatEl::Node(d) = el {
             node_ids.push(resolve_or_insert_node(
                 graph,
+                runtime,
                 d.as_ref(),
                 mu,
                 &mut stats,
@@ -199,6 +222,7 @@ where
                 let right = node_ids[node_cursor];
                 insert_edge_now(
                     graph,
+                    runtime,
                     *dir,
                     descriptor.as_ref(),
                     left,
@@ -287,6 +311,7 @@ fn flatten_into(p: &PathPattern, out: &mut Vec<FlatEl>) -> Result<(), String> {
 
 fn resolve_or_insert_node<G>(
     graph: &G,
+    runtime: &crate::runtime::engine::Runtime<'_, G>,
     desc: Option<&Descriptor>,
     mu: &mut Assignment,
     stats: &mut InsertStats,
@@ -319,7 +344,7 @@ where
         .transpose()?
         .unwrap_or(LabelType::Star);
     let props = desc
-        .map(literal_props_from_descriptor)
+        .map(|d| eval_props_from_descriptor(d, runtime, mu))
         .transpose()?
         .unwrap_or_default();
     // ISO §13.2 GR7: validate post-insert against the active GRAPH TYPE
@@ -340,6 +365,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn insert_edge_now<G>(
     graph: &G,
+    runtime: &crate::runtime::engine::Runtime<'_, G>,
     dir: EdgeDir,
     desc: Option<&Descriptor>,
     left: Id,
@@ -381,7 +407,7 @@ where
         .transpose()?
         .unwrap_or(LabelType::Star);
     let props = desc
-        .map(literal_props_from_descriptor)
+        .map(|d| eval_props_from_descriptor(d, runtime, mu))
         .transpose()?
         .unwrap_or_default();
 
@@ -429,10 +455,36 @@ fn is_label_empty(lt: &LabelType) -> bool {
     matches!(lt, LabelType::Star)
 }
 
+/// Evaluate every `value_filter` (`{name: expr}`) on the descriptor
+/// against the current binding row using the existing expression
+/// evaluator. Literals stay literal; `var.attr`, `var`, comparisons,
+/// COALESCE, etc. resolve through `Runtime::run_expr`. A `Failure`
+/// (unbound variable, missing attribute, type error) becomes
+/// `Value::Null` to mirror the existing 3VL semantics for reads.
+fn eval_props_from_descriptor<G>(
+    desc: &Descriptor,
+    runtime: &crate::runtime::engine::Runtime<'_, G>,
+    mu: &Assignment,
+) -> Result<Props, String>
+where
+    G: GraphAccess,
+{
+    use crate::runtime::result::ExprResult;
+    let mut out: Props = HashMap::new();
+    for (name, expr) in &desc.value_filters {
+        let v = match runtime.run_expr(mu, expr) {
+            ExprResult::Success(v) => v,
+            ExprResult::Failure(_) => crate::model::value::Value::Null,
+        };
+        out.insert(name.clone(), v);
+    }
+    Ok(out)
+}
+
+// Kept around as documentation; literal-only mode was MVP-0 default and
+// can be re-enabled by callers that want a stricter shape.
+#[allow(dead_code)]
 fn literal_props_from_descriptor(desc: &Descriptor) -> Result<Props, String> {
-    // INSERT property values are literals in MVP-0. Anything more complex
-    // (var.attr, function calls, etc.) requires a binding-aware evaluator
-    // which lands when MVP-1 ships SET/REMOVE.
     let mut out: Props = HashMap::new();
     for (name, expr) in &desc.value_filters {
         match expr {
@@ -441,13 +493,166 @@ fn literal_props_from_descriptor(desc: &Descriptor) -> Result<Props, String> {
             }
             other => {
                 return Err(format!(
-                    "INSERT: only literal property values are supported in MVP-0; \
-                     property '{name}' uses {other}"
+                    "INSERT (literal-only mode): property '{name}' uses {other}"
                 ));
             }
         }
     }
     Ok(out)
+}
+
+struct SetStats {
+    nodes: usize,
+    edges: usize,
+}
+
+/// Apply one `SET` statement (one or more `<set item>`s) to the binding
+/// row. Each item resolves its target variable in `mu`, evaluates its
+/// RHS, and writes through `GraphAccessMut`. ISO §13.3 GR8 b.i is
+/// honoured by `replace_node_props` / `replace_edge_props` (clear+set).
+fn apply_set<G>(
+    graph: &G,
+    runtime: &crate::runtime::engine::Runtime<'_, G>,
+    items: &[SetItem],
+    mu: &Assignment,
+    schema: Option<&crate::typing::variable_type::Schema>,
+) -> Result<SetStats, String>
+where
+    G: GraphAccess + GraphAccessMut,
+{
+    use crate::runtime::result::ExprResult;
+    let mut stats = SetStats { nodes: 0, edges: 0 };
+    for item in items {
+        match item {
+            SetItem::Property { var, prop, value } => {
+                let pv = mu.get(var).ok_or_else(|| {
+                    format!("SET: variable {var} is not bound — needs a preceding MATCH")
+                })?;
+                let v = match runtime.run_expr(mu, value) {
+                    ExprResult::Success(v) => v,
+                    ExprResult::Failure(_) => crate::model::value::Value::Null,
+                };
+                match pv {
+                    PathValue::Node(id) => {
+                        graph.set_node_prop(*id, prop, v);
+                        stats.nodes += 1;
+                        if let Some(schema) = schema {
+                            let labels = graph.node_labels(*id);
+                            let props = graph.node_props(*id);
+                            crate::typing::validate::validate_node_against_schema(
+                                &labels, &props, schema,
+                            )?;
+                        }
+                    }
+                    PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => {
+                        graph.set_edge_prop(*id, prop, v);
+                        stats.edges += 1;
+                        if let Some(schema) = schema {
+                            crate::typing::validate::validate_edge_against_schema(
+                                graph, *id, schema,
+                            )?;
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "SET: variable {var} is not a node or edge reference"
+                        ));
+                    }
+                }
+            }
+            SetItem::AllProperties { var, props } => {
+                let pv = mu.get(var).ok_or_else(|| {
+                    format!("SET: variable {var} is not bound — needs a preceding MATCH")
+                })?;
+                let mut props_map = crate::model::graph::Props::new();
+                for (name, expr) in props {
+                    let v = match runtime.run_expr(mu, expr) {
+                        ExprResult::Success(v) => v,
+                        ExprResult::Failure(_) => crate::model::value::Value::Null,
+                    };
+                    props_map.insert(name.clone(), v);
+                }
+                match pv {
+                    PathValue::Node(id) => {
+                        graph.replace_node_props(*id, props_map);
+                        stats.nodes += 1;
+                        if let Some(schema) = schema {
+                            let labels = graph.node_labels(*id);
+                            let props_now = graph.node_props(*id);
+                            crate::typing::validate::validate_node_against_schema(
+                                &labels, &props_now, schema,
+                            )?;
+                        }
+                    }
+                    PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => {
+                        graph.replace_edge_props(*id, props_map);
+                        stats.edges += 1;
+                        if let Some(schema) = schema {
+                            crate::typing::validate::validate_edge_against_schema(
+                                graph, *id, schema,
+                            )?;
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "SET: variable {var} is not a node or edge reference"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(stats)
+}
+
+/// Apply one `REMOVE` statement (one or more `<remove item>`s).
+fn apply_remove<G>(
+    graph: &G,
+    items: &[RemoveItem],
+    mu: &Assignment,
+    schema: Option<&crate::typing::variable_type::Schema>,
+) -> Result<SetStats, String>
+where
+    G: GraphAccess + GraphAccessMut,
+{
+    let mut stats = SetStats { nodes: 0, edges: 0 };
+    for item in items {
+        match item {
+            RemoveItem::Property { var, prop } => {
+                let pv = mu.get(var).ok_or_else(|| {
+                    format!("REMOVE: variable {var} is not bound — needs a preceding MATCH")
+                })?;
+                match pv {
+                    PathValue::Node(id) => {
+                        graph.remove_node_prop(*id, prop);
+                        stats.nodes += 1;
+                        if let Some(schema) = schema {
+                            let labels = graph.node_labels(*id);
+                            let props = graph.node_props(*id);
+                            crate::typing::validate::validate_node_against_schema(
+                                &labels, &props, schema,
+                            )?;
+                        }
+                    }
+                    PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => {
+                        graph.remove_edge_prop(*id, prop);
+                        stats.edges += 1;
+                        if let Some(schema) = schema {
+                            crate::typing::validate::validate_edge_against_schema(
+                                graph, *id, schema,
+                            )?;
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "REMOVE: variable {var} is not a node or edge reference"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(stats)
 }
 
 fn apply_delete<G>(

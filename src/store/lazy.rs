@@ -796,8 +796,14 @@ impl LazyGraphStore {
     /// statements get O(1) "mark dirty" while the schema-consulting paths
     /// pay the O(N+E) inference at most once per dirty cycle.
     pub fn refresh_default_if_dirty(&self) {
-        let dirty = self.catalog.borrow().is_default_dirty();
-        if !dirty {
+        let needs_refresh = {
+            let cat = self.catalog.borrow();
+            cat.is_default_dirty()
+                || !cat
+                    .types
+                    .contains_key(super::super::runtime::catalog::DEFAULT_NAME)
+        };
+        if !needs_refresh {
             return;
         }
         let schema = crate::typing::inference::infer_simple_schema(self);
@@ -829,8 +835,27 @@ impl LazyGraphStore {
         // Refresh DEFAULT first so the persisted file's catalog matches
         // the post-mutation data. (No-op when nothing's dirty.)
         self.refresh_default_if_dirty();
+        // If the catalog has no DEFAULT entry yet (fresh DB never queried
+        // DEFAULT), build one now so the saved file ships with a valid
+        // schema users can SHOW after reopen. The catalog stays "active:
+        // None" — we just populate the entry.
+        {
+            let needs_default = !self
+                .catalog
+                .borrow()
+                .types
+                .contains_key(super::super::runtime::catalog::DEFAULT_NAME);
+            if needs_default {
+                let schema = crate::typing::inference::infer_simple_schema(self);
+                self.catalog.borrow_mut().types.insert(
+                    super::super::runtime::catalog::DEFAULT_NAME.to_string(),
+                    schema,
+                );
+            }
+        }
         let g = self.materialize_to_graph();
-        super::io::save_graph_atomic(&g, db_path)
+        let cat = self.catalog.borrow().clone();
+        super::io::save_graph_with_catalog_atomic(&g, &cat, db_path)
     }
 }
 
@@ -894,19 +919,54 @@ impl GraphAccess for LazyGraphStore {
     }
 
     fn node_props(&self, id: Id) -> Props {
-        if let Some(n) = self.overlay.borrow().get_new_node(id) {
+        let overlay = self.overlay.borrow();
+        if let Some(n) = overlay.get_new_node(id) {
             return n.props.clone();
         }
+        // Base node: start from disk, apply per-prop mutations on top.
         let decoded = self.read_node_record(id);
-        self.decode_props_from_record(&decoded.props)
+        let mut base = self.decode_props_from_record(&decoded.props);
+        if let Some(mods) = overlay.mod_node_props.get(&id) {
+            if mods.cleared {
+                base.clear();
+            }
+            for (name, op) in &mods.set {
+                match op {
+                    Some(v) => {
+                        base.insert(name.clone(), v.clone());
+                    }
+                    None => {
+                        base.remove(name);
+                    }
+                }
+            }
+        }
+        base
     }
 
     fn edge_props(&self, id: Id) -> Props {
-        if let Some(e) = self.overlay.borrow().get_new_edge(id) {
+        let overlay = self.overlay.borrow();
+        if let Some(e) = overlay.get_new_edge(id) {
             return e.props.clone();
         }
         let decoded = self.read_edge_record(id);
-        self.decode_props_from_record(&decoded.node.props)
+        let mut base = self.decode_props_from_record(&decoded.node.props);
+        if let Some(mods) = overlay.mod_edge_props.get(&id) {
+            if mods.cleared {
+                base.clear();
+            }
+            for (name, op) in &mods.set {
+                match op {
+                    Some(v) => {
+                        base.insert(name.clone(), v.clone());
+                    }
+                    None => {
+                        base.remove(name);
+                    }
+                }
+            }
+        }
+        base
     }
 
     fn src(&self, edge_id: Id) -> Id {
@@ -1245,6 +1305,104 @@ impl crate::model::graph_access::GraphAccessMut for LazyGraphStore {
         let bn = overlay.base_node_count;
         let be = overlay.base_edge_count;
         overlay.clear(bn, be);
+    }
+
+    fn set_node_prop(&self, id: Id, prop: &str, value: crate::model::value::Value) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_node_count {
+            // New (overlay-tracked) node: write directly into its
+            // OverlayNode entry, no PropMods bookkeeping needed.
+            let off = (id - overlay.base_node_count) as usize;
+            if let Some(n) = overlay.new_nodes.get_mut(off) {
+                n.props.insert(prop.to_string(), value);
+            }
+            return;
+        }
+        // Base node: stage the change in the per-record PropMods map.
+        let entry = overlay.mod_node_props.entry(id).or_default();
+        entry.set.insert(prop.to_string(), Some(value));
+    }
+
+    fn set_edge_prop(&self, id: Id, prop: &str, value: crate::model::value::Value) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_edge_count {
+            let off = (id - overlay.base_edge_count) as usize;
+            if let Some(e) = overlay.new_edges.get_mut(off) {
+                e.props.insert(prop.to_string(), value);
+            }
+            return;
+        }
+        let entry = overlay.mod_edge_props.entry(id).or_default();
+        entry.set.insert(prop.to_string(), Some(value));
+    }
+
+    fn replace_node_props(&self, id: Id, props: Props) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_node_count {
+            let off = (id - overlay.base_node_count) as usize;
+            if let Some(n) = overlay.new_nodes.get_mut(off) {
+                n.props = props;
+            }
+            return;
+        }
+        // ISO §13.3 GR8 b.i: clear the existing props, then apply the
+        // new map. We encode that by flipping `cleared` and rebuilding
+        // `set` to mirror only the new entries.
+        let mut entry = crate::store::overlay::PropMods {
+            cleared: true,
+            set: HashMap::new(),
+        };
+        for (k, v) in props {
+            entry.set.insert(k, Some(v));
+        }
+        overlay.mod_node_props.insert(id, entry);
+    }
+
+    fn replace_edge_props(&self, id: Id, props: Props) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_edge_count {
+            let off = (id - overlay.base_edge_count) as usize;
+            if let Some(e) = overlay.new_edges.get_mut(off) {
+                e.props = props;
+            }
+            return;
+        }
+        let mut entry = crate::store::overlay::PropMods {
+            cleared: true,
+            set: HashMap::new(),
+        };
+        for (k, v) in props {
+            entry.set.insert(k, Some(v));
+        }
+        overlay.mod_edge_props.insert(id, entry);
+    }
+
+    fn remove_node_prop(&self, id: Id, prop: &str) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_node_count {
+            let off = (id - overlay.base_node_count) as usize;
+            if let Some(n) = overlay.new_nodes.get_mut(off) {
+                n.props.remove(prop);
+            }
+            return;
+        }
+        // Stage a remove (None) in the per-record PropMods map so
+        // future reads filter the property out.
+        let entry = overlay.mod_node_props.entry(id).or_default();
+        entry.set.insert(prop.to_string(), None);
+    }
+
+    fn remove_edge_prop(&self, id: Id, prop: &str) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_edge_count {
+            let off = (id - overlay.base_edge_count) as usize;
+            if let Some(e) = overlay.new_edges.get_mut(off) {
+                e.props.remove(prop);
+            }
+            return;
+        }
+        let entry = overlay.mod_edge_props.entry(id).or_default();
+        entry.set.insert(prop.to_string(), None);
     }
 }
 

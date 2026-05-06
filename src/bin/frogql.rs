@@ -269,11 +269,14 @@ fn main() {
                         store.catalog_mut().mark_default_dirty();
                         eprintln!(
                             "OK ({} nodes inserted, {} edges inserted, {} nodes deleted, \
-                             {} edges deleted, {} rows; {:.3}s)",
+                             {} edges deleted, {} nodes modified, {} edges modified, \
+                             {} rows; {:.3}s)",
                             exec.nodes_inserted,
                             exec.edges_inserted,
                             exec.nodes_deleted,
                             exec.edges_deleted,
+                            exec.nodes_modified,
+                            exec.edges_modified,
                             exec.rows.len(),
                             t.elapsed().as_secs_f64()
                         );

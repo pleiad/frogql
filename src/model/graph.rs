@@ -508,6 +508,30 @@ impl super::graph_access::GraphAccessMut for Graph {
     fn rollback_session(&self) {
         // No overlay to rewind; mutability is unimplemented in MVP-0.
     }
+
+    fn set_node_prop(&self, _id: Id, _prop: &str, _value: super::value::Value) {
+        unimplemented!("Graph::set_node_prop: use LazyGraphStore for mutability");
+    }
+
+    fn set_edge_prop(&self, _id: Id, _prop: &str, _value: super::value::Value) {
+        unimplemented!("Graph::set_edge_prop: use LazyGraphStore for mutability");
+    }
+
+    fn replace_node_props(&self, _id: Id, _props: Props) {
+        unimplemented!("Graph::replace_node_props: use LazyGraphStore for mutability");
+    }
+
+    fn replace_edge_props(&self, _id: Id, _props: Props) {
+        unimplemented!("Graph::replace_edge_props: use LazyGraphStore for mutability");
+    }
+
+    fn remove_node_prop(&self, _id: Id, _prop: &str) {
+        unimplemented!("Graph::remove_node_prop: use LazyGraphStore for mutability");
+    }
+
+    fn remove_edge_prop(&self, _id: Id, _prop: &str) {
+        unimplemented!("Graph::remove_edge_prop: use LazyGraphStore for mutability");
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -255,6 +255,8 @@ impl Connection {
         d.set_item("edges_inserted", exec.edges_inserted)?;
         d.set_item("nodes_deleted", exec.nodes_deleted)?;
         d.set_item("edges_deleted", exec.edges_deleted)?;
+        d.set_item("nodes_modified", exec.nodes_modified)?;
+        d.set_item("edges_modified", exec.edges_modified)?;
         d.set_item("rows", exec.rows.len())?;
         Ok(d.into_py(py))
     }

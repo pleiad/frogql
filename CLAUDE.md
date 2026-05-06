@@ -20,7 +20,10 @@ cargo test --test parser_test --test runtime_test --test store_runtime_test \
            --test graph_type_test --test typecheck_smoke --test typecheck_test \
            --test optional_match_test --test multi_match_test \
            --test aggregates_proptest --test lattice_proptest --test multi_match_proptest \
-           --test exists_fold_test --test exists_runtime_test
+           --test exists_fold_test --test exists_runtime_test \
+           --test parser_dm_test --test lazy_mut_test --test dm_runtime_test \
+           --test dm_persistence_test --test dm_schema_test --test dm_default_test \
+           --test dump_test
 
 # Single test
 cargo test --test runtime_test test_join_star_any_label -- --exact
@@ -115,6 +118,12 @@ For local downstream development against a not-yet-published change: `cd python 
 - `Runtime::warm_triple_index() -> Arc<TripleIndex>` — force the cache to build now and hand back the Arc for sharing
 - `Runtime::run_query(&query, limit)` — execute with RETURN projection
 - `Runtime::run_with_limit(&pattern, limit)` — early termination after N results
+- `Runtime::invalidate_caches()` — drops cached `TripleIndex` + EXISTS memo; called after every successful DML so the next query rebuilds against the post-mutation graph
+- `runtime::dm::run_dm(&store, &dm, schema_for_validation)` — execute one ISO §13 data-modifying statement (INSERT / DELETE / DETACH DELETE). `schema_for_validation` is `Some(&Schema)` only when G2000 should fire (active type is neither DEFAULT nor absent)
+- `LazyGraphStore::open_or_create(path)` — sqlite3-style; creates an empty `.gdb` if `path` doesn't exist, then opens it
+- `LazyGraphStore::save(path)` — atomic save of the merged base+overlay view (tmp+rename); refreshes DEFAULT before persisting
+- `LazyGraphStore::materialize_to_graph()` — decode the merged view into an in-RAM `Graph` with compacted IDs; used by `save` and the dump utility
+- `LazyGraphStore::refresh_default_if_dirty()` — re-run `infer_simple_schema` if the catalog's `default_dirty` flag is set; idempotent
 
 ### Graph-type catalog
 
@@ -129,7 +138,36 @@ DDL surface today: `CREATE / USE / DROP GRAPH TYPE`, plus inspection / validatio
 
 `USE` does not validate. The walk is opt-in because it is O(N + E); the typechecker still constrains queries against the active schema either way.
 
-REPL meta-commands follow the SQLite dot-prefix convention (see `src/bin/frogql.rs`): `.schema` aliases `SHOW GRAPH TYPE DEFAULT`, `.schema simple` switches to the grouped by-label renderer in `print_schema_simple` (which lists every node type unconditionally — the earlier "standalone-only" filter hid all nodes on connected graphs and was removed in commit `e23d04d`), `.graph-types` aliases `SHOW GRAPH TYPES`, `.help` lists meta-commands and DDL surface, and `.quit` / `.exit` (plus bare `quit` / `exit`) leave the REPL.
+REPL meta-commands follow the SQLite dot-prefix convention (see `src/bin/frogql.rs`): `.schema` aliases `SHOW GRAPH TYPE DEFAULT`, `.schema simple` switches to the grouped by-label renderer in `print_schema_simple` (which lists every node type unconditionally — the earlier "standalone-only" filter hid all nodes on connected graphs and was removed in commit `e23d04d`), `.graph-types` aliases `SHOW GRAPH TYPES`, `.save` materialises the merged base+overlay view to the open `.gdb` atomically (see *Data Modification*), `.dump-json <path>` writes a pg_dump-style JSON snapshot, `.help` lists meta-commands and DDL surface, and `.quit` / `.exit` (plus bare `quit` / `exit`) leave the REPL.
+
+### Data Modification (ISO §13, MVP-0)
+
+DML lands as a layered overlay on top of `LazyGraphStore`. The on-disk file stays untouched until `.save`; mutations live in `RefCell<MutationOverlay>` (`src/store/overlay.rs`). The compiler pipeline shares the parser path with queries: `parse_statement` returns either `Statement::Query` or `Statement::DataModification(DmStatement)`, dispatched to `Runtime::run_query` or the free function `runtime::dm::run_dm`.
+
+Surface accepted in MVP-0:
+- `INSERT <path pattern list>` standalone or after a `MATCH` chain.
+- `[DETACH | NODETACH] DELETE x [, y, ...]` with bare variable references.
+- Optional trailing `RETURN <items>` projecting the post-mutation working table.
+- `SET` and `REMOVE` are reserved at the lexer level but the parser rejects them with "not implemented in this version" so they don't collide with property names. They land in MVP-1 along with `DELETE` over arbitrary value expressions (Feature GD04) and `INSERT` properties referencing `mu` (e.g. `MATCH (a) INSERT (b {who: a.name})`).
+
+Architecture notes:
+- **Overlay**, not in-place. `MutationOverlay` carries `new_nodes`, `new_edges`, tombstones, and adjacency maps for new edges only. Reads merge base + overlay (`LazyGraphStore`'s `GraphAccess` impl filters tombstones and surfaces overlay entries). The base CSR / page cache stay read-only — keeps SF1 working sets in bounded RAM and avoids invalidating the page cache on every mutation.
+- **`GraphAccessMut`** (`src/model/graph_access.rs`) takes `&self` (RefCell-backed), so the existing `Runtime` lifetime that plumbs `&G` everywhere stays untouched. Implemented properly on `LazyGraphStore`; `Graph` (in-RAM JSON fixture) gets stub `unimplemented!` impls because it isn't the production backend.
+- **Atomicity**. ISO §13.5 Note 196 + §13.2 GR5/GR6 demand all-or-nothing per statement. `run_dm` builds a list of bindings before mutating, applies them inside a closure, and on any error calls `store.rollback_session()` which clears the overlay. Coarser than per-statement: it discards earlier successful DML in the same session too — accepted limitation in MVP-0 (no transaction boundary smaller than the connection until WAL).
+- **Match-chain elaboration**. `run_dm` runs the MATCH chain through `elaborate::elaborate_query` before executing it, so `(a:Person {name: 'Alice'})` lowers `{name: 'Alice'}` into a WHERE filter. Skipping elaboration silently ignores `value_filters` on descriptors and matches too many rows; this bit hard during E2E testing and is the reason the elaborate call sits inside `run_dm`.
+- **G2000 validation**. Per-element check via `typing::validate::validate_node_against_schema` / `validate_edge_against_schema`, called from `apply_insert_pattern` only when the active GRAPH TYPE is non-DEFAULT. DEFAULT skips validation because it is data-derived and re-inferred lazily (see below).
+- **DEFAULT lifecycle**. `GraphTypeCatalog.default_dirty` (in-RAM only, `#[serde(skip)]`) flips after every successful DML. `LazyGraphStore::refresh_default_if_dirty` re-runs `infer_simple_schema` on next access; called automatically by `handle_show("DEFAULT")` and `LazyGraphStore::save`. Eager refresh after each DML would cost O(N+E) per mutation; lazy + dirty flag keeps DML O(1) and amortises the inference at most once per dirty cycle.
+- **TripleIndex invalidation**. Every successful DML calls `Runtime::invalidate_caches()` (REPL) or clears `Connection.triple_index` (Python). The next query rebuilds the six-ordering index from the merged base+overlay view via `TripleIndex::from_graph(&store)` — ~670ms on SF0.1, ~0ms on a fresh DB. Maintaining the six sorted Vecs incrementally would cost O(E) per insert (memmove); rebuild lazy is the right trade for batch-mutate-then-batch-query workloads.
+
+Persistence:
+- `LazyGraphStore::open_or_create(path)` mirrors SQLite: opening a non-existent path writes an empty `.gdb` first, then opens it. The REPL emits `creating new database: <path>` to surface the create.
+- `LazyGraphStore::save(path)` materialises merged base+overlay into a temporary `Graph`, calls `save_graph_atomic` (writes to `<path>.tmp`, then atomic `rename`), keeps the existing pager fd alive (POSIX rename keeps the old inode while the fd holds it), and refreshes DEFAULT before persisting. Subsequent reads on the same `LazyGraphStore` continue to work coherently against the snapshot at open + overlay; reopening from the file produces the post-save image.
+- `Connection.save()` (Python) and `.save` (REPL) both call into this. Auto-commit is OFF by design: forgetting `.save` loses the overlay, mirroring SQLite's explicit-commit semantics.
+
+Dump:
+- `store::dump::dump_to_json_file(&store, path)` produces a JSON document in the exact shape `Graph::from_json_value` consumes — round-trip property holds. Available via `.dump-json <path>` in the REPL. The pg_dump-style GQL dump (a script of INSERTs that reconstructs the graph using a temporary `_dump_id` property) is deferred to MVP-1 because it depends on `MATCH+INSERT` with bindings and `REMOVE`, both still pending.
+
+Test files added in this layer (each maps to one of the 8 phases of `~/.claude/plans/que-dice-el-gql-encapsulated-pumpkin.md`): `parser_dm_test.rs`, `lazy_mut_test.rs`, `dm_runtime_test.rs`, `dm_persistence_test.rs`, `dm_schema_test.rs`, `dm_default_test.rs`, `dump_test.rs`. 58 tests total.
 
 ### ID system
 

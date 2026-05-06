@@ -1302,7 +1302,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
     }
 
-    fn run_expr(&self, mu: &Assignment, expr: &Expr) -> ExprResult {
+    /// Evaluate an `Expr` against a binding row. Public so the DML
+    /// runtime (`runtime::dm`) can resolve `INSERT (b {who: a.name})`-
+    /// style expressions in MVP-1.
+    pub fn run_expr(&self, mu: &Assignment, expr: &Expr) -> ExprResult {
         match expr {
             Expr::Const(v) => ExprResult::Success(v.clone()),
 
@@ -1312,14 +1315,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             // (an OPTIONAL match that did not fire). Failure is
             // reserved for repetition-grouping and unbound names.
             Expr::Var(name) => match mu.get(name) {
-                Some(PathValue::Node(id)) => ExprResult::Success(Value::Node(*id)),
-                Some(PathValue::EdgeDirectional(id)) | Some(PathValue::EdgeUndirectional(id)) => {
-                    ExprResult::Success(Value::Edge(*id))
-                }
-                Some(PathValue::Nothing) => ExprResult::Success(Value::Null),
-                Some(PathValue::Group(_)) => {
-                    ExprResult::Failure(format!("variable '{name}' is a repetition group"))
-                }
+                Some(pv) => ExprResult::Success(path_value_to_value(pv)),
                 None => ExprResult::Failure(format!("variable '{name}' not bound")),
             },
 
@@ -1805,6 +1801,19 @@ fn sum_values(values: &[Value]) -> Value {
 }
 
 /// Always Float (averages of ints usually aren't ints). Empty → null.
+/// Convert a `PathValue` (binding-table value) to a `Value` (projected
+/// row value). Repetition `Group(...)` becomes `Value::List(...)` so a
+/// `RETURN y` after `MATCH (x)-[y]->{1,n}()` lands as a list of edge
+/// references instead of collapsing to NULL.
+fn path_value_to_value(pv: &PathValue) -> Value {
+    match pv {
+        PathValue::Node(id) => Value::Node(*id),
+        PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => Value::Edge(*id),
+        PathValue::Nothing => Value::Null,
+        PathValue::Group(items) => Value::List(items.iter().map(path_value_to_value).collect()),
+    }
+}
+
 fn avg_values(values: &[Value]) -> Value {
     let mut sum: f64 = 0.0;
     let mut count: u64 = 0;

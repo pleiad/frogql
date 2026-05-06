@@ -13,6 +13,7 @@
 //! with "not implemented in this version" so users get a compile error
 //! instead of a confusing parse error against a property name.
 
+use crate::syntax::expr::Expr;
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::{MatchStatement, ReturnItem};
 
@@ -44,6 +45,37 @@ pub enum DmOp {
     /// `NODETACH DELETE` (default per §13.5 SR6). Targets restricted to
     /// `<binding variable reference>` in MVP-0 (Feature GD04 not enabled).
     Delete { detach: bool, targets: Vec<String> },
+    /// ISO §13.3 SET. MVP-1.B handles property-value SET; label SET
+    /// (`<set label item>`) lands in MVP-1.D.
+    Set(Vec<SetItem>),
+    /// ISO §13.4 REMOVE. MVP-1.C handles `REMOVE x.prop`; label REMOVE
+    /// (`REMOVE x:Label`) lands in MVP-1.D.
+    Remove(Vec<RemoveItem>),
+}
+
+/// One element of `<remove item list>` (ISO §13.4).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemoveItem {
+    /// `<remove property item> ::= var <period> prop`.
+    Property { var: String, prop: String },
+}
+
+/// One element of `<set item list>` (ISO §13.3).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetItem {
+    /// `<set property item> ::= var <period> prop <equals> <value expr>`.
+    Property {
+        var: String,
+        prop: String,
+        value: Expr,
+    },
+    /// `<set all properties item> ::= var <equals> <left brace> [pkv list] <right brace>`.
+    /// ISO §13.3 GR8 b.i: every existing property of the target is
+    /// removed first, then the new set is applied (clear+set, not merge).
+    AllProperties {
+        var: String,
+        props: Vec<(String, Expr)>,
+    },
 }
 
 /// Validate that a `PathPattern` is legal as an `<insert path pattern>`

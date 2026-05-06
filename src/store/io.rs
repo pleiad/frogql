@@ -30,6 +30,34 @@ pub fn save_graph_atomic(graph: &Graph, db_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Same as `save_graph_atomic` but also persists the GRAPH TYPE catalog
+/// into the new file. Used by `LazyGraphStore::save` so the post-save
+/// `.gdb` keeps every entry the in-memory catalog had (DEFAULT included).
+/// Without this, `.save` followed by reopen would surface "graph type
+/// 'DEFAULT' not found" because `save_graph` alone never writes the
+/// catalog page chain.
+pub fn save_graph_with_catalog_atomic(
+    graph: &Graph,
+    catalog: &crate::runtime::catalog::GraphTypeCatalog,
+    db_path: &Path,
+) -> io::Result<()> {
+    let mut tmp = db_path.to_path_buf().into_os_string();
+    tmp.push(".tmp");
+    let tmp_path = std::path::PathBuf::from(tmp);
+    save_graph(graph, &tmp_path)?;
+    // Re-open the temp file, write the catalog into a fresh chain, and
+    // update the header pointer. Two-pass write keeps `save_graph` itself
+    // unchanged (no catalog plumbing) at the cost of one extra open.
+    {
+        let mut pager = Pager::open(&tmp_path)?;
+        let root = super::catalog_io::write_catalog(&mut pager, catalog, 0)?;
+        pager.header.catalog_root = root;
+        pager.write_header()?;
+    }
+    std::fs::rename(&tmp_path, db_path)?;
+    Ok(())
+}
+
 /// Save a Graph to a .gql database file.
 pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
     let mut pager = Pager::create(db_path)?;
