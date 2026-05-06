@@ -35,8 +35,8 @@ focus going forward.
 
 | System | Subdir | Status |
 |---|---|---|
-| gqlite (lazy backend) | [`gqlite/`](gqlite/) | ✅ implemented |
-| GraphQLite — colliery-io/graphqlite (Cypher, SQLite-backed) | [`graphqlite/`](graphqlite/) | ✅ implemented |
+| gqlite (lazy backend) | [`gqlite/`](gqlite/) | ✅ implemented; see [`gqlite/KNOWN_ISSUES.md`](gqlite/KNOWN_ISSUES.md) for the `Comment \| Post` label-disjunction filter bug surfaced by the row-equivalence oracle (affects IC2/IC8/IC9 result rows; latency unaffected) |
+| GraphQLite — colliery-io/graphqlite (Cypher, SQLite-backed) | [`graphqlite/`](graphqlite/) | ✅ implemented; see [`graphqlite/DIVERGENCES.md`](graphqlite/DIVERGENCES.md) for the int64 RETURN-projection bug surfaced by the row-equivalence oracle |
 | Kuzu — kuzudb (vectorized columnar engine, CIDR 2023; pinned to v0.11.3 since [upstream archived 2025-10-10](https://github.com/kuzudb/kuzu)) | [`kuzu/`](kuzu/) | ✅ implemented; see [`kuzu/DIVERGENCES.md`](kuzu/DIVERGENCES.md) for the archival-status framing and the `label()`-predicate query-shape divergence (Kuzu's optimizer doesn't push `label()` through multi-hop joins → IC8 ~14s/iter, an honest finding) |
 | GraphLite — GraphLite-AI/GraphLite (ISO GQL, Sled-backed) | — | not yet integrated |
 | GQLite — webbery/gqlite (custom DSL, dead since April 2023) | — | not yet integrated |
