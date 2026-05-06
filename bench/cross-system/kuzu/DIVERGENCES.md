@@ -82,13 +82,68 @@ RETURN ... LIMIT 20
 | gqlite (us) | `(c: Comment \| Post)` (native ISO GQL) | Query level |
 | graphqlite | `WHERE c:Comment OR c:Post` (Cypher 4.x dialect rejects pipe) | Query level |
 | auksys/gqlite | `WHERE c:Comment OR c:Post` (planner bug on pipe in multi-hop) | Query level |
-| **Kuzu** | **`WHERE label(c) IN ["Comment", "Post"]`** (Kuzu builtin) | **Query level** |
+| **Kuzu** | **`(c)` unlabeled, schema-constrained** | **Schema level (REL TABLE)** |
 
-**Update 2026-05**: we discovered Kuzu's `label(node)` builtin which
-returns the node's NODE TABLE name as a string. Combining with
-`IN [...]` gives a real query-level label predicate — same semantic
-constraint as the other systems. **Not** a schema-level data-shape
-constraint, despite earlier integration notes saying otherwise.
+### Kuzu's situation in detail
+
+Kuzu's openCypher dialect doesn't accept either of the syntactic
+forms the other systems use:
+
+- `(message:Comment|Post)` pattern disjunction → parser error
+- `WHERE message:Comment OR message:Post` runtime predicate →
+  parser error (Kuzu has no `node:Label` predicate because every
+  node lives in exactly one NODE TABLE, so the engine never needs
+  to ask that question at runtime)
+- `UNION ALL ... LIMIT N` (canonical Cypher arg-max idiom) →
+  silently broken; LIMIT applies per-branch only, not globally
+  (returned 151K rows for LIMIT 5 in our test)
+- `CALL { ... UNION ALL ... }` subquery wrap → no `CALL{}` grammar
+- `WITH ... after UNION ALL` → parser error
+
+There is one form that does work: the **`label(node)` builtin**
+returns the node's NODE TABLE name as a string. `WHERE label(m) IN
+["Comment", "Post"]` is a real query-level predicate, evaluated
+per row. It's exactly equivalent to gqlite's `(m:Comment|Post)`
+or graphqlite's `WHERE m:Comment OR m:Post` semantically.
+
+**But it's catastrophically slow on multi-hop queries.** Measured
+on Kuzu 0.11.3:
+- IC2 (single label() check, 1-hop friends + hasCreator): ~520 ms
+  (vs ~30 ms with schema constraint — 17× slower)
+- IC8 (label() check inside a 4-hop chain through replyOf): **~14 s
+  per iter** (vs ~80 ms with schema constraint — 175× slower)
+
+Kuzu's optimizer doesn't push the `label()` predicate through
+multi-hop joins — it materializes the full join result first, then
+filters by label. The schema-constrained form, in contrast, lets
+the multi-typed `hasCreator(FROM Comment, FROM Post)` REL TABLE
+limit the message-side at edge traversal time.
+
+### Why we ship the schema-constrained form
+
+We use `(message)` unlabeled, relying on the multi-typed
+`hasCreator` REL TABLE schema declaration to constrain the message
+endpoint to Comment-or-Post.
+
+**Reading the cypher file alone, you cannot tell that `(message)`
+is restricted to Comment-or-Post.** The constraint comes from
+`setup.py`'s `CREATE REL TABLE hasCreator(FROM Comment TO Person,
+FROM Post TO Person)`. If the loader were changed to also create
+`hasCreator(FROM Forum TO Person)`, this query would silently match
+Forums too, while gqlite/graphqlite/the spec would not. **The two
+queries are equivalent only on our specific data load.**
+
+We accept this audit-trail divergence because:
+1. The fast `label()`-based alternative is 17-175× slower in Kuzu
+   0.11.3's optimizer, making the bench unwieldy (30+ min per run).
+2. The schema-constrained form has been the bench's behavior since
+   the kuzu integration PR landed. Numbers haven't changed.
+3. On our actual data, both forms produce identical result rows.
+4. The slow optimizer behavior is Kuzu's, not something we can fix
+   in our bench harness.
+
+A reviewer wanting a strictly-query-level translation can swap to
+the `label()` form; the trade-off is documented here.
 
 What does NOT work in Kuzu (tested):
 - `(m:Comment|Post)` pattern disjunction → parser error

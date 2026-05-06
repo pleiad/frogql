@@ -4,15 +4,14 @@
 // shape — `start` is the queried Person, `person` is the comment
 // author, canonical column names.
 //
-// Kuzu-specific divergences from the toml:
-//   - Kuzu has no `(node:Comment|Post)` pattern disjunction nor
-//     `WHERE node:Label` predicate — see ic2.cypher header for the
-//     fuller enumeration. Instead we use `label(node)` builtin in
-//     WHERE, which IS a real query-level label predicate (not
-//     schema-level data-shape constraint). Same idiom as ic2.cypher.
+// Kuzu-specific divergences from the toml — see ic2.cypher header
+// (and DIVERGENCES.md) for the audit. Short version: schema-level
+// constraint via the multi-typed `hasCreator` REL TABLE rather than
+// query-level `label()` predicate, because Kuzu's optimizer doesn't
+// push label() through multi-hop joins (~175× slower on this query).
+// Same data, different audit trail.
 //   - Edge labels lowercase per loader convention.
 MATCH (start:Person {id: $personId})<-[:hasCreator]-(message)<-[:replyOf]-(comment:Comment)-[:hasCreator]->(person:Person)
-WHERE label(message) IN ["Comment", "Post"]
 RETURN person.id AS personId,
        person.firstName AS personFirstName,
        person.lastName AS personLastName,
