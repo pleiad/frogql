@@ -7,11 +7,17 @@
 // toml is the bench's source-of-truth.
 //
 // Kuzu-specific divergences from the toml:
-//   - Each Kuzu node has exactly one label (its NODE TABLE), so
-//     `(message:Comment|Post)` label disjunction in patterns isn't
-//     directly available. We leave `(message)` unlabeled — Kuzu's
-//     multi-typed REL TABLE on `hasCreator` constrains the label
-//     implicitly. Same logical query, different syntactic form.
+//   - Kuzu has no label-disjunction mechanism at all. Tested 2026-05:
+//     `(message:Comment|Post)` pattern → parser error; `WHERE
+//     message:Comment OR message:Post` predicate → parser error;
+//     `UNION ALL ... LIMIT N` → silently broken (LIMIT applied per
+//     branch only, not globally); `CALL { ... UNION ALL ... }` →
+//     no CALL{} grammar; `... UNION ALL ... WITH ... LIMIT` →
+//     parser error after UNION. So we use `(message)` bound but
+//     unlabeled — Kuzu's multi-typed REL TABLE on `hasCreator`
+//     (FROM Comment, FROM Post) constrains `message` to Comment+Post
+//     at the SCHEMA level. Same semantic constraint, applied via
+//     edge schema rather than node label predicate.
 //   - Edge labels lowercase per loader convention.
 MATCH (:Person {id: $personId})-[:knows]-(friend:Person)<-[:hasCreator]-(message)
 WHERE message.creationDate <= $maxDate
