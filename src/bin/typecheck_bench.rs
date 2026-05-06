@@ -23,8 +23,11 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
+use gqlrust::model::graph_access::GraphAccess;
 use gqlrust::runtime::engine::Runtime;
+use gqlrust::store::disk::DiskGraphStore;
 use gqlrust::store::lazy::LazyGraphStore;
+use gqlrust::typing::variable_type::Schema;
 
 // ---------------------------------------------------------------------------
 
@@ -103,8 +106,9 @@ struct Case {
     query: &'static str,
 }
 
-/// 18 cases: 3 valid controls + 9 empty-by-typing + 6 invalid (rejected).
-/// See `bench/TYPECHECKER_BENCHMARK.md` for the case-set description.
+/// 21 cases: 3 valid controls + 3 LDBC-IC valid (the IC2/IC8
+/// centerpieces) + 9 empty-by-typing + 6 invalid (rejected). See
+/// `bench/INTERNAL_BENCHMARK.md` for the case-set description.
 const CASES: &[Case] = &[
     // ---- Valid controls (3) ----
     Case {
@@ -121,6 +125,48 @@ const CASES: &[Case] = &[
         category: Category::Valid,
         id: "v_where",
         query: "MATCH (p: Person) WHERE p.id = 933 RETURN p.firstName",
+    },
+    // ---- LDBC IC valid cases (the centerpieces — spec-faithful + ORDER BY teardown) ----
+    // v_ic2_spec: full LDBC IC2 (anonymous start, COALESCE, ORDER BY).
+    // The slowdown vs v_ic2_noorder is what ORDER BY costs us.
+    Case {
+        category: Category::Valid,
+        id: "v_ic2_spec",
+        query: "MATCH (:Person {id: 19791209300143})~[:knows]~(friend: Person)<-[:hasCreator]-(message: Comment | Post) \
+                WHERE message.creationDate <= 1354060800000 \
+                RETURN friend.id AS personId, friend.firstName AS personFirstName, \
+                       friend.lastName AS personLastName, message.id AS postOrCommentId, \
+                       COALESCE(message.content, message.imageFile) AS postOrCommentContent, \
+                       message.creationDate AS postOrCommentCreationDate \
+                ORDER BY postOrCommentCreationDate DESC, postOrCommentId ASC LIMIT 20",
+    },
+    // v_ic2_noorder: same logical query as v_ic2_spec WITHOUT ORDER BY.
+    // LIMIT can short-circuit at the first 20 matched messages instead
+    // of materializing + sorting the full result set. The ratio
+    // v_ic2_spec / v_ic2_noorder isolates the runtime cost of the
+    // spec's ORDER BY tie-break (no top-N heap optimization yet).
+    Case {
+        category: Category::Valid,
+        id: "v_ic2_noorder",
+        query: "MATCH (:Person {id: 19791209300143})~[:knows]~(friend: Person)<-[:hasCreator]-(message: Comment | Post) \
+                WHERE message.creationDate <= 1354060800000 \
+                RETURN friend.id AS personId, friend.firstName AS personFirstName, \
+                       friend.lastName AS personLastName, message.id AS postOrCommentId, \
+                       COALESCE(message.content, message.imageFile) AS postOrCommentContent, \
+                       message.creationDate AS postOrCommentCreationDate \
+                LIMIT 20",
+    },
+    // v_ic8_spec: LDBC IC8 spec-faithful — multi-hop chain through replyOf.
+    // Different shape than IC2 (longer chain, single label-disjunction
+    // hop in the middle).
+    Case {
+        category: Category::Valid,
+        id: "v_ic8_spec",
+        query: "MATCH (start: Person {id: 2199023256816})<-[:hasCreator]-(:Comment | Post)<-[:replyOf]-(comment: Comment)-[:hasCreator]->(person: Person) \
+                RETURN person.id AS personId, person.firstName AS personFirstName, \
+                       person.lastName AS personLastName, comment.creationDate AS commentCreationDate, \
+                       comment.id AS commentId, comment.content AS commentContent \
+                ORDER BY commentCreationDate DESC, commentId ASC LIMIT 20",
     },
     // ---- Empty by typing (9) ----
     Case {
@@ -292,26 +338,52 @@ fn main() {
 
     ensure_dataset();
 
-    println!("db;category;case;phase;iter;ns;flags");
-    bench_db(Path::new(SF01_GDB), iters, warmup);
-}
+    println!("backend;db;category;case;phase;iter;ns;flags");
+    let db_path = Path::new(SF01_GDB);
 
-fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
+    // Open lazy first so we have the schema (DiskGraphStore doesn't
+    // own a catalog; the schema is data-shape-derived and identical
+    // across backends, so reusing the lazy store's active schema for
+    // the disk pass is correct).
     let path_str = db_path.display().to_string();
-    eprintln!("\n=== {path_str} ===");
+    eprintln!("\n=== lazy: {path_str} ===");
     let t0 = Instant::now();
-    let store = LazyGraphStore::open(db_path).unwrap_or_else(|e| {
+    let lazy = LazyGraphStore::open(db_path).unwrap_or_else(|e| {
         eprintln!("failed to open .gdb {path_str}: {e}");
         std::process::exit(1);
     });
     eprintln!(
         "  {} nodes / {} edges in {:.2}s",
-        store.node_count(),
-        store.edge_count(),
+        lazy.node_count(),
+        lazy.edge_count(),
         t0.elapsed().as_secs_f64()
     );
-    let active = store.catalog().active_schema();
-    let rt = Runtime::new(&store);
+    let active = lazy.catalog().active_schema().clone();
+    let rt_lazy = Runtime::new(&lazy);
+    bench_db("lazy", &path_str, &active, &rt_lazy, iters, warmup);
+
+    // Disk backend — same .gdb, same schema, no LRU page cache.
+    drop(rt_lazy);
+    drop(lazy);
+    eprintln!("\n=== disk: {path_str} ===");
+    let t0 = Instant::now();
+    let disk = DiskGraphStore::open(db_path).unwrap_or_else(|e| {
+        eprintln!("failed to open .gdb {path_str} (disk backend): {e}");
+        std::process::exit(1);
+    });
+    eprintln!("  opened in {:.2}s", t0.elapsed().as_secs_f64());
+    let rt_disk = Runtime::new(&disk);
+    bench_db("disk", &path_str, &active, &rt_disk, iters, warmup);
+}
+
+fn bench_db<G: GraphAccess>(
+    backend: &str,
+    path_str: &str,
+    active: &Schema,
+    rt: &Runtime<'_, G>,
+    iters: usize,
+    warmup: usize,
+) {
 
     const TABLE_WIDTH: usize = 103; // sum of the format widths below + separators
     eprintln!(
@@ -326,7 +398,7 @@ fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
 
     let mut warned_count = 0usize;
     for case in CASES {
-        if run_case(&path_str, &active, &rt, case, iters, warmup) {
+        if run_case(backend, path_str, active, rt, case, iters, warmup) {
             warned_count += 1;
         }
     }
@@ -354,10 +426,11 @@ fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
 /// a soundness warning (outcome ≠ expected, OR `Outcome::Empty` with a
 /// non-zero rt_unchk row count). Caller tallies these for the per-DB
 /// summary line at the bottom of the table.
-fn run_case(
+fn run_case<G: GraphAccess>(
+    backend: &str,
     db_path: &str,
-    active: &gqlrust::typing::variable_type::Schema,
-    rt: &Runtime<'_, LazyGraphStore>,
+    active: &Schema,
+    rt: &Runtime<'_, G>,
     case: &Case,
     iters: usize,
     warmup: usize,
@@ -406,7 +479,7 @@ fn run_case(
         };
         if !is_warmup {
             compile_chk_samples.push(compile_chk_ns);
-            csv_row(db_path, case, "compile_chk", n - warmup, compile_chk_ns, "");
+            csv_row(backend, db_path, case, "compile_chk", n - warmup, compile_chk_ns, "");
         }
 
         // ---- Unchecked compile + runtime ----
@@ -416,6 +489,7 @@ fn run_case(
         if !is_warmup {
             compile_unchk_samples.push(compile_unchk_ns);
             csv_row(
+                backend,
                 db_path,
                 case,
                 "compile_unchk",
@@ -444,7 +518,7 @@ fn run_case(
                 soundness_violations += 1;
                 max_violation_rows = max_violation_rows.max(rows);
             }
-            csv_row(db_path, case, "rt_unchk", n - warmup, rt_unchk_ns, &flag);
+            csv_row(backend, db_path, case, "rt_unchk", n - warmup, rt_unchk_ns, &flag);
         }
     }
 
@@ -543,9 +617,10 @@ fn run_case(
     outcome_mismatch || empty_unsound
 }
 
-fn csv_row(db: &str, case: &Case, phase: &str, iter: usize, ns: u128, flag: &str) {
+fn csv_row(backend: &str, db: &str, case: &Case, phase: &str, iter: usize, ns: u128, flag: &str) {
     println!(
-        "{};{};{};{};{};{};{}",
+        "{};{};{};{};{};{};{};{}",
+        backend,
         db,
         case.category.label(),
         case.id,
