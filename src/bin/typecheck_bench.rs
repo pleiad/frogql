@@ -370,11 +370,12 @@ fn main() {
         RefreshKind::new().with_processes(ProcessRefreshKind::new().with_memory()),
     );
     let rss_baseline = rss_mb(&mut sys);
-    eprintln!("RSS baseline: {rss_baseline:.1} MiB");
-
-    // Capture .gdb size as a meta row (same value regardless of
-    // backend; we still emit per-backend for join-ability downstream).
     let db_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+    let db_size_mib = db_bytes as f64 / (1024.0 * 1024.0);
+    eprintln!(
+        "Setup: db_path = {}\n       db_size = {:.1} MiB ({} bytes)\n       rss_baseline = {:.1} MiB",
+        path_str, db_size_mib, db_bytes, rss_baseline,
+    );
 
     // ---- lazy backend ----
     eprintln!("\n=== lazy: {path_str} ===");
@@ -383,26 +384,23 @@ fn main() {
         eprintln!("failed to open .gdb {path_str}: {e}");
         std::process::exit(1);
     });
-    let lazy_open_ns = t0.elapsed().as_nanos();
+    let lazy_open_secs = t0.elapsed().as_secs_f64();
     let rss_after_lazy_open = rss_mb(&mut sys);
     eprintln!(
-        "  {} nodes / {} edges in {:.2}s, RSS {:.1} MiB (+{:.1})",
+        "  open_time     = {:.2}s\n  graph         = {} nodes / {} edges\n  rss_after_open = {:.1} MiB (+{:.1} over baseline)",
+        lazy_open_secs,
         lazy.node_count(),
         lazy.edge_count(),
-        t0.elapsed().as_secs_f64(),
         rss_after_lazy_open,
         rss_after_lazy_open - rss_baseline,
     );
-    emit_meta(&path_str, "lazy", "open_ns", lazy_open_ns);
-    emit_meta(&path_str, "lazy", "rss_after_open_mb", (rss_after_lazy_open * 1000.0) as u128);
-    emit_meta(&path_str, "lazy", "db_bytes", db_bytes as u128);
     let active = lazy.catalog().active_schema().clone();
     let rt_lazy = Runtime::new(&lazy);
     let mut peak_rss_lazy = rss_after_lazy_open;
     bench_db("lazy", &path_str, &active, &rt_lazy, iters, warmup, &mut sys, &mut peak_rss_lazy);
-    emit_meta(&path_str, "lazy", "peak_rss_during_loop_mb", (peak_rss_lazy * 1000.0) as u128);
     eprintln!(
-        "Peak RSS lazy: {peak_rss_lazy:.1} MiB (+{:.1} over baseline)",
+        "  peak_rss_loop = {:.1} MiB (+{:.1} over baseline)",
+        peak_rss_lazy,
         peak_rss_lazy - rss_baseline,
     );
 
@@ -415,43 +413,21 @@ fn main() {
         eprintln!("failed to open .gdb {path_str} (disk backend): {e}");
         std::process::exit(1);
     });
-    let disk_open_ns = t0.elapsed().as_nanos();
+    let disk_open_secs = t0.elapsed().as_secs_f64();
     let rss_after_disk_open = rss_mb(&mut sys);
     eprintln!(
-        "  opened in {:.2}s, RSS {:.1} MiB (+{:.1})",
-        t0.elapsed().as_secs_f64(),
+        "  open_time     = {:.2}s\n  rss_after_open = {:.1} MiB (+{:.1} over baseline)",
+        disk_open_secs,
         rss_after_disk_open,
         rss_after_disk_open - rss_baseline,
     );
-    emit_meta(&path_str, "disk", "open_ns", disk_open_ns);
-    emit_meta(&path_str, "disk", "rss_after_open_mb", (rss_after_disk_open * 1000.0) as u128);
-    emit_meta(&path_str, "disk", "db_bytes", db_bytes as u128);
     let rt_disk = Runtime::new(&disk);
     let mut peak_rss_disk = rss_after_disk_open;
     bench_db("disk", &path_str, &active, &rt_disk, iters, warmup, &mut sys, &mut peak_rss_disk);
-    emit_meta(&path_str, "disk", "peak_rss_during_loop_mb", (peak_rss_disk * 1000.0) as u128);
     eprintln!(
-        "Peak RSS disk: {peak_rss_disk:.1} MiB (+{:.1} over baseline)",
+        "  peak_rss_loop = {:.1} MiB (+{:.1} over baseline)",
+        peak_rss_disk,
         peak_rss_disk - rss_baseline,
-    );
-}
-
-// `value_milli` carries either an integer in nanoseconds (open_ns,
-// db_bytes — used as raw counts) or RSS-MB×1000 for the *_rss_*_mb
-// rows; the column is `ns` for schema compatibility but holds whatever
-// scalar the metric needs. Downstream parsers split on the case/phase
-// columns, not the value type.
-fn emit_meta(db_path: &str, backend: &str, phase: &str, value_milli: u128) {
-    println!(
-        "{};{};{};{};{};{};{};{}",
-        backend,
-        db_path,
-        "meta",
-        "_setup",
-        phase,
-        0,
-        value_milli,
-        "",
     );
 }
 
