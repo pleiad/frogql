@@ -14,11 +14,19 @@ Cell encoding:
     False        → "false"
     int          → decimal repr
     float        → repr (matches Rust's default Display for finite f64)
-    str          → raw, no escaping
+    str          → trailing whitespace trimmed (rstrip), no other escaping
     other        → repr() fallback
 
 Cells joined with "\\x1f" (US, unit separator). Rows joined with "\\n".
 sha256 of the resulting bytes, lowercase hex.
+
+Why rstrip on strings: a formatting-level difference between the
+loaders — gqlite strips trailing whitespace from CSV string columns,
+Kuzu preserves it. Neither is "wrong"; both are reasonable choices.
+The row-content oracle wants to compare semantic equivalence, so we
+normalize away the formatting drift at canonicalization time without
+touching the data each engine actually loaded. Mirrored in
+`canonicalize_cell` in `src/bin/ldbc_bench.rs`.
 
 LDBC SF0.1 doesn't ship strings containing the separator bytes, so the
 join-without-escape is unambiguous.
@@ -40,7 +48,8 @@ def canonicalize_cell(v) -> str:
     if isinstance(v, float):
         return repr(v)
     if isinstance(v, str):
-        return v
+        # Trailing-whitespace rstrip — see module docstring.
+        return v.rstrip()
     return repr(v)
 
 

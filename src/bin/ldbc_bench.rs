@@ -127,7 +127,16 @@ fn shape_of_result(result: &QueryResult) -> String {
 //   Float(f)     → Rust default `{}` formatting (Python `repr(f)`
 //                   matches for finite values; LDBC ICs don't have
 //                   float columns so this branch is rarely hit)
-//   Str(s)       → s, raw UTF-8 (no escaping)
+//   Str(s)       → s with trailing whitespace stripped (`trim_end`).
+//                   Each system's CSV loader handles trailing
+//                   whitespace on string columns differently — gqlite
+//                   strips at load, Kuzu preserves. Neither is wrong;
+//                   both are reasonable formatting choices. The row-
+//                   content oracle compares semantic equivalence, so
+//                   we normalize the formatting drift at
+//                   canonicalization time without touching either
+//                   engine's loaded data. Mirrored in
+//                   `_lib/row_hash.py`.
 //   List/Record/Node/Edge → debug-format (rare in IC RETURNs;
 //                   mismatches across systems would surface as
 //                   hash WARN with the .rows.jsonl available for
@@ -142,7 +151,7 @@ fn canonicalize_cell(v: &Value) -> String {
         Value::Bool(false) => "false".to_string(),
         Value::Int(n) => n.to_string(),
         Value::Float(f) => f.to_string(),
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.trim_end().to_string(),
         other => format!("{other:?}"),
     }
 }
