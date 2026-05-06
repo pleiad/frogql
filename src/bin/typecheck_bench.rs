@@ -437,7 +437,16 @@ fn main() {
     let active = lazy.catalog().active_schema().clone();
     let rt_lazy = Runtime::new(&lazy);
     let mut peak_rss_lazy = rss_after_lazy_open;
-    bench_db("lazy", &path_str, &active, &rt_lazy, iters, warmup, &mut sys, &mut peak_rss_lazy);
+    bench_db(
+        "lazy",
+        &path_str,
+        &active,
+        &rt_lazy,
+        iters,
+        warmup,
+        &mut sys,
+        &mut peak_rss_lazy,
+    );
     eprintln!(
         "  peak_rss_loop = {:.1} MiB (+{:.1} over baseline)",
         peak_rss_lazy,
@@ -463,7 +472,16 @@ fn main() {
     );
     let rt_disk = Runtime::new(&disk);
     let mut peak_rss_disk = rss_after_disk_open;
-    bench_db("disk", &path_str, &active, &rt_disk, iters, warmup, &mut sys, &mut peak_rss_disk);
+    bench_db(
+        "disk",
+        &path_str,
+        &active,
+        &rt_disk,
+        iters,
+        warmup,
+        &mut sys,
+        &mut peak_rss_disk,
+    );
     eprintln!(
         "  peak_rss_loop = {:.1} MiB (+{:.1} over baseline)",
         peak_rss_disk,
@@ -493,7 +511,6 @@ fn bench_db<G: GraphAccess>(
     sys: &mut System,
     peak_rss: &mut f64,
 ) {
-
     const TABLE_WIDTH: usize = 103; // sum of the format widths below + separators
     eprintln!(
         "{:<10} {:<28} {:>13} {:>15} {:>11} {:>9} {:>11}",
@@ -594,7 +611,15 @@ fn run_case<G: GraphAccess>(
         };
         if !is_warmup {
             compile_chk_samples.push(compile_chk_ns);
-            csv_row(backend, db_path, case, "compile_chk", n - warmup, compile_chk_ns, "");
+            csv_row(
+                backend,
+                db_path,
+                case,
+                "compile_chk",
+                n - warmup,
+                compile_chk_ns,
+                "",
+            );
         }
 
         // ---- Unchecked compile + runtime ----
@@ -633,7 +658,15 @@ fn run_case<G: GraphAccess>(
                 soundness_violations += 1;
                 max_violation_rows = max_violation_rows.max(rows);
             }
-            csv_row(backend, db_path, case, "rt_unchk", n - warmup, rt_unchk_ns, &flag);
+            csv_row(
+                backend,
+                db_path,
+                case,
+                "rt_unchk",
+                n - warmup,
+                rt_unchk_ns,
+                &flag,
+            );
         }
     }
 
