@@ -3,38 +3,32 @@
 
 id = 6
 name = "Tag co-occurrence"
-status = "blocked"
-
-blocked_reason = """
-Tested 2026-05-05 (re-checked after `<>` alias landed):
-  - `WHERE person <> otherPerson` — bare-node comparison; needs
-    property access (`person.id <> otherPerson.id`).
-  - `WHERE otherTag.name <> $tagName` — works directly now
-    (string-property comparison; `<>` is fine post-fix).
-  - `COUNT(post)` — bare-node aggregate; needs `COUNT(post.id)` or
-    `COUNT(*)`.
-  - `GROUP BY otherTagName` — RETURN-clause alias not visible in
-    GROUP BY (`unexpected bare variable 'otherTagName'`). Workaround:
-    `GROUP BY otherTag.name` (raw expression instead of alias).
-"""
-
-required_features = [
-    "bare-node comparison (or property-access rewrite)",
-    "COUNT over bare node references",
-    "GROUP BY by RETURN-clause alias",
-]
+status = "implemented"
 
 params_file = "interactive_6_param.txt"
 param_columns = ["personId", "tagName"]
 param_types = ["int", "string"]
+
 query = """
-MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)
+MATCH (person:Person {id: {personId}})~[:knows]~{1, 2}(otherPerson:Person)
 WHERE person <> otherPerson
-MATCH (otherPerson)<-[:hasCreator]-(post:Post)-[:hasTag]->(:Tag {name: $tagName})
+MATCH (otherPerson)<-[:hasCreator]-(post:Post)-[:hasTag]->(:Tag {name: {tagName}})
 MATCH (post)-[:hasTag]->(otherTag:Tag)
-WHERE otherTag.name <> $tagName
-RETURN otherTag.name AS otherTagName, COUNT(post) AS postCount
-GROUP BY otherTagName
-ORDER BY postCount DESC, otherTagName ASC
+WHERE otherTag.name <> {tagName}
+RETURN
+    otherTag.name AS otherTagName,
+    COUNT(post) AS postCount
+GROUP BY otherTag.name
+ORDER BY postCount DESC, otherTag.name ASC
 LIMIT 10
 """
+
+return_columns = ["otherTagName", "postCount"]
+
+expected_shape = "s,i"
+
+[divergences]
+group-by-raw-expr = "spec writes `GROUP BY otherTagName` referencing the RETURN-alias. gqlite's parser doesn't visit RETURN aliases when resolving GROUP BY items, so we use `GROUP BY otherTag.name` (raw expression). Same group key, same rows. Same divergence as IC5."
+order-by-raw-expr = "spec writes `ORDER BY postCount DESC, otherTagName ASC`. We keep `postCount` as the alias (alias resolution works for ORDER BY) but use `otherTag.name ASC` for the tie-break to match the GROUP BY rewrite. Identical sort key."
+edge-casing = "loader produces lowercase :knows, :hasCreator, :hasTag. Loader-level."
+bare-node-compare = "spec uses `WHERE person <> otherPerson`. gqlite's `<>` on bound nodes is now first-class (PR #42); we run the spec verbatim."

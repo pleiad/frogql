@@ -3,37 +3,34 @@
 
 id = 11
 name = "Job referral"
-status = "blocked"
-
-blocked_reason = """
-Tested 2026-05-05 (re-checked after `<>` alias landed). Same as IC9
-— the query DOES execute end-to-end after a single rewrite
-(`WHERE person <> otherPerson` → `WHERE person.id <> otherPerson.id`,
-plus dropping the `CAST`). Holding off for the same reason: the
-property-rewrite loses spec faithfulness even though it's
-semantically equivalent on LDBC IDs. The bench would silently
-misrepresent what gqlite is running. Revisit when bare-node
-comparison (or `id(node)` builtin) lands.
-"""
-
-required_features = [
-    "bare-node comparison (or `id(node)` builtin)",
-]
+status = "implemented"
 
 params_file = "interactive_11_param.txt"
 param_columns = ["personId", "countryName", "workFromYear"]
 param_types = ["int", "string", "int"]
+
 query = """
-MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)-[workAt:workAt]->(company:Company)-[:isLocatedIn]->(country:Country)
-WHERE person <> otherPerson 
-  AND country.name = $countryName 
-  AND workAt.workFrom < $workFromYear
-RETURN 
-    otherPerson.id AS personId, 
-    otherPerson.firstName AS personFirstName, 
-    otherPerson.lastName AS personLastName, 
-    company.name AS companyName, 
+MATCH (person:Person {id: {personId}})~[:knows]~{1, 2}(otherPerson:Person)-[workAt:workAt]->(company:Company)-[:isLocatedIn]->(country:Country)
+WHERE person <> otherPerson
+  AND country.name = {countryName}
+  AND workAt.workFrom < {workFromYear}
+RETURN
+    otherPerson.id AS personId,
+    otherPerson.firstName AS personFirstName,
+    otherPerson.lastName AS personLastName,
+    company.name AS companyName,
     workAt.workFrom AS workFromYear
-ORDER BY workFromYear ASC, CAST(personId AS INTEGER) ASC, companyName DESC
+ORDER BY workFromYear ASC, personId ASC, companyName DESC
 LIMIT 10
 """
+
+return_columns = ["personId", "personFirstName", "personLastName", "companyName", "workFromYear"]
+
+expected_shape = "i,s,s,s,i"
+
+[divergences]
+no-cast = "spec ORDER BY tie-break is `CAST(personId AS INTEGER) ASC`. gqlite stores Person.id as native int, so plain `otherPerson.id ASC` sorts identically. CAST isn't in the parser; not needed here. Same divergence as IC8/IC9."
+order-by-aliases = "spec writes `ORDER BY workFromYear ASC, CAST(personId AS INTEGER) ASC, companyName DESC`. We use the same RETURN aliases (`workFromYear`, `personId`, `companyName`) — gqlite's parser doesn't currently accept mixed alias-and-raw-expression ORDER BY items (panics with `Expr sort key reached post-projection path`), and using all aliases is the spec form anyway."
+sub-label = "spec uses `(:Company)` and `(:Country)`. The LDBC loader synthesizes these sub-labels from the `type` column on Organisation and Place (Company: 1575, University: 6380, Country: 111, City: 1343, Continent: 6 in SF0.1). No divergence at the query level."
+edge-casing = "loader produces lowercase :knows, :workAt, :isLocatedIn. Loader-level."
+bare-node-compare = "spec uses `WHERE person <> otherPerson`. gqlite's `<>` on bound nodes is now first-class (PR #42); we run the spec verbatim."
