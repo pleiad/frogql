@@ -67,6 +67,35 @@ pub fn try_ltj<G: GraphAccess>(
     index: &TripleIndex,
     limit: usize,
 ) -> Option<IntermediateResult> {
+    try_ltj_inner(graph, pattern, index, limit, None)
+}
+
+/// Like `try_ltj` but with an externally supplied variable pin: `pin_var`
+/// is forced to bind to `pin_id` before the LTJ runs, exactly as the
+/// internal index-resolved pinning works. Used by the BTree-LTJ-real
+/// ORDER BY path: the engine drives the sort variable through the btree
+/// in key order, calling this once per (value, id) pair so the LTJ
+/// itself never enumerates that variable's domain. The named variable
+/// must exist in the pattern; if not, the pin is silently ignored
+/// (caller can detect via `var_id_to_name` reflection if needed).
+pub fn try_ltj_with_pin<G: GraphAccess>(
+    graph: &G,
+    pattern: &PathPattern,
+    index: &TripleIndex,
+    limit: usize,
+    pin_var: &str,
+    pin_id: u32,
+) -> Option<IntermediateResult> {
+    try_ltj_inner(graph, pattern, index, limit, Some((pin_var, pin_id)))
+}
+
+fn try_ltj_inner<G: GraphAccess>(
+    graph: &G,
+    pattern: &PathPattern,
+    index: &TripleIndex,
+    limit: usize,
+    external_pin: Option<(&str, u32)>,
+) -> Option<IntermediateResult> {
     let mut decomp = decompose(pattern, index)?;
 
     if decomp.triples.is_empty() {
@@ -78,7 +107,7 @@ pub fn try_ltj<G: GraphAccess>(
     // the triples and pre-bind it in the result tuple. Without this, even with
     // the eq weight=1 in the VEO, the lonely-var binding would still scan the
     // variable's position before rejecting (see `veo.rs` rationale comment).
-    let pinned = if std::env::var("GQLITE_DISABLE_INDEX_FOLD").is_ok() {
+    let mut pinned = if std::env::var("GQLITE_DISABLE_INDEX_FOLD").is_ok() {
         Vec::new()
     } else {
         match fold_indexed_constants(graph, &mut decomp) {
@@ -86,6 +115,39 @@ pub fn try_ltj<G: GraphAccess>(
             FoldOutcome::Pinned(p) => p,
         }
     };
+
+    // External pin from the BTree-LTJ-real ORDER BY path. Resolve the
+    // variable name to an id, substitute its term positions to a constant
+    // (mirroring `fold_indexed_constants`), and drop the satisfied label
+    // / attr filters for the pinned variable.
+    if let Some((pin_name, pin_id)) = external_pin {
+        if let Some(pin_var_id) = decomp
+            .var_id_to_name
+            .iter()
+            .position(|n| n == pin_name)
+            .map(|i| i as u8)
+        {
+            if !pinned.iter().any(|(v, _)| *v == pin_var_id) {
+                pinned.push((pin_var_id, pin_id));
+                for triple in decomp.triples.iter_mut() {
+                    for term in triple.terms.iter_mut() {
+                        if let Term::Variable(v) = term {
+                            if *v == pin_var_id {
+                                *term = Term::Constant(pin_id);
+                            }
+                        }
+                    }
+                }
+                decomp.filters.retain(|f| match &f.kind {
+                    FilterKind::NodeLabel { var_id, .. }
+                    | FilterKind::NodeProperty { var_id, .. }
+                    | FilterKind::NodeAttrCmp { var_id, .. }
+                    | FilterKind::NodeInSet { var_id, .. } => *var_id != pin_var_id,
+                });
+            }
+        }
+    }
+
     if std::env::var("GQLITE_DISABLE_INDEX_FOLD").is_err() {
         fold_range_filters(graph, &mut decomp);
     }

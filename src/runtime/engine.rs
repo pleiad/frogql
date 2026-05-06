@@ -187,12 +187,34 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             .as_ref()
             .is_some_and(|specs| specs.iter().any(|s| matches!(s.key, SortKey::Column(_))));
 
+        // BTree-LTJ "real": when the precondition holds, drive the sort
+        // variable from the btree in key order, calling the LTJ once per
+        // (value, ids) pair with the variable pre-pinned. Replaces the
+        // entire `run_match_chain → sort` flow with k LTJ runs and an
+        // early-exit at LIMIT k. Activated only via the explicit force
+        // flag — no auto path because the win is conditional on join
+        // selectivity (see bitácora 10 §13).
+        let force = std::env::var("GQLITE_ORDERBY_FORCE").ok();
+        let real_rows = if has_order && force.as_deref() == Some("btree-ltj-real") {
+            self.try_btree_ltj_real(query, limit)
+        } else {
+            None
+        };
+
         let return_items = match &query.returns {
             None => {
+                if let Some(rows) = real_rows {
+                    let mut ir = IntermediateResult::new(Vec::new());
+                    ir.rows = rows;
+                    if limit > 0 && ir.rows.len() > limit {
+                        ir.rows.truncate(limit);
+                    }
+                    return QueryResult::Raw(ir);
+                }
                 let input_limit = if has_order { 0 } else { limit };
                 let mut ir = self.run_match_chain(query, input_limit);
                 if let Some(specs) = &query.order_by {
-                    self.sort_rows(&mut ir.rows, specs);
+                    self.route_pre_sort(&mut ir.rows, specs, &query.matches, limit);
                     if limit > 0 && ir.rows.len() > limit {
                         ir.rows.truncate(limit);
                     }
@@ -205,12 +227,19 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let has_aggs = return_items.iter().any(|i| i.is_aggregate());
         let needs_full_input = has_aggs || query.distinct || has_order;
         let input_limit = if needs_full_input { 0 } else { limit };
-        let mut ir = self.run_match_chain(query, input_limit);
 
-        let pre_projection_sort = !has_aggs && !has_column_sort_key;
+        let (mut ir, used_real) = match real_rows {
+            Some(rows) => (IntermediateResult::new(rows), true),
+            None => (self.run_match_chain(query, input_limit), false),
+        };
+
+        let pre_projection_sort = !has_aggs && !has_column_sort_key && !used_real;
         if pre_projection_sort {
             if let Some(specs) = &query.order_by {
-                self.sort_rows(&mut ir.rows, specs);
+                // DISTINCT post-projection means sort sees more rows than
+                // it needs to keep — top-k can't safely cut here.
+                let sort_limit = if query.distinct { 0 } else { limit };
+                self.route_pre_sort(&mut ir.rows, specs, &query.matches, sort_limit);
             }
         }
 
@@ -225,9 +254,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             self.run_row_by_row(return_items, &ir.rows, query.distinct)
         };
 
-        if has_order && !pre_projection_sort {
+        if has_order && !pre_projection_sort && !used_real {
             if let Some(specs) = &query.order_by {
-                sort_projected_rows(&mut projected, specs);
+                sort_projected_rows(&mut projected, specs, limit);
             }
         }
 
@@ -238,11 +267,167 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         QueryResult::Projected(projected)
     }
 
+    /// Route the pre-projection sort to one of three implementations:
+    /// pdqsort (full O(n log n)), top-k heap (O(n log k) when `limit < n / 2`),
+    /// or a btree-driven bucket sort that walks ids already in attribute
+    /// order. The btree path applies only when the spec is a single
+    /// `var.attr` AttrLookup AND the store has a btree index on
+    /// `(label, attr)` for some label declared on `var`. When the btree
+    /// short-circuits, it returns `true`; otherwise we fall back to
+    /// `sort_rows` (which itself decides between top-k and pdqsort).
+    ///
+    /// The env var `GQLITE_ORDERBY_FORCE` controls routing for benches:
+    /// `pdqsort` / `topk` skip the btree branch; `btree-ltj` enables it
+    /// (and falls through to pdqsort if precondition not met).
+    fn route_pre_sort(
+        &self,
+        rows: &mut Vec<ResultRow>,
+        specs: &[SortSpec],
+        matches: &[MatchStatement],
+        limit: usize,
+    ) {
+        let force = std::env::var("GQLITE_ORDERBY_FORCE").ok();
+        let try_btree = !matches!(force.as_deref(), Some("pdqsort") | Some("topk"));
+        if try_btree && self.try_btree_sort(rows, specs, matches, limit) {
+            return;
+        }
+        self.sort_rows(rows, specs, limit);
+    }
+
+    /// BTree-LTJ "real": drive the sort variable through the btree in key
+    /// order, calling `try_ltj_with_pin` once per `(value, [ids])` entry
+    /// so the LTJ itself never enumerates the variable's domain. Stops
+    /// at `LIMIT k` without ever materializing rows beyond k.
+    ///
+    /// Precondition (the lessons from bitácora §13 baked in):
+    /// - Single-spec ORDER BY of shape `var.attr`.
+    /// - The pattern has at least one edge — otherwise the LTJ doesn't
+    ///   fire and the per-iteration cost degrades to O(n) post-scan.
+    /// - The store has a btree on `(label, attr)` for some label on `var`.
+    /// - No aggregates, no GROUP BY, no DISTINCT, no NULLS FIRST.
+    /// - The btree covers every node carrying the label (no nulls).
+    ///
+    /// Falls back to `None` on any precondition miss; caller routes
+    /// through the standard `run_match_chain → route_pre_sort` flow.
+    fn try_btree_ltj_real(&self, query: &Query, limit: usize) -> Option<Vec<ResultRow>> {
+        if query.distinct {
+            return None;
+        }
+        if let Some(items) = &query.returns {
+            if items.iter().any(|i| i.is_aggregate()) {
+                return None;
+            }
+        }
+        if query.group_by.is_some() {
+            return None;
+        }
+        let specs = query.order_by.as_ref()?;
+        if specs.len() != 1 {
+            return None;
+        }
+        let spec = &specs[0];
+        let SortKey::Expr(Expr::AttrLookup { var, attr }) = &spec.key else {
+            return None;
+        };
+        if matches!(spec.nulls.unwrap_or(NullsOrder::Last), NullsOrder::First) {
+            return None;
+        }
+
+        // Edge precondition: the LTJ only fires for patterns that
+        // decompose into ≥1 triple, and a triple needs an edge.
+        if !query.matches.iter().any(|m| pattern_has_edge(m.pattern())) {
+            return None;
+        }
+
+        let labels = labels_for_var(&query.matches, var);
+        if labels.is_empty() {
+            return None;
+        }
+        let asc = matches!(spec.dir, SortDir::Asc);
+        let (label, ordered_ids) = labels.iter().find_map(|l| {
+            self.graph
+                .lookup_node_ordered(l, attr, asc)
+                .map(|ids| (l.clone(), ids))
+        })?;
+        let label_total = self.graph.nodes_with_label(&label)?.len();
+        if ordered_ids.len() != label_total {
+            return None;
+        }
+
+        // Collapse the match chain into the same shape `run_match_chain`
+        // would feed to LTJ. This path supports only single-MATCH chains
+        // (no OPTIONAL / multi-MATCH); running k small LTJs already
+        // assumes a single decomposable pattern.
+        if query.has_any_optional() || query.matches.len() > 1 {
+            return None;
+        }
+        let pattern = query.collapsed_pattern();
+        let index = self.triple_index();
+
+        let cap = if limit == 0 { usize::MAX } else { limit };
+        let mut out: Vec<ResultRow> = Vec::with_capacity(cap.min(label_total));
+
+        for id in ordered_ids {
+            let ir = pattern_extract::try_ltj_with_pin(self.graph, &pattern, &index, 0, var, id)?;
+            for row in ir.rows {
+                out.push(row);
+                if out.len() >= cap {
+                    return Some(out);
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// Btree-driven pre-projection sort. Precondition: `specs` is a
+    /// single `SortKey::Expr(AttrLookup { var, attr })` AND the variable
+    /// carries some label `L` for which the store has a btree index on
+    /// `(L, attr)`. Returns true on success (rows replaced with the
+    /// btree-ordered output, capped at `limit` if non-zero); false when
+    /// the precondition does not hold.
+    ///
+    /// The btree gives ids in key order; we group `rows` by
+    /// `mu[var].id()` and emit in btree order, with rows lacking a
+    /// btree key (null prop / non-node binding) placed per
+    /// `NullsOrder`. Sort cost is O(n + |rows| + k); top-k reduces to
+    /// constant work once `k` rows have been emitted.
+    fn try_btree_sort(
+        &self,
+        rows: &mut Vec<ResultRow>,
+        specs: &[SortSpec],
+        matches: &[MatchStatement],
+        limit: usize,
+    ) -> bool {
+        if specs.len() != 1 {
+            return false;
+        }
+        let spec = &specs[0];
+        let SortKey::Expr(Expr::AttrLookup { var, attr }) = &spec.key else {
+            return false;
+        };
+        let labels = labels_for_var(matches, var);
+        if labels.is_empty() {
+            return false;
+        }
+        let asc = matches!(spec.dir, SortDir::Asc);
+        let ordered_ids = labels
+            .iter()
+            .find_map(|l| self.graph.lookup_node_ordered(l, attr, asc));
+        let Some(ordered_ids) = ordered_ids else {
+            return false;
+        };
+        let nulls_first = matches!(spec.nulls.unwrap_or(NullsOrder::Last), NullsOrder::First);
+        let owned = std::mem::take(rows);
+        *rows = btree_bucket_output(owned, var, &ordered_ids, limit, nulls_first);
+        true
+    }
+
     /// Pre-projection sort over `IntermediateResult` rows. ISO §16.17
     /// GR 1; pdqsort per §16.17 GR 1k/US006 (peer order is
     /// implementation-dependent). Caller guarantees every spec is a
-    /// `SortKey::Expr`.
-    fn sort_rows(&self, rows: &mut Vec<ResultRow>, specs: &[SortSpec]) {
+    /// `SortKey::Expr`. `limit = 0` means "no truncation, full sort";
+    /// `limit > 0` enables the top-k heap path when the heuristic fires.
+    fn sort_rows(&self, rows: &mut Vec<ResultRow>, specs: &[SortSpec], limit: usize) {
         let mut decorated: Vec<(Vec<Option<Value>>, ResultRow)> = std::mem::take(rows)
             .into_iter()
             .map(|row| {
@@ -263,7 +448,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             })
             .collect();
 
-        decorated.sort_unstable_by(|(a, _), (b, _)| compare_sort_keys(a, b, specs));
+        sort_decorated(&mut decorated, specs, limit);
 
         rows.extend(decorated.into_iter().map(|(_, r)| r));
     }
@@ -1969,8 +2154,8 @@ impl GroupKey {
 
 /// Post-projection sort over already-projected rows. Caller
 /// guarantees every spec is a `SortKey::Column` (typechecker rejects
-/// the mixed case).
-fn sort_projected_rows(rows: &mut Vec<Vec<Value>>, specs: &[SortSpec]) {
+/// the mixed case). `limit > 0` enables the top-k heap path.
+fn sort_projected_rows(rows: &mut Vec<Vec<Value>>, specs: &[SortSpec], limit: usize) {
     let mut decorated: Vec<(Vec<Option<Value>>, Vec<Value>)> = std::mem::take(rows)
         .into_iter()
         .map(|projected| {
@@ -1990,8 +2175,219 @@ fn sort_projected_rows(rows: &mut Vec<Vec<Value>>, specs: &[SortSpec]) {
             (keys, projected)
         })
         .collect();
-    decorated.sort_unstable_by(|(a, _), (b, _)| compare_sort_keys(a, b, specs));
+    sort_decorated(&mut decorated, specs, limit);
     rows.extend(decorated.into_iter().map(|(_, p)| p));
+}
+
+/// True when the pattern carries at least one edge of any direction.
+/// LTJ requires triples and a triple requires an edge — without one,
+/// `try_ltj` returns None and the BTree-LTJ-real path can't pin the
+/// sort variable through the index-fold pipeline.
+fn pattern_has_edge(p: &PathPattern) -> bool {
+    match p {
+        PathPattern::EdgeRight(_)
+        | PathPattern::EdgeLeft(_)
+        | PathPattern::EdgeUndirected(_)
+        | PathPattern::EdgeAnyDirection(_) => true,
+        PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+            pattern_has_edge(a) || pattern_has_edge(b)
+        }
+        PathPattern::Filter(p, _)
+        | PathPattern::Repeat { pattern: p, .. }
+        | PathPattern::Questioned(p) => pattern_has_edge(p),
+        PathPattern::Node(_) => false,
+    }
+}
+
+/// Walk every `Descriptor` in `matches` and collect the required
+/// labels declared on the descriptor whose `var` matches `target`.
+/// Required labels are the conjunctive positive leaves
+/// (`required_labels()` on `LabelType`); patterns under `Or` / `Neg`
+/// don't constrain the variable enough to feed a btree lookup.
+fn labels_for_var(matches: &[MatchStatement], target: &str) -> Vec<String> {
+    fn walk(p: &PathPattern, target: &str, out: &mut Vec<String>) {
+        match p {
+            PathPattern::Node(Some(d))
+            | PathPattern::EdgeRight(Some(d))
+            | PathPattern::EdgeLeft(Some(d))
+            | PathPattern::EdgeUndirected(Some(d))
+            | PathPattern::EdgeAnyDirection(Some(d))
+                if d.var.as_deref() == Some(target) =>
+            {
+                for l in d.dtype.label.required_labels() {
+                    out.push(l.to_string());
+                }
+            }
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                walk(a, target, out);
+                walk(b, target, out);
+            }
+            PathPattern::Filter(p, _)
+            | PathPattern::Repeat { pattern: p, .. }
+            | PathPattern::Questioned(p) => walk(p, target, out),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for m in matches {
+        walk(m.pattern(), target, &mut out);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Build a btree-ordered output by bucketing rows on `mu[var_name].id()`
+/// and walking `ordered_ids` in sort order. Rows whose binding for
+/// `var_name` is missing or not a Node go to the "nulls" bucket and
+/// are placed before / after the indexed run per `nulls_first`.
+/// `limit == 0` means no truncation.
+fn btree_bucket_output(
+    rows: Vec<ResultRow>,
+    var_name: &str,
+    ordered_ids: &[Id],
+    limit: usize,
+    nulls_first: bool,
+) -> Vec<ResultRow> {
+    let total = rows.len();
+    let mut taken: Vec<Option<ResultRow>> = rows.into_iter().map(Some).collect();
+    let mut by_id: HashMap<Id, Vec<usize>> = HashMap::new();
+    let mut nulls: Vec<usize> = Vec::new();
+    for (i, slot) in taken.iter().enumerate() {
+        let row = slot.as_ref().expect("just-built buffer is fully populated");
+        match row.assignment.get(var_name) {
+            Some(PathValue::Node(id)) => by_id.entry(*id).or_default().push(i),
+            _ => nulls.push(i),
+        }
+    }
+
+    let cap = if limit == 0 { total } else { limit.min(total) };
+    let mut out: Vec<ResultRow> = Vec::with_capacity(cap);
+
+    let push_indexed = |out: &mut Vec<ResultRow>,
+                        taken: &mut [Option<ResultRow>],
+                        by_id: &mut HashMap<Id, Vec<usize>>|
+     -> bool {
+        for &id in ordered_ids {
+            let Some(idxs) = by_id.remove(&id) else {
+                continue;
+            };
+            for i in idxs {
+                if let Some(r) = taken[i].take() {
+                    out.push(r);
+                    if out.len() >= cap {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    };
+    let push_nulls = |out: &mut Vec<ResultRow>, taken: &mut [Option<ResultRow>]| -> bool {
+        for &i in &nulls {
+            if let Some(r) = taken[i].take() {
+                out.push(r);
+                if out.len() >= cap {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+
+    if nulls_first {
+        if push_nulls(&mut out, &mut taken) {
+            return out;
+        }
+        push_indexed(&mut out, &mut taken, &mut by_id);
+    } else if !push_indexed(&mut out, &mut taken, &mut by_id) {
+        push_nulls(&mut out, &mut taken);
+    }
+    out
+}
+
+/// Sort a decorated `[(keys, payload)]` buffer in-place. Routes to one
+/// of three implementations:
+///
+/// - `pdqsort` — Rust's `sort_unstable_by`, O(n log n). Always safe.
+/// - `topk` — bounded max-heap of size k, O(n log k). Used when the
+///   query carries a usable `LIMIT k` and `k < n / 2`. The heap holds
+///   the k entries that come earliest in output order; entries that
+///   exceed the running max are dropped on sight.
+///
+/// Override the heuristic with `GQLITE_ORDERBY_FORCE=pdqsort|topk` —
+/// useful for benchmarking the worst case of each algorithm in
+/// isolation. Force=topk silently degrades to pdqsort when `limit == 0`
+/// or `limit >= n` (no top-k to extract).
+fn sort_decorated<T>(
+    decorated: &mut Vec<(Vec<Option<Value>>, T)>,
+    specs: &[SortSpec],
+    limit: usize,
+) {
+    let n = decorated.len();
+    let force = std::env::var("GQLITE_ORDERBY_FORCE").ok();
+    let topk_applies = limit > 0 && limit < n;
+    let use_topk = match force.as_deref() {
+        Some("topk") => topk_applies,
+        Some("pdqsort") => false,
+        _ => topk_applies && limit * 2 < n,
+    };
+    if use_topk {
+        let owned = std::mem::take(decorated);
+        *decorated = select_topk_decorated(owned, specs, limit);
+    } else {
+        decorated.sort_unstable_by(|(a, _), (b, _)| compare_sort_keys(a, b, specs));
+    }
+}
+
+/// Hand-rolled max-heap of size `k` keyed by `compare_sort_keys`. Returns
+/// the k earliest items in output order. We avoid `std::collections::
+/// BinaryHeap` because its `Ord`-bound API doesn't let us thread a
+/// borrowed `specs` slice into comparisons without per-entry cloning.
+fn select_topk_decorated<T>(
+    items: Vec<(Vec<Option<Value>>, T)>,
+    specs: &[SortSpec],
+    k: usize,
+) -> Vec<(Vec<Option<Value>>, T)> {
+    if k == 0 {
+        return Vec::new();
+    }
+    let mut heap: Vec<(Vec<Option<Value>>, T)> = Vec::with_capacity(k);
+    for (keys, row) in items {
+        if heap.len() < k {
+            heap.push((keys, row));
+            if heap.len() == k {
+                for i in (0..k / 2).rev() {
+                    sift_down(&mut heap, i, specs);
+                }
+            }
+        } else if compare_sort_keys(&keys, &heap[0].0, specs).is_lt() {
+            heap[0] = (keys, row);
+            sift_down(&mut heap, 0, specs);
+        }
+    }
+    heap.sort_unstable_by(|(a, _), (b, _)| compare_sort_keys(a, b, specs));
+    heap
+}
+
+fn sift_down<T>(heap: &mut [(Vec<Option<Value>>, T)], mut i: usize, specs: &[SortSpec]) {
+    let n = heap.len();
+    loop {
+        let l = 2 * i + 1;
+        let r = 2 * i + 2;
+        let mut largest = i;
+        if l < n && compare_sort_keys(&heap[l].0, &heap[largest].0, specs).is_gt() {
+            largest = l;
+        }
+        if r < n && compare_sort_keys(&heap[r].0, &heap[largest].0, specs).is_gt() {
+            largest = r;
+        }
+        if largest == i {
+            break;
+        }
+        heap.swap(i, largest);
+        i = largest;
+    }
 }
 
 /// ISO §16.17 GR 1g comparator over pre-computed key tuples. `None`

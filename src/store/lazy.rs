@@ -1223,6 +1223,10 @@ impl GraphAccess for LazyGraphStore {
         self.secondary.borrow().lookup_range(label, prop, lo, hi)
     }
 
+    fn lookup_node_ordered(&self, label: &str, prop: &str, ascending: bool) -> Option<Vec<Id>> {
+        self.secondary.borrow().ordered_ids(label, prop, ascending)
+    }
+
     fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {
         let overlay = self.overlay.borrow();
         let mut out: Vec<Id> = self
