@@ -259,6 +259,19 @@ impl<'a, G: GraphAccess> LtjRunner<'a, G> {
     pub fn run(&mut self, limit: usize) -> Vec<ResultTuple> {
         let mut results = Vec::new();
         let mut tuple = vec![(0u8, 0u32); self.algorithm.num_vars];
+        // Pre-populate pinned bindings into the slots beyond the VEO so
+        // result construction sees them. The search loop only writes to
+        // tuple[0..veo.size()]. This was previously missing in
+        // `LtjRunner::run` (the dead-code `LtjAlgorithm::run` had it),
+        // which left pinned-var slots at the default `(0, 0)` and
+        // produced wrong bindings for index-folded variables. Surfaces
+        // through the BTree-LTJ-real ORDER BY path.
+        for (i, &binding) in self.algorithm.pinned.iter().enumerate() {
+            let slot = self.algorithm.veo.size() + i;
+            if slot < tuple.len() {
+                tuple[slot] = binding;
+            }
+        }
         self.search(0, &mut tuple, &mut results, limit);
         results
     }

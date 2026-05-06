@@ -50,6 +50,7 @@ fn main() {
 
     for &n in &ns {
         for dist in dists {
+            // Single-node bench: ORDER BY x.id over MATCH (x: User).
             let g = build_user_graph(n, dist);
             let queries = make_queries(n);
 
@@ -67,11 +68,10 @@ fn main() {
                         let _ = rt.run_query(&query, 0);
                         t.elapsed().as_secs_f64() * 1_000.0
                     });
-                    println!("{n},{k_label},memory,{dist},{impl_name},{med:.3}");
+                    println!("{n},{k_label},memory_node,{dist},{impl_name},{med:.3}");
                 }
             }
 
-            // Persist + reopen as LazyGraphStore so the btree exists.
             let tmp = std::env::temp_dir().join(format!("orderby_bench_{n}_{dist}.gdb"));
             let _ = std::fs::remove_file(&tmp);
             g.save(&tmp).expect("save graph to .gdb");
@@ -79,7 +79,11 @@ fn main() {
             let lazy_idx: Arc<TripleIndex> = Runtime::new(&store).warm_triple_index();
 
             for (k_label, q) in &queries {
-                for impl_name in ["pdqsort", "topk", "btree-ltj"] {
+                // btree-ltj-real precondition needs an edge — fails on
+                // single-node queries by design (see bitácora 10 §13).
+                // We still run it through the force path so the bench
+                // reports the fallback cost (it routes to pdqsort).
+                for impl_name in ["pdqsort", "topk", "btree-ltj", "btree-ltj-real"] {
                     let med = bench_median(iters, || {
                         std::env::set_var("GQLITE_ORDERBY_FORCE", impl_name);
                         let rt = Runtime::with_triple_index(&store, lazy_idx.clone());
@@ -88,12 +92,116 @@ fn main() {
                         let _ = rt.run_query(&query, 0);
                         t.elapsed().as_secs_f64() * 1_000.0
                     });
-                    println!("{n},{k_label},lazy,{dist},{impl_name},{med:.3}");
+                    println!("{n},{k_label},lazy_node,{dist},{impl_name},{med:.3}");
                 }
             }
             let _ = std::fs::remove_file(&tmp);
+
+            // Join bench: ORDER BY u.id over MATCH (u: User)-[:Knows]->(f: User).
+            // Each user knows roughly `avg_degree` others. The btree-ltj-real
+            // path is meant to win here because the LTJ actually fires.
+            let gj = build_user_with_knows(n, dist, 4);
+            let join_queries = make_join_queries(n);
+            let memory_idx_j: Arc<TripleIndex> = Runtime::new(&gj).warm_triple_index();
+
+            for (k_label, q) in &join_queries {
+                for impl_name in ["pdqsort", "topk"] {
+                    let med = bench_median(iters, || {
+                        std::env::set_var("GQLITE_ORDERBY_FORCE", impl_name);
+                        let rt = Runtime::with_triple_index(&gj, memory_idx_j.clone());
+                        let query = compile_query(q).expect("compile");
+                        let t = Instant::now();
+                        let _ = rt.run_query(&query, 0);
+                        t.elapsed().as_secs_f64() * 1_000.0
+                    });
+                    println!("{n},{k_label},memory_join,{dist},{impl_name},{med:.3}");
+                }
+            }
+
+            let tmp_j = std::env::temp_dir().join(format!("orderby_bench_join_{n}_{dist}.gdb"));
+            let _ = std::fs::remove_file(&tmp_j);
+            gj.save(&tmp_j).expect("save");
+            let store_j = LazyGraphStore::open(&tmp_j).expect("open");
+            let lazy_idx_j: Arc<TripleIndex> = Runtime::new(&store_j).warm_triple_index();
+
+            for (k_label, q) in &join_queries {
+                for impl_name in ["pdqsort", "topk", "btree-ltj", "btree-ltj-real"] {
+                    let med = bench_median(iters, || {
+                        std::env::set_var("GQLITE_ORDERBY_FORCE", impl_name);
+                        let rt = Runtime::with_triple_index(&store_j, lazy_idx_j.clone());
+                        let query = compile_query(q).expect("compile");
+                        let t = Instant::now();
+                        let _ = rt.run_query(&query, 0);
+                        t.elapsed().as_secs_f64() * 1_000.0
+                    });
+                    println!("{n},{k_label},lazy_join,{dist},{impl_name},{med:.3}");
+                }
+            }
+            let _ = std::fs::remove_file(&tmp_j);
         }
     }
+}
+
+fn make_join_queries(n: usize) -> Vec<(String, String)> {
+    // Sort by the OUTER variable `u` of `u-[:Knows]->f` — best case for
+    // btree-ltj-real because we drive `u` from the btree and the LTJ
+    // expands to (u, f) pairs per pinned u.
+    let mut out = Vec::new();
+    for k in [1usize, 10, 100, 1_000] {
+        if k <= n {
+            out.push((
+                format!("join_k{k}"),
+                format!(
+                    "MATCH (u: User)-[:Knows]->(f: User) RETURN u.id, f.id \
+                     ORDER BY u.id LIMIT {k}"
+                ),
+            ));
+        }
+    }
+    out
+}
+
+fn build_user_with_knows(n: usize, dist: &str, avg_degree: usize) -> Graph {
+    let ids: Vec<usize> = match dist {
+        "sorted_asc" => (0..n).collect(),
+        "sorted_desc" => (0..n).rev().collect(),
+        "random" => deterministic_shuffle(n, 0xdeadbeef),
+        _ => panic!("unknown dist: {dist}"),
+    };
+    let mut nodes = String::with_capacity(n * 64);
+    nodes.push('[');
+    for (idx, id_val) in ids.iter().enumerate() {
+        if idx > 0 {
+            nodes.push(',');
+        }
+        nodes.push_str(&format!(
+            "{{\"id\":\"u{idx}\",\"labels\":[\"User\"],\"props\":{{\"id\":{id_val}}}}}"
+        ));
+    }
+    nodes.push(']');
+
+    // Deterministic Knows edges: each user u_i connects to (i+1, i+2, ..., i+avg_degree) mod n.
+    // Each edge gets a unique id "k{i}_{j}".
+    let mut edges = String::with_capacity(n * avg_degree * 80);
+    edges.push('[');
+    let mut first = true;
+    for i in 0..n {
+        for j in 1..=avg_degree {
+            if !first {
+                edges.push(',');
+            }
+            first = false;
+            let tgt = (i + j) % n;
+            edges.push_str(&format!(
+                "{{\"id\":\"k{i}_{j}\",\"labels\":[\"Knows\"],\"props\":{{}},\
+                  \"endpoints\":[\"u{i}\",\"u{tgt}\"],\"directionality\":\"->\"}}"
+            ));
+        }
+    }
+    edges.push(']');
+
+    let json = format!("{{\"nodes\":{nodes},\"edges\":{edges}}}");
+    Graph::from_json_str(&json).expect("parse synthetic join graph")
 }
 
 fn make_queries(n: usize) -> Vec<(String, String)> {

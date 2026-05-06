@@ -187,8 +187,30 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             .as_ref()
             .is_some_and(|specs| specs.iter().any(|s| matches!(s.key, SortKey::Column(_))));
 
+        // BTree-LTJ "real": when the precondition holds, drive the sort
+        // variable from the btree in key order, calling the LTJ once per
+        // (value, ids) pair with the variable pre-pinned. Replaces the
+        // entire `run_match_chain → sort` flow with k LTJ runs and an
+        // early-exit at LIMIT k. Activated only via the explicit force
+        // flag — no auto path because the win is conditional on join
+        // selectivity (see bitácora 10 §13).
+        let force = std::env::var("GQLITE_ORDERBY_FORCE").ok();
+        let real_rows = if has_order && force.as_deref() == Some("btree-ltj-real") {
+            self.try_btree_ltj_real(query, limit)
+        } else {
+            None
+        };
+
         let return_items = match &query.returns {
             None => {
+                if let Some(rows) = real_rows {
+                    let mut ir = IntermediateResult::new(Vec::new());
+                    ir.rows = rows;
+                    if limit > 0 && ir.rows.len() > limit {
+                        ir.rows.truncate(limit);
+                    }
+                    return QueryResult::Raw(ir);
+                }
                 let input_limit = if has_order { 0 } else { limit };
                 let mut ir = self.run_match_chain(query, input_limit);
                 if let Some(specs) = &query.order_by {
@@ -205,9 +227,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let has_aggs = return_items.iter().any(|i| i.is_aggregate());
         let needs_full_input = has_aggs || query.distinct || has_order;
         let input_limit = if needs_full_input { 0 } else { limit };
-        let mut ir = self.run_match_chain(query, input_limit);
 
-        let pre_projection_sort = !has_aggs && !has_column_sort_key;
+        let (mut ir, used_real) = match real_rows {
+            Some(rows) => (IntermediateResult::new(rows), true),
+            None => (self.run_match_chain(query, input_limit), false),
+        };
+
+        let pre_projection_sort = !has_aggs && !has_column_sort_key && !used_real;
         if pre_projection_sort {
             if let Some(specs) = &query.order_by {
                 // DISTINCT post-projection means sort sees more rows than
@@ -228,7 +254,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             self.run_row_by_row(return_items, &ir.rows, query.distinct)
         };
 
-        if has_order && !pre_projection_sort {
+        if has_order && !pre_projection_sort && !used_real {
             if let Some(specs) = &query.order_by {
                 sort_projected_rows(&mut projected, specs, limit);
             }
@@ -266,6 +292,91 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             return;
         }
         self.sort_rows(rows, specs, limit);
+    }
+
+    /// BTree-LTJ "real": drive the sort variable through the btree in key
+    /// order, calling `try_ltj_with_pin` once per `(value, [ids])` entry
+    /// so the LTJ itself never enumerates the variable's domain. Stops
+    /// at `LIMIT k` without ever materializing rows beyond k.
+    ///
+    /// Precondition (the lessons from bitácora §13 baked in):
+    /// - Single-spec ORDER BY of shape `var.attr`.
+    /// - The pattern has at least one edge — otherwise the LTJ doesn't
+    ///   fire and the per-iteration cost degrades to O(n) post-scan.
+    /// - The store has a btree on `(label, attr)` for some label on `var`.
+    /// - No aggregates, no GROUP BY, no DISTINCT, no NULLS FIRST.
+    /// - The btree covers every node carrying the label (no nulls).
+    ///
+    /// Falls back to `None` on any precondition miss; caller routes
+    /// through the standard `run_match_chain → route_pre_sort` flow.
+    fn try_btree_ltj_real(&self, query: &Query, limit: usize) -> Option<Vec<ResultRow>> {
+        if query.distinct {
+            return None;
+        }
+        if let Some(items) = &query.returns {
+            if items.iter().any(|i| i.is_aggregate()) {
+                return None;
+            }
+        }
+        if query.group_by.is_some() {
+            return None;
+        }
+        let specs = query.order_by.as_ref()?;
+        if specs.len() != 1 {
+            return None;
+        }
+        let spec = &specs[0];
+        let SortKey::Expr(Expr::AttrLookup { var, attr }) = &spec.key else {
+            return None;
+        };
+        if matches!(spec.nulls.unwrap_or(NullsOrder::Last), NullsOrder::First) {
+            return None;
+        }
+
+        // Edge precondition: the LTJ only fires for patterns that
+        // decompose into ≥1 triple, and a triple needs an edge.
+        if !query.matches.iter().any(|m| pattern_has_edge(m.pattern())) {
+            return None;
+        }
+
+        let labels = labels_for_var(&query.matches, var);
+        if labels.is_empty() {
+            return None;
+        }
+        let asc = matches!(spec.dir, SortDir::Asc);
+        let (label, ordered_ids) = labels.iter().find_map(|l| {
+            self.graph
+                .lookup_node_ordered(l, attr, asc)
+                .map(|ids| (l.clone(), ids))
+        })?;
+        let label_total = self.graph.nodes_with_label(&label)?.len();
+        if ordered_ids.len() != label_total {
+            return None;
+        }
+
+        // Collapse the match chain into the same shape `run_match_chain`
+        // would feed to LTJ. This path supports only single-MATCH chains
+        // (no OPTIONAL / multi-MATCH); running k small LTJs already
+        // assumes a single decomposable pattern.
+        if query.has_any_optional() || query.matches.len() > 1 {
+            return None;
+        }
+        let pattern = query.collapsed_pattern();
+        let index = self.triple_index();
+
+        let cap = if limit == 0 { usize::MAX } else { limit };
+        let mut out: Vec<ResultRow> = Vec::with_capacity(cap.min(label_total));
+
+        for id in ordered_ids {
+            let ir = pattern_extract::try_ltj_with_pin(self.graph, &pattern, &index, 0, var, id)?;
+            for row in ir.rows {
+                out.push(row);
+                if out.len() >= cap {
+                    return Some(out);
+                }
+            }
+        }
+        Some(out)
     }
 
     /// Btree-driven pre-projection sort. Precondition: `specs` is a
@@ -2057,6 +2168,26 @@ fn sort_projected_rows(rows: &mut Vec<Vec<Value>>, specs: &[SortSpec], limit: us
         .collect();
     sort_decorated(&mut decorated, specs, limit);
     rows.extend(decorated.into_iter().map(|(_, p)| p));
+}
+
+/// True when the pattern carries at least one edge of any direction.
+/// LTJ requires triples and a triple requires an edge — without one,
+/// `try_ltj` returns None and the BTree-LTJ-real path can't pin the
+/// sort variable through the index-fold pipeline.
+fn pattern_has_edge(p: &PathPattern) -> bool {
+    match p {
+        PathPattern::EdgeRight(_)
+        | PathPattern::EdgeLeft(_)
+        | PathPattern::EdgeUndirected(_)
+        | PathPattern::EdgeAnyDirection(_) => true,
+        PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+            pattern_has_edge(a) || pattern_has_edge(b)
+        }
+        PathPattern::Filter(p, _)
+        | PathPattern::Repeat { pattern: p, .. }
+        | PathPattern::Questioned(p) => pattern_has_edge(p),
+        PathPattern::Node(_) => false,
+    }
 }
 
 /// Walk every `Descriptor` in `matches` and collect the required

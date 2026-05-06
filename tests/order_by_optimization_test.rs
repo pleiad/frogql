@@ -173,6 +173,111 @@ fn btree_path_emits_same_rows_as_pdqsort_via_lazy_store() {
 }
 
 #[test]
+fn btree_ltj_real_matches_pdqsort_on_join_query() {
+    // Build a small graph with Knows edges, unique User.id, btree
+    // available. The btree-ltj-real path drives `u` from the btree
+    // and expands to (u, f) pairs per pinned u via `try_ltj_with_pin`.
+    // Output must match pdqsort row-for-row.
+    let n: u32 = 30;
+    let avg_degree: u32 = 3;
+    let mut nodes = String::new();
+    for i in 0..n {
+        if i > 0 {
+            nodes.push(',');
+        }
+        nodes.push_str(&format!(
+            "{{\"id\":\"u{i}\",\"labels\":[\"User\"],\"props\":{{\"id\":{}}}}}",
+            n - i
+        ));
+    }
+    let mut edges = String::new();
+    let mut first = true;
+    for i in 0..n {
+        for j in 1..=avg_degree {
+            if !first {
+                edges.push(',');
+            }
+            first = false;
+            let tgt = (i + j) % n;
+            edges.push_str(&format!(
+                "{{\"id\":\"k{i}_{j}\",\"labels\":[\"Knows\"],\"props\":{{}},\
+                  \"endpoints\":[\"u{i}\",\"u{tgt}\"],\"directionality\":\"->\"}}"
+            ));
+        }
+    }
+    let json = format!("{{\"nodes\":[{nodes}],\"edges\":[{edges}]}}");
+    let g = Graph::from_json_str(&json).unwrap();
+    let tmp = std::env::temp_dir().join("gqlite_orderby_real_join.gdb");
+    let _ = std::fs::remove_file(&tmp);
+    g.save(&tmp).unwrap();
+    let store = LazyGraphStore::open(&tmp).unwrap();
+
+    let q_str = "MATCH (u: User)-[:Knows]->(f: User) RETURN u.id, f.id ORDER BY u.id LIMIT 10";
+    let prev = std::env::var("GQLITE_ORDERBY_FORCE").ok();
+
+    std::env::set_var("GQLITE_ORDERBY_FORCE", "pdqsort");
+    let pdq = match Runtime::new(&store).run_query(&compile_query(q_str).unwrap(), 0) {
+        QueryResult::Projected(rs) => rs,
+        _ => panic!("expected projected"),
+    };
+    std::env::set_var("GQLITE_ORDERBY_FORCE", "btree-ltj-real");
+    let real = match Runtime::new(&store).run_query(&compile_query(q_str).unwrap(), 0) {
+        QueryResult::Projected(rs) => rs,
+        _ => panic!("expected projected"),
+    };
+    match prev {
+        Some(v) => std::env::set_var("GQLITE_ORDERBY_FORCE", v),
+        None => std::env::remove_var("GQLITE_ORDERBY_FORCE"),
+    }
+    let _ = std::fs::remove_file(&tmp);
+
+    assert_eq!(pdq.len(), real.len(), "row counts differ");
+    // Per-row: u.id (col0) must appear in non-decreasing order in both,
+    // and the SET of (u.id, f.id) tuples must coincide. Within a single
+    // u.id the order of f.id is implementation-dependent (peer order
+    // per ISO §16.17 GR 1k), so compare as sets per u.id group.
+    let mut pdq_groups: std::collections::BTreeMap<i64, std::collections::BTreeSet<i64>> =
+        Default::default();
+    let mut real_groups: std::collections::BTreeMap<i64, std::collections::BTreeSet<i64>> =
+        Default::default();
+    for row in &pdq {
+        let u_id = match &row[0] {
+            Value::Int(n) => *n,
+            v => panic!("expected int, got {v:?}"),
+        };
+        let f_id = match &row[1] {
+            Value::Int(n) => *n,
+            v => panic!("expected int, got {v:?}"),
+        };
+        pdq_groups.entry(u_id).or_default().insert(f_id);
+    }
+    for row in &real {
+        let u_id = match &row[0] {
+            Value::Int(n) => *n,
+            v => panic!("expected int, got {v:?}"),
+        };
+        let f_id = match &row[1] {
+            Value::Int(n) => *n,
+            v => panic!("expected int, got {v:?}"),
+        };
+        real_groups.entry(u_id).or_default().insert(f_id);
+    }
+    assert_eq!(pdq_groups, real_groups, "u.id groups differ");
+}
+
+#[test]
+fn btree_ltj_real_bails_on_single_node_query() {
+    // No edges → LTJ doesn't fire → btree-ltj-real precondition fails →
+    // routes to pdqsort. Output must match pdqsort exactly (no
+    // regression even though force=btree-ltj-real is set).
+    let g = build_users(20);
+    let q = "MATCH (x: User) RETURN x.name ORDER BY x.name LIMIT 5";
+    let pdq = run_with_force(&g, q, Some("pdqsort"));
+    let real = run_with_force(&g, q, Some("btree-ltj-real"));
+    assert_eq!(pdq, real);
+}
+
+#[test]
 fn topk_with_distinct_keeps_full_sort() {
     // DISTINCT can shrink the post-projection set; if top-k cut at the
     // pre-projection level we'd miss rows that survive dedup. The
