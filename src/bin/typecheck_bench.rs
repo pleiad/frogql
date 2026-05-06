@@ -44,7 +44,7 @@ const DEFAULT_WARMUP: usize = 1;
 // Result-row cap per runtime call.
 const LIMIT: usize = 100;
 
-// CSV stdout: db;category;case;phase;iter;ns;flags
+// CSV stdout: backend;db;category;case;phase;iter;ns;flags
 // See bench/INTERNAL_BENCHMARK.md "Output" for the column and
 // flag vocabulary.
 

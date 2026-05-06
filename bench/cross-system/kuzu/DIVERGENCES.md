@@ -45,66 +45,49 @@ What we lose by using a frozen target:
 
 ## Cypher dialect divergences — IC2-specific
 
-### 1. Label disjunction handled implicitly via the multi-typed REL TABLE
+### 1. Label disjunction via the `label()` builtin (query-level predicate)
 
 The IC2 query needs to match messages of either label `Comment` or
-`Post`. Kuzu's openCypher subset accepts neither
-- `MATCH (c:Comment|Post) ...` (Cypher 5+ direct union-label form)
-- `MATCH (c) ... WHERE c:Comment OR c:Post ...` (label-predicate form)
+`Post`. Kuzu's openCypher subset rejects every direct form the
+other systems use:
 
-Both fail with `Parser exception: Invalid input ...`. We initially
-wrote the query with a `UNION ALL` of two MATCHes (which Kuzu does
-accept), but ran into the next problem: **`LIMIT 20` after `UNION
-ALL` doesn't apply to the union total.** It applies only to the
-second branch, so the result was thousands of rows from branch 1
-plus 20 from branch 2 — wrong by orders of magnitude.
+- `MATCH (c:Comment|Post) ...` (Cypher 5+ pattern disjunction) →
+  `Parser exception: Invalid input ...`
+- `MATCH (c) ... WHERE c:Comment OR c:Post ...` (label predicate)
+  → parser error. Kuzu has no `node:Label` predicate because every
+  node lives in exactly one NODE TABLE, so the engine never exposes
+  it.
+- `MATCH ... UNION ALL MATCH ...` with `LIMIT 20` at the tail → the
+  parser accepts it, but **`LIMIT` applies only to the second
+  branch**, not the union total (returned 151K rows for `LIMIT 5`
+  in our test). Silently wrong by orders of magnitude.
+- Trailing `WITH ... LIMIT` after `UNION ALL` → parser error.
+- `CALL { ... UNION ALL ... } RETURN ... LIMIT 20` → no `CALL{}`
+  grammar in Kuzu 0.11.3.
 
-Trailing `WITH ... LIMIT` after a UNION isn't supported in Kuzu's
-parser. `CALL { ... } RETURN ... LIMIT 20` (the openCypher 5+
-subquery form for "limit the union total") isn't either.
+**The form we ship** is `WHERE label(message) IN ["Comment", "Post"]`.
+The `label(node)` builtin returns the node's NODE TABLE name as a
+string; `IN [...]` is a real query-level predicate, evaluated per
+row. Semantically equivalent to gqlite's `(message:Comment|Post)`
+and graphqlite's `WHERE message:Comment OR message:Post`.
 
-**The form that works** turned out to be much simpler: leave `(c)`
-unlabeled. Because `hasCreator` is declared as a multi-typed REL
-TABLE (`FROM Comment TO Person, FROM Post TO Person`), the engine
-constrains the source endpoint of an unlabeled `(c)-[:hasCreator]->`
-to nodes that are Comment-or-Post automatically. No union, no
-predicate, no rewrite needed. The shape matches what gqlite, our
-own ISO-GQL system, runs:
+We also tried, and rejected, a *schema-constrained* form: leave
+`(message)` unlabeled and rely on the multi-typed REL TABLE
+declaration (`hasCreator FROM Comment TO Person, FROM Post TO
+Person`) to constrain the endpoint at edge-traversal time. That
+ran 17–175× faster than `label()` (because Kuzu's optimizer
+exploits the REL TABLE constraint, but doesn't push `label()`
+through multi-hop joins) — but it encoded the predicate at LOAD
+TIME rather than QUERY TIME. A reviewer auditing whether the bench
+matches the spec would have had to read `setup.py` to verify the
+predicate. We chose the slower honest form. See §"Why we ship the
+slower honest form anyway" below.
 
-```cypher
-MATCH (p:Person {id: $personId})-[:knows]-(friend)<-[:hasCreator]-(c)
-WHERE c.creationDate <= $maxDate
-RETURN ... LIMIT 20
-```
-
-| System | Label disjunction form | Constraint expressed at... |
+| System | Label disjunction form | Constraint at... |
 |---|---|---|
-| gqlite (us) | `(c: Comment \| Post)` (native ISO GQL) | Query level |
-| graphqlite | `WHERE c:Comment OR c:Post` (Cypher 4.x dialect rejects pipe) | Query level |
-| auksys/gqlite | `WHERE c:Comment OR c:Post` (planner bug on pipe in multi-hop) | Query level |
+| gqlite (us) | `(c:Comment \| Post)` (native ISO GQL) | Query level |
+| graphqlite | `WHERE c:Comment OR c:Post` (Cypher 4.x label predicate) | Query level |
 | **Kuzu** | **`WHERE label(c) IN ["Comment", "Post"]`** (Kuzu builtin) | **Query level** |
-
-### Kuzu's situation in detail
-
-Kuzu's openCypher dialect doesn't accept either of the syntactic
-forms the other systems use:
-
-- `(message:Comment|Post)` pattern disjunction → parser error
-- `WHERE message:Comment OR message:Post` runtime predicate →
-  parser error (Kuzu has no `node:Label` predicate because every
-  node lives in exactly one NODE TABLE, so the engine never needs
-  to ask that question at runtime)
-- `UNION ALL ... LIMIT N` (canonical Cypher arg-max idiom) →
-  silently broken; LIMIT applies per-branch only, not globally
-  (returned 151K rows for LIMIT 5 in our test)
-- `CALL { ... UNION ALL ... }` subquery wrap → no `CALL{}` grammar
-- `WITH ... after UNION ALL` → parser error
-
-The form that **does work and is what we ship**: the `label(node)`
-builtin returns the node's NODE TABLE name as a string. `WHERE
-label(m) IN ["Comment", "Post"]` is a real query-level predicate,
-evaluated per row. Semantically equivalent to gqlite's
-`(m:Comment|Post)` and graphqlite's `WHERE m:Comment OR m:Post`.
 
 ### Performance cost of the honest form, measured on Kuzu 0.11.3
 
@@ -144,28 +127,6 @@ silently pre-encoded the predicate at load time."
 The bench wall-time goes up substantially (~30+ min per full run)
 under this form. Acceptable: the bench is run on merge cadence,
 not every dev iteration.
-
-What does NOT work in Kuzu (tested):
-- `(m:Comment|Post)` pattern disjunction → parser error
-- `WHERE m:Comment OR m:Post` predicate (the openCypher form
-  graphqlite and Neo4j accept) → parser error. Kuzu's data model
-  puts each node in exactly one NODE TABLE, so the engine never
-  exposes a `node:Label` predicate; you reach for `label(node)`
-  string equality instead.
-- `UNION ALL ... LIMIT N` (canonical Cypher arg-max idiom) →
-  silently broken; LIMIT applies per-branch only, not globally
-  (returned 151K rows for LIMIT 5 in our test). Not relevant once
-  we found `label()`, but documented for future ICs.
-- `CALL { ... UNION ALL ... }` subquery wrap → no `CALL{}` grammar.
-- `WITH ... after UNION ALL` → parser error.
-
-Earlier we considered relying on the multi-typed REL TABLE schema
-(`(message)` unlabeled, with `hasCreator` declared `FROM Comment,
-FROM Post`) as the constraint mechanism. That worked but encoded
-the constraint at LOAD TIME rather than at QUERY TIME — it'd produce
-different results on a different data shape. We replaced it with
-the `label()`-based form before merging the bench, so our shipped
-queries do express the spec's predicate at the query level.
 
 ### 2. Multi-typed REL TABLE requires FROM/TO hints in COPY
 
