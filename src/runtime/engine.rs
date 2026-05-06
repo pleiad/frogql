@@ -1288,12 +1288,31 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 }
                 SimpleType::Record(m)
             }
+            Value::Node(_) => SimpleType::Node,
+            Value::Edge(_) => SimpleType::Edge,
         }
     }
 
     fn run_expr(&self, mu: &Assignment, expr: &Expr) -> ExprResult {
         match expr {
             Expr::Const(v) => ExprResult::Success(v.clone()),
+
+            // ISO §20.12 + §4.4.4: a `<binding variable reference>`
+            // resolves to a reference value (Node/Edge by id), or to
+            // null when the variable is bound to `PathValue::Nothing`
+            // (an OPTIONAL match that did not fire). Failure is
+            // reserved for repetition-grouping and unbound names.
+            Expr::Var(name) => match mu.get(name) {
+                Some(PathValue::Node(id)) => ExprResult::Success(Value::Node(*id)),
+                Some(PathValue::EdgeDirectional(id)) | Some(PathValue::EdgeUndirectional(id)) => {
+                    ExprResult::Success(Value::Edge(*id))
+                }
+                Some(PathValue::Nothing) => ExprResult::Success(Value::Null),
+                Some(PathValue::Group(_)) => {
+                    ExprResult::Failure(format!("variable '{name}' is a repetition group"))
+                }
+                None => ExprResult::Failure(format!("variable '{name}' not bound")),
+            },
 
             Expr::AttrLookup { var, attr } => {
                 let pv = match mu.get(var) {
@@ -1868,6 +1887,7 @@ fn hash_value<H: Hasher>(v: &Value, state: &mut H) {
                 hash_value(v, state);
             }
         }
+        Value::Node(id) | Value::Edge(id) => id.hash(state),
     }
 }
 

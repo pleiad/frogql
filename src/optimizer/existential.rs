@@ -97,7 +97,7 @@ fn fold_in_expr(e: &mut Expr, schema: &Schema) {
                 fold_in_expr(a, schema);
             }
         }
-        Expr::Const(_) | Expr::AttrLookup { .. } | Expr::Type(_) => {}
+        Expr::Const(_) | Expr::Var(_) | Expr::AttrLookup { .. } | Expr::Type(_) => {}
     }
 
     // Decide and rewrite. The two reads of `e` are sequential — the

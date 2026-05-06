@@ -64,6 +64,8 @@ fn shape_of_value(v: &Value) -> &'static str {
         Value::Float(_) => "f",
         Value::List(_) => "l",
         Value::Record(_) => "r",
+        Value::Node(_) => "N",
+        Value::Edge(_) => "E",
     }
 }
 
