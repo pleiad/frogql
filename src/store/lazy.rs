@@ -669,18 +669,6 @@ impl LazyGraphStore {
         record::decode_edge(&page.data[offset..end])
     }
 
-    fn decode_labels_from_record(&self, label_str_ids: &[u32]) -> LabelType {
-        let labels: Vec<String> = label_str_ids
-            .iter()
-            .map(|&sid| self.strings.resolve(sid).unwrap().to_string())
-            .collect();
-        if labels.is_empty() {
-            LabelType::Star
-        } else {
-            LabelType::from_list(&labels)
-        }
-    }
-
     fn decode_props_from_record(&self, encoded: &[(u32, PropValue)]) -> Props {
         let mut props = HashMap::new();
         for (name_sid, pv) in encoded {
@@ -903,19 +891,34 @@ impl GraphAccess for LazyGraphStore {
     }
 
     fn node_labels(&self, id: Id) -> LabelType {
-        if let Some(n) = self.overlay.borrow().get_new_node(id) {
+        let overlay = self.overlay.borrow();
+        if let Some(n) = overlay.get_new_node(id) {
             return n.labels.clone();
         }
         let decoded = self.read_node_record(id);
-        self.decode_labels_from_record(&decoded.label_str_ids)
+        let mut labels: Vec<String> = decoded
+            .label_str_ids
+            .iter()
+            .map(|&sid| self.strings.resolve(sid).unwrap().to_string())
+            .collect();
+        apply_label_mods(&mut labels, overlay.mod_node_labels.get(&id));
+        labels_from_strings(labels)
     }
 
     fn edge_labels(&self, id: Id) -> LabelType {
-        if let Some(e) = self.overlay.borrow().get_new_edge(id) {
+        let overlay = self.overlay.borrow();
+        if let Some(e) = overlay.get_new_edge(id) {
             return e.labels.clone();
         }
         let decoded = self.read_edge_record(id);
-        self.decode_labels_from_record(&decoded.node.label_str_ids)
+        let mut labels: Vec<String> = decoded
+            .node
+            .label_str_ids
+            .iter()
+            .map(|&sid| self.strings.resolve(sid).unwrap().to_string())
+            .collect();
+        apply_label_mods(&mut labels, overlay.mod_edge_labels.get(&id));
+        labels_from_strings(labels)
     }
 
     fn node_props(&self, id: Id) -> Props {
@@ -1023,20 +1026,34 @@ impl GraphAccess for LazyGraphStore {
     fn nodes_with_label(&self, label: &str) -> Option<Vec<Id>> {
         let overlay = self.overlay.borrow();
         let base = self.label_to_nodes.get(label);
-        let overlay_dirty = !overlay.new_nodes.is_empty() || !overlay.deleted_nodes.is_empty();
+        let overlay_dirty = !overlay.new_nodes.is_empty()
+            || !overlay.deleted_nodes.is_empty()
+            || !overlay.mod_node_labels.is_empty();
         if !overlay_dirty {
             return base.cloned();
         }
-        // Filter base list by tombstones, then append overlay nodes that
-        // carry this label.
+        // Filter base list by tombstones AND by `REMOVE x:label` mods.
         let mut out: Vec<Id> = base
             .map(|v| {
                 v.iter()
                     .copied()
                     .filter(|id| !overlay.is_node_deleted(*id))
+                    .filter(|id| {
+                        overlay
+                            .mod_node_labels
+                            .get(id)
+                            .map(|m| !m.removed.contains(label))
+                            .unwrap_or(true)
+                    })
                     .collect()
             })
             .unwrap_or_default();
+        // Base nodes that gained this label via SET x:label.
+        for (id, mods) in &overlay.mod_node_labels {
+            if mods.added.contains(label) && !overlay.is_node_deleted(*id) && !out.contains(id) {
+                out.push(*id);
+            }
+        }
         for (offset, n) in overlay.new_nodes.iter().enumerate() {
             let id = overlay.base_node_count + offset as u32;
             if overlay.is_node_deleted(id) {
@@ -1062,7 +1079,9 @@ impl GraphAccess for LazyGraphStore {
     fn directed_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
         let overlay = self.overlay.borrow();
         let base = self.label_to_edges.get(label);
-        let overlay_dirty = !overlay.new_edges.is_empty() || !overlay.deleted_edges.is_empty();
+        let overlay_dirty = !overlay.new_edges.is_empty()
+            || !overlay.deleted_edges.is_empty()
+            || !overlay.mod_edge_labels.is_empty();
         if !overlay_dirty {
             return base.map(|ids| {
                 ids.iter()
@@ -1077,10 +1096,27 @@ impl GraphAccess for LazyGraphStore {
                     .filter(|&&iid| {
                         !overlay.is_edge_deleted(iid) && self.edge_directed[iid as usize]
                     })
+                    .filter(|&&iid| {
+                        overlay
+                            .mod_edge_labels
+                            .get(&iid)
+                            .map(|m| !m.removed.contains(label))
+                            .unwrap_or(true)
+                    })
                     .copied()
                     .collect()
             })
             .unwrap_or_default();
+        for (id, mods) in &overlay.mod_edge_labels {
+            if mods.added.contains(label)
+                && (*id as usize) < self.edge_directed.len()
+                && self.edge_directed[*id as usize]
+                && !overlay.is_edge_deleted(*id)
+                && !out.contains(id)
+            {
+                out.push(*id);
+            }
+        }
         for (offset, e) in overlay.new_edges.iter().enumerate() {
             let id = overlay.base_edge_count + offset as u32;
             if overlay.is_edge_deleted(id) || !e.directed {
@@ -1103,7 +1139,9 @@ impl GraphAccess for LazyGraphStore {
     fn undirected_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
         let overlay = self.overlay.borrow();
         let base = self.label_to_edges.get(label);
-        let overlay_dirty = !overlay.new_edges.is_empty() || !overlay.deleted_edges.is_empty();
+        let overlay_dirty = !overlay.new_edges.is_empty()
+            || !overlay.deleted_edges.is_empty()
+            || !overlay.mod_edge_labels.is_empty();
         if !overlay_dirty {
             return base.map(|ids| {
                 ids.iter()
@@ -1118,10 +1156,27 @@ impl GraphAccess for LazyGraphStore {
                     .filter(|&&iid| {
                         !overlay.is_edge_deleted(iid) && !self.edge_directed[iid as usize]
                     })
+                    .filter(|&&iid| {
+                        overlay
+                            .mod_edge_labels
+                            .get(&iid)
+                            .map(|m| !m.removed.contains(label))
+                            .unwrap_or(true)
+                    })
                     .copied()
                     .collect()
             })
             .unwrap_or_default();
+        for (id, mods) in &overlay.mod_edge_labels {
+            if mods.added.contains(label)
+                && (*id as usize) < self.edge_directed.len()
+                && !self.edge_directed[*id as usize]
+                && !overlay.is_edge_deleted(*id)
+                && !out.contains(id)
+            {
+                out.push(*id);
+            }
+        }
         for (offset, e) in overlay.new_edges.iter().enumerate() {
             let id = overlay.base_edge_count + offset as u32;
             if overlay.is_edge_deleted(id) || e.directed {
@@ -1404,6 +1459,107 @@ impl crate::model::graph_access::GraphAccessMut for LazyGraphStore {
         let entry = overlay.mod_edge_props.entry(id).or_default();
         entry.set.insert(prop.to_string(), None);
     }
+
+    fn add_node_label(&self, id: Id, label: &str) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_node_count {
+            let off = (id - overlay.base_node_count) as usize;
+            if let Some(n) = overlay.new_nodes.get_mut(off) {
+                n.labels = label_type_with_added(&n.labels, label);
+            }
+            return;
+        }
+        let entry = overlay.mod_node_labels.entry(id).or_default();
+        entry.removed.remove(label);
+        entry.added.insert(label.to_string());
+    }
+
+    fn add_edge_label(&self, id: Id, label: &str) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_edge_count {
+            let off = (id - overlay.base_edge_count) as usize;
+            if let Some(e) = overlay.new_edges.get_mut(off) {
+                e.labels = label_type_with_added(&e.labels, label);
+            }
+            return;
+        }
+        let entry = overlay.mod_edge_labels.entry(id).or_default();
+        entry.removed.remove(label);
+        entry.added.insert(label.to_string());
+    }
+
+    fn remove_node_label(&self, id: Id, label: &str) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_node_count {
+            let off = (id - overlay.base_node_count) as usize;
+            if let Some(n) = overlay.new_nodes.get_mut(off) {
+                n.labels = label_type_with_removed(&n.labels, label);
+            }
+            return;
+        }
+        let entry = overlay.mod_node_labels.entry(id).or_default();
+        entry.added.remove(label);
+        entry.removed.insert(label.to_string());
+    }
+
+    fn remove_edge_label(&self, id: Id, label: &str) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_edge_count {
+            let off = (id - overlay.base_edge_count) as usize;
+            if let Some(e) = overlay.new_edges.get_mut(off) {
+                e.labels = label_type_with_removed(&e.labels, label);
+            }
+            return;
+        }
+        let entry = overlay.mod_edge_labels.entry(id).or_default();
+        entry.added.remove(label);
+        entry.removed.insert(label.to_string());
+    }
+}
+
+/// Apply a `LabelMods` (if any) to an in-place vector of label strings:
+/// drops every name in `removed`, then appends every name in `added`
+/// that is not already present. Preserves the relative order of base
+/// labels for stable display.
+fn apply_label_mods(labels: &mut Vec<String>, mods: Option<&crate::store::overlay::LabelMods>) {
+    let Some(mods) = mods else { return };
+    if !mods.removed.is_empty() {
+        labels.retain(|l| !mods.removed.contains(l));
+    }
+    for l in &mods.added {
+        if !labels.iter().any(|x| x == l) {
+            labels.push(l.clone());
+        }
+    }
+}
+
+/// Reverse of `decode_labels_from_record` over a string vector. Empty
+/// input collapses to `Star` to mirror the on-disk "no labels" encoding.
+fn labels_from_strings(labels: Vec<String>) -> LabelType {
+    if labels.is_empty() {
+        LabelType::Star
+    } else {
+        LabelType::from_list(&labels)
+    }
+}
+
+/// Add `label` to a label type that is the result of `labels_from_dtype`
+/// (so a `Label`, `And` chain, or `Star`). Idempotent — the label is
+/// only appended when it is not already present.
+fn label_type_with_added(lt: &LabelType, label: &str) -> LabelType {
+    let mut labels = crate::model::graph::Graph::label_strings(lt);
+    if !labels.iter().any(|l| l == label) {
+        labels.push(label.to_string());
+    }
+    labels_from_strings(labels)
+}
+
+/// Drop `label` from a label type. Idempotent — missing labels are a
+/// no-op (ISO §13.4 GR4 b).
+fn label_type_with_removed(lt: &LabelType, label: &str) -> LabelType {
+    let mut labels = crate::model::graph::Graph::label_strings(lt);
+    labels.retain(|l| l != label);
+    labels_from_strings(labels)
 }
 
 fn cell_bounds(page: &Page, index: u16) -> (usize, usize) {

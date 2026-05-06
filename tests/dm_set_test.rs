@@ -49,7 +49,9 @@ fn set_property_overwrites_existing_value() {
         .nodes_with_label("Account")
         .unwrap()
         .into_iter()
-        .find(|&n| matches!(store.node_props(n).get("owner"), Some(Value::Str(s)) if s == "Renamed"))
+        .find(
+            |&n| matches!(store.node_props(n).get("owner"), Some(Value::Str(s)) if s == "Renamed"),
+        )
         .expect("renamed account must be visible");
     assert_eq!(
         store.node_props(id).get("owner"),
@@ -86,9 +88,7 @@ fn set_all_properties_clears_then_sets() {
     // ISO §13.3 GR8 b.i: SET x = { ... } removes every existing prop
     // first, then applies the new map.
     let store = fraud_store("set_all_props.gdb");
-    let dm = parse_dm_or_panic(
-        "MATCH (a:Account {owner: 'Aretha'}) SET a = { only: 'thing' }",
-    );
+    let dm = parse_dm_or_panic("MATCH (a:Account {owner: 'Aretha'}) SET a = { only: 'thing' }");
     let exec = run_dm(&store, &dm, None).unwrap();
     assert_eq!(exec.nodes_modified, 1);
 
@@ -106,7 +106,11 @@ fn set_all_properties_clears_then_sets() {
                 .unwrap_or(false)
         })
         .collect();
-    assert_eq!(candidates.len(), 1, "must find exactly the cleared+set node");
+    assert_eq!(
+        candidates.len(),
+        1,
+        "must find exactly the cleared+set node"
+    );
     let target = candidates[0];
     let _ = id;
     let props = store.node_props(target);
@@ -132,15 +136,16 @@ fn set_property_on_edge() {
         .into_iter()
         .next()
         .unwrap();
-    assert_eq!(store.edge_props(some_edge).get("flag"), Some(&Value::Bool(true)));
+    assert_eq!(
+        store.edge_props(some_edge).get("flag"),
+        Some(&Value::Bool(true))
+    );
 }
 
 #[test]
 fn set_with_attribute_expression_per_binding() {
     let store = fraud_store("set_attr_expr.gdb");
-    let dm = parse_dm_or_panic(
-        "MATCH (a:Account) SET a.last_owner = a.owner",
-    );
+    let dm = parse_dm_or_panic("MATCH (a:Account) SET a.last_owner = a.owner");
     let exec = run_dm(&store, &dm, None).unwrap();
     assert!(exec.nodes_modified >= 1);
     // Each Account should now have last_owner == owner.
@@ -153,11 +158,12 @@ fn set_with_attribute_expression_per_binding() {
 #[test]
 fn set_multiple_items_in_one_statement() {
     let store = fraud_store("set_multi.gdb");
-    let dm = parse_dm_or_panic(
-        "MATCH (a:Account {owner: 'Aretha'}) SET a.x = 1, a.y = 2",
-    );
+    let dm = parse_dm_or_panic("MATCH (a:Account {owner: 'Aretha'}) SET a.x = 1, a.y = 2");
     let exec = run_dm(&store, &dm, None).unwrap();
-    assert_eq!(exec.nodes_modified, 2, "two SET items, one binding row each");
+    assert_eq!(
+        exec.nodes_modified, 2,
+        "two SET items, one binding row each"
+    );
 
     let id = store
         .nodes_with_label("Account")

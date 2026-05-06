@@ -193,4 +193,22 @@ pub trait GraphAccessMut: GraphAccess {
 
     /// `REMOVE x.prop` on an edge.
     fn remove_edge_prop(&self, id: Id, prop: &str);
+
+    // --- ISO §13.3 / §13.4 SET / REMOVE labels (MVP-1.D, Feature GD02)
+
+    /// `SET x:Label`. Idempotent: adding a label the element already
+    /// carries is a no-op. The same call cancels any previously staged
+    /// `REMOVE x:Label` so reads see only the latest intent.
+    fn add_node_label(&self, id: Id, label: &str);
+
+    /// `SET x:Label` on an edge. Same idempotency rules as nodes.
+    fn add_edge_label(&self, id: Id, label: &str);
+
+    /// `REMOVE x:Label`. Idempotent — removing a label the element does
+    /// not carry is a no-op (ISO §13.4 GR4 b). Cancels any previously
+    /// staged `SET x:Label` for the same `(id, label)` pair.
+    fn remove_node_label(&self, id: Id, label: &str);
+
+    /// `REMOVE x:Label` on an edge.
+    fn remove_edge_label(&self, id: Id, label: &str);
 }

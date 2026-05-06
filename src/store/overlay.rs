@@ -53,6 +53,19 @@ pub struct PropMods {
     pub set: HashMap<String, Option<Value>>,
 }
 
+/// Per-record label mutation accumulated during a session. Used by
+/// MVP-1.D `SET x:Label` / `REMOVE x:Label` (ISO §13.3 / §13.4) on
+/// base-id nodes / edges; overlay-allocated records mutate their
+/// `OverlayNode`/`OverlayEdge.labels` field directly. The two sets stay
+/// disjoint — `add_*_label` removes the name from `removed` and inserts
+/// into `added`, and `remove_*_label` does the inverse — so reads
+/// reconstruct the effective label set as `(base ∪ added) \ removed`.
+#[derive(Debug, Default, Clone)]
+pub struct LabelMods {
+    pub added: HashSet<String>,
+    pub removed: HashSet<String>,
+}
+
 /// All mutations applied since the store was opened or last saved.
 ///
 /// IDs handed out for new nodes / edges are dense above the base counts,
@@ -74,6 +87,13 @@ pub struct MutationOverlay {
     /// `OverlayNode`/`OverlayEdge` directly and bypass these.
     pub mod_node_props: HashMap<Id, PropMods>,
     pub mod_edge_props: HashMap<Id, PropMods>,
+
+    /// Label-mutation overlay over base records. Reads of node/edge
+    /// labels that hit a base id consult these maps after fetching disk
+    /// labels. Overlay-allocated records mutate their
+    /// `OverlayNode`/`OverlayEdge.labels` directly. (MVP-1.D)
+    pub mod_node_labels: HashMap<Id, LabelMods>,
+    pub mod_edge_labels: HashMap<Id, LabelMods>,
 
     /// Outgoing directed edges per source node, only for edges with
     /// `id >= base_edge_count`. Base edges live in the CSR and the
@@ -192,6 +212,8 @@ impl MutationOverlay {
         self.deleted_edges.clear();
         self.mod_node_props.clear();
         self.mod_edge_props.clear();
+        self.mod_node_labels.clear();
+        self.mod_edge_labels.clear();
         self.new_outgoing.clear();
         self.new_incoming.clear();
         self.new_undirected.clear();

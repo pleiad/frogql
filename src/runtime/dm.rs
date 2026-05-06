@@ -128,7 +128,7 @@ where
                     exec.rows.push(new_mu);
                 }
                 DmOp::Delete { detach, targets } => {
-                    let stats = apply_delete(graph, *detach, targets, mu)?;
+                    let stats = apply_delete(graph, &runtime, *detach, targets, mu)?;
                     exec.nodes_deleted += stats.nodes;
                     exec.edges_deleted += stats.edges;
                     exec.rows.push(mu.clone());
@@ -600,6 +600,38 @@ where
                     }
                 }
             }
+            SetItem::Label { var, label } => {
+                let pv = mu.get(var).ok_or_else(|| {
+                    format!("SET: variable {var} is not bound — needs a preceding MATCH")
+                })?;
+                match pv {
+                    PathValue::Node(id) => {
+                        graph.add_node_label(*id, label);
+                        stats.nodes += 1;
+                        if let Some(schema) = schema {
+                            let labels = graph.node_labels(*id);
+                            let props = graph.node_props(*id);
+                            crate::typing::validate::validate_node_against_schema(
+                                &labels, &props, schema,
+                            )?;
+                        }
+                    }
+                    PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => {
+                        graph.add_edge_label(*id, label);
+                        stats.edges += 1;
+                        if let Some(schema) = schema {
+                            crate::typing::validate::validate_edge_against_schema(
+                                graph, *id, schema,
+                            )?;
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "SET: variable {var} is not a node or edge reference"
+                        ));
+                    }
+                }
+            }
         }
     }
     Ok(stats)
@@ -650,6 +682,38 @@ where
                     }
                 }
             }
+            RemoveItem::Label { var, label } => {
+                let pv = mu.get(var).ok_or_else(|| {
+                    format!("REMOVE: variable {var} is not bound — needs a preceding MATCH")
+                })?;
+                match pv {
+                    PathValue::Node(id) => {
+                        graph.remove_node_label(*id, label);
+                        stats.nodes += 1;
+                        if let Some(schema) = schema {
+                            let labels = graph.node_labels(*id);
+                            let props = graph.node_props(*id);
+                            crate::typing::validate::validate_node_against_schema(
+                                &labels, &props, schema,
+                            )?;
+                        }
+                    }
+                    PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => {
+                        graph.remove_edge_label(*id, label);
+                        stats.edges += 1;
+                        if let Some(schema) = schema {
+                            crate::typing::validate::validate_edge_against_schema(
+                                graph, *id, schema,
+                            )?;
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "REMOVE: variable {var} is not a node or edge reference"
+                        ));
+                    }
+                }
+            }
         }
     }
     Ok(stats)
@@ -657,26 +721,36 @@ where
 
 fn apply_delete<G>(
     graph: &G,
+    runtime: &crate::runtime::engine::Runtime<'_, G>,
     detach: bool,
-    targets: &[String],
+    targets: &[Expr],
     mu: &Assignment,
 ) -> Result<DeleteStats, String>
 where
     G: GraphAccess + GraphAccessMut,
 {
+    use crate::model::value::Value;
+    use crate::runtime::result::ExprResult;
     let mut stats = DeleteStats { nodes: 0, edges: 0 };
-    for var in targets {
-        let Some(pv) = mu.get(var) else {
-            return Err(format!(
-                "DELETE: variable {var} is not bound — every DELETE target needs a \
-                 preceding MATCH that produces it"
-            ));
+    for expr in targets {
+        // Evaluate the target expression in the binding row. ISO §13.5
+        // Feature GD04 admits any `<value expression>`; expression
+        // shortcuts like `Var` still resolve via run_expr.
+        let value = match runtime.run_expr(mu, expr) {
+            ExprResult::Success(v) => v,
+            // §13.5 GR4 a: a target that fails to evaluate (e.g.
+            // unbound variable, unresolved attribute) is treated as
+            // null and skipped, so a DELETE that "doesn't apply" to a
+            // particular row stays inert rather than aborting the
+            // statement.
+            ExprResult::Failure(_) => Value::Null,
         };
-        match pv {
-            PathValue::Node(id) => {
-                let id = *id;
+        match value {
+            Value::Null => {
+                // No-op per §13.5 GR4 a.
+            }
+            Value::Node(id) => {
                 if detach {
-                    // detach_delete_node accumulates counts by hand.
                     let incident: Vec<Id> = graph
                         .outgoing_edges(id)
                         .into_iter()
@@ -704,13 +778,14 @@ where
                     }
                 }
             }
-            PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => {
-                graph.delete_edge(*id);
+            Value::Edge(id) => {
+                graph.delete_edge(id);
                 stats.edges += 1;
             }
-            PathValue::Nothing | PathValue::Group(_) => {
+            other => {
                 return Err(format!(
-                    "DELETE: variable {var} is not a node or edge reference"
+                    "DELETE: target expression evaluated to {other:?}, expected a node \
+                     or edge reference"
                 ));
             }
         }

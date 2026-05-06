@@ -1580,10 +1580,12 @@ impl Parser {
         Ok(pattern)
     }
 
-    /// `[ DETACH | NODETACH ] DELETE <var> (, <var>)*` — ISO §13.5.
-    /// MVP-0 restricts the `<delete item>` to a `<binding variable
-    /// reference>` (Feature GD04 not enabled), so the targets are bare
-    /// names. NODETACH is the implicit default per §13.5 SR6.
+    /// `[ DETACH | NODETACH ] DELETE <value expression list>` —
+    /// ISO §13.5. MVP-1.E enables Feature GD04 ("simple expression
+    /// support"): each target is now any `<value expression>` (e.g.
+    /// `n`, `n.parent`, `coalesce(a, b)`) and gets evaluated per
+    /// binding row at runtime. NODETACH is the implicit default per
+    /// §13.5 SR6.
     fn parse_delete_op(&mut self) -> Result<DmOp, String> {
         let detach = if self.eat(&Token::Detach) {
             true
@@ -1594,9 +1596,9 @@ impl Parser {
             false
         };
         self.expect(&Token::Delete)?;
-        let mut targets = vec![self.expect_var_name("DELETE")?];
+        let mut targets = vec![self.expr()?];
         while self.eat(&Token::Comma) {
-            targets.push(self.expect_var_name("DELETE")?);
+            targets.push(self.expr()?);
         }
         Ok(DmOp::Delete { detach, targets })
     }
@@ -1636,11 +1638,18 @@ impl Parser {
             let value = self.expr()?;
             return Ok(SetItem::Property { var, prop, value });
         }
-        // <set label item> would land here (`x:Label` / `x IS Label`).
-        // ISO §13.3 conformance feature GD02; MVP-1.D wires it.
+        // <set label item>: `x:Label` or `x IS Label`. ISO §13.3 GR8 c,
+        // Feature GD02. The lexer maps both `is` and `IS` to `Typed`, so
+        // the same arm handles either spelling.
+        if self.eat(&Token::Colon) || self.eat(&Token::Typed) {
+            let label = match self.advance() {
+                Token::Name(n) => n,
+                t => return Err(format!("SET: expected label name, got {t:?}")),
+            };
+            return Ok(SetItem::Label { var, label });
+        }
         Err(format!(
-            "SET: expected '=' (set all properties) or '.<prop> = value' after '{var}'; \
-             label form is reserved for MVP-1.D"
+            "SET: expected '=', '.<prop> = value', ':Label', or 'IS Label' after '{var}'"
         ))
     }
 
@@ -1668,9 +1677,18 @@ impl Parser {
             };
             return Ok(RemoveItem::Property { var, prop });
         }
+        // <remove label item>: `x:Label` or `x IS Label`. ISO §13.4 GR4
+        // b, Feature GD02. Idempotent — removing a label the element does
+        // not carry is a no-op.
+        if self.eat(&Token::Colon) || self.eat(&Token::Typed) {
+            let label = match self.advance() {
+                Token::Name(n) => n,
+                t => return Err(format!("REMOVE: expected label name, got {t:?}")),
+            };
+            return Ok(RemoveItem::Label { var, label });
+        }
         Err(format!(
-            "REMOVE: expected '.<prop>' after '{var}'; label form (REMOVE x:Label) \
-             is reserved for MVP-1.D"
+            "REMOVE: expected '.<prop>', ':Label', or 'IS Label' after '{var}'"
         ))
     }
 

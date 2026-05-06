@@ -23,7 +23,8 @@ cargo test --test parser_test --test runtime_test --test store_runtime_test \
            --test exists_fold_test --test exists_runtime_test \
            --test parser_dm_test --test lazy_mut_test --test dm_runtime_test \
            --test dm_persistence_test --test dm_schema_test --test dm_default_test \
-           --test dump_test
+           --test dump_test --test dm_set_test --test dm_remove_test \
+           --test dm_label_test --test dm_delete_expr_test
 
 # Single test
 cargo test --test runtime_test test_join_star_any_label -- --exact
@@ -138,17 +139,21 @@ DDL surface today: `CREATE / USE / DROP GRAPH TYPE`, plus inspection / validatio
 
 `USE` does not validate. The walk is opt-in because it is O(N + E); the typechecker still constrains queries against the active schema either way.
 
-REPL meta-commands follow the SQLite dot-prefix convention (see `src/bin/frogql.rs`): `.schema` aliases `SHOW GRAPH TYPE DEFAULT`, `.schema simple` switches to the grouped by-label renderer in `print_schema_simple` (which lists every node type unconditionally — the earlier "standalone-only" filter hid all nodes on connected graphs and was removed in commit `e23d04d`), `.graph-types` aliases `SHOW GRAPH TYPES`, `.save` materialises the merged base+overlay view to the open `.gdb` atomically (see *Data Modification*), `.dump-json <path>` writes a pg_dump-style JSON snapshot, `.help` lists meta-commands and DDL surface, and `.quit` / `.exit` (plus bare `quit` / `exit`) leave the REPL.
+REPL meta-commands follow the SQLite dot-prefix convention (see `src/bin/frogql.rs`): `.schema` aliases `SHOW GRAPH TYPE DEFAULT`, `.schema simple` switches to the grouped by-label renderer in `print_schema_simple` (which lists every node type unconditionally — the earlier "standalone-only" filter hid all nodes on connected graphs and was removed in commit `e23d04d`), `.graph-types` aliases `SHOW GRAPH TYPES`, `.save` materialises the merged base+overlay view to the open `.gdb` atomically (see *Data Modification*), `.dump-json <path>` writes a pg_dump-style JSON snapshot, `.dump-gql <path>` writes a GQL script that recreates the graph, `.help` lists meta-commands and DDL surface, and `.quit` / `.exit` (plus bare `quit` / `exit`) leave the REPL.
 
-### Data Modification (ISO §13, MVP-0)
+### Data Modification (ISO §13, MVP-0 + MVP-1)
 
 DML lands as a layered overlay on top of `LazyGraphStore`. The on-disk file stays untouched until `.save`; mutations live in `RefCell<MutationOverlay>` (`src/store/overlay.rs`). The compiler pipeline shares the parser path with queries: `parse_statement` returns either `Statement::Query` or `Statement::DataModification(DmStatement)`, dispatched to `Runtime::run_query` or the free function `runtime::dm::run_dm`.
 
-Surface accepted in MVP-0:
-- `INSERT <path pattern list>` standalone or after a `MATCH` chain.
-- `[DETACH | NODETACH] DELETE x [, y, ...]` with bare variable references.
+Surface accepted today (MVP-0 + every MVP-1 sub-phase):
+- `INSERT <path pattern list>` standalone or after a `MATCH` chain. Property values may reference bound variables (`MATCH (a) INSERT (b:Tag {who: a.name})`); the runtime evaluates them via `Runtime::run_expr` per binding (MVP-1.A).
+- `SET x.prop = expr` and `SET x = { ... }` (clear+set per ISO §13.3 GR8 b.i). Backed by `MutationOverlay.mod_node_props` / `mod_edge_props` with per-record `PropMods { cleared, set }` (MVP-1.B).
+- `REMOVE x.prop` — same overlay map, `set[k] = None` filters the key on read (MVP-1.C).
+- `SET x:Label` / `SET x IS Label` / `REMOVE x:Label` / `REMOVE x IS Label` (Feature GD02, MVP-1.D). Backed by `MutationOverlay.mod_node_labels` / `mod_edge_labels` with per-record `LabelMods { added, removed }`; the label index reads honour the overlay so post-mutation queries stay coherent.
+- `[DETACH | NODETACH] DELETE <expr list>` (Feature GD04, MVP-1.E). Targets are arbitrary `<value expression>`s evaluated per row; `Null` is a no-op, anything that isn't a `Value::Node` / `Value::Edge` raises an error.
 - Optional trailing `RETURN <items>` projecting the post-mutation working table.
-- `SET` and `REMOVE` are reserved at the lexer level but the parser rejects them with "not implemented in this version" so they don't collide with property names. They land in MVP-1 along with `DELETE` over arbitrary value expressions (Feature GD04) and `INSERT` properties referencing `mu` (e.g. `MATCH (a) INSERT (b {who: a.name})`).
+
+Multi-DML chains in a single statement (`MATCH α INSERT β SET γ`) remain deferred to v2 — the parser still accepts at most one DML op per statement.
 
 Architecture notes:
 - **Overlay**, not in-place. `MutationOverlay` carries `new_nodes`, `new_edges`, tombstones, and adjacency maps for new edges only. Reads merge base + overlay (`LazyGraphStore`'s `GraphAccess` impl filters tombstones and surfaces overlay entries). The base CSR / page cache stay read-only — keeps SF1 working sets in bounded RAM and avoids invalidating the page cache on every mutation.
@@ -161,13 +166,14 @@ Architecture notes:
 
 Persistence:
 - `LazyGraphStore::open_or_create(path)` mirrors SQLite: opening a non-existent path writes an empty `.gdb` first, then opens it. The REPL emits `creating new database: <path>` to surface the create.
-- `LazyGraphStore::save(path)` materialises merged base+overlay into a temporary `Graph`, calls `save_graph_atomic` (writes to `<path>.tmp`, then atomic `rename`), keeps the existing pager fd alive (POSIX rename keeps the old inode while the fd holds it), and refreshes DEFAULT before persisting. Subsequent reads on the same `LazyGraphStore` continue to work coherently against the snapshot at open + overlay; reopening from the file produces the post-save image.
+- `LazyGraphStore::save(path)` materialises merged base+overlay into a temporary `Graph`, then calls `save_graph_with_catalog_atomic` (writes graph to `<path>.tmp`, opens that tmp again to write the catalog into a fresh page chain so DEFAULT survives reopen, atomic `rename`). Keeps the existing pager fd alive (POSIX rename keeps the old inode while the fd holds it), and seeds DEFAULT via `infer_simple_schema` if the catalog never had one. Subsequent reads on the same `LazyGraphStore` continue to work coherently against the snapshot at open + overlay; reopening from the file produces the post-save image *with* DEFAULT.
 - `Connection.save()` (Python) and `.save` (REPL) both call into this. Auto-commit is OFF by design: forgetting `.save` loses the overlay, mirroring SQLite's explicit-commit semantics.
 
 Dump:
-- `store::dump::dump_to_json_file(&store, path)` produces a JSON document in the exact shape `Graph::from_json_value` consumes — round-trip property holds. Available via `.dump-json <path>` in the REPL. The pg_dump-style GQL dump (a script of INSERTs that reconstructs the graph using a temporary `_dump_id` property) is deferred to MVP-1 because it depends on `MATCH+INSERT` with bindings and `REMOVE`, both still pending.
+- `store::dump::dump_to_json_file(&store, path)` produces a JSON document in the exact shape `Graph::from_json_value` consumes — round-trip property holds. Available via `.dump-json <path>` in the REPL.
+- `store::dump::dump_to_gql_file(&store, path)` (MVP-1.F) emits a GQL script that reconstructs the graph: one `INSERT (:L1 & L2 {_dump_id: 'n_K', ...})` per node, then a `MATCH (a:* {_dump_id: ...}), (b:* {_dump_id: ...}) INSERT (a)-[:E {...}]->(b)` per edge, then a final `MATCH (n) REMOVE n._dump_id` to strip the synthetic key. If `_dump_id` already exists on any element the dumper falls back to `__dump_id_v1`, `__dump_id_v2`, .... Available via `.dump-gql <path>` in the REPL. String values containing `'` raise an error because the lexer has no escape syntax.
 
-Test files added in this layer (each maps to one of the 8 phases of `~/.claude/plans/que-dice-el-gql-encapsulated-pumpkin.md`): `parser_dm_test.rs`, `lazy_mut_test.rs`, `dm_runtime_test.rs`, `dm_persistence_test.rs`, `dm_schema_test.rs`, `dm_default_test.rs`, `dump_test.rs`. 58 tests total.
+Test files for this layer: `parser_dm_test.rs`, `lazy_mut_test.rs`, `dm_runtime_test.rs`, `dm_persistence_test.rs`, `dm_schema_test.rs`, `dm_default_test.rs`, `dump_test.rs`, `dm_set_test.rs`, `dm_remove_test.rs`, `dm_label_test.rs`, `dm_delete_expr_test.rs`.
 
 ### ID system
 
@@ -438,3 +444,26 @@ For reference, GraphQLite (a SQLite extension with Cypher) measures 32.82 ms med
 - Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6); changing the order is a breaking on-disk format change.
 - The Python wheel (`frogql` on PyPI) MUST stay independent of `repl` / `bench` features — never reference `rustyline`, `ureq`, `zstd`, `tar`, `sysinfo`, or `toml` from library code.
 - New bins that need optional deps: declare them as explicit `[[bin]]` entries in `Cargo.toml` with `required-features = [...]`. Auto-discovery still picks up bins that use only always-on deps.
+
+## Implementation status (handoff 2026-05-06)
+
+DML phases implemented and committed to `main`:
+
+- **MVP-0** (`feat(dml)` commit `c3f93d4`): full surface — `INSERT`, `MATCH ... [DETACH|NODETACH] DELETE`, optional `RETURN`, `.save`, `.dump-json`, `open_or_create`, G2000, DEFAULT dirty flag. 58 tests across 7 files.
+- **MVP-1.A**: INSERT property expressions (`{prop: a.attr}`). `Runtime::run_expr` is now public and used by `runtime/dm::eval_props_from_descriptor`.
+- **MVP-1.B**: ISO §13.3 SET. `DmOp::Set(Vec<SetItem>)` with `Property` and `AllProperties` (clear+set per GR8 b.i). Overlay: `mod_node_props` / `mod_edge_props` with `PropMods { cleared, set: HashMap<String, Option<Value>> }`. `GraphAccessMut`: `set_node_prop`, `replace_node_props`, edge equivalents. Tests: `tests/dm_set_test.rs`.
+- **MVP-1.C**: ISO §13.4 REMOVE. `DmOp::Remove(Vec<RemoveItem>)` reuses the same overlay (`set[k] = None`). `GraphAccessMut`: `remove_node_prop`, `remove_edge_prop`. Tests: `tests/dm_remove_test.rs`.
+- **MVP-1.D**: ISO §13.3 / §13.4 SET / REMOVE labels (Feature GD02). `SetItem::Label` / `RemoveItem::Label`; the parser accepts `x:Label` and `x IS Label` after the var. Overlay: `mod_node_labels` / `mod_edge_labels` with `LabelMods { added, removed }`; `GraphAccessMut` gains `add_node_label`, `remove_node_label`, edge equivalents. `nodes_with_label` / `directed_edges_with_label` / `undirected_edges_with_label` honour the label overlay so reads stay coherent post-mutation. Tests: `tests/dm_label_test.rs` (12 cases, including G2000 enforcement).
+- **MVP-1.E**: ISO §13.5 DELETE with value expressions (Feature GD04). `DmOp::Delete.targets` is now `Vec<Expr>`; `parse_delete_op` calls `self.expr()`; `apply_delete` evaluates each target through `runtime.run_expr`, expects `Value::Node` / `Value::Edge`, treats `Null` as a no-op (§13.5 GR4 a). Tests: `tests/dm_delete_expr_test.rs`.
+- **MVP-1.F**: `.dump-gql`. `src/store/dump.rs::dump_to_gql_string` / `dump_to_gql_file` emit `INSERT (:L1 & L2 {_dump_id: 'n_K', ...})` per node, `MATCH (a:* {_dump_id: 'n_S'}), (b:* {_dump_id: 'n_T'}) INSERT (a)-[:E {...}]->(b)` per edge, then `MATCH (n) REMOVE n._dump_id` to strip the synthetic key. Collision detection falls back to `__dump_id_v1`, `__dump_id_v2`, .... String values that contain a literal `'` raise an error (the lexer has no escape support). REPL: `.dump-gql <path>`. Tests: `tests/dump_test.rs::dump_gql_round_trip_reproduces_graph_shape` and `dump_gql_avoids_dump_id_collision`.
+
+Two bugs fixed in the same commit:
+
+- `.save` followed by reopen reported "graph type 'DEFAULT' not found". `save_graph` only persisted graph data; the catalog page chain was lost on every save. Fix: new `save_graph_with_catalog_atomic` in `src/store/io.rs` writes the catalog into the new file before `rename`. `LazyGraphStore::save` seeds DEFAULT when missing (the empty fresh-DB case never installed it). `refresh_default_if_dirty` re-infers when DEFAULT is absent, not only when dirty.
+- `MATCH (x)-[y]->{1,n}() RETURN y` projected NULL because `Expr::Var` returned `Failure` on `PathValue::Group`. Replaced the case with `path_value_to_value(pv)` (see `src/runtime/engine.rs`); groups now lift to `Value::List(items mapped)`.
+
+MVP-1 is now feature-complete on `main` (sub-phases A–F all landed). Notable carve-outs that did **not** ship and stay deferred:
+
+- **Multi-DML chains** (`MATCH α INSERT β SET γ` in one statement). ISO §13.1 permits arbitrary chains; the parser still accepts at most one DML op per statement. Tests work around this by splitting into separate `run_dm` calls.
+- **Cross-quote string round-trip in `.dump-gql`**. The lexer has no escape syntax, so a property string containing `'` can't survive a dump→reload cycle; `dump_to_gql_string` raises an error rather than emitting an unparseable script.
+- **Incremental secondary indexes under DML overlay**. With a non-empty overlay, `lookup_node_eq` / `lookup_node_range` return `None` so the caller falls back to a scan; landing in MVP-2.

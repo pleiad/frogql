@@ -90,13 +90,16 @@ fn insert_rejects_any_direction_edge() {
 
 #[test]
 fn delete_simple() {
+    use gqlrust::syntax::expr::Expr;
     let dm = parse_dm("MATCH (a:Person) DELETE a");
     assert_eq!(dm.matches.len(), 1);
     let DmOp::Delete { detach, targets } = &dm.op else {
         panic!("expected Delete");
     };
     assert!(!(*detach), "DELETE without prefix → NODETACH (§13.5 SR6)");
-    assert_eq!(targets, &vec!["a".to_string()]);
+    assert_eq!(targets.len(), 1);
+    // Bare variable reference parses as `Expr::Var` after MVP-1.E.
+    assert!(matches!(&targets[0], Expr::Var(name) if name == "a"));
 }
 
 #[test]
@@ -120,11 +123,19 @@ fn nodetach_delete_explicit() {
 
 #[test]
 fn delete_multiple_targets() {
+    use gqlrust::syntax::expr::Expr;
     let dm = parse_dm("MATCH (a:Person), (b:Person) DETACH DELETE a, b");
     let DmOp::Delete { targets, .. } = &dm.op else {
         panic!();
     };
-    assert_eq!(targets, &vec!["a".to_string(), "b".to_string()]);
+    let names: Vec<&str> = targets
+        .iter()
+        .map(|e| match e {
+            Expr::Var(n) => n.as_str(),
+            other => panic!("expected Var, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(names, vec!["a", "b"]);
 }
 
 #[test]

@@ -42,9 +42,12 @@ pub enum DmOp {
     /// EdgeAnyDirection, Join). Validated at parse time.
     Insert(Vec<PathPattern>),
     /// ISO §13.5. `detach=true` → `DETACH DELETE`; `detach=false` →
-    /// `NODETACH DELETE` (default per §13.5 SR6). Targets restricted to
-    /// `<binding variable reference>` in MVP-0 (Feature GD04 not enabled).
-    Delete { detach: bool, targets: Vec<String> },
+    /// `NODETACH DELETE` (default per §13.5 SR6). Each target is an
+    /// arbitrary `<value expression>` evaluated against the binding row
+    /// at execution time (MVP-1.E, ISO Feature GD04 enabled). The
+    /// expression must yield a `Value::Node` or `Value::Edge`; `Null`
+    /// is treated as a no-op (§13.5 GR4 a).
+    Delete { detach: bool, targets: Vec<Expr> },
     /// ISO §13.3 SET. MVP-1.B handles property-value SET; label SET
     /// (`<set label item>`) lands in MVP-1.D.
     Set(Vec<SetItem>),
@@ -58,6 +61,9 @@ pub enum DmOp {
 pub enum RemoveItem {
     /// `<remove property item> ::= var <period> prop`.
     Property { var: String, prop: String },
+    /// `<remove label item> ::= var <colon> label` (or `var IS label`).
+    /// MVP-1.D, ISO Feature GD02.
+    Label { var: String, label: String },
 }
 
 /// One element of `<set item list>` (ISO §13.3).
@@ -76,6 +82,10 @@ pub enum SetItem {
         var: String,
         props: Vec<(String, Expr)>,
     },
+    /// `<set label item> ::= var <colon> label` (or `var IS label`).
+    /// MVP-1.D, ISO Feature GD02. Idempotent: setting a label the
+    /// element already carries is a no-op (§13.3 GR8 c.iii).
+    Label { var: String, label: String },
 }
 
 /// Validate that a `PathPattern` is legal as an `<insert path pattern>`

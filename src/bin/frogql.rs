@@ -178,6 +178,23 @@ fn main() {
             continue;
         }
 
+        // `.dump-gql <path>` — emit a GQL script that recreates the
+        // graph (`INSERT` per node, `MATCH+INSERT` per edge, final
+        // `REMOVE` to strip the synthetic `_dump_id` key). MVP-1.F.
+        if let Some(rest) = line.strip_prefix(".dump-gql") {
+            let target = rest.trim();
+            if target.is_empty() {
+                eprintln!("usage: .dump-gql <path>");
+                continue;
+            }
+            let t = Instant::now();
+            match gqlrust::store::dump::dump_to_gql_file(&store, Path::new(target)) {
+                Ok(()) => eprintln!("Dumped to {target} ({:.3}s).", t.elapsed().as_secs_f64()),
+                Err(e) => eprintln!("Dump failed: {e}"),
+            }
+            continue;
+        }
+
         // SQLite-style `.save` — atomically writes the merged base+overlay
         // state to `db_path`. Until the user invokes this, DML mutations
         // live only in the in-RAM overlay (no auto-commit).
@@ -1174,6 +1191,9 @@ fn print_help() {
     println!("  .schema simple      grouped by-label renderer of the inferred schema");
     println!("  .graph-types        list all GRAPH TYPEs (alias for SHOW GRAPH TYPES)");
     println!("  .indexes            list secondary indexes (alias for SHOW INDEXES)");
+    println!("  .save               persist overlay to the open .gdb (atomic tmp+rename)");
+    println!("  .dump-json <path>   write a JSON snapshot (round-trips with import_json)");
+    println!("  .dump-gql <path>    write a GQL script that recreates the graph");
     println!("  .help               this message");
     println!("  .quit / .exit       exit the REPL");
     println!();

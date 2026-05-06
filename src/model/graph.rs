@@ -532,6 +532,22 @@ impl super::graph_access::GraphAccessMut for Graph {
     fn remove_edge_prop(&self, _id: Id, _prop: &str) {
         unimplemented!("Graph::remove_edge_prop: use LazyGraphStore for mutability");
     }
+
+    fn add_node_label(&self, _id: Id, _label: &str) {
+        unimplemented!("Graph::add_node_label: use LazyGraphStore for mutability");
+    }
+
+    fn add_edge_label(&self, _id: Id, _label: &str) {
+        unimplemented!("Graph::add_edge_label: use LazyGraphStore for mutability");
+    }
+
+    fn remove_node_label(&self, _id: Id, _label: &str) {
+        unimplemented!("Graph::remove_node_label: use LazyGraphStore for mutability");
+    }
+
+    fn remove_edge_label(&self, _id: Id, _label: &str) {
+        unimplemented!("Graph::remove_edge_label: use LazyGraphStore for mutability");
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
