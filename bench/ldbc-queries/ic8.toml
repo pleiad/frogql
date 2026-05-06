@@ -9,7 +9,7 @@ params_file = "interactive_8_param.txt"
 param_columns = ["personId"]
 param_types = ["int"]
 query = """
-MATCH (start:Person {id: $personId})<-[:hasCreator]-(:Comment|Post)<-[:replyOf]-(comment:Comment)-[:hasCreator]->(person:Person)
+MATCH (start:Person {id: {personId}})<-[:hasCreator]-(:Comment|Post)<-[:replyOf]-(comment:Comment)-[:hasCreator]->(person:Person)
 RETURN
     person.id AS personId,
     person.firstName AS personFirstName,

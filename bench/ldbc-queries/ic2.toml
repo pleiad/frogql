@@ -10,8 +10,8 @@ param_columns = ["personId", "maxDate"]
 param_types = ["int", "int"]
 
 query = """
-MATCH (:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(message:Comment|Post)
-WHERE message.creationDate <= $maxDate
+MATCH (:Person {id: {personId}})~[:knows]~(friend:Person)<-[:hasCreator]-(message:Comment|Post)
+WHERE message.creationDate <= {maxDate}
 RETURN
     friend.id AS personId,
     friend.firstName AS personFirstName,
