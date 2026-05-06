@@ -7,20 +7,21 @@
 // toml is the bench's source-of-truth.
 //
 // Kuzu-specific divergences from the toml:
-//   - Kuzu has no label-disjunction mechanism at all. Tested 2026-05:
-//     `(message:Comment|Post)` pattern → parser error; `WHERE
-//     message:Comment OR message:Post` predicate → parser error;
-//     `UNION ALL ... LIMIT N` → silently broken (LIMIT applied per
-//     branch only, not globally); `CALL { ... UNION ALL ... }` →
-//     no CALL{} grammar; `... UNION ALL ... WITH ... LIMIT` →
-//     parser error after UNION. So we use `(message)` bound but
-//     unlabeled — Kuzu's multi-typed REL TABLE on `hasCreator`
-//     (FROM Comment, FROM Post) constrains `message` to Comment+Post
-//     at the SCHEMA level. Same semantic constraint, applied via
-//     edge schema rather than node label predicate.
+//   - Kuzu's openCypher subset doesn't accept the pipe-disjunction
+//     pattern `(message:Comment|Post)` (parser error) nor the
+//     runtime predicate `WHERE message:Comment OR message:Post`
+//     (also parser error — Kuzu has no `node:Label` predicate
+//     because every node lives in exactly one NODE TABLE, so the
+//     usual openCypher predicate isn't part of their grammar).
+//     Instead, Kuzu provides a `label(node)` builtin that returns
+//     the node's NODE TABLE name as a string. We use
+//     `WHERE label(message) IN ["Comment", "Post"]` — this is a
+//     real query-level label predicate, evaluated per row, not a
+//     schema-level data-shape constraint.
 //   - Edge labels lowercase per loader convention.
 MATCH (:Person {id: $personId})-[:knows]-(friend:Person)<-[:hasCreator]-(message)
-WHERE message.creationDate <= $maxDate
+WHERE label(message) IN ["Comment", "Post"]
+  AND message.creationDate <= $maxDate
 RETURN friend.id AS personId,
        friend.firstName AS personFirstName,
        friend.lastName AS personLastName,

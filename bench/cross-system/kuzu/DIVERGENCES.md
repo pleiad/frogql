@@ -82,34 +82,35 @@ RETURN ... LIMIT 20
 | gqlite (us) | `(c: Comment \| Post)` (native ISO GQL) | Query level |
 | graphqlite | `WHERE c:Comment OR c:Post` (Cypher 4.x dialect rejects pipe) | Query level |
 | auksys/gqlite | `WHERE c:Comment OR c:Post` (planner bug on pipe in multi-hop) | Query level |
-| **Kuzu** | **`(c)` unlabeled** | **Schema level (REL TABLE)** |
+| **Kuzu** | **`WHERE label(c) IN ["Comment", "Post"]`** (Kuzu builtin) | **Query level** |
 
-**This Kuzu form is a divergence, not equivalence.** Kuzu's query
-body doesn't say "node is Comment-or-Post"; it says "node is anything
-reachable via hasCreator". The Comment-or-Post restriction comes from
-our LOADER declaring `hasCreator` as `FROM Comment TO Person, FROM
-Post TO Person`. If we'd loaded hasCreator from any other label type
-(say Forum), Kuzu's query would happily match those too — gqlite's
-and graphqlite's wouldn't. The two queries are equivalent **only on
-our specific data load**.
+**Update 2026-05**: we discovered Kuzu's `label(node)` builtin which
+returns the node's NODE TABLE name as a string. Combining with
+`IN [...]` gives a real query-level label predicate — same semantic
+constraint as the other systems. **Not** a schema-level data-shape
+constraint, despite earlier integration notes saying otherwise.
 
-We accept this divergence because Kuzu has no syntactic alternative.
-Tested 2026-05:
+What does NOT work in Kuzu (tested):
 - `(m:Comment|Post)` pattern disjunction → parser error
-- `WHERE m:Comment OR m:Post` predicate → parser error (no runtime
-  label-predicate in Kuzu — Kuzu's data model has every node in
-  exactly one NODE TABLE, so the engine never needs to ask "what
-  label is this node" at query time)
-- `UNION ALL ... LIMIT N` (canonical Cypher form) → silently broken;
-  LIMIT applies per-branch only, not globally (returned 151K rows for
-  LIMIT 5 in our test)
-- `CALL { ... UNION ALL ... }` subquery wrap → no `CALL{}` grammar
-- `WITH ... after UNION ALL` → parser error
+- `WHERE m:Comment OR m:Post` predicate (the openCypher form
+  graphqlite and Neo4j accept) → parser error. Kuzu's data model
+  puts each node in exactly one NODE TABLE, so the engine never
+  exposes a `node:Label` predicate; you reach for `label(node)`
+  string equality instead.
+- `UNION ALL ... LIMIT N` (canonical Cypher arg-max idiom) →
+  silently broken; LIMIT applies per-branch only, not globally
+  (returned 151K rows for LIMIT 5 in our test). Not relevant once
+  we found `label()`, but documented for future ICs.
+- `CALL { ... UNION ALL ... }` subquery wrap → no `CALL{}` grammar.
+- `WITH ... after UNION ALL` → parser error.
 
-The schema-level constraint is the only viable form for Kuzu IC2/IC8.
-Reviewers comparing Kuzu's IC2/IC8 numbers to gqlite/graphqlite's
-should keep this in mind: same logical work *on our data*, different
-constraint mechanism.
+Earlier we considered relying on the multi-typed REL TABLE schema
+(`(message)` unlabeled, with `hasCreator` declared `FROM Comment,
+FROM Post`) as the constraint mechanism. That worked but encoded
+the constraint at LOAD TIME rather than at QUERY TIME — it'd produce
+different results on a different data shape. We replaced it with
+the `label()`-based form before merging the bench, so our shipped
+queries do express the spec's predicate at the query level.
 
 ### 2. Multi-typed REL TABLE requires FROM/TO hints in COPY
 
