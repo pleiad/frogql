@@ -308,30 +308,53 @@ fn merge_constraints(p: PathPattern, c: &Constraints) -> PathPattern {
 }
 
 /// Merge type and value constraints into a node descriptor.
+///
+/// Same shape as `merge_into_edge_desc` for the anonymous-descriptor case:
+/// an unnamed node `()` cannot be referenced from a WHERE conjunct, but its
+/// own descriptor (label/type predicates from the pattern) must survive
+/// pushdown so the LTJ extractor can apply them. Earlier versions used
+/// `let var_name = d.var.clone()?;` which dropped the descriptor entirely
+/// for anonymous nodes — a latent twin of the edge-side bug.
 fn merge_into_node_desc(desc: Option<Descriptor>, c: &Constraints) -> Option<Descriptor> {
     let mut d = desc?;
-    let var_name = d.var.clone()?;
 
-    if let Some(attrs) = c.types.get(&var_name) {
-        for (attr, ty) in attrs {
-            d.dtype.props.extend(attr.clone(), ty.clone());
+    if let Some(var_name) = d.var.clone() {
+        if let Some(attrs) = c.types.get(&var_name) {
+            for (attr, ty) in attrs {
+                d.dtype.props.extend(attr.clone(), ty.clone());
+            }
         }
-    }
-    if let Some(preds) = c.values.get(&var_name) {
-        d.value_preds.extend(preds.iter().cloned());
+        if let Some(preds) = c.values.get(&var_name) {
+            d.value_preds.extend(preds.iter().cloned());
+        }
     }
     Some(d)
 }
 
 /// Merge only type constraints into an edge descriptor; value predicates on
 /// edges are left in the residual WHERE for now.
+///
+/// Anonymous edges (no `var` — e.g. `<-[:hasCreator]-`) carry NO predicates
+/// from WHERE because no name in the conjuncts could ever name them, but
+/// they DO carry their own label/type constraints from the descriptor
+/// (e.g. `:hasCreator`). The early version of this function used
+/// `let var_name = d.var.clone()?;` which short-circuited on `None` and
+/// dropped the WHOLE descriptor, including its label. That ignored the edge
+/// label at the LTJ extraction stage and let `(p)<-[:hasCreator]-(m)` admit
+/// any-edge candidates for `m`. Caught by the cross-system row-content
+/// equivalence oracle (`bench/cross-system/`) — the symptom looked like a
+/// label-disjunction filter bug but the cause was here.
 fn merge_into_edge_desc(desc: Option<Descriptor>, c: &Constraints) -> Option<Descriptor> {
     let mut d = desc?;
-    let var_name = d.var.clone()?;
 
-    if let Some(attrs) = c.types.get(&var_name) {
-        for (attr, ty) in attrs {
-            d.dtype.props.extend(attr.clone(), ty.clone());
+    // Edge has no name → no WHERE-conjunct could ever target it. Skip the
+    // type-merge step but PRESERVE the descriptor (its own label/type
+    // constraints still need to reach the LTJ extractor).
+    if let Some(var_name) = d.var.clone() {
+        if let Some(attrs) = c.types.get(&var_name) {
+            for (attr, ty) in attrs {
+                d.dtype.props.extend(attr.clone(), ty.clone());
+            }
         }
     }
     Some(d)
