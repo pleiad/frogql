@@ -16,7 +16,7 @@
 //! dataset path arg — opens `bench/data/ldbc-sf0.1.gdb` from a
 //! hardcoded path; case set references LDBC labels by name.
 //!
-//! See `bench/TYPECHECKER_BENCHMARK.md` for output format, case set
+//! See `bench/INTERNAL_BENCHMARK.md` for output format, case set
 //! details, and stream cross-checking.
 
 use std::env;
@@ -45,7 +45,7 @@ const DEFAULT_WARMUP: usize = 1;
 const LIMIT: usize = 100;
 
 // CSV stdout: db;category;case;phase;iter;ns;flags
-// See bench/TYPECHECKER_BENCHMARK.md "Output" for the column and
+// See bench/INTERNAL_BENCHMARK.md "Output" for the column and
 // flag vocabulary.
 
 // ---------------------------------------------------------------------------
@@ -109,10 +109,10 @@ struct Case {
     query: &'static str,
 }
 
-/// 25 cases: 3 valid controls + 3 LDBC-IC valid + 3 valid extras
-/// (empty-by-data, aggregate, variable-length) + 10 empty-by-typing
-/// + 6 invalid (rejected). See `bench/INTERNAL_BENCHMARK.md` for
-/// the case-set description.
+/// 25 cases: 3 valid controls, 3 LDBC-IC valid, 3 valid extras
+/// (empty-by-data, aggregate, variable-length), 10 empty-by-typing,
+/// 6 invalid (rejected). See `bench/INTERNAL_BENCHMARK.md` for the
+/// case-set description.
 const CASES: &[Case] = &[
     // ---- Valid controls (3) ----
     Case {
@@ -479,6 +479,10 @@ fn rss_mb(sys: &mut System) -> f64 {
         .unwrap_or(0.0)
 }
 
+// Threading 8 args is fine here: this fn has one call site (per-backend
+// dispatch in main) and lifting them into a struct adds ceremony
+// without clarity. Bench-internal only.
+#[allow(clippy::too_many_arguments)]
 fn bench_db<G: GraphAccess>(
     backend: &str,
     path_str: &str,

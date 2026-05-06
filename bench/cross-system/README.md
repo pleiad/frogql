@@ -10,7 +10,7 @@ This is the **external** bench in the project's two-bench split:
 
 - **External bench** (this dir): how does gqlite compare to other
   graph databases on user-facing query latency. The headline numbers.
-- **Internal bench** ([`bench/TYPECHECKER_BENCHMARK.md`](../TYPECHECKER_BENCHMARK.md)):
+- **Internal bench** ([`bench/INTERNAL_BENCHMARK.md`](../INTERNAL_BENCHMARK.md)):
   how do gqlite's own components (the typechecker today; potentially
   other compiler microbenches later) perform in isolation. Engine
   diagnostics, not engine comparisons.
