@@ -41,7 +41,7 @@ proptest = "1"
 
 # Bins that need optional deps. Auto-discovery still picks up the
 # remaining bins (bench_queries, bench_repeat, convert_edgelist,
-# typecheck_bench) which use only the always-on dependencies.
+# internal_bench) which use only the always-on dependencies.
 [[bin]]
 name = "frogql"
 path = "src/bin/frogql.rs"

@@ -12,7 +12,7 @@ question.
 ## Setup
 
 ```bash
-cargo build --release --bin gqlite --bin bench_setup --bin typecheck_bench
+cargo build --release --bin gqlite --bin bench_setup --bin internal_bench
 ./target/release/bench_setup
 ```
 
@@ -29,16 +29,16 @@ cleanly if `bench/data/ldbc-sf0.3.gdb` is missing.
 
 ```bash
 # Default: 3 iters per case, 1 warmup, SF0.1, both backends (~30 min wall).
-./target/release/typecheck_bench
+./target/release/internal_bench
 
 # Capture the streams separately:
-./target/release/typecheck_bench > internal.csv 2> internal.txt
+./target/release/internal_bench > internal.csv 2> internal.txt
 
 # Higher iter count for stable medians (slow — see notes):
-./target/release/typecheck_bench --iters 30 --warmup 3
+./target/release/internal_bench --iters 30 --warmup 3
 
 # SF0.3 instead of SF0.1:
-./target/release/typecheck_bench --sf 0.3
+./target/release/internal_bench --sf 0.3
 ```
 
 ### Flags
@@ -157,7 +157,7 @@ regression — investigate before trusting the rest of the table.
 ## Case set
 
 25 cases across 3 categories. Source of truth:
-`src/bin/typecheck_bench.rs::CASES`.
+`src/bin/internal_bench.rs::CASES`.
 
 **Valid (9)** — both paths run; controls for typecheck overhead.
 
@@ -220,7 +220,7 @@ competitive claims, internal for engineering diagnostics.
 
 ## See also
 
-- `src/bin/typecheck_bench.rs` — the binary; rustdoc header has a
+- `src/bin/internal_bench.rs` — the binary; rustdoc header has a
   brief usage reference.
 - `bench/cross-system/README.md` — companion external bench.
 - `bench/cross-system/SURVEY.md` — narrative covering every external

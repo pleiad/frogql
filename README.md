@@ -485,7 +485,7 @@ Other binaries in `src/bin/`:
 - `bench_queries` — generic benchmark runner
 - `bench_setup` — downloads + extracts LDBC datasets (`bench/data/` is gitignored)
 - `ldbc_bench` — LDBC interactive-complete driver, queries in `bench/ldbc-queries/*.toml`
-- `typecheck_bench` — typechecker microbench
+- `internal_bench` — gqlite-only diagnostic bench (typechecker on/off, lazy/disk backend)
 - `convert_edgelist` — edge-list format converter
 
 ## Documentation

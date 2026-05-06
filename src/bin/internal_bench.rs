@@ -1,20 +1,22 @@
-//! Typechecker benchmark.
+//! Internal bench — gqlite-only diagnostics.
 //!
 //! Compares wall time of the LDBC SF0.1 case set with vs without the
-//! typechecker. The typechecker can short-circuit doomed queries
-//! (empty-by-typing, free variable, type mismatch) before the runtime
-//! ever runs — see rules.md §10 Theorem 6.5 for the soundness
-//! argument behind the guaranteed-empty short-circuit. This bench
-//! measures both paths per case and reports the difference.
+//! typechecker, across lazy and disk backends. The typechecker can
+//! short-circuit doomed queries (empty-by-typing, free variable, type
+//! mismatch) before the runtime ever runs — see rules.md §10
+//! Theorem 6.5 for the soundness argument behind the guaranteed-empty
+//! short-circuit. This bench measures both paths per case and reports
+//! the difference.
 //!
 //! Usage:
 //!
 //!     ./target/release/bench_setup       # one-time: download + build .gdb
-//!     ./target/release/typecheck_bench   # run the bench
+//!     ./target/release/internal_bench    # run the bench
 //!
-//! Flags: `--iters N` (default 3) and `--warmup N` (default 1). No
-//! dataset path arg — opens `bench/data/ldbc-sf0.1.gdb` from a
-//! hardcoded path; case set references LDBC labels by name.
+//! Flags: `--iters N` (default 3), `--warmup N` (default 1), and
+//! `--sf 0.1|0.3` (default 0.1). No dataset path arg — opens
+//! `bench/data/ldbc-sf<SF>.gdb` from a hardcoded path; case set
+//! references LDBC labels by name.
 //!
 //! See `bench/INTERNAL_BENCHMARK.md` for output format, case set
 //! details, and stream cross-checking.
@@ -36,10 +38,12 @@ use gqlrust::typing::variable_type::Schema;
 const SF01_GDB: &str = "bench/data/ldbc-sf0.1.gdb";
 const SF03_GDB: &str = "bench/data/ldbc-sf0.3.gdb";
 
-// Default of 3 matches the LDBC bench. The slowest doomed cases
-// take ~50s/iter on the unchecked path, so 30 iters would be a
-// ~1.5h run; 3 keeps a default invocation under ~15 min.
-const DEFAULT_ITERS: usize = 3;
+// 5 gives a real median and a usable p95 from a sorted-sample
+// estimator. The slowest doomed cases (`e_chain4_bad_leaf`,
+// `e_repeat_bad_leaf`) take ~40s/iter unchecked, so 5 iters lands
+// the default invocation around ~40 min on SF0.1; iters=10 doubles
+// that. Pass --iters 3 for a quicker dev-iteration loop.
+const DEFAULT_ITERS: usize = 5;
 const DEFAULT_WARMUP: usize = 1;
 // Result-row cap per runtime call.
 const LIMIT: usize = 100;
