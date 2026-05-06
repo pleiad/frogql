@@ -1,35 +1,21 @@
 """Row-content canonicalization + sha256 for the cross-system
-row-equivalence oracle.
-
-Mirrors `canonicalize_cell` / `canonicalize_row` / `canonicalize_and_hash`
-in `src/bin/ldbc_bench.rs` exactly. With ORDER BY in every IC's toml
-the three runners' iter-0 results are deterministic, so byte-equal
-blobs across systems → identical sha256 hashes → row-content
-equivalence. compare_results.py reads HASH lines from each runner's
-stderr and flags any (IC, params_row) where systems disagree.
+row-equivalence oracle. Byte-mirror of `canonicalize_cell` /
+`canonicalize_row` / `canonicalize_and_hash` in
+`src/bin/ldbc_bench.rs`; both implementations must produce
+identical hashes for the same logical row set.
 
 Cell encoding:
-    None         → "\\x00"
-    True         → "true"
-    False        → "false"
-    int          → decimal repr
-    float        → repr (matches Rust's default Display for finite f64)
-    str          → trailing whitespace trimmed (rstrip), no other escaping
-    other        → repr() fallback
+    None  → "\\x00"
+    bool  → "true" / "false"
+    int   → decimal
+    float → repr (matches Rust's `{}` for finite f64)
+    str   → rstripped (loaders disagree on trailing whitespace; the
+            oracle compares semantic equivalence, not formatting)
+    other → repr() fallback
 
-Cells joined with "\\x1f" (US, unit separator). Rows joined with "\\n".
-sha256 of the resulting bytes, lowercase hex.
-
-Why rstrip on strings: a formatting-level difference between the
-loaders — gqlite strips trailing whitespace from CSV string columns,
-Kuzu preserves it. Neither is "wrong"; both are reasonable choices.
-The row-content oracle wants to compare semantic equivalence, so we
-normalize away the formatting drift at canonicalization time without
-touching the data each engine actually loaded. Mirrored in
-`canonicalize_cell` in `src/bin/ldbc_bench.rs`.
-
-LDBC SF0.1 doesn't ship strings containing the separator bytes, so the
-join-without-escape is unambiguous.
+Cells joined with "\\x1f", rows with "\\n", sha256 over the bytes
+(lowercase hex). LDBC strings don't contain the separator bytes, so
+the join is unambiguous.
 """
 from __future__ import annotations
 
@@ -48,7 +34,6 @@ def canonicalize_cell(v) -> str:
     if isinstance(v, float):
         return repr(v)
     if isinstance(v, str):
-        # Trailing-whitespace rstrip — see module docstring.
         return v.rstrip()
     return repr(v)
 
