@@ -6,20 +6,37 @@ name = "Expert search"
 status = "blocked"
 
 blocked_reason = """
-Multiset list aggregate for ordered `tagNames`; `ORDER BY`; TagClass /
-`isSubclassOf` hierarchy in the pattern or schema.
+Tested 2026-05-05:
+  - `COLLECT_LIST(DISTINCT tag.name)` — `COLLECT_LIST` aggregate not
+    in parser. Tested also `collect`, `array_agg`, `ARRAY_AGG` —
+    none recognized. No equivalent function exists today.
+  - `COUNT(comment)` — bare-node aggregate; `COUNT(comment.id)` or
+    `COUNT(*)` would parse.
+  - `[:isSubclassOf]->{0,}` — zero-or-more reflexive transitive
+    closure; could be supported via `{0,N}` for some N, but the
+    open-ended {0,} form is the spec.
+The COLLECT_LIST gap is the main blocker — the query's whole point
+is to multiset-aggregate the tag names per friend.
 """
 
 required_features = [
-    "COLLECT_LIST / multiset aggregate in RETURN",
-    "ORDER BY",
-    "TagClass / isSubclassOf hierarchy",
+    "COLLECT_LIST / multiset aggregate (any name)",
+    "COUNT over bare node references",
+    "{0,} unbounded transitive closure (or {0,N} approximation)",
 ]
 
 params_file = "interactive_12_param.txt"
 param_columns = ["personId", "tagClassName"]
 param_types = ["int", "string"]
 query = """
-IC12_QUERY_PLACEHOLDER
-Params (interactive_12_param.txt header): personId | tagClassName
+MATCH (person:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(comment:Comment)-[:replyOf]->(post:Post)-[:hasTag]->(tag:Tag)-[:hasType]->(tagClass:TagClass)-[:isSubclassOf]->{0,}(:TagClass {name: $tagClassName})
+RETURN 
+    friend.id AS friendId, 
+    friend.firstName AS friendFirstName, 
+    friend.lastName AS friendLastName, 
+    COLLECT_LIST(DISTINCT tag.name) AS tagNames, 
+    COUNT(comment) AS replyCount
+GROUP BY friendId, friendFirstName, friendLastName
+ORDER BY replyCount DESC, CAST(friendId AS INTEGER) ASC
+LIMIT 20
 """

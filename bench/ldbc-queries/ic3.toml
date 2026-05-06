@@ -6,17 +6,46 @@ name = "Friends and friends of friends that have been to given countries"
 status = "blocked"
 
 blocked_reason = """
-Ranked result: `ORDER BY` per spec.
+Tested 2026-05-05 (re-checked after `<>` alias landed):
+  - `WHERE person <> otherPerson` — bare-node comparison; gqlite needs
+    property access (`person.id <> otherPerson.id`). The operator
+    itself is fine now; what's missing is treating nodes as
+    expression operands.
+  - `COUNT(DISTINCT messageX)` — `DISTINCT` over a bare node reference
+    not supported. `COUNT(DISTINCT messageX.id)` would parse.
+  - `$startDate + DURATION({days: $durationDays})` — `DURATION` literal
+    not in parser. Could be inlined as `$startDate + $durationDays * 86400000`,
+    but `*` (multiplication) also doesn't tokenize. Would have to inline
+    the resolved millis literal per param row in the substitution layer.
 """
 
 required_features = [
-    "ORDER BY",
+    "bare-node comparison (or `a.id <> b.id` property rewrite)",
+    "DISTINCT over bare node references in aggregates",
+    "DURATION literal (or inline the millis)",
+    "multiplication operator `*`",
 ]
 
 params_file = "interactive_3_param.txt"
 param_columns = ["personId", "countryXName", "countryYName", "startDate", "endDate"]
 param_types = ["int", "string", "string", "int", "int"]
 query = """
-IC03_QUERY_PLACEHOLDER
-Params (interactive_3_param.txt header): personId | countryXName | countryYName | startDate | endDate
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)-[:isLocatedIn]->(:City)-[:isPartOf]->(country:Country)
+WHERE country.name <> $countryXName AND country.name <> $countryYName
+MATCH (otherPerson)<-[:hasCreator]-(messageX:Message)-[:isLocatedIn]->(:Country {name: $countryXName})
+WHERE messageX.creationDate >= $startDate AND messageX.creationDate < $startDate + DURATION({days: $durationDays})
+MATCH (otherPerson)<-[:hasCreator]-(messageY:Message)-[:isLocatedIn]->(:Country {name: $countryYName})
+WHERE messageY.creationDate >= $startDate AND messageY.creationDate < $startDate + DURATION({days: $durationDays})
+RETURN 
+    otherPerson.id AS otherPersonId,
+    otherPerson.firstName AS otherPersonFirstName,
+    otherPerson.lastName AS otherPersonLastName,
+    COUNT(DISTINCT messageX) AS xCount,
+    COUNT(DISTINCT messageY) AS yCount,
+    COUNT(DISTINCT messageX) + COUNT(DISTINCT messageY) AS totalCount
+GROUP BY otherPersonId, otherPersonFirstName, otherPersonLastName
+ORDER BY totalCount DESC, CAST(otherPersonId AS INTEGER) ASC
+LIMIT 20
 """

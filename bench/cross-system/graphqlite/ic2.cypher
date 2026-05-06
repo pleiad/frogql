@@ -1,35 +1,28 @@
-// Cypher translation of bench/ldbc-queries/ic2.toml.
+// Cypher translation of bench/ldbc-queries/ic2.toml for graphqlite
+// (colliery-io/graphqlite 0.4.4 from PyPI).
 //
-// Source-of-truth IC2 lives in that toml; this file is a language
-// translation. Substitution placeholders use graphqlite's native
-// $-prefixed parameter syntax.
+// Source-of-truth: bench/ldbc-queries/ic2.toml. The toml runs the
+// closest-to-spec query gqlite's ISO GQL parser supports today
+// (anonymous start, COALESCE, ORDER BY, <=). This translation
+// mirrors the toml's shape — same columns, same logical query —
+// for fair cross-system comparison. NOT a verbatim copy of the
+// LDBC reference Cypher; the toml is the bench's source-of-truth.
 //
-// Divergences from spec, applied to every system for apples-to-apples:
-//   - no ORDER BY (gqlite parser doesn't support it)
-//   - no `coalesce(c.content, c.imageFile)` — we return c.content directly
-//   - lowercase :knows / :hasCreator (loader convention)
-//
-// graphqlite-specific divergences:
-//   - The start-node predicate is `{ldbcId: $personId}` not `{id: $personId}`
-//     because graphqlite's `.id` accessor returns the loader's
-//     prefixed external_id (`"Person:933"`), not the int LDBC id.
-//     Same reason `friend.ldbcId` and `c.ldbcId` appear in RETURN
-//     where gqlite uses `.id`. See DIVERGENCES.md.
-//
-// Structural shape: single MATCH with a label predicate in WHERE.
-// graphqlite's Cypher dialect rejects `(c:Comment|Post)` (Cypher 5+
-// feature, not in this dialect), so we express the same logical
-// query with `WHERE c:Comment OR c:Post`. This matches the
-// structural shape of gqlite's `(c: Comment | Post)` form — both
-// systems do one MATCH then a label-disjunction filter — so the
-// cross-system comparison reflects each engine's evaluation of
-// the same query shape, not different shapes of the same logical
-// query. (graphqlite's UNION ALL of two MATCHes is faster on this
-// engine, but that's a structurally different query than what
-// gqlite runs; using it here would compare apples to oranges.)
-MATCH (p:Person {ldbcId: $personId})-[:knows]-(friend:Person)<-[:hasCreator]-(c)
-WHERE (c:Comment OR c:Post) AND c.creationDate <= $maxDate
-RETURN friend.ldbcId AS friend_id, friend.firstName AS friend_firstName,
-       friend.lastName AS friend_lastName,
-       c.ldbcId AS c_id, c.content AS c_content, c.creationDate AS c_creationDate
+// graphqlite-specific divergences from the toml:
+//   - graphqlite reserves `.id` for the loader's prefixed
+//     external_id; we read the int LDBC id from `.ldbcId`.
+//     See DIVERGENCES.md.
+//   - Cypher 4.x dialect rejects `(message:Comment|Post)` label
+//     disjunction in patterns; we use `WHERE message:Comment OR
+//     message:Post`. Same logical query.
+//   - Edge labels lowercase per loader convention.
+MATCH (:Person {ldbcId: $personId})-[:knows]-(friend:Person)<-[:hasCreator]-(message)
+WHERE (message:Comment OR message:Post) AND message.creationDate <= $maxDate
+RETURN friend.ldbcId AS personId,
+       friend.firstName AS personFirstName,
+       friend.lastName AS personLastName,
+       message.ldbcId AS postOrCommentId,
+       COALESCE(message.content, message.imageFile) AS postOrCommentContent,
+       message.creationDate AS postOrCommentCreationDate
+ORDER BY postOrCommentCreationDate DESC, postOrCommentId ASC
 LIMIT 20

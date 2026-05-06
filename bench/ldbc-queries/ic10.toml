@@ -6,20 +6,44 @@ name = "Friend recommendation"
 status = "blocked"
 
 blocked_reason = """
-Anti-join: FoAF must not already be a direct friend; exclude "common" neighbors
-via graph negation. Ranked result: `ORDER BY`. Birthday predicate vs `$month`
-needs richer scalars than `+`/`-` alone (`*`, `%`, or date builtins).
+Tested 2026-05-05. Heaviest-blocked IC; needs four parser features
+that gqlite doesn't have:
+  - `WHERE person <> foaf` — bare-node comparison; needs property
+    access. Same fix as IC3/5/6/9.
+  - `EXTRACT(MONTH FROM foaf.birthday)` — `EXTRACT(... FROM ...)`
+    syntax not in parser.
+  - `$month MOD 12` — `MOD` operator not in parser.
+  - `CASE WHEN ... THEN ... ELSE ... END` — `CASE` expression not
+    in parser. Used inside `SUM(CASE WHEN ... THEN 1 ELSE -1 END)`,
+    so removing it isn't trivial — would need to rewrite with two
+    separate counts joined by `-`.
 """
 
 required_features = [
-    "graph NOT EXISTS / existential subquery",
-    "ORDER BY",
-    "richer scalar / date expressions (e.g. *, %, date parts)",
+    "bare-node comparison (or property-access rewrite)",
+    "EXTRACT(date-part FROM date)",
+    "MOD operator",
+    "CASE WHEN ... END expression",
 ]
 
 params_file = "interactive_10_param.txt"
 param_columns = ["personId", "month"]
 query = """
-IC10_QUERY_PLACEHOLDER
-Params (interactive_10_param.txt header): personId | month
+MATCH (person:Person {id: $personId})~[:knows]~{2}(foaf:Person)-[:isLocatedIn]->(city:City)
+WHERE person <> foaf AND NOT EXISTS { MATCH (person)~[:knows]~(foaf) }
+  AND (
+    (EXTRACT(MONTH FROM foaf.birthday) = $month AND EXTRACT(DAY FROM foaf.birthday) >= 21) OR 
+    (EXTRACT(MONTH FROM foaf.birthday) = ($month MOD 12) + 1 AND EXTRACT(DAY FROM foaf.birthday) < 22)
+  )
+OPTIONAL MATCH (foaf)<-[:hasCreator]-(post:Post)-[:hasTag]->(tag:Tag)
+RETURN 
+    foaf.id AS personId,
+    foaf.firstName AS personFirstName,
+    foaf.lastName AS personLastName,
+    SUM(CASE WHEN EXISTS { MATCH (person)-[:hasInterest]->(tag) } THEN 1 ELSE -1 END) AS commonInterestScore,
+    foaf.gender AS personGender,
+    city.name AS personCityName
+GROUP BY personId, personFirstName, personLastName, personGender, personCityName
+ORDER BY commonInterestScore DESC, CAST(personId AS INTEGER) ASC
+LIMIT 10
 """

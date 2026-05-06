@@ -6,16 +6,36 @@ name = "Recent messages by friends or friends of friends"
 status = "blocked"
 
 blocked_reason = """
-Ranked result: `ORDER BY` per spec.
+Tested 2026-05-05 (re-checked after `<>` alias landed). The query
+DOES execute end-to-end after a single rewrite —
+`WHERE person <> otherPerson` → `WHERE person.id <> otherPerson.id`
+plus dropping `CAST(messageId AS INTEGER)` from ORDER BY (sort
+directly on the int column instead). 13.5s on SF0.1 (the
+`~[:knows]~{1,2}` 2-hop variable-length is what's slow, not the
+parser). We hold off on shipping because the spec compares node
+references and the property-access rewrite silently translates that
+to ID comparison in the bench harness — semantically equivalent on
+LDBC IDs but loses spec faithfulness. Revisit if/when gqlite
+supports bare-node comparison or an `id(node)` / `elementId(node)`
+builtin.
 """
 
 required_features = [
-    "ORDER BY",
+    "bare-node comparison (or `id(node)` builtin)",
 ]
 
 params_file = "interactive_9_param.txt"
 param_columns = ["personId", "maxDate"]
 query = """
-IC09_QUERY_PLACEHOLDER
-Params (interactive_9_param.txt header): personId | maxDate
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)<-[:hasCreator]-(message:Message)
+WHERE person <> otherPerson AND message.creationDate < $maxDate
+RETURN 
+    otherPerson.id AS otherPersonId, 
+    otherPerson.firstName AS otherPersonFirstName, 
+    otherPerson.lastName AS otherPersonLastName, 
+    message.id AS messageId, 
+    COALESCE(message.content, message.imageFile) AS messageContent, 
+    message.creationDate AS messageCreationDate
+ORDER BY messageCreationDate DESC, CAST(messageId AS INTEGER) ASC
+LIMIT 20
 """

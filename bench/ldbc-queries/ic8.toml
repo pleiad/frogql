@@ -3,19 +3,32 @@
 
 id = 8
 name = "Recent replies on a person's messages"
-status = "blocked"
-
-blocked_reason = """
-Stable ordering: `ORDER BY` (`creationDate DESC`, `id ASC` tie-break) per spec.
-"""
-
-required_features = [
-    "ORDER BY",
-]
+status = "implemented"
 
 params_file = "interactive_8_param.txt"
 param_columns = ["personId"]
+param_types = ["int"]
 query = """
-IC08_QUERY_PLACEHOLDER
-Params (interactive_8_param.txt header): personId
+MATCH (start:Person {id: {personId}})<-[:hasCreator]-(:Comment|Post)<-[:replyOf]-(comment:Comment)-[:hasCreator]->(person:Person)
+RETURN
+    person.id AS personId,
+    person.firstName AS personFirstName,
+    person.lastName AS personLastName,
+    comment.creationDate AS commentCreationDate,
+    comment.id AS commentId,
+    comment.content AS commentContent
+ORDER BY commentCreationDate DESC, commentId ASC
+LIMIT 20
 """
+
+return_columns = [
+    "personId", "personFirstName", "personLastName",
+    "commentCreationDate", "commentId", "commentContent",
+]
+
+expected_shape = "i,s,s,i,i,s"
+
+[divergences]
+message-union = "spec uses anonymous `(:Message)`; we use `(:Comment|Post)`. Loader doesn't synthesize :Message. Same as IC2/IC7."
+edge-casing = "loader produces lowercase :hasCreator / :replyOf. No semantic difference."
+no-tointeger = "spec ORDER BY uses plain `commentId ASC` already (no toInteger here); we match it directly."

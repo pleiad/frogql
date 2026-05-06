@@ -6,17 +6,34 @@ name = "Job referral"
 status = "blocked"
 
 blocked_reason = """
-Ranked result: `ORDER BY` per spec.
+Tested 2026-05-05 (re-checked after `<>` alias landed). Same as IC9
+— the query DOES execute end-to-end after a single rewrite
+(`WHERE person <> otherPerson` → `WHERE person.id <> otherPerson.id`,
+plus dropping the `CAST`). Holding off for the same reason: the
+property-rewrite loses spec faithfulness even though it's
+semantically equivalent on LDBC IDs. The bench would silently
+misrepresent what gqlite is running. Revisit when bare-node
+comparison (or `id(node)` builtin) lands.
 """
 
 required_features = [
-    "ORDER BY",
+    "bare-node comparison (or `id(node)` builtin)",
 ]
 
 params_file = "interactive_11_param.txt"
 param_columns = ["personId", "countryName", "workFromYear"]
 param_types = ["int", "string", "int"]
 query = """
-IC11_QUERY_PLACEHOLDER
-Params (interactive_11_param.txt header): personId | countryName | workFromYear
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)-[workAt:workAt]->(company:Company)-[:isLocatedIn]->(country:Country)
+WHERE person <> otherPerson 
+  AND country.name = $countryName 
+  AND workAt.workFrom < $workFromYear
+RETURN 
+    otherPerson.id AS personId, 
+    otherPerson.firstName AS personFirstName, 
+    otherPerson.lastName AS personLastName, 
+    company.name AS companyName, 
+    workAt.workFrom AS workFromYear
+ORDER BY workFromYear ASC, CAST(personId AS INTEGER) ASC, companyName DESC
+LIMIT 10
 """

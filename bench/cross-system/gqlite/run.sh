@@ -3,7 +3,7 @@
 # per-iter CSV in the cross-system schema.
 #
 # Output schema (matches src/bin/ldbc_bench.rs):
-#   query;backend;params;row;iter;result_count;result_shape;elapsed_ns
+#   query;backend;params;row;iter;result_count;elapsed_ns
 #
 # Usage:
 #   bench/cross-system/gqlite/run.sh <out_csv> [--ic <n>] [--iters N] [--warmup N] [--backend lazy|disk]

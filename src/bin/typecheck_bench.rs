@@ -16,19 +16,25 @@
 //! dataset path arg — opens `bench/data/ldbc-sf0.1.gdb` from a
 //! hardcoded path; case set references LDBC labels by name.
 //!
-//! See `bench/TYPECHECKER_BENCHMARK.md` for output format, case set
+//! See `bench/INTERNAL_BENCHMARK.md` for output format, case set
 //! details, and stream cross-checking.
 
 use std::env;
 use std::path::Path;
 use std::time::Instant;
 
+use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+
+use gqlrust::model::graph_access::GraphAccess;
 use gqlrust::runtime::engine::Runtime;
+use gqlrust::store::disk::DiskGraphStore;
 use gqlrust::store::lazy::LazyGraphStore;
+use gqlrust::typing::variable_type::Schema;
 
 // ---------------------------------------------------------------------------
 
 const SF01_GDB: &str = "bench/data/ldbc-sf0.1.gdb";
+const SF03_GDB: &str = "bench/data/ldbc-sf0.3.gdb";
 
 // Default of 3 matches the LDBC bench. The slowest doomed cases
 // take ~50s/iter on the unchecked path, so 30 iters would be a
@@ -38,8 +44,8 @@ const DEFAULT_WARMUP: usize = 1;
 // Result-row cap per runtime call.
 const LIMIT: usize = 100;
 
-// CSV stdout: db;category;case;phase;iter;ns;flags
-// See bench/TYPECHECKER_BENCHMARK.md "Output" for the column and
+// CSV stdout: backend;db;category;case;phase;iter;ns;flags
+// See bench/INTERNAL_BENCHMARK.md "Output" for the column and
 // flag vocabulary.
 
 // ---------------------------------------------------------------------------
@@ -103,8 +109,10 @@ struct Case {
     query: &'static str,
 }
 
-/// 18 cases: 3 valid controls + 9 empty-by-typing + 6 invalid (rejected).
-/// See `bench/TYPECHECKER_BENCHMARK.md` for the case-set description.
+/// 25 cases: 3 valid controls, 3 LDBC-IC valid, 3 valid extras
+/// (empty-by-data, aggregate, variable-length), 10 empty-by-typing,
+/// 6 invalid (rejected). See `bench/INTERNAL_BENCHMARK.md` for the
+/// case-set description.
 const CASES: &[Case] = &[
     // ---- Valid controls (3) ----
     Case {
@@ -122,7 +130,76 @@ const CASES: &[Case] = &[
         id: "v_where",
         query: "MATCH (p: Person) WHERE p.id = 933 RETURN p.firstName",
     },
-    // ---- Empty by typing (9) ----
+    // ---- LDBC IC valid cases (the centerpieces — spec-faithful + ORDER BY teardown) ----
+    // v_ic2_spec: full LDBC IC2 (anonymous start, COALESCE, ORDER BY).
+    // The slowdown vs v_ic2_noorder is what ORDER BY costs us.
+    Case {
+        category: Category::Valid,
+        id: "v_ic2_spec",
+        query: "MATCH (:Person {id: 19791209300143})~[:knows]~(friend: Person)<-[:hasCreator]-(message: Comment | Post) \
+                WHERE message.creationDate <= 1354060800000 \
+                RETURN friend.id AS personId, friend.firstName AS personFirstName, \
+                       friend.lastName AS personLastName, message.id AS postOrCommentId, \
+                       COALESCE(message.content, message.imageFile) AS postOrCommentContent, \
+                       message.creationDate AS postOrCommentCreationDate \
+                ORDER BY postOrCommentCreationDate DESC, postOrCommentId ASC LIMIT 20",
+    },
+    // v_ic2_noorder: same logical query as v_ic2_spec WITHOUT ORDER BY.
+    // LIMIT can short-circuit at the first 20 matched messages instead
+    // of materializing + sorting the full result set. The ratio
+    // v_ic2_spec / v_ic2_noorder isolates the runtime cost of the
+    // spec's ORDER BY tie-break (no top-N heap optimization yet).
+    Case {
+        category: Category::Valid,
+        id: "v_ic2_noorder",
+        query: "MATCH (:Person {id: 19791209300143})~[:knows]~(friend: Person)<-[:hasCreator]-(message: Comment | Post) \
+                WHERE message.creationDate <= 1354060800000 \
+                RETURN friend.id AS personId, friend.firstName AS personFirstName, \
+                       friend.lastName AS personLastName, message.id AS postOrCommentId, \
+                       COALESCE(message.content, message.imageFile) AS postOrCommentContent, \
+                       message.creationDate AS postOrCommentCreationDate \
+                LIMIT 20",
+    },
+    // v_ic8_spec: LDBC IC8 spec-faithful — multi-hop chain through replyOf.
+    // Different shape than IC2 (longer chain, single label-disjunction
+    // hop in the middle).
+    Case {
+        category: Category::Valid,
+        id: "v_ic8_spec",
+        query: "MATCH (start: Person {id: 2199023256816})<-[:hasCreator]-(:Comment | Post)<-[:replyOf]-(comment: Comment)-[:hasCreator]->(person: Person) \
+                RETURN person.id AS personId, person.firstName AS personFirstName, \
+                       person.lastName AS personLastName, comment.creationDate AS commentCreationDate, \
+                       comment.id AS commentId, comment.content AS commentContent \
+                ORDER BY commentCreationDate DESC, commentId ASC LIMIT 20",
+    },
+    // v_empty_by_data: type-checks fine; the runtime lookup misses
+    // because the id literally isn't in the data. Pairs vs every
+    // `e_*` case to show the typechecker's *limit* — it can short-
+    // circuit type-driven emptiness, but data-driven emptiness has
+    // to go through the runtime.
+    Case {
+        category: Category::Valid,
+        id: "v_empty_by_data",
+        query: "MATCH (p: Person {id: 1234567890}) RETURN p.firstName",
+    },
+    // v_count_friends: aggregate. Different runtime cost profile from
+    // straight projection — forces full materialization, no LIMIT
+    // short-circuit. Bare-node aggregate (`COUNT(f)`) doesn't parse
+    // in gqlite today; we count `f.id` instead.
+    Case {
+        category: Category::Valid,
+        id: "v_count_friends",
+        query: "MATCH (p: Person {id: 933})~[:knows]~(f: Person) RETURN COUNT(f.id)",
+    },
+    // v_repeat: variable-length match (friends-of-friends, 1 or 2
+    // hops). Exercises gqlite's repetition runtime which IC2/IC8
+    // chains don't cover.
+    Case {
+        category: Category::Valid,
+        id: "v_repeat",
+        query: "MATCH (p: Person {id: 933})~[:knows]~{1,2}(f: Person) RETURN f.firstName",
+    },
+    // ---- Empty by typing (10) ----
     Case {
         category: Category::EmptyByTyping,
         id: "e_chain4_bad_leaf",
@@ -182,6 +259,18 @@ const CASES: &[Case] = &[
         id: "e_label_only",
         query: "MATCH (x: Wagumi) RETURN x.id",
     },
+    // e_type_clash_arith: arithmetic between mismatched types
+    // (`p.firstName + p.id` is `string + int`). The schema knows
+    // both types; the typechecker should mark this guaranteed-empty
+    // (no value satisfies the predicate after the type clash).
+    // Different surface than e_type_mismatch_chain which uses
+    // equality (`c.firstName = 933`) — this one is in arithmetic
+    // followed by a comparison.
+    Case {
+        category: Category::EmptyByTyping,
+        id: "e_type_clash_arith",
+        query: "MATCH (p: Person) WHERE p.firstName + p.id > 0 RETURN p.id",
+    },
     // ---- Invalid: rejected by the compile pipeline (6) ----
     Case {
         category: Category::InvalidRejected,
@@ -237,12 +326,12 @@ fn ensure_dataset() {
 
 fn print_usage(prog: &str) {
     eprintln!(
-        "Usage: {prog} [--iters N] [--warmup N]\n\
+        "Usage: {prog} [--iters N] [--warmup N] [--sf 0.1|0.3]\n\
          \n\
-         Defaults: --iters {DEFAULT_ITERS}  --warmup {DEFAULT_WARMUP}\n\
+         Defaults: --iters {DEFAULT_ITERS}  --warmup {DEFAULT_WARMUP}  --sf 0.1\n\
          \n\
-         Dataset: bench/data/ldbc-sf0.1.gdb (run ./target/release/bench_setup\n\
-         once to build it)."
+         Datasets: bench/data/ldbc-sf{{0.1,0.3}}.gdb. SF0.1 is auto-built\n\
+         by bench_setup; SF0.3 must be built separately."
     );
 }
 
@@ -250,6 +339,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut iters = DEFAULT_ITERS;
     let mut warmup = DEFAULT_WARMUP;
+    let mut sf = "0.1".to_string();
     let mut i = 1;
     let need_value = |i: usize, flag: &str| -> &str {
         if i + 1 >= args.len() {
@@ -274,6 +364,10 @@ fn main() {
                 });
                 i += 2;
             }
+            "--sf" => {
+                sf = need_value(i, "--sf").to_string();
+                i += 2;
+            }
             "-h" | "--help" => {
                 print_usage(&args[0]);
                 return;
@@ -290,29 +384,133 @@ fn main() {
         std::process::exit(1);
     }
 
-    ensure_dataset();
+    let gdb_path: &str = match sf.as_str() {
+        "0.1" => SF01_GDB,
+        "0.3" => SF03_GDB,
+        other => {
+            eprintln!("--sf must be 0.1 or 0.3, got {other:?}");
+            std::process::exit(1);
+        }
+    };
 
-    println!("db;category;case;phase;iter;ns;flags");
-    bench_db(Path::new(SF01_GDB), iters, warmup);
-}
+    if sf == "0.1" {
+        ensure_dataset();
+    } else if !Path::new(gdb_path).exists() {
+        eprintln!("missing {gdb_path} for SF{sf}; build it first via bench_setup or import.");
+        std::process::exit(1);
+    }
 
-fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
+    println!("backend;db;category;case;phase;iter;ns;flags");
+    let db_path = Path::new(gdb_path);
     let path_str = db_path.display().to_string();
-    eprintln!("\n=== {path_str} ===");
+
+    // RSS sampler. Snapshot baseline now (pre-open) so deltas
+    // reflect engine + DB state, not Rust runtime + sysinfo overhead.
+    let mut sys = System::new_with_specifics(
+        RefreshKind::new().with_processes(ProcessRefreshKind::new().with_memory()),
+    );
+    let rss_baseline = rss_mb(&mut sys);
+    let db_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+    let db_size_mib = db_bytes as f64 / (1024.0 * 1024.0);
+    eprintln!(
+        "Setup: db_path = {}\n       db_size = {:.1} MiB ({} bytes)\n       rss_baseline = {:.1} MiB",
+        path_str, db_size_mib, db_bytes, rss_baseline,
+    );
+
+    // ---- lazy backend ----
+    eprintln!("\n=== lazy: {path_str} ===");
     let t0 = Instant::now();
-    let store = LazyGraphStore::open(db_path).unwrap_or_else(|e| {
+    let lazy = LazyGraphStore::open(db_path).unwrap_or_else(|e| {
         eprintln!("failed to open .gdb {path_str}: {e}");
         std::process::exit(1);
     });
+    let lazy_open_secs = t0.elapsed().as_secs_f64();
+    let rss_after_lazy_open = rss_mb(&mut sys);
     eprintln!(
-        "  {} nodes / {} edges in {:.2}s",
-        store.node_count(),
-        store.edge_count(),
-        t0.elapsed().as_secs_f64()
+        "  open_time     = {:.2}s\n  graph         = {} nodes / {} edges\n  rss_after_open = {:.1} MiB (+{:.1} over baseline)",
+        lazy_open_secs,
+        lazy.node_count(),
+        lazy.edge_count(),
+        rss_after_lazy_open,
+        rss_after_lazy_open - rss_baseline,
     );
-    let active = store.catalog().active_schema();
-    let rt = Runtime::new(&store);
+    let active = lazy.catalog().active_schema().clone();
+    let rt_lazy = Runtime::new(&lazy);
+    let mut peak_rss_lazy = rss_after_lazy_open;
+    bench_db(
+        "lazy",
+        &path_str,
+        &active,
+        &rt_lazy,
+        iters,
+        warmup,
+        &mut sys,
+        &mut peak_rss_lazy,
+    );
+    eprintln!(
+        "  peak_rss_loop = {:.1} MiB (+{:.1} over baseline)",
+        peak_rss_lazy,
+        peak_rss_lazy - rss_baseline,
+    );
 
+    // ---- disk backend ----
+    drop(rt_lazy);
+    drop(lazy);
+    eprintln!("\n=== disk: {path_str} ===");
+    let t0 = Instant::now();
+    let disk = DiskGraphStore::open(db_path).unwrap_or_else(|e| {
+        eprintln!("failed to open .gdb {path_str} (disk backend): {e}");
+        std::process::exit(1);
+    });
+    let disk_open_secs = t0.elapsed().as_secs_f64();
+    let rss_after_disk_open = rss_mb(&mut sys);
+    eprintln!(
+        "  open_time     = {:.2}s\n  rss_after_open = {:.1} MiB (+{:.1} over baseline)",
+        disk_open_secs,
+        rss_after_disk_open,
+        rss_after_disk_open - rss_baseline,
+    );
+    let rt_disk = Runtime::new(&disk);
+    let mut peak_rss_disk = rss_after_disk_open;
+    bench_db(
+        "disk",
+        &path_str,
+        &active,
+        &rt_disk,
+        iters,
+        warmup,
+        &mut sys,
+        &mut peak_rss_disk,
+    );
+    eprintln!(
+        "  peak_rss_loop = {:.1} MiB (+{:.1} over baseline)",
+        peak_rss_disk,
+        peak_rss_disk - rss_baseline,
+    );
+}
+
+fn rss_mb(sys: &mut System) -> f64 {
+    let pid = Pid::from_u32(std::process::id());
+    sys.refresh_process_specifics(pid, ProcessRefreshKind::new().with_memory());
+    sys.process(pid)
+        .map(|p| p.memory() as f64 / (1024.0 * 1024.0))
+        .unwrap_or(0.0)
+}
+
+// Threading 8 args is fine here: this fn has one call site (per-backend
+// dispatch in main) and lifting them into a struct adds ceremony
+// without clarity. Bench-internal only.
+#[allow(clippy::too_many_arguments)]
+fn bench_db<G: GraphAccess>(
+    backend: &str,
+    path_str: &str,
+    active: &Schema,
+    rt: &Runtime<'_, G>,
+    iters: usize,
+    warmup: usize,
+    sys: &mut System,
+    peak_rss: &mut f64,
+) {
     const TABLE_WIDTH: usize = 103; // sum of the format widths below + separators
     eprintln!(
         "{:<10} {:<28} {:>13} {:>15} {:>11} {:>9} {:>11}",
@@ -326,8 +524,14 @@ fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
 
     let mut warned_count = 0usize;
     for case in CASES {
-        if run_case(&path_str, &active, &rt, case, iters, warmup) {
+        if run_case(backend, path_str, active, rt, case, iters, warmup) {
             warned_count += 1;
+        }
+        // Sample RSS per case (cheap; once per ~iters runs). Tracks
+        // the high-water mark for the per-backend peak emit.
+        let cur = rss_mb(sys);
+        if cur > *peak_rss {
+            *peak_rss = cur;
         }
     }
     eprintln!("{}", "-".repeat(TABLE_WIDTH));
@@ -354,10 +558,11 @@ fn bench_db(db_path: &Path, iters: usize, warmup: usize) {
 /// a soundness warning (outcome ≠ expected, OR `Outcome::Empty` with a
 /// non-zero rt_unchk row count). Caller tallies these for the per-DB
 /// summary line at the bottom of the table.
-fn run_case(
+fn run_case<G: GraphAccess>(
+    backend: &str,
     db_path: &str,
-    active: &gqlrust::typing::variable_type::Schema,
-    rt: &Runtime<'_, LazyGraphStore>,
+    active: &Schema,
+    rt: &Runtime<'_, G>,
     case: &Case,
     iters: usize,
     warmup: usize,
@@ -406,7 +611,15 @@ fn run_case(
         };
         if !is_warmup {
             compile_chk_samples.push(compile_chk_ns);
-            csv_row(db_path, case, "compile_chk", n - warmup, compile_chk_ns, "");
+            csv_row(
+                backend,
+                db_path,
+                case,
+                "compile_chk",
+                n - warmup,
+                compile_chk_ns,
+                "",
+            );
         }
 
         // ---- Unchecked compile + runtime ----
@@ -416,6 +629,7 @@ fn run_case(
         if !is_warmup {
             compile_unchk_samples.push(compile_unchk_ns);
             csv_row(
+                backend,
                 db_path,
                 case,
                 "compile_unchk",
@@ -444,7 +658,15 @@ fn run_case(
                 soundness_violations += 1;
                 max_violation_rows = max_violation_rows.max(rows);
             }
-            csv_row(db_path, case, "rt_unchk", n - warmup, rt_unchk_ns, &flag);
+            csv_row(
+                backend,
+                db_path,
+                case,
+                "rt_unchk",
+                n - warmup,
+                rt_unchk_ns,
+                &flag,
+            );
         }
     }
 
@@ -543,9 +765,10 @@ fn run_case(
     outcome_mismatch || empty_unsound
 }
 
-fn csv_row(db: &str, case: &Case, phase: &str, iter: usize, ns: u128, flag: &str) {
+fn csv_row(backend: &str, db: &str, case: &Case, phase: &str, iter: usize, ns: u128, flag: &str) {
     println!(
-        "{};{};{};{};{};{};{}",
+        "{};{};{};{};{};{};{};{}",
+        backend,
         db,
         case.category.label(),
         case.id,

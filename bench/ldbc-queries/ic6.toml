@@ -6,17 +6,35 @@ name = "Tag co-occurrence"
 status = "blocked"
 
 blocked_reason = """
-Ranked result: `ORDER BY` per spec.
+Tested 2026-05-05 (re-checked after `<>` alias landed):
+  - `WHERE person <> otherPerson` — bare-node comparison; needs
+    property access (`person.id <> otherPerson.id`).
+  - `WHERE otherTag.name <> $tagName` — works directly now
+    (string-property comparison; `<>` is fine post-fix).
+  - `COUNT(post)` — bare-node aggregate; needs `COUNT(post.id)` or
+    `COUNT(*)`.
+  - `GROUP BY otherTagName` — RETURN-clause alias not visible in
+    GROUP BY (`unexpected bare variable 'otherTagName'`). Workaround:
+    `GROUP BY otherTag.name` (raw expression instead of alias).
 """
 
 required_features = [
-    "ORDER BY",
+    "bare-node comparison (or property-access rewrite)",
+    "COUNT over bare node references",
+    "GROUP BY by RETURN-clause alias",
 ]
 
 params_file = "interactive_6_param.txt"
 param_columns = ["personId", "tagName"]
 param_types = ["int", "string"]
 query = """
-IC06_QUERY_PLACEHOLDER
-Params (interactive_6_param.txt header): personId | tagName
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)<-[:hasCreator]-(post:Post)-[:hasTag]->(:Tag {name: $tagName})
+MATCH (post)-[:hasTag]->(otherTag:Tag)
+WHERE otherTag.name <> $tagName
+RETURN otherTag.name AS otherTagName, COUNT(post) AS postCount
+GROUP BY otherTagName
+ORDER BY postCount DESC, otherTagName ASC
+LIMIT 10
 """

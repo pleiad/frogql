@@ -6,16 +6,36 @@ name = "New groups"
 status = "blocked"
 
 blocked_reason = """
-Ranked result: `ORDER BY` per spec.
+Tested 2026-05-05 (re-checked after `<>` alias landed):
+  - `WHERE person <> otherPerson` — bare-node comparison; needs
+    property access (`person.id <> otherPerson.id`).
+  - `COUNT(post)` — bare-node aggregate; needs `COUNT(post.id)` or
+    `COUNT(*)` (post comes from OPTIONAL MATCH so semantics matter).
+  - `CAST(forum.id AS INTEGER)` in ORDER BY — `CAST` syntax absent;
+    plain `forum.id ASC` would sort identically since `Forum.id` is
+    natively int.
+With those three rewrites the query would parse; we hold off on
+shipping as 'minimal modifications' — the property-access rewrite
+silently translates a bare-node comparison into ID comparison, which
+is semantically equivalent on LDBC IDs but loses spec faithfulness.
 """
 
 required_features = [
-    "ORDER BY",
+    "bare-node comparison (or property-access rewrite)",
+    "COUNT over bare node references",
+    "CAST(... AS INTEGER) (or sort directly on int columns)",
 ]
 
 params_file = "interactive_5_param.txt"
 param_columns = ["personId", "minDate"]
 query = """
-IC05_QUERY_PLACEHOLDER
-Params (interactive_5_param.txt header): personId | minDate
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)<-[hm:hasMember]-(forum:Forum)
+WHERE hm.creationDate > $minDate
+OPTIONAL MATCH (otherPerson)<-[:hasCreator]-(post:Post)<-[:containerOf]-(forum)
+RETURN forum.title AS forumTitle, COUNT(post) AS postCount
+GROUP BY forumTitle, forum.id
+ORDER BY postCount DESC, CAST(forum.id AS INTEGER) ASC
+LIMIT 20
 """
