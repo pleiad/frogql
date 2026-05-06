@@ -1,17 +1,31 @@
-# GQLite
+# froGQL
 
 A Rust graph database implementing ISO GQL path pattern matching, with single-file storage inspired by SQLite.
 
-## Quick Start
+## Install
 
+**Python (PyPI)**:
+```bash
+pip install frogql
+```
+Wheels ship for CPython 3.8+ on Linux (x86_64, aarch64), macOS (x86_64, arm64), and Windows (x86_64).
+
+**CLI / library (build from source)**:
 ```bash
 cargo build --release
+```
 
+## Quick Start (REPL)
+
+```bash
 # Import a CSV dataset and open the REPL
-./target/release/gqlite movies.gdb --import-csv path/to/Spanner_Instance/
+./target/release/frogql movies.gdb --import-csv path/to/Spanner_Instance/
 
 # Open an existing database
-./target/release/gqlite movies.gdb
+./target/release/frogql movies.gdb
+
+# Skip the typechecker for the session
+./target/release/frogql movies.gdb --no-typecheck
 ```
 
 ```
@@ -60,17 +74,17 @@ The `examples/` directory contains ready-to-use `.gdb` files:
 | fraud_detection.gdb | 14,550 | 31,564 | Financial fraud (Transaction, Account, TRIGGERED_ALERT, ...) |
 | bom.gdb | 1,500 | 2,248 | Bill of Materials (Product, Assembly, ConsistsOf, ...) |
 
-Regenerate from CSV: `./target/release/gqlite examples/movies.gdb --import-csv <csv_dir>`
+Regenerate from CSV: `./target/release/frogql examples/movies.gdb --import-csv <csv_dir>`
 
 ## Data Import
 
-GQLite reads graph data from three formats. Every import path also runs
+froGQL reads graph data from three formats. Every import path also runs
 `infer_simple_schema` and persists the result as the `DEFAULT` GRAPH TYPE,
 so the typechecker is useful immediately after the first open.
 
 **CSV with config** (Text2GQL / Cypher datasets):
 ```bash
-gqlite mydb.gdb --import-csv path/to/Spanner_Instance/
+frogql mydb.gdb --import-csv path/to/Spanner_Instance/
 # Reads spanner_import_config.json + CSV files.
 # Node CSVs: detected as files without SRC_ID/DST_ID columns; ID column
 #   resolved by trying `vid`, `<Label>_id`, any `*_id`, then column 0.
@@ -81,7 +95,7 @@ gqlite mydb.gdb --import-csv path/to/Spanner_Instance/
 
 **LDBC SNB CSV-Basic**:
 ```bash
-gqlite mydb.gdb --import-ldbc-csv path/to/social_network-sf0.1-CsvBasic-LongDateFormatter/
+frogql mydb.gdb --import-ldbc-csv path/to/social_network-sf0.1-CsvBasic-LongDateFormatter/
 # Three-pass loader:
 #   1. nodes — each LDBC entity owns its id space (Place id 0 ≠ Organisation id 0),
 #      so the loader keys node ids by (entity_label, external_id).
@@ -92,7 +106,7 @@ gqlite mydb.gdb --import-ldbc-csv path/to/social_network-sf0.1-CsvBasic-LongDate
 
 **JSON**:
 ```bash
-gqlite mydb.gdb --import-json graph.json
+frogql mydb.gdb --import-json graph.json
 ```
 
 ```json
@@ -233,7 +247,7 @@ Two regimes at runtime:
 
 ## Graph Types
 
-GQLite has a persistent catalog of named graph types. The catalog lives
+froGQL has a persistent catalog of named graph types. The catalog lives
 inside the `.gdb` and survives close/reopen. The DDL is ISO-style:
 
 ```
@@ -336,8 +350,8 @@ type allows any properties.
 ### Python bindings
 
 ```python
-import gqlite
-conn = gqlite.open("movies.gdb")
+import frogql
+conn = frogql.open("movies.gdb")
 conn.execute("CREATE GRAPH TYPE strict AS { (:Movie {title STRING}) }")
 # → {"ok": True, "kind": "ddl", "message": "GRAPH TYPE 'strict' created..."}
 
@@ -361,7 +375,7 @@ conn.graph_types()
 
 ## Storage
 
-GQLite uses a single `.gdb` file with 4KB pages:
+froGQL uses a single `.gdb` file with 4KB pages:
 - All node/edge IDs are `u32` internally (no string overhead at query time)
 - Three storage backends: in-memory `Graph`, `LazyGraphStore` (topology in RAM, labels/props from disk via LRU page cache), `DiskGraphStore` (minimal RAM)
 - The REPL uses `LazyGraphStore` for efficient memory usage on large graphs
@@ -386,7 +400,7 @@ in detail.
 
 ## Secondary indexes
 
-GQLite auto-builds hash indexes on `(label, prop)` pairs whose values are
+froGQL auto-builds hash indexes on `(label, prop)` pairs whose values are
 unique within the label, in a single O(N) pass at `LazyGraphStore::open`.
 On the LDBC SF0.1 dataset that captures `Person.id`, `Tag.name`,
 `Country.name`, `TagClass.name`, every other `*_id` column the loader
