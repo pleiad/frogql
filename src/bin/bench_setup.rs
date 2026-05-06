@@ -1,20 +1,27 @@
-//! `bench_setup` — fetch the LDBC SF0.1 dataset + substitution
-//! parameters and build the frogql `.gdb`. Idempotent: each step
-//! checks for its output and skips if present. Pass `--rebuild` to
-//! force the .gdb to rebuild even if it exists.
+//! `bench_setup` — fetch an LDBC SNB dataset + substitution parameters
+//! and build the frogql `.gdb`. Idempotent: each step checks for its
+//! output and skips if present. Pass `--rebuild` to force the .gdb to
+//! rebuild even if it exists.
 //!
 //! Usage:
-//!     bench_setup [--data-dir bench/data] [--rebuild] [--skip-download]
+//!     bench_setup [--data-dir bench/data] [--sf 0.1] [--rebuild] [--skip-download]
 //!
 //! Defaults:
 //!   --data-dir   bench/data
+//!   --sf         0.1
 //!   --skip-download   off (set to use already-present archives only)
 //!
-//! The companion bench (`ldbc_bench`) expects the layout this script
-//! produces:
-//!   <data-dir>/ldbc-sf0.1.gdb
-//!   <data-dir>/ldbc-sf0.1/social_network-sf0.1-CsvBasic-LongDateFormatter/
-//!   <data-dir>/substitution_parameters-sf0.1/substitution_parameters-sf0.1/
+//! Pass `--sf 0.3` (or any other LDBC scale factor — `1`, `3`, `10`,
+//! ...) to fetch a larger dataset. The output paths and URLs are
+//! parametrized on the SF string so different scales coexist under
+//! the same `--data-dir`. The companion bench (`ldbc_bench`,
+//! `typecheck_bench`) reads the same `--sf` flag and points at the
+//! per-SF artifacts.
+//!
+//! Layout produced (with `<SF>` replaced by the `--sf` value):
+//!   <data-dir>/ldbc-sf<SF>.gdb
+//!   <data-dir>/ldbc-sf<SF>/social_network-sf<SF>-CsvBasic-LongDateFormatter/
+//!   <data-dir>/substitution_parameters-sf<SF>/substitution_parameters-sf<SF>/
 
 use std::env;
 use std::fs;
@@ -23,20 +30,23 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-const DATASET_URL: &str = "https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf0.1-CsvBasic-LongDateFormatter.tar.zst";
-const PARAMS_URL: &str =
-    "https://datasets.ldbcouncil.org/snb-interactive-v1/substitution_parameters-sf0.1.tar.zst";
+const DATASET_URL_TEMPLATE: &str =
+    "https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf{SF}-CsvBasic-LongDateFormatter.tar.zst";
+const PARAMS_URL_TEMPLATE: &str =
+    "https://datasets.ldbcouncil.org/snb-interactive-v1/substitution_parameters-sf{SF}.tar.zst";
 
 fn print_usage(prog: &str) {
     eprintln!(
-        "Usage: {prog} [--data-dir <dir>] [--rebuild] [--skip-download]\n\
+        "Usage: {prog} [--data-dir <dir>] [--sf <factor>] [--rebuild] [--skip-download]\n\
          \n\
-         Downloads the LDBC SF0.1 dataset + substitution params, then\n\
-         builds <data-dir>/ldbc-sf0.1.gdb via frogql --import-ldbc-csv.\n\
-         Idempotent — re-running with the artifacts present is a no-op.\n\
+         Downloads an LDBC SNB dataset + substitution params at the\n\
+         given scale factor, then builds <data-dir>/ldbc-sf<SF>.gdb\n\
+         via frogql --import-ldbc-csv. Idempotent — re-running with\n\
+         the artifacts present is a no-op.\n\
          \n\
          Defaults:\n\
          \t--data-dir bench/data\n\
+         \t--sf 0.1 (LDBC scale factor; pass 0.3, 1, 3, 10, ... for larger)\n\
          \t--skip-download is off (set to use only already-present archives)\n\
          \t--rebuild is off (force-rebuild the .gdb even if present)"
     );
@@ -45,11 +55,10 @@ fn print_usage(prog: &str) {
 fn main() {
     let args: Vec<String> = env::args().collect();
     let mut data_dir = PathBuf::from("bench/data");
+    let mut sf: String = "0.1".to_string();
     let mut rebuild = false;
     let mut skip_download = false;
     let mut i = 1;
-    // Helper: fail cleanly when a flag is missing its value rather
-    // than panicking with index-out-of-bounds.
     let need_value = |i: usize, flag: &str| -> &str {
         if i + 1 >= args.len() {
             eprintln!("{flag} requires a value");
@@ -61,6 +70,10 @@ fn main() {
         match args[i].as_str() {
             "--data-dir" => {
                 data_dir = PathBuf::from(need_value(i, "--data-dir"));
+                i += 2;
+            }
+            "--sf" => {
+                sf = need_value(i, "--sf").to_string();
                 i += 2;
             }
             "--rebuild" => {
@@ -86,16 +99,18 @@ fn main() {
     fs::create_dir_all(&data_dir)
         .unwrap_or_else(|e| fail(&format!("create data-dir {}: {e}", data_dir.display())));
     eprintln!("data-dir: {}", data_dir.display());
+    eprintln!("scale:    sf{sf}");
+
+    let dataset_url = DATASET_URL_TEMPLATE.replace("{SF}", &sf);
+    let params_url = PARAMS_URL_TEMPLATE.replace("{SF}", &sf);
 
     // Step 1: dataset.
-    let dataset_archive = data_dir.join("ldbc-sf0.1.tar.zst");
-    let dataset_dir = data_dir.join("ldbc-sf0.1");
-    let csv_dir = dataset_dir.join("social_network-sf0.1-CsvBasic-LongDateFormatter");
-    // Idempotency check: a partially-extracted directory can exist if
-    // an earlier run was interrupted. Verifying a key sub-path that
-    // only appears post-extraction (the LDBC layout's `dynamic/` dir)
-    // rejects the partial-extract case where the top-level dir exists
-    // but is empty or incomplete.
+    let dataset_archive = data_dir.join(format!("ldbc-sf{sf}.tar.zst"));
+    let dataset_dir = data_dir.join(format!("ldbc-sf{sf}"));
+    let csv_dir = dataset_dir.join(format!("social_network-sf{sf}-CsvBasic-LongDateFormatter"));
+    // Idempotency guard: a partially-extracted dir can exist from an
+    // interrupted run. Verify a key sub-path that only appears post-
+    // extraction (`dynamic/`).
     let dataset_extracted = csv_dir.is_dir() && csv_dir.join("dynamic").is_dir();
     if dataset_extracted {
         eprintln!("[skip] dataset already extracted at {}", csv_dir.display());
@@ -107,7 +122,7 @@ fn main() {
                     dataset_archive.display()
                 ));
             }
-            download(DATASET_URL, &dataset_archive);
+            download(&dataset_url, &dataset_archive);
         } else {
             eprintln!(
                 "[skip] dataset archive already at {}",
@@ -118,11 +133,9 @@ fn main() {
     }
 
     // Step 2: substitution params.
-    let params_archive = data_dir.join("substitution_parameters-sf0.1.tar.zst");
-    let params_dir = data_dir.join("substitution_parameters-sf0.1");
-    let params_inner = params_dir.join("substitution_parameters-sf0.1");
-    // Same partial-extract guard: check for a known file (IC2's param
-    // file is always there post-extract) instead of just the dir.
+    let params_archive = data_dir.join(format!("substitution_parameters-sf{sf}.tar.zst"));
+    let params_dir = data_dir.join(format!("substitution_parameters-sf{sf}"));
+    let params_inner = params_dir.join(format!("substitution_parameters-sf{sf}"));
     let params_extracted =
         params_inner.is_dir() && params_inner.join("interactive_2_param.txt").is_file();
     if params_extracted {
@@ -138,7 +151,7 @@ fn main() {
                     params_archive.display()
                 ));
             }
-            download(PARAMS_URL, &params_archive);
+            download(&params_url, &params_archive);
         } else {
             eprintln!(
                 "[skip] params archive already at {}",
@@ -148,9 +161,8 @@ fn main() {
         extract_tar_zst(&params_archive, &params_dir);
     }
 
-    // Step 3: .gdb. Shells out to the frogql binary's --import-ldbc-csv
-    // path so the .gdb is built by exactly the same code the REPL uses.
-    let gdb_path = data_dir.join("ldbc-sf0.1.gdb");
+    // Step 3: .gdb.
+    let gdb_path = data_dir.join(format!("ldbc-sf{sf}.gdb"));
     if gdb_path.exists() && !rebuild {
         eprintln!(
             "[skip] .gdb already at {} (pass --rebuild to force)",
@@ -173,8 +185,6 @@ fn main() {
             gdb_path.display()
         );
     } else {
-        // ldbc_bench's --params-dir default points at bench/data/...,
-        // so a custom data-dir needs the flag set explicitly.
         eprintln!(
             "  run the bench with:\n\
              \t./target/release/ldbc_bench {} \\\n\
@@ -204,7 +214,6 @@ fn download(url: &str, dest: &Path) {
     let mut file =
         fs::File::create(dest).unwrap_or_else(|e| fail(&format!("create {}: {e}", dest.display())));
 
-    // Copy with simple progress logging every ~10 MiB.
     let mut buf = vec![0u8; 1 << 20]; // 1 MiB
     let mut total_read: u64 = 0;
     let mut next_log: u64 = 10 << 20;
@@ -265,7 +274,6 @@ fn build_gdb(gdb_path: &Path, csv_dir: &Path) {
     eprintln!("building {} from {}", gdb_path.display(), csv_dir.display());
     let t0 = Instant::now();
 
-    // `target/release/frogql` lives next to `target/release/bench_setup`.
     let exe_dir = env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))
