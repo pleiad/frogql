@@ -339,6 +339,16 @@ def main() -> int:
             # both map to `gqlite` (one physical run rewrites the CSV
             # column post-hoc; the stderr stays with the runner name).
             def _normalize(s: str) -> str:
+                # gqlite has two name spaces. The CSV `backend` column
+                # uses `lazy-baseline` / `lazy-no-fold` / `disk` / etc.
+                # (set by ldbc_bench, distinguishes ablation modes).
+                # The stderr filename stems use `gqlite-baseline` /
+                # `gqlite-no-fold` (set by run_all.sh, distinguishes
+                # ablation modes for human-readable filenames). Both
+                # have to collapse to the same logical identity so the
+                # cross-source check ("CSV said this system measured;
+                # did its stderr emit a hash?") doesn't flag every
+                # ablation cell as MISS.
                 if s in (
                     "lazy",
                     "lazy-baseline",
@@ -346,6 +356,8 @@ def main() -> int:
                     "disk",
                     "disk-baseline",
                     "memory",
+                    "gqlite-baseline",
+                    "gqlite-no-fold",
                 ):
                     return "gqlite"
                 if s == "graphqlite-cypher":
@@ -355,8 +367,9 @@ def main() -> int:
                 return s
 
             queries_h = sorted({q for (q, _) in by_cell_h})
-            mismatches_total = 0
-            agree_total = 0
+            mismatches_total = 0  # no consensus — all hashes distinct
+            consensus_total = 0   # majority + ≥1 outlier
+            agree_total = 0       # full agreement
             missing_total = 0
             for q in queries_h:
                 cells = sorted(
@@ -385,28 +398,71 @@ def main() -> int:
                         print(f"    OK   row {r}: {n_systems}/{n_systems} "
                               f"systems agree (hash={h[:12]}...)")
                     else:
-                        mismatches_total += 1
-                        print(f"    WARN row {r}: HASH DISAGREES across systems")
-                        for s in sorted(vmap):
-                            count, h = vmap[s]
-                            print(f"           {s}: count={count} "
-                                  f"hash={h[:12]}...")
+                        # Compute consensus: which hash do most systems agree
+                        # on? If there's a strict majority (more than half),
+                        # report it as a "consensus with outliers" — a much
+                        # weaker but still informative signal than full
+                        # agreement. The graphqlite int64-projection bug on
+                        # IC2 and the row-count divergences on IC5/IC6/IC9
+                        # all manifest as "3 systems agree byte-for-byte,
+                        # graphqlite differs"; surfacing that explicitly
+                        # avoids burying byte-identical gqlite-vs-kuzu
+                        # agreement under generic "HASH DISAGREES" noise.
+                        from collections import Counter
+                        hash_counts = Counter(h for (_c, h) in vmap.values())
+                        majority_hash, majority_n = hash_counts.most_common(1)[0]
+                        n_systems = len(vmap)
+                        majority_systems = sorted(
+                            s for s, (_c, h) in vmap.items()
+                            if h == majority_hash
+                        )
+                        outlier_systems = sorted(
+                            s for s, (_c, h) in vmap.items()
+                            if h != majority_hash
+                        )
+                        if majority_n >= 2 and majority_n > n_systems - majority_n:
+                            consensus_total += 1
+                            print(
+                                f"    WARN row {r}: CONSENSUS with outliers "
+                                f"({majority_n}/{n_systems} agree on "
+                                f"{majority_hash[:12]}...): "
+                                f"majority={majority_systems}, "
+                                f"outliers={outlier_systems}"
+                            )
+                            for s in outlier_systems:
+                                count, h = vmap[s]
+                                print(f"           outlier {s}: count={count} "
+                                      f"hash={h[:12]}...")
+                        else:
+                            mismatches_total += 1
+                            print(
+                                f"    WARN row {r}: NO CONSENSUS — "
+                                f"all {n_systems} hashes differ"
+                            )
+                            for s in sorted(vmap):
+                                count, h = vmap[s]
+                                print(f"           {s}: count={count} "
+                                      f"hash={h[:12]}...")
                         print(f"           diff actual rows in:")
                         for s in sorted(vmap):
                             print(f"             {results_dir}/{s}.{q.lower()}.rows.jsonl")
             print()
-            total_cells = agree_total + mismatches_total + missing_total
-            if mismatches_total == 0 and missing_total == 0:
+            total_cells = agree_total + consensus_total + mismatches_total + missing_total
+            if mismatches_total == 0 and missing_total == 0 and consensus_total == 0:
                 print(f"  OK row-content equivalence: {agree_total}/{total_cells} "
                       f"(IC, params_row) cells agreed across systems.")
             else:
                 parts = []
+                if agree_total:
+                    parts.append(f"{agree_total} fully agreed")
+                if consensus_total:
+                    parts.append(f"{consensus_total} consensus-with-outliers")
                 if mismatches_total:
-                    parts.append(f"{mismatches_total} disagreed")
+                    parts.append(f"{mismatches_total} no-consensus")
                 if missing_total:
                     parts.append(f"{missing_total} had missing-system hashes")
-                print(f"  WARN row-content equivalence: {'; '.join(parts)}; "
-                      f"{agree_total} agreed (of {total_cells} total cells).")
+                print(f"  Row-content equivalence: {'; '.join(parts)} "
+                      f"(of {total_cells} total cells).")
                 if mismatches_total:
                     print("  Mismatches: with ORDER BY in the toml the iter-0 "
                           "results are deterministic, so any disagreement is "
