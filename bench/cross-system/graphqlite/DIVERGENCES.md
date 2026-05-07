@@ -127,3 +127,39 @@ graphqlite point at this divergence file.
 **Tested versions**: graphqlite 0.4.4 (PyPI, `pip install graphqlite`).
 If a future version fixes int64 RETURN, this divergence becomes
 moot and the cross-system comparison rises to 3/3 systems.
+
+## graphqlite undirected variable-length expansion `[:rel*N..M]-` follows only outgoing edges
+
+**Symptom**: `MATCH (p:Person {ldbcId: $pid})-[:knows*1..2]-(o:Person) RETURN count(o)`
+returns 0 for some Persons whose 1-hop count is non-zero. Concretely,
+for `pid=24189255811707` (LDBC SF0.1):
+
+```
+1-hop knows (no quantifier): 11 friends
+1-hop knows forward only:    0
+1-hop knows reverse only:    11
+[:knows*1..1]- (undirected):  0  ← BUG. should be 11.
+[:knows*1..2]- (undirected):  0  ← BUG.
+[:knows*1..2]-> (forward):    0
+<-[:knows*1..2]- (reverse):   373
+```
+
+So `-[:rel]-` (no quantifier) is correctly bidirectional, but
+`-[:rel*N..M]-` (variable-length, no arrow heads) is silently
+forward-only. For Persons whose `knows` edges all live in the
+reverse direction in the underlying SQLite table (an artifact of
+LDBC storing each pair once in one direction), the variable-length
+expansion finds zero friends.
+
+**Effect on the bench**: IC11 has been re-translated to use the
+`type` column on `:Organisation` / `:Place` (the loader doesn't
+synthesize `:Company` / `:Country` sub-labels — see "encoding of
+sub-types" in each ic-cypher comment block). After that fix, Kuzu
+and gqlite produce byte-identical IC11 rows, but graphqlite still
+returns 0 on the one IC11 parameter row where the expected result
+is non-empty (LDBC interactive_11_param.txt row 1, person
+`24189255811707`). The graphqlite outlier on this row is a
+graphqlite runtime bug, not a translation bug.
+
+**Tested versions**: graphqlite 0.4.4. Reproduces with the literal
+queries above; not yet reported upstream.
