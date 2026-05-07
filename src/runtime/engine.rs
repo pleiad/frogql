@@ -483,13 +483,18 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
         for m in iter {
             let pattern = m.pattern();
-            let ir_new = self.run_path_pattern(pattern, 0);
             let new_vars = pattern.freevars();
             acc = match m {
-                MatchStatement::Simple { .. } => natural_join(&acc, &ir_new, 0),
-                MatchStatement::Optional { .. } => {
-                    left_outer_join(&acc, &ir_new, &bound_vars, &new_vars)
+                MatchStatement::Simple { .. } => {
+                    let ir_new = self.run_path_pattern(pattern, 0);
+                    natural_join(&acc, &ir_new, 0)
                 }
+                MatchStatement::Optional { .. } => self
+                    .optional_via_bind_pushdown(&acc, pattern, &bound_vars, &new_vars)
+                    .unwrap_or_else(|| {
+                        let ir_new = self.run_path_pattern(pattern, 0);
+                        left_outer_join(&acc, &ir_new, &bound_vars, &new_vars)
+                    }),
             };
             bound_vars.extend(new_vars);
             if limit > 0 && acc.rows.len() >= limit {
@@ -508,6 +513,111 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
 
         acc
+    }
+
+    /// OPTIONAL MATCH bind-pushdown. The naive path evaluates the inner
+    /// pattern globally and then left-outer-joins against the outer rows;
+    /// when the inner pattern's hot variables are already bound by the
+    /// outer (the `OPTIONAL MATCH (otherPerson)<-[:hasCreator]-(post)<-[:containerOf]-(forum)`
+    /// shape over an outer table that already binds `otherPerson` and
+    /// `forum`), that global evaluation enumerates a search space orders
+    /// of magnitude larger than what survives the join. Per-row LTJ with
+    /// the shared variables pinned reduces it to one local intersection
+    /// per outer row — analogous to SQLite's correlated nested-loop with
+    /// index lookup on the inner side.
+    ///
+    /// Returns `None` (caller falls back to global eval + left_outer_join) when:
+    ///   - the optimization is disabled (`GQLITE_DISABLE_OPTIONAL_PUSHDOWN`);
+    ///   - there are no shared variables between outer rows and the inner
+    ///     pattern (no correlation to exploit);
+    ///   - any outer row binds a shared variable to a non-Node value (edges
+    ///     and `Group` repetitions can't be pinned by the LTJ today);
+    ///   - the inner pattern is not LTJ-decomposable (unions, repetitions,
+    ///     any-direction edges).
+    fn optional_via_bind_pushdown(
+        &self,
+        acc: &IntermediateResult,
+        pattern: &PathPattern,
+        bound_vars: &HashSet<String>,
+        new_vars: &HashSet<String>,
+    ) -> Option<IntermediateResult> {
+        if std::env::var("GQLITE_DISABLE_OPTIONAL_PUSHDOWN").is_ok() {
+            return None;
+        }
+        let shared: Vec<String> = bound_vars.intersection(new_vars).cloned().collect();
+        if shared.is_empty() {
+            return None;
+        }
+        let pad_vars: Vec<String> = new_vars.difference(bound_vars).cloned().collect();
+        let index = self.triple_index();
+
+        // Sniff whether the inner pattern is LTJ-decomposable on the first
+        // row whose shared bindings are all Node-typed. The decomposition
+        // is structural (data-independent), so a single None means the
+        // pattern can never be pinned — bail to the global fallback.
+        let mut decomposable_checked = false;
+        let mut out_rows: Vec<ResultRow> = Vec::with_capacity(acc.rows.len());
+
+        for r1 in &acc.rows {
+            let mut pin_pairs: Vec<(&str, u32)> = Vec::with_capacity(shared.len());
+            let mut row_pinnable = true;
+            for v in &shared {
+                match r1.assignment.get(v) {
+                    Some(PathValue::Node(id)) => pin_pairs.push((v.as_str(), *id)),
+                    _ => {
+                        row_pinnable = false;
+                        break;
+                    }
+                }
+            }
+
+            if !row_pinnable {
+                // Edge / Nothing / Group / unbound: inner can't unify on
+                // anything but a Node here, so emit the padded outer row
+                // straight away. This preserves the LEFT-OUTER semantics
+                // for rows the previous OPTIONAL left as Nothing.
+                let mut padded = r1.assignment.clone();
+                for v in &pad_vars {
+                    padded.extend(v.clone(), PathValue::Nothing);
+                }
+                out_rows.push(ResultRow::with_paths(r1.paths.clone(), padded));
+                continue;
+            }
+
+            let inner =
+                pattern_extract::try_ltj_with_pins(self.graph, pattern, &index, 0, &pin_pairs)?;
+            decomposable_checked = true;
+
+            if inner.rows.is_empty() {
+                let mut padded = r1.assignment.clone();
+                for v in &pad_vars {
+                    padded.extend(v.clone(), PathValue::Nothing);
+                }
+                out_rows.push(ResultRow::with_paths(r1.paths.clone(), padded));
+            } else {
+                let mut matched_any = false;
+                for r2 in &inner.rows {
+                    if r1.assignment.can_unify(&r2.assignment) {
+                        matched_any = true;
+                        out_rows.push(ResultRow::join(r1, r2, r1.assignment.unify(&r2.assignment)));
+                    }
+                }
+                if !matched_any {
+                    let mut padded = r1.assignment.clone();
+                    for v in &pad_vars {
+                        padded.extend(v.clone(), PathValue::Nothing);
+                    }
+                    out_rows.push(ResultRow::with_paths(r1.paths.clone(), padded));
+                }
+            }
+        }
+
+        // If the loop never reached `try_ltj_with_pins` (every row had a
+        // non-Node shared binding), we never confirmed decomposability —
+        // but every row was already emitted as padded, so the result is
+        // semantically equivalent to the fallback. Return it.
+        let _ = decomposable_checked;
+        Some(IntermediateResult::new(out_rows))
     }
 
     fn run_row_by_row(

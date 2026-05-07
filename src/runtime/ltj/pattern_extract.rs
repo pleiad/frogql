@@ -67,7 +67,7 @@ pub fn try_ltj<G: GraphAccess>(
     index: &TripleIndex,
     limit: usize,
 ) -> Option<IntermediateResult> {
-    try_ltj_inner(graph, pattern, index, limit, None)
+    try_ltj_inner(graph, pattern, index, limit, &[])
 }
 
 /// Like `try_ltj` but with an externally supplied variable pin: `pin_var`
@@ -86,7 +86,24 @@ pub fn try_ltj_with_pin<G: GraphAccess>(
     pin_var: &str,
     pin_id: u32,
 ) -> Option<IntermediateResult> {
-    try_ltj_inner(graph, pattern, index, limit, Some((pin_var, pin_id)))
+    try_ltj_inner(graph, pattern, index, limit, &[(pin_var, pin_id)])
+}
+
+/// Multi-variable extension of `try_ltj_with_pin`. Each `(name, id)` pair
+/// pre-fixes the named variable in the pattern's decomposition before the
+/// LTJ runs — equivalent to substituting `Term::Variable(v)` with
+/// `Term::Constant(id)` in every triple position. Used by the OPTIONAL
+/// MATCH bind-pushdown path: the engine correlates the inner pattern with
+/// each outer-row's shared-var bindings, avoiding a global pattern
+/// enumeration and the subsequent left-outer hash-join.
+pub fn try_ltj_with_pins<G: GraphAccess>(
+    graph: &G,
+    pattern: &PathPattern,
+    index: &TripleIndex,
+    limit: usize,
+    pins: &[(&str, u32)],
+) -> Option<IntermediateResult> {
+    try_ltj_inner(graph, pattern, index, limit, pins)
 }
 
 fn try_ltj_inner<G: GraphAccess>(
@@ -94,7 +111,7 @@ fn try_ltj_inner<G: GraphAccess>(
     pattern: &PathPattern,
     index: &TripleIndex,
     limit: usize,
-    external_pin: Option<(&str, u32)>,
+    external_pins: &[(&str, u32)],
 ) -> Option<IntermediateResult> {
     let mut decomp = decompose(pattern, index)?;
 
@@ -116,24 +133,27 @@ fn try_ltj_inner<G: GraphAccess>(
         }
     };
 
-    // External pin from the BTree-LTJ-real ORDER BY path. Resolve the
-    // variable name to an id, substitute its term positions to a constant
-    // (mirroring `fold_indexed_constants`), and drop the satisfied label
-    // / attr filters for the pinned variable.
-    if let Some((pin_name, pin_id)) = external_pin {
+    // External pins. Used by:
+    // (a) the BTree-LTJ-real ORDER BY path — one pin per (sort-value, id);
+    // (b) the OPTIONAL MATCH bind-pushdown — one pin per shared variable
+    //     between the outer binding row and the inner pattern.
+    // Resolve each name to its var_id, substitute term positions to a
+    // constant (mirroring `fold_indexed_constants`), and drop the satisfied
+    // label / attr filters for the pinned variable.
+    for (pin_name, pin_id) in external_pins {
         if let Some(pin_var_id) = decomp
             .var_id_to_name
             .iter()
-            .position(|n| n == pin_name)
+            .position(|n| n == *pin_name)
             .map(|i| i as u8)
         {
             if !pinned.iter().any(|(v, _)| *v == pin_var_id) {
-                pinned.push((pin_var_id, pin_id));
+                pinned.push((pin_var_id, *pin_id));
                 for triple in decomp.triples.iter_mut() {
                     for term in triple.terms.iter_mut() {
                         if let Term::Variable(v) = term {
                             if *v == pin_var_id {
-                                *term = Term::Constant(pin_id);
+                                *term = Term::Constant(*pin_id);
                             }
                         }
                     }
