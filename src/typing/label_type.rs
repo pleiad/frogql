@@ -100,6 +100,31 @@ impl LabelType {
             _ => vec![],
         }
     }
+
+    /// Or-of-leaves candidate labels — for the btree multi-label merge
+    /// path. Returns `Some([X, Y, …])` when the type is a pure
+    /// disjunction of bare labels (e.g. `Comment | Post`), so a node
+    /// satisfying the type carries at least one of the listed labels.
+    /// Returns `None` for shapes that the merge can't safely cover:
+    ///   - Anything with `And` / `Neg` / `Star` / `Top` / `Empty`. The
+    ///     `required_labels()` path already handles And-of-Labels via a
+    ///     single btree pick; mixing And under Or would over-include
+    ///     candidates and the LTJ filter chain may not correctly
+    ///     re-prune them in this code path.
+    ///
+    /// The returned slice is unordered and may contain duplicates;
+    /// callers should sort + dedup if they rely on uniqueness.
+    pub fn or_candidate_labels(&self) -> Option<Vec<&str>> {
+        match self {
+            LabelType::Label(s) => Some(vec![s.as_str()]),
+            LabelType::Or(a, b) => {
+                let mut left = a.or_candidate_labels()?;
+                left.extend(b.or_candidate_labels()?);
+                Some(left)
+            }
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for LabelType {

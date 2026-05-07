@@ -351,21 +351,6 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             return None;
         }
 
-        let labels = labels_for_var(&query.matches, var);
-        if labels.is_empty() {
-            return None;
-        }
-        let asc = matches!(primary.dir, SortDir::Asc);
-        let (label, ordered_ids) = labels.iter().find_map(|l| {
-            self.graph
-                .lookup_node_ordered(l, attr, asc)
-                .map(|ids| (l.clone(), ids))
-        })?;
-        let label_total = self.graph.nodes_with_label(&label)?.len();
-        if ordered_ids.len() != label_total {
-            return None;
-        }
-
         // Collapse the match chain into the same shape `run_match_chain`
         // would feed to LTJ. This path supports only single-MATCH chains
         // (no OPTIONAL / multi-MATCH); running k small LTJs already
@@ -373,40 +358,122 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         if query.has_any_optional() || query.matches.len() > 1 {
             return None;
         }
+
+        let asc = matches!(primary.dir, SortDir::Asc);
+        let labels = labels_for_var(&query.matches, var);
+        // Build the ordered-id stream: one btree's `Vec<Id>` for the
+        // single-label / And case, or a k-way merge of per-label
+        // cursors for `Or`-of-leaves descriptors. Both produce ids in
+        // primary-attr sort order.
+        let mut cursors: Vec<BtreeMergeCursor> = if !labels.is_empty() {
+            // Single-label / required-labels path: pick the first label
+            // with a btree on `attr`. Walk that one cursor in order.
+            // The btree-merge with a single cursor degenerates to the
+            // original linear walk.
+            let (label, ordered_ids) = labels.iter().find_map(|l| {
+                self.graph
+                    .lookup_node_ordered(l, attr, asc)
+                    .map(|ids| (l.clone(), ids))
+            })?;
+            let label_total = self.graph.nodes_with_label(&label)?.len();
+            if ordered_ids.len() != label_total {
+                return None;
+            }
+            vec![BtreeMergeCursor::new(self.graph, label, ordered_ids, attr)]
+        } else {
+            // Multi-label `Or`-of-leaves path: every candidate must
+            // have a btree on `attr`. Per-label coverage may be
+            // partial (the auto-built btree skips nodes whose `attr`
+            // is null); the merge still walks every value-bearing id
+            // in primary-attr order, which is sufficient under the
+            // already-enforced `NULLS LAST` precondition.
+            let or_labels = or_candidate_labels_for_var(&query.matches, var)?;
+            if std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
+                eprintln!(
+                    "btree-ltj-real: or-merge over labels {:?} on attr {:?}",
+                    or_labels, attr
+                );
+            }
+            let mut cs = Vec::with_capacity(or_labels.len());
+            for l in or_labels {
+                let ids = match self.graph.lookup_node_ordered(&l, attr, asc) {
+                    Some(v) => v,
+                    None => {
+                        if std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
+                            eprintln!(
+                                "btree-ltj-real:   {} no btree on (label, attr) — fallback",
+                                l
+                            );
+                        }
+                        return None;
+                    }
+                };
+                let label_total = match self.graph.nodes_with_label(&l) {
+                    Some(v) => v.len(),
+                    None => return None,
+                };
+                if std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
+                    eprintln!(
+                        "btree-ltj-real:   {} ids={} label_total={}",
+                        l,
+                        ids.len(),
+                        label_total
+                    );
+                }
+                // Allow `ids.len() < label_total`: the auto-built btree
+                // omits nodes whose `attr` is null (the index can't key
+                // on `Null`). Walking only the indexed ids is correct
+                // for `NULLS LAST` (the precondition we already
+                // enforce up-front for the primary spec) — null-valued
+                // nodes sort to the end and so can't enter the top-k
+                // unless the requested limit exceeds the non-null
+                // count, in which case the merge produces all the
+                // indexed rows anyway and the caller's downstream sort
+                // / truncation handles the remainder. The common case
+                // (LDBC IC2 with `creationDate < ...`) excludes nulls
+                // up front via 3VL.
+                if ids.len() > label_total {
+                    return None;
+                }
+                cs.push(BtreeMergeCursor::new(self.graph, l, ids, attr));
+            }
+            cs
+        };
+
         let pattern = query.collapsed_pattern();
         let index = self.triple_index();
-
         let cap = if limit == 0 { usize::MAX } else { limit };
         let single_spec = specs.len() == 1;
-        let mut out: Vec<ResultRow> = Vec::with_capacity(cap.min(label_total));
+        let multi_label = cursors.len() > 1;
+        let mut out: Vec<ResultRow> = Vec::with_capacity(cap);
+        // De-dup ids that appear in two different label cursors at
+        // once (a node carrying both `Comment` and `Post`, say).
+        // Single-cursor walks can't repeat an id, so skip the cost.
+        let mut visited: HashSet<Id> = HashSet::new();
 
         // Cohort-aware early exit (multi-spec case): once we have ≥ k
-        // rows AND the next btree id's primary value differs from the
-        // previous one, every remaining id has a strictly worse primary
-        // key and can't enter the top-k. Stop, then sort the buffer
-        // by all specs (primary already in sorted order; secondaries
-        // resolve in-memory) and truncate to k. For the single-spec
-        // case the original early-exit at `out.len() >= cap` is
-        // semantically optimal — no secondary tie-break to consider.
-        // For multi-spec, snapshot the primary attr value of every
-        // processed id so we can detect the cohort boundary. Reading
-        // `node_props` is a page-cache hit on the LDBC workload; cheap
-        // enough to do per id and avoids needing a separate
-        // value-aware iterator on the btree.
+        // rows AND the next id's primary value differs from the
+        // previously processed id's, every remaining id has a
+        // strictly worse primary key and can't enter the top-k. Stop,
+        // then sort the buffer by all specs (primary already in
+        // sorted order; secondaries resolve in-memory) and truncate
+        // to k. The single-spec case gets the original early-exit at
+        // `out.len() >= cap` — no secondary tie-break to consider.
         let mut last_primary_value: Option<Value> = None;
-        for id in ordered_ids {
-            let cur_primary: Option<Value> = if single_spec {
-                None
-            } else {
-                self.graph.node_props(id).get(attr).cloned()
+        loop {
+            let Some(idx) = pick_best_cursor(&cursors, asc) else {
+                break;
             };
+            let id = cursors[idx]
+                .current_id()
+                .expect("pick_best_cursor returns only live cursors");
+            let cur_primary = cursors[idx].head_value.clone();
 
-            // Cohort boundary: stop once we have ≥ k rows and the
-            // current id's primary value differs from the last
-            // processed id's. The `last_primary_value.is_some()` guard
-            // keeps the first iteration after `out` first reaches `cap`
-            // from triggering on `Some(_) != None` and breaking without
-            // ever giving the secondary keys a chance.
+            if multi_label && !visited.insert(id) {
+                cursors[idx].advance(self.graph, attr);
+                continue;
+            }
+
             if !single_spec
                 && out.len() >= cap
                 && last_primary_value.is_some()
@@ -415,7 +482,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 break;
             }
 
-            let ir = pattern_extract::try_ltj_with_pin(self.graph, &pattern, &index, 0, var, id)?;
+            let ir = self.pinned_run(&pattern, &index, var, id)?;
             for row in ir.rows {
                 out.push(row);
                 if single_spec && out.len() >= cap {
@@ -423,18 +490,53 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 }
             }
             last_primary_value = cur_primary;
+            cursors[idx].advance(self.graph, attr);
         }
 
         if !single_spec && specs.len() > 1 && !out.is_empty() {
-            // Sort the cohort buffer by all specs and truncate. The
-            // existing pre-projection sort handles top-k internally
-            // when `limit > 0`.
             self.sort_rows(&mut out, specs, cap);
         }
         if cap < out.len() {
             out.truncate(cap);
         }
         Some(out)
+    }
+
+    /// Per-pin execution helper for the btree-LTJ-real walk. Calls
+    /// `try_ltj_with_pin` on flat-chain leaves directly; for `Union`
+    /// (introduced by the unroll pass) recurses into each arm with
+    /// the same pin and concatenates the row sets, mirroring the
+    /// runtime's own `Union` evaluator. `Filter` is also unwrapped:
+    /// run the pinned inner, then post-filter the rows with `expr`.
+    /// Returns `None` only when one of the leaf chains is itself
+    /// non-decomposable — the caller propagates that to the standard
+    /// `run_match_chain` fallback.
+    fn pinned_run(
+        &self,
+        pattern: &PathPattern,
+        index: &TripleIndex,
+        var: &str,
+        id: u32,
+    ) -> Option<IntermediateResult> {
+        match pattern {
+            PathPattern::Union(a, b) => {
+                let ir_a = self.pinned_run(a, index, var, id)?;
+                let ir_b = self.pinned_run(b, index, var, id)?;
+                let mut rows = ir_a.rows;
+                rows.extend(ir_b.rows);
+                Some(IntermediateResult::new(rows))
+            }
+            PathPattern::Filter(inner, expr) => {
+                let ir = self.pinned_run(inner, index, var, id)?;
+                let filtered: Vec<ResultRow> = ir
+                    .rows
+                    .into_iter()
+                    .filter(|r| self.run_expr(&r.assignment, expr).get_bool())
+                    .collect();
+                Some(IntermediateResult::new(filtered))
+            }
+            _ => pattern_extract::try_ltj_with_pin(self.graph, pattern, index, 0, var, id),
+        }
     }
 
     /// Btree-driven pre-projection sort. Precondition: `specs` is a
@@ -2367,6 +2469,99 @@ fn pattern_has_edge(p: &PathPattern) -> bool {
     }
 }
 
+/// One cursor in the btree-LTJ-real merge walk. Holds the per-label
+/// sorted id stream from `lookup_node_ordered` plus the cached
+/// primary-attr value of the head id. The merge driver advances the
+/// cursor by stepping `pos` and re-reading `head_value` from the
+/// graph; reads come from the page cache in the LDBC-class workloads
+/// that motivate the merge.
+///
+/// Single-label paths use one cursor — the merge degenerates to the
+/// original linear walk over the single btree's id list.
+#[derive(Debug)]
+struct BtreeMergeCursor {
+    /// Label associated with this btree. Diagnostic only — the merge
+    /// driver never has to disambiguate by label.
+    _label: String,
+    ids: Vec<Id>,
+    pos: usize,
+    head_value: Option<Value>,
+}
+
+impl BtreeMergeCursor {
+    fn new<G: GraphAccess>(graph: &G, label: String, ids: Vec<Id>, attr: &str) -> Self {
+        let head_value = ids
+            .first()
+            .and_then(|&id| graph.node_props(id).get(attr).cloned());
+        Self {
+            _label: label,
+            ids,
+            pos: 0,
+            head_value,
+        }
+    }
+
+    fn current_id(&self) -> Option<Id> {
+        self.ids.get(self.pos).copied()
+    }
+
+    fn advance<G: GraphAccess>(&mut self, graph: &G, attr: &str) {
+        self.pos += 1;
+        self.head_value = self
+            .ids
+            .get(self.pos)
+            .and_then(|&id| graph.node_props(id).get(attr).cloned());
+    }
+
+    fn is_done(&self) -> bool {
+        self.pos >= self.ids.len()
+    }
+}
+
+/// Pick the cursor whose `head_value` is best (smallest if `asc`,
+/// largest otherwise). Returns the cursor index, or `None` when every
+/// cursor is exhausted. Linear scan over the cursors — for the
+/// expected `Or`-arity (2-3 labels) it beats a heap and avoids the
+/// allocation. Cursors with `Some(value)` always rank ahead of those
+/// with `None` (a missing primary attr): the latter still need to be
+/// tried by the LTJ but only after every value-bearing id has been
+/// processed, which the cohort-detection break never reaches in
+/// practice on indexed workloads.
+fn pick_best_cursor(cursors: &[BtreeMergeCursor], asc: bool) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (i, c) in cursors.iter().enumerate() {
+        if c.is_done() {
+            continue;
+        }
+        let Some(b) = best else {
+            best = Some(i);
+            continue;
+        };
+        // Compare via the runtime's `cmp_values`, which knows the
+        // GQL ordering for `Int`/`Float`/`Str`/`Bool` (the only types
+        // a btree indexes anyway). A `None` head ranks behind any
+        // `Some` head — the LTJ may still want to try the id but
+        // only after the value-bearing cursors are drained, which the
+        // cohort early-exit never reaches in practice.
+        let take_c = match (&cursors[b].head_value, &c.head_value) {
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            (None, None) => false,
+            (Some(bv), Some(cv)) => {
+                if asc {
+                    cmp_values(cv, BinOp::Lt, bv)
+                } else {
+                    cmp_values(cv, BinOp::Gt, bv)
+                }
+            }
+        };
+        if take_c {
+            best = Some(i);
+        }
+    }
+    best
+}
+
 /// Walk every `Descriptor` in `matches` and collect the required
 /// labels declared on the descriptor whose `var` matches `target`.
 /// Required labels are the conjunctive positive leaves
@@ -2403,6 +2598,62 @@ fn labels_for_var(matches: &[MatchStatement], target: &str) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Or-candidate labels for `target`, when its descriptor's label type
+/// is a pure disjunction of bare labels (`A | B | …`). Returns `None`
+/// for any other shape (And, Neg, Star, mixed). Collected across every
+/// descriptor declaration of `target` in the chain; if any declaration
+/// is non-Or-of-leaves, the whole result is `None` because we can't
+/// safely under-cover the merge from one and over-cover from another.
+///
+/// Used by the btree-LTJ-real multi-label merge path; the existing
+/// `labels_for_var` (required-labels) handles And / bare cases via a
+/// single-btree pick.
+fn or_candidate_labels_for_var(matches: &[MatchStatement], target: &str) -> Option<Vec<String>> {
+    fn walk(p: &PathPattern, target: &str, out: &mut Option<Vec<String>>) {
+        match p {
+            PathPattern::Node(Some(d))
+            | PathPattern::EdgeRight(Some(d))
+            | PathPattern::EdgeLeft(Some(d))
+            | PathPattern::EdgeUndirected(Some(d))
+            | PathPattern::EdgeAnyDirection(Some(d))
+                if d.var.as_deref() == Some(target) =>
+            {
+                if out.is_none() {
+                    return;
+                }
+                let Some(cands) = d.dtype.label.or_candidate_labels() else {
+                    *out = None;
+                    return;
+                };
+                if let Some(acc) = out.as_mut() {
+                    for l in cands {
+                        acc.push(l.to_string());
+                    }
+                }
+            }
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                walk(a, target, out);
+                walk(b, target, out);
+            }
+            PathPattern::Filter(p, _)
+            | PathPattern::Repeat { pattern: p, .. }
+            | PathPattern::Questioned(p) => walk(p, target, out),
+            _ => {}
+        }
+    }
+    let mut out: Option<Vec<String>> = Some(Vec::new());
+    for m in matches {
+        walk(m.pattern(), target, &mut out);
+    }
+    let mut v = out?;
+    if v.is_empty() {
+        return None;
+    }
+    v.sort();
+    v.dedup();
+    Some(v)
 }
 
 /// Build a btree-ordered output by bucketing rows on `mu[var_name].id()`
