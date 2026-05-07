@@ -718,7 +718,14 @@ fn decompose_pattern(
     }
 }
 
-/// Decompose a flat chain [Node, Edge, Node, Edge, Node] into triples.
+/// Decompose a flat chain `Node (Edge Node?)*` into triples. The
+/// trailing node is optional after every edge: when two edges sit
+/// adjacent (`Edge Edge`, written by users as `~[:r]~~[:r]~` or
+/// produced by the unroll pass for fixed-bound repetitions) we
+/// synthesise a fresh anonymous node as the boundary, mirroring what
+/// the runtime's `Concat` evaluator would do via path-merge on
+/// `last_node_id` / `first_node_id`. Same for an edge with nothing
+/// after it (a trailing dangling edge).
 // Same accumulator bundle as decompose_pattern_top.
 #[allow(clippy::too_many_arguments)]
 fn decompose_flat_chain(
@@ -732,8 +739,6 @@ fn decompose_flat_chain(
     triple_info: &mut Vec<(u8, u8, Option<String>, EdgeKind)>,
     fresh: &mut u32,
 ) -> Option<u8> {
-    // Expected pattern: Node (Edge Node)*
-    // Minimum 3 elements for one triple: Node Edge Node
     if elems.is_empty() {
         return None;
     }
@@ -745,16 +750,24 @@ fn decompose_flat_chain(
     let mut current_node = node_var(*first_desc, names, id_to_name, filters, internal, fresh);
 
     let mut i = 1;
-    while i + 1 < elems.len() {
-        // Expect: Edge, Node
+    while i < elems.len() {
         let FlatElement::Edge(kind, edge_desc) = &elems[i] else {
             return None;
         };
-        let FlatElement::Node(tgt_desc) = &elems[i + 1] else {
-            return None;
+
+        // The boundary after this edge is either an explicit Node (use
+        // its descriptor and consume both) or implicit (fresh internal
+        // var; consume only the edge). The implicit branch is what
+        // turns `Edge Edge` and trailing-edge cases into well-formed
+        // triples.
+        let (next_var, advance) = match elems.get(i + 1) {
+            Some(FlatElement::Node(tgt_desc)) => (
+                node_var(*tgt_desc, names, id_to_name, filters, internal, fresh),
+                2,
+            ),
+            _ => (fresh_var(names, id_to_name, internal, fresh), 1),
         };
 
-        let next_var = node_var(*tgt_desc, names, id_to_name, filters, internal, fresh);
         let edge_var_name = edge_desc.and_then(|d| d.var.clone());
         let p_term = build_p_term(*edge_desc, index, names, id_to_name, internal, fresh);
 
@@ -774,26 +787,7 @@ fn decompose_flat_chain(
         triple_info.push((src_var, tgt_var, edge_var_name, *kind));
 
         current_node = next_var;
-        i += 2;
-    }
-
-    // If there's a trailing edge with no node after it, create a fresh target
-    if i < elems.len() {
-        if let FlatElement::Edge(kind, edge_desc) = &elems[i] {
-            let next_var = fresh_var(names, id_to_name, internal, fresh);
-            let edge_var_name = edge_desc.and_then(|d| d.var.clone());
-            let p_term = build_p_term(*edge_desc, index, names, id_to_name, internal, fresh);
-            let (src_var, tgt_var) = match kind {
-                EdgeKind::Right | EdgeKind::Undirected => (current_node, next_var),
-                EdgeKind::Left => (next_var, current_node),
-            };
-
-            triples.push(TriplePattern {
-                terms: [Term::Variable(src_var), p_term, Term::Variable(tgt_var)],
-            });
-            triple_info.push((src_var, tgt_var, edge_var_name, *kind));
-            current_node = next_var;
-        }
+        i += advance;
     }
 
     if triples.is_empty() {
