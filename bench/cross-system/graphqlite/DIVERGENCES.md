@@ -128,6 +128,37 @@ graphqlite point at this divergence file.
 If a future version fixes int64 RETURN, this divergence becomes
 moot and the cross-system comparison rises to 3/3 systems.
 
+## IC11 sub-types encoded as `type` property, not as labels
+
+The LDBC SNB IC11 spec references `:Company` and `:Country` as
+schema-level sub-labels of `:Organisation` and `:Place`. Our
+graphqlite loader (`setup.py`) loads each Organisation node with
+label `"Organisation"` and each Place node with label `"Place"`,
+storing the sub-type as a regular property column (`type`) on the
+node. graphqlite's `insert_nodes_bulk` API takes a single label per
+node and there's no schema-level multi-label or sub-label primitive.
+The cross-system IC11 cypher filters by the `type` property instead
+of matching the sub-label directly:
+
+```cypher
+MATCH ... -[:workAt]-> (company:Organisation) -[:isLocatedIn]-> (country:Place)
+WHERE company.type = 'company' AND country.type = 'country' AND ...
+```
+
+Pre-fix the cypher used the spec form `(:Company) ... (:Country)`
+directly; graphqlite didn't error on the unknown labels but every
+match failed silently → 0 rows on every parameter row. Post-fix the
+query is structurally correct, but graphqlite still returns 0/15
+because of a separate runtime bug in undirected variable-length
+expansion (see next section). The encoding-of-sub-types fix is
+required regardless of that runtime bug — without it the cypher
+could never match anything.
+
+The semantic effect is identical to gqlite's `:Company` / `:Country`
+match: gqlite's LDBC loader synthesizes the sub-label via
+`LabelType::And` on the same `type` column at load time; ours keeps
+it flat as a property. Documented inline in `ic11.cypher`.
+
 ## graphqlite undirected variable-length expansion `[:rel*N..M]-` follows only outgoing edges
 
 **Symptom**: `MATCH (p:Person {ldbcId: $pid})-[:knows*1..2]-(o:Person) RETURN count(o)`

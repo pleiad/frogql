@@ -195,6 +195,46 @@ it's the cost of the supported path; capturing it as a "fairness
 fix" by switching to the deprecated API would be measuring a path
 no one is supposed to use anymore.
 
+### 6. IC11 sub-types encoded as `type` column, not synthesized labels
+
+The LDBC SNB IC11 spec references `:Company` and `:Country` as
+schema-level sub-labels of `:Organisation` and `:Place`. Our Kuzu
+loader (`setup.py`) keeps `Organisation` and `Place` as single NODE
+TABLEs with the sub-type carried as a `type` column (lowercase:
+`'company'` / `'university'` for Organisation, `'country'` / `'city'`
+/ `'continent'` for Place). The cross-system IC11 cypher
+(`ic11.cypher`) filters by the `type` column instead of matching the
+sub-label directly:
+
+```cypher
+MATCH ... -[:workAt]-> (company:Organisation) -[:isLocatedIn]-> (country:Place)
+WHERE company.type = 'company' AND country.type = 'country' AND ...
+```
+
+Pre-fix the cypher used the spec form `(:Company) ... (:Country)`
+directly; Kuzu's strict-schema binder rejected it with
+`Binder exception: Table Company does not exist`. Post-fix the query
+runs cleanly and the result hash on the one non-empty parameter row
+is byte-identical to gqlite's, which uses synthesized
+`:Company`/`:Country` sub-labels via its LDBC loader's
+`LabelType::And` promotion of the same `type` column. Same data,
+different encoding.
+
+Splitting `organisation_0_0.csv` and `place_0_0.csv` into separate
+NODE TABLEs at load time would let the spec query work verbatim, but
+requires:
+
+1. Pre-splitting both CSVs by the `type` column in `setup.py`.
+2. Declaring `Company`, `University`, `Country`, `City`, `Continent`
+   as separate NODE TABLEs.
+3. Rewriting `isLocatedIn`, `studyAt`, `workAt` as multi-typed REL
+   TABLEs with FROM/TO hints per CSV — same idiom already used for
+   `hasCreator`, `hasTag`, `replyOf`, `isLocatedIn`, `likes`.
+
+Achievable but out of scope for the current submission. Documented
+inline in `ic11.cypher` and verified equivalent via the cross-system
+row-content hash oracle.
+
 ## What's NOT divergent
 
 - **Parameter binding** — Kuzu's `Connection.execute(query, params)`
