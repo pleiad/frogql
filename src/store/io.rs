@@ -41,17 +41,37 @@ pub fn save_graph_with_catalog_atomic(
     catalog: &crate::runtime::catalog::GraphTypeCatalog,
     db_path: &Path,
 ) -> io::Result<()> {
+    save_graph_with_catalog_and_indexes_atomic(graph, catalog, &[], db_path)
+}
+
+/// Like `save_graph_with_catalog_atomic` but also persists the
+/// DDL-declared subset of `index_specs` (entries with `auto = false`)
+/// into a fresh `header.secondary_index_root` chain. Auto entries are
+/// not written: the open-time `build_auto_indexes_bulk` reproduces
+/// them from the data without help. Pass `&[]` (or use the wrapper
+/// above) when there's nothing to persist.
+pub fn save_graph_with_catalog_and_indexes_atomic(
+    graph: &Graph,
+    catalog: &crate::runtime::catalog::GraphTypeCatalog,
+    index_specs: &[super::secondary_index::IndexSpec],
+    db_path: &Path,
+) -> io::Result<()> {
     let mut tmp = db_path.to_path_buf().into_os_string();
     tmp.push(".tmp");
     let tmp_path = std::path::PathBuf::from(tmp);
     save_graph(graph, &tmp_path)?;
-    // Re-open the temp file, write the catalog into a fresh chain, and
-    // update the header pointer. Two-pass write keeps `save_graph` itself
-    // unchanged (no catalog plumbing) at the cost of one extra open.
+    // Re-open the temp file, write the catalog and DDL-index list into
+    // fresh chains, and update both header pointers. Two-pass write
+    // keeps `save_graph` itself unchanged (no catalog plumbing) at the
+    // cost of one extra open. The DDL list write is a no-op when
+    // `index_specs` has no `auto = false` entries — the chain root
+    // stays 0, which the open path treats as "no persisted list".
     {
         let mut pager = Pager::open(&tmp_path)?;
         let root = super::catalog_io::write_catalog(&mut pager, catalog, 0)?;
         pager.header.catalog_root = root;
+        let idx_root = super::secondary_index_io::write_specs(&mut pager, index_specs, 0)?;
+        pager.header.secondary_index_root = idx_root;
         pager.write_header()?;
     }
     std::fs::rename(&tmp_path, db_path)?;

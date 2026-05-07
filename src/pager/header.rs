@@ -28,7 +28,9 @@ pub const FORMAT_VERSION: u16 = 1;
 /// bytes 60-63: graph-type catalog root page (u32 LE, 0 = no catalog)
 /// bytes 64-95: active graph-type name (u8[32], null-padded UTF-8; empty = none)
 /// bytes 96-99: CSR adjacency root page (u32 LE, 0 = legacy adjacency_root only)
-/// bytes 100+:  reserved (zeroed)
+/// bytes 100-103: secondary-index DDL chain root (u32 LE, 0 = legacy file
+///   without persisted indexes; auto-builds run normally on open)
+/// bytes 104+:  reserved (zeroed)
 /// ```
 ///
 /// Note: page 0 does NOT use the standard slotted-page cell machinery.
@@ -60,6 +62,18 @@ pub struct FileHeader {
     /// 6 sub-chains (per-direction offsets + flat edge_id arrays) and
     /// reads in O(N + E) total instead of N small per-node reads.
     pub csr_adjacency_root: u32,
+    /// Root page of the persisted secondary-index DDL list (0 = legacy
+    /// file: no list, only the auto-build runs at open). Holds JSON-
+    /// encoded `IndexSpec`s for every DDL-declared (`auto = false`)
+    /// index; auto entries are not persisted because the auto-build
+    /// reproduces them deterministically from the data on every open.
+    ///
+    /// TODO: drop the legacy fallback once all on-disk databases have
+    /// been re-saved with this field. Right now `0` is a valid value
+    /// for files written before the slot existed; once the field is
+    /// universally present, the absence of a non-zero root can become
+    /// an error path or just a "no DDL indexes" signal.
+    pub secondary_index_root: u32,
 }
 
 impl Default for FileHeader {
@@ -82,6 +96,7 @@ impl Default for FileHeader {
             catalog_root: 0,
             active_type_name: None,
             csr_adjacency_root: 0,
+            secondary_index_root: 0,
         }
     }
 }
@@ -142,6 +157,7 @@ impl FileHeader {
         d[60..64].copy_from_slice(&self.catalog_root.to_le_bytes());
         d[64..96].copy_from_slice(&encode_active_name(self.active_type_name.as_deref()));
         d[96..100].copy_from_slice(&self.csr_adjacency_root.to_le_bytes());
+        d[100..104].copy_from_slice(&self.secondary_index_root.to_le_bytes());
 
         page
     }
@@ -172,6 +188,12 @@ impl FileHeader {
             catalog_root: u32::from_le_bytes([d[60], d[61], d[62], d[63]]),
             active_type_name: decode_active_name(&d[64..96]),
             csr_adjacency_root: u32::from_le_bytes([d[96], d[97], d[98], d[99]]),
+            // Legacy `.gdb` files written before this slot existed have
+            // 0 here (the byte range was reserved + zeroed), which the
+            // open path treats as "no persisted DDL list". TODO: drop
+            // the legacy compat once all stored databases have been
+            // re-saved with this field present.
+            secondary_index_root: u32::from_le_bytes([d[100], d[101], d[102], d[103]]),
         })
     }
 }

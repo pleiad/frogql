@@ -130,6 +130,13 @@ pub struct LazyGraphStore {
     // properties. Memory-only for now (rebuilt every open). Used by the LTJ
     // optimizer to constant-fold `(x:L {prop: literal})` start lookups.
     secondary: RefCell<SecondaryIndex>,
+    /// Last persisted secondary-index DDL chain root. `0` means "no
+    /// chain" — for legacy files written before this slot existed and
+    /// for fresh databases that never declared a DDL index. Tracked
+    /// here so subsequent writes can free the old chain. TODO: remove
+    /// the legacy `0` interpretation once every stored .gdb has been
+    /// re-saved with the slot present.
+    secondary_index_root: Cell<u32>,
 
     /// In-RAM mutation overlay for ISO §13 DML (INSERT / DELETE / DETACH
     /// DELETE in MVP-0). Empty during read-only sessions; non-empty after
@@ -201,6 +208,7 @@ impl LazyGraphStore {
         let has_fast_index = string_table_root != 0 && node_locs_root != 0 && edge_topo_root != 0;
 
         let catalog_root = pager.header.catalog_root;
+        let secondary_index_root = pager.header.secondary_index_root;
         let mut store = LazyGraphStore {
             pager: RefCell::new(pager),
             strings,
@@ -219,6 +227,7 @@ impl LazyGraphStore {
             catalog: RefCell::new(GraphTypeCatalog::new()),
             catalog_root: Cell::new(catalog_root),
             secondary: RefCell::new(SecondaryIndex::new()),
+            secondary_index_root: Cell::new(secondary_index_root),
             overlay: RefCell::new(MutationOverlay::default()),
         };
 
@@ -283,6 +292,40 @@ impl LazyGraphStore {
             eprintln!(
                 "  secondary index auto-build: {:.3}s  ({} indexes)",
                 t4.elapsed().as_secs_f64(),
+                store.secondary.borrow().list().len()
+            );
+        }
+
+        // Replay persisted DDL-declared indexes. The auto-build above
+        // produced the indexes the heuristic infers from data; this
+        // adds back the ones the user declared via `CREATE INDEX`,
+        // which the heuristic skips (typically because the property is
+        // non-unique within the label, like `Post.creationDate`). A
+        // legacy `.gdb` written before the slot existed has
+        // `secondary_index_root == 0` and `read_specs` returns an
+        // empty list, so this path is a no-op for old files. TODO:
+        // drop the `0` legacy path once all stored databases have been
+        // re-saved with the slot present.
+        let t5 = std::time::Instant::now();
+        let specs = {
+            let mut pager = store.pager.borrow_mut();
+            super::secondary_index_io::read_specs(&mut pager, store.secondary_index_root.get())?
+        };
+        if !specs.is_empty() {
+            let mut sec = store.secondary.borrow_mut();
+            for spec in specs {
+                // `build_declared` errors only on a same-kind conflict
+                // with an already-present index, which here would mean
+                // the auto pass already built one for this `(label,
+                // prop, kind)`. Skip silently — the auto-built copy is
+                // semantically identical, no need to rebuild.
+                let _ = sec.build_declared(&store, spec.name, &spec.label, &spec.prop, spec.kind);
+            }
+        }
+        if trace {
+            eprintln!(
+                "  secondary index DDL replay:  {:.3}s  ({} indexes total)",
+                t5.elapsed().as_secs_f64(),
                 store.secondary.borrow().list().len()
             );
         }
@@ -843,7 +886,15 @@ impl LazyGraphStore {
         }
         let g = self.materialize_to_graph();
         let cat = self.catalog.borrow().clone();
-        super::io::save_graph_with_catalog_atomic(&g, &cat, db_path)
+        // Persist DDL-declared indexes too. The current `secondary`
+        // RefCell holds specs whose NodeIds reference the live graph,
+        // not the materialised + ID-compacted output, but the DDL
+        // entries we serialise are pure schema (label, prop, kind,
+        // name) so they round-trip cleanly: the next open's auto
+        // pass populates buckets from the on-disk node records, then
+        // replays the DDL list on top.
+        let specs: Vec<_> = self.secondary.borrow().list().to_vec();
+        super::io::save_graph_with_catalog_and_indexes_atomic(&g, &cat, &specs, db_path)
     }
 }
 

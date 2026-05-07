@@ -29,6 +29,8 @@ pub enum PageType {
     Free = 7,
     /// Graph-type catalog page (chained, JSON payload).
     Catalog = 8,
+    /// Persisted secondary-index DDL list (chained, JSON payload).
+    SecondaryIndex = 9,
 }
 
 impl PageType {
@@ -43,6 +45,7 @@ impl PageType {
             6 => Some(Self::Overflow),
             7 => Some(Self::Free),
             8 => Some(Self::Catalog),
+            9 => Some(Self::SecondaryIndex),
             _ => None,
         }
     }
