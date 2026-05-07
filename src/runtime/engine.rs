@@ -244,11 +244,33 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
 
         let mut projected = if has_aggs {
-            let p = self.run_aggregated(return_items, query.group_by.as_deref(), &ir.rows);
-            if query.distinct {
-                dedup_preserving_order(p)
+            // `COUNT(*)`-only short-circuit: with no GROUP BY / ORDER BY /
+            // DISTINCT and every item being `COUNT(*)`, the answer is one
+            // row of `[ir.rows.len(); k]`. Skips the HashMap grouping pass
+            // entirely (LDBC IC1/IS-style cardinality probes).
+            let only_count_star = return_items.iter().all(|it| {
+                matches!(
+                    it,
+                    ReturnItem::Aggregate {
+                        agg: Aggregator::CountStar,
+                        ..
+                    }
+                )
+            });
+            if only_count_star
+                && query.group_by.is_none()
+                && !query.distinct
+                && !has_order
+            {
+                let n = Value::Int(ir.rows.len() as i64);
+                vec![vec![n; return_items.len()]]
             } else {
-                p
+                let p = self.run_aggregated(return_items, query.group_by.as_deref(), &ir.rows);
+                if query.distinct {
+                    dedup_preserving_order(p)
+                } else {
+                    p
+                }
             }
         } else {
             self.run_row_by_row(return_items, &ir.rows, query.distinct)
@@ -626,19 +648,21 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         rows: &[ResultRow],
         distinct: bool,
     ) -> Vec<Vec<Value>> {
-        let mut projected: Vec<Vec<Value>> = Vec::new();
+        let mut projected: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+        // O(N) dedup via HashSet; the previous `Vec::contains` was O(N²).
+        let mut seen: Option<HashSet<GroupKey>> =
+            if distinct { Some(HashSet::with_capacity(rows.len())) } else { None };
         for row in rows {
             let vals: Vec<Value> = items
                 .iter()
                 .map(|item| self.eval_expr_item(item, &row.assignment))
                 .collect();
-            if distinct {
-                if !projected.contains(&vals) {
-                    projected.push(vals);
+            if let Some(seen) = seen.as_mut() {
+                if !seen.insert(GroupKey::from_values(vals.clone())) {
+                    continue;
                 }
-            } else {
-                projected.push(vals);
             }
+            projected.push(vals);
         }
         projected
     }
@@ -657,20 +681,35 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
     }
 
-    /// Group-and-aggregate projection. Keys come from explicit GROUP BY
+    /// Single-pass hash aggregation. Keys come from explicit GROUP BY
     /// (ISO §16.15) when present, otherwise from the non-aggregate RETURN
     /// items. ISO §20.9 GR 7a-i: a query with no key items and zero rows
     /// still emits one output row.
+    ///
+    /// Each group holds its non-aggregate projection (cached from the first
+    /// row of the group, so we never re-evaluate them) plus one
+    /// `Accumulator` per aggregate (running state, O(1) memory for non-
+    /// DISTINCT). One pass over `rows`; output emitted in insertion order
+    /// of the first occurrence of each key.
     fn run_aggregated(
         &self,
         items: &[ReturnItem],
         explicit_group_by: Option<&[Expr]>,
         rows: &[ResultRow],
     ) -> Vec<Vec<Value>> {
-        let mut group_indices: Vec<Vec<usize>> = Vec::new();
+        let aggs: Vec<&Aggregator> = items
+            .iter()
+            .filter_map(|it| match it {
+                ReturnItem::Aggregate { agg, .. } => Some(agg),
+                _ => None,
+            })
+            .collect();
+        let non_agg_count = items.len() - aggs.len();
+
+        let mut states: Vec<GroupState> = Vec::new();
         let mut key_to_index: HashMap<GroupKey, usize> = HashMap::new();
 
-        for (row_idx, row) in rows.iter().enumerate() {
+        for row in rows {
             let key_values: Vec<Value> = match explicit_group_by {
                 Some(exprs) => exprs
                     .iter()
@@ -686,90 +725,56 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     .collect(),
             };
             let key = GroupKey::from_values(key_values);
-            match key_to_index.get(&key) {
-                Some(&i) => group_indices[i].push(row_idx),
+            let idx = match key_to_index.get(&key) {
+                Some(&i) => i,
                 None => {
-                    key_to_index.insert(key, group_indices.len());
-                    group_indices.push(vec![row_idx]);
+                    let proj: Vec<Value> = items
+                        .iter()
+                        .filter(|it| !it.is_aggregate())
+                        .map(|it| self.eval_expr_item(it, &row.assignment))
+                        .collect();
+                    let accs: Vec<Accumulator> = aggs.iter().copied().map(Accumulator::new).collect();
+                    let i = states.len();
+                    states.push(GroupState { proj, accs });
+                    key_to_index.insert(key, i);
+                    i
                 }
-            }
-        }
-
-        let key_arity = explicit_group_by
-            .map(|e| e.len())
-            .unwrap_or_else(|| items.iter().filter(|it| !it.is_aggregate()).count());
-        if key_arity == 0 && group_indices.is_empty() {
-            group_indices.push(Vec::new());
-        }
-
-        let mut out: Vec<Vec<Value>> = Vec::with_capacity(group_indices.len());
-        for row_idxs in &group_indices {
-            let row_vals: Vec<Value> = items
-                .iter()
-                .map(|item| match item {
-                    ReturnItem::Expr { expr, .. } => {
-                        let mu = match row_idxs.first() {
-                            Some(&i) => &rows[i].assignment,
-                            None => return Value::Null,
-                        };
-                        match self.run_expr(mu, expr) {
-                            ExprResult::Success(v) => v,
-                            ExprResult::Failure(_) => Value::Null,
-                        }
-                    }
-                    ReturnItem::Aggregate { agg, .. } => self.apply_aggregator(agg, row_idxs, rows),
-                })
-                .collect();
-            out.push(row_vals);
-        }
-        out
-    }
-
-    fn apply_aggregator(&self, agg: &Aggregator, row_idxs: &[usize], rows: &[ResultRow]) -> Value {
-        match agg {
-            // ISO §20.9 GR 2: COUNT(*) is cardinality, no null-elim, no DISTINCT.
-            Aggregator::CountStar => Value::Int(row_idxs.len() as i64),
-            Aggregator::GeneralSet {
-                kind,
-                quantifier,
-                expr,
-            } => {
-                let values = self.collect_aggregate_values(expr, *quantifier, row_idxs, rows);
-                match kind {
-                    GeneralSetKind::Count => Value::Int(values.len() as i64),
-                    GeneralSetKind::Sum => sum_values(&values),
-                    GeneralSetKind::Avg => avg_values(&values),
-                    GeneralSetKind::Min => min_values(&values),
-                    GeneralSetKind::Max => max_values(&values),
-                }
-            }
-        }
-    }
-
-    /// Evaluate inner expr per row, drop ISO nulls (Failure), optionally
-    /// dedup via HashSet when quantifier is DISTINCT.
-    fn collect_aggregate_values(
-        &self,
-        expr: &Expr,
-        quantifier: SetQuantifier,
-        row_idxs: &[usize],
-        rows: &[ResultRow],
-    ) -> Vec<Value> {
-        let mut out: Vec<Value> = Vec::new();
-        let mut seen: HashSet<GroupKey> = HashSet::new();
-        for &idx in row_idxs {
-            let v = match self.run_expr(&rows[idx].assignment, expr) {
-                ExprResult::Success(Value::Null) => continue, // null-eliminated
-                ExprResult::Success(v) => v,
-                ExprResult::Failure(_) => continue, // null-eliminated
             };
-            if matches!(quantifier, SetQuantifier::Distinct) {
-                let key = GroupKey::from_values(vec![v.clone()]);
-                if !seen.insert(key) {
-                    continue;
+            let state = &mut states[idx];
+            for (acc, agg) in state.accs.iter_mut().zip(aggs.iter()) {
+                acc.update(self, &row.assignment, agg);
+            }
+        }
+
+        let key_arity = explicit_group_by.map(|e| e.len()).unwrap_or(non_agg_count);
+        if key_arity == 0 && states.is_empty() {
+            // ISO §20.9 GR 7a-i: empty input + no grouping keys still emits
+            // one output row (e.g. `RETURN count(*)` over zero matches → 0).
+            let accs: Vec<Accumulator> = aggs.iter().copied().map(Accumulator::new).collect();
+            states.push(GroupState {
+                proj: Vec::new(),
+                accs,
+            });
+        }
+
+        let mut out: Vec<Vec<Value>> = Vec::with_capacity(states.len());
+        for mut state in states {
+            let mut row = Vec::with_capacity(items.len());
+            let mut pi = 0;
+            let mut ai = 0;
+            for it in items {
+                match it {
+                    ReturnItem::Expr { .. } => {
+                        row.push(std::mem::replace(&mut state.proj[pi], Value::Null));
+                        pi += 1;
+                    }
+                    ReturnItem::Aggregate { .. } => {
+                        row.push(state.accs[ai].finalize());
+                        ai += 1;
+                    }
                 }
             }
-            out.push(v);
+            out.push(row);
         }
         out
     }
@@ -2050,52 +2055,6 @@ fn left_outer_join(
     IntermediateResult::new(rows)
 }
 
-// Aggregate reducers (ISO §20.9 GR 7a-iii..vi). Inputs already passed
-// null-elimination and optional DISTINCT in collect_aggregate_values.
-// Empty input → `Value::Null`.
-
-fn null_value() -> Value {
-    Value::Null
-}
-
-/// Int-preserving when all inputs are Int; promotes to Float on any
-/// Float input. Non-numeric skipped (gradual tolerance). Empty → null.
-fn sum_values(values: &[Value]) -> Value {
-    let mut int_acc: i64 = 0;
-    let mut float_acc: f64 = 0.0;
-    let mut had_float = false;
-    let mut had_value = false;
-    for v in values {
-        match v {
-            Value::Int(n) => {
-                if had_float {
-                    float_acc += *n as f64;
-                } else {
-                    int_acc = int_acc.wrapping_add(*n);
-                }
-                had_value = true;
-            }
-            Value::Float(f) => {
-                if !had_float {
-                    float_acc = int_acc as f64;
-                    had_float = true;
-                }
-                float_acc += f;
-                had_value = true;
-            }
-            _ => {} // skip non-numeric
-        }
-    }
-    if !had_value {
-        null_value()
-    } else if had_float {
-        Value::Float(float_acc)
-    } else {
-        Value::Int(int_acc)
-    }
-}
-
-/// Always Float (averages of ints usually aren't ints). Empty → null.
 /// Convert a `PathValue` (binding-table value) to a `Value` (projected
 /// row value). Repetition `Group(...)` becomes `Value::List(...)` so a
 /// `RETURN y` after `MATCH (x)-[y]->{1,n}()` lands as a list of edge
@@ -2109,54 +2068,212 @@ fn path_value_to_value(pv: &PathValue) -> Value {
     }
 }
 
-fn avg_values(values: &[Value]) -> Value {
-    let mut sum: f64 = 0.0;
-    let mut count: u64 = 0;
-    for v in values {
-        let n = match v {
-            Value::Int(n) => *n as f64,
-            Value::Float(f) => *f,
-            _ => continue, // skip non-numeric
+fn null_value() -> Value {
+    Value::Null
+}
+
+/// One group's running state: the projection of the non-aggregate
+/// RETURN items (cached from the first row that hit this bucket — they
+/// are functionally determined by the GROUP BY key) plus an accumulator
+/// per aggregate item, in RETURN order.
+struct GroupState {
+    proj: Vec<Value>,
+    accs: Vec<Accumulator>,
+}
+
+/// Per-group running state for one aggregate. Updated O(1) per input
+/// row for non-DISTINCT variants; DISTINCT keeps a `HashSet` per group
+/// to dedup before folding (matches the previous behavior).
+///
+/// ISO §20.9 GR 7a-iii..vi: null-elimination happens before `update`
+/// is called (caller turns ISO null / failure into `None`); empty
+/// groups finalize to `Value::Null`.
+enum Accumulator {
+    /// `COUNT(*)`: cardinality, no null-elim, no DISTINCT (GR 2).
+    CountStar(u64),
+    Count {
+        n: u64,
+        seen: Option<HashSet<GroupKey>>,
+    },
+    /// Int-preserving until any `Float` input promotes the accumulator;
+    /// non-numeric inputs are skipped (gradual tolerance).
+    Sum {
+        int_acc: i64,
+        float_acc: f64,
+        had_float: bool,
+        had_value: bool,
+        seen: Option<HashSet<GroupKey>>,
+    },
+    /// Always emits Float per ISO `<average>`.
+    Avg {
+        sum: f64,
+        n: u64,
+        seen: Option<HashSet<GroupKey>>,
+    },
+    /// Smallest by `value_cmp`. Incomparable with running best → skipped.
+    Min(Option<Value>),
+    Max(Option<Value>),
+}
+
+impl Accumulator {
+    fn new(agg: &Aggregator) -> Self {
+        match agg {
+            Aggregator::CountStar => Accumulator::CountStar(0),
+            Aggregator::GeneralSet {
+                kind, quantifier, ..
+            } => {
+                let distinct = matches!(quantifier, SetQuantifier::Distinct);
+                let seen = if distinct { Some(HashSet::new()) } else { None };
+                match kind {
+                    GeneralSetKind::Count => Accumulator::Count { n: 0, seen },
+                    GeneralSetKind::Sum => Accumulator::Sum {
+                        int_acc: 0,
+                        float_acc: 0.0,
+                        had_float: false,
+                        had_value: false,
+                        seen,
+                    },
+                    GeneralSetKind::Avg => Accumulator::Avg {
+                        sum: 0.0,
+                        n: 0,
+                        seen,
+                    },
+                    GeneralSetKind::Min => Accumulator::Min(None),
+                    GeneralSetKind::Max => Accumulator::Max(None),
+                }
+            }
+        }
+    }
+
+    /// Evaluate the inner expression once for this row and fold the
+    /// result into the accumulator. `CountStar` ignores the expression
+    /// (it has none) and counts every row.
+    fn update<G: GraphAccess>(
+        &mut self,
+        runtime: &Runtime<'_, G>,
+        mu: &Assignment,
+        agg: &Aggregator,
+    ) {
+        if let Accumulator::CountStar(n) = self {
+            *n += 1;
+            return;
+        }
+        let expr = match agg {
+            Aggregator::GeneralSet { expr, .. } => expr,
+            Aggregator::CountStar => unreachable!("handled above"),
         };
-        sum += n;
-        count += 1;
-    }
-    if count == 0 {
-        null_value()
-    } else {
-        Value::Float(sum / count as f64)
-    }
-}
-
-/// Smallest by `value_cmp`. Incomparable with running best → skipped.
-fn min_values(values: &[Value]) -> Value {
-    let mut best: Option<&Value> = None;
-    for v in values {
-        match best {
-            None => best = Some(v),
-            Some(current) => {
-                if let Some(std::cmp::Ordering::Less) = value_cmp(v, current) {
-                    best = Some(v);
+        let value = match runtime.run_expr(mu, expr) {
+            ExprResult::Success(Value::Null) => return, // null-eliminated
+            ExprResult::Success(v) => v,
+            ExprResult::Failure(_) => return,           // null-eliminated
+        };
+        match self {
+            Accumulator::CountStar(_) => unreachable!(),
+            Accumulator::Count { n, seen } => {
+                if let Some(seen) = seen {
+                    if seen.insert(GroupKey::from_values(vec![value])) {
+                        *n += 1;
+                    }
+                } else {
+                    *n += 1;
                 }
+            }
+            Accumulator::Sum {
+                int_acc,
+                float_acc,
+                had_float,
+                had_value,
+                seen,
+            } => {
+                if let Some(seen) = seen {
+                    if !seen.insert(GroupKey::from_values(vec![value.clone()])) {
+                        return;
+                    }
+                }
+                match value {
+                    Value::Int(n) => {
+                        if *had_float {
+                            *float_acc += n as f64;
+                        } else {
+                            *int_acc = int_acc.wrapping_add(n);
+                        }
+                        *had_value = true;
+                    }
+                    Value::Float(f) => {
+                        if !*had_float {
+                            *float_acc = *int_acc as f64;
+                            *had_float = true;
+                        }
+                        *float_acc += f;
+                        *had_value = true;
+                    }
+                    _ => {} // skip non-numeric
+                }
+            }
+            Accumulator::Avg { sum, n, seen } => {
+                if let Some(seen) = seen {
+                    if !seen.insert(GroupKey::from_values(vec![value.clone()])) {
+                        return;
+                    }
+                }
+                let f = match value {
+                    Value::Int(i) => i as f64,
+                    Value::Float(f) => f,
+                    _ => return, // skip non-numeric
+                };
+                *sum += f;
+                *n += 1;
+            }
+            Accumulator::Min(best) => match best {
+                None => *best = Some(value),
+                Some(current) => {
+                    if let Some(std::cmp::Ordering::Less) = value_cmp(&value, current) {
+                        *best = Some(value);
+                    }
+                }
+            },
+            Accumulator::Max(best) => match best {
+                None => *best = Some(value),
+                Some(current) => {
+                    if let Some(std::cmp::Ordering::Greater) = value_cmp(&value, current) {
+                        *best = Some(value);
+                    }
+                }
+            },
+        }
+    }
+
+    fn finalize(&mut self) -> Value {
+        match self {
+            Accumulator::CountStar(n) => Value::Int(*n as i64),
+            Accumulator::Count { n, .. } => Value::Int(*n as i64),
+            Accumulator::Sum {
+                int_acc,
+                float_acc,
+                had_float,
+                had_value,
+                ..
+            } => {
+                if !*had_value {
+                    null_value()
+                } else if *had_float {
+                    Value::Float(*float_acc)
+                } else {
+                    Value::Int(*int_acc)
+                }
+            }
+            Accumulator::Avg { sum, n, .. } => {
+                if *n == 0 {
+                    null_value()
+                } else {
+                    Value::Float(*sum / *n as f64)
+                }
+            }
+            Accumulator::Min(best) | Accumulator::Max(best) => {
+                best.take().unwrap_or_else(null_value)
             }
         }
     }
-    best.cloned().unwrap_or_else(null_value)
-}
-
-fn max_values(values: &[Value]) -> Value {
-    let mut best: Option<&Value> = None;
-    for v in values {
-        match best {
-            None => best = Some(v),
-            Some(current) => {
-                if let Some(std::cmp::Ordering::Greater) = value_cmp(v, current) {
-                    best = Some(v);
-                }
-            }
-        }
-    }
-    best.cloned().unwrap_or_else(null_value)
 }
 
 /// O(n) dedup preserving insertion order via HashSet membership.
@@ -2175,9 +2292,18 @@ fn dedup_preserving_order(rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
 // `Value` lacks Hash/Eq because of `f64`. This wrapper is runtime-local;
 // modifying `Value` would touch ~30 call sites. Floats are normalized so
 // NaN==NaN and +0.0==-0.0 (consistent with our notion of "same group").
+//
+// `hash` is precomputed once at construction so HashMap probes only feed
+// 8 bytes into the BuildHasher instead of recursively hashing the entire
+// `Vec<Value>` on every lookup. Eq still walks the full key for
+// correctness (the prefix `self.hash == other.hash` short-circuits the
+// common "different group" case before allocating any compare work).
 
 #[derive(Debug, Clone)]
-struct GroupKey(Vec<Value>);
+struct GroupKey {
+    hash: u64,
+    vals: Vec<Value>,
+}
 
 fn hash_value<H: Hasher>(v: &Value, state: &mut H) {
     std::mem::discriminant(v).hash(state);
@@ -2236,11 +2362,12 @@ fn normalize_float_bits(f: f64) -> u64 {
 
 impl PartialEq for GroupKey {
     fn eq(&self, other: &Self) -> bool {
-        self.0.len() == other.0.len()
+        self.hash == other.hash
+            && self.vals.len() == other.vals.len()
             && self
-                .0
+                .vals
                 .iter()
-                .zip(other.0.iter())
+                .zip(other.vals.iter())
                 .all(|(a, b)| eq_value(a, b))
     }
 }
@@ -2249,16 +2376,21 @@ impl Eq for GroupKey {}
 
 impl Hash for GroupKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.len().hash(state);
-        for v in &self.0 {
-            hash_value(v, state);
-        }
+        state.write_u64(self.hash);
     }
 }
 
 impl GroupKey {
-    fn from_values(vs: Vec<Value>) -> Self {
-        GroupKey(vs)
+    fn from_values(vals: Vec<Value>) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        vals.len().hash(&mut hasher);
+        for v in &vals {
+            hash_value(v, &mut hasher);
+        }
+        GroupKey {
+            hash: hasher.finish(),
+            vals,
+        }
     }
 }
 
