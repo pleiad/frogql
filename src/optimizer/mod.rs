@@ -1,4 +1,5 @@
 pub mod existential;
+pub mod order_by_alias;
 pub mod pushdown;
 pub mod unroll_repeat;
 

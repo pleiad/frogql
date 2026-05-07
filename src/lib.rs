@@ -50,6 +50,7 @@ fn optimize_query(q: Query, schema: &Schema) -> Query {
         Query { matches, ..q }
     };
     optimizer::existential::fold_empty_existentials(&mut q, schema);
+    optimizer::order_by_alias::optimize(&mut q);
     q
 }
 
