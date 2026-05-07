@@ -127,3 +127,70 @@ graphqlite point at this divergence file.
 **Tested versions**: graphqlite 0.4.4 (PyPI, `pip install graphqlite`).
 If a future version fixes int64 RETURN, this divergence becomes
 moot and the cross-system comparison rises to 3/3 systems.
+
+## IC11 sub-types encoded as `type` property, not as labels
+
+The LDBC SNB IC11 spec references `:Company` and `:Country` as
+schema-level sub-labels of `:Organisation` and `:Place`. Our
+graphqlite loader (`setup.py`) loads each Organisation node with
+label `"Organisation"` and each Place node with label `"Place"`,
+storing the sub-type as a regular property column (`type`) on the
+node. graphqlite's `insert_nodes_bulk` API takes a single label per
+node and there's no schema-level multi-label or sub-label primitive.
+The cross-system IC11 cypher filters by the `type` property instead
+of matching the sub-label directly:
+
+```cypher
+MATCH ... -[:workAt]-> (company:Organisation) -[:isLocatedIn]-> (country:Place)
+WHERE company.type = 'company' AND country.type = 'country' AND ...
+```
+
+Pre-fix the cypher used the spec form `(:Company) ... (:Country)`
+directly; graphqlite didn't error on the unknown labels but every
+match failed silently → 0 rows on every parameter row. Post-fix the
+query is structurally correct, but graphqlite still returns 0/15
+because of a separate runtime bug in undirected variable-length
+expansion (see next section). The encoding-of-sub-types fix is
+required regardless of that runtime bug — without it the cypher
+could never match anything.
+
+The semantic effect is identical to gqlite's `:Company` / `:Country`
+match: gqlite's LDBC loader synthesizes the sub-label via
+`LabelType::And` on the same `type` column at load time; ours keeps
+it flat as a property. Documented inline in `ic11.cypher`.
+
+## graphqlite undirected variable-length expansion `[:rel*N..M]-` follows only outgoing edges
+
+**Symptom**: `MATCH (p:Person {ldbcId: $pid})-[:knows*1..2]-(o:Person) RETURN count(o)`
+returns 0 for some Persons whose 1-hop count is non-zero. Concretely,
+for `pid=24189255811707` (LDBC SF0.1):
+
+```
+1-hop knows (no quantifier): 11 friends
+1-hop knows forward only:    0
+1-hop knows reverse only:    11
+[:knows*1..1]- (undirected):  0  ← BUG. should be 11.
+[:knows*1..2]- (undirected):  0  ← BUG.
+[:knows*1..2]-> (forward):    0
+<-[:knows*1..2]- (reverse):   373
+```
+
+So `-[:rel]-` (no quantifier) is correctly bidirectional, but
+`-[:rel*N..M]-` (variable-length, no arrow heads) is silently
+forward-only. For Persons whose `knows` edges all live in the
+reverse direction in the underlying SQLite table (an artifact of
+LDBC storing each pair once in one direction), the variable-length
+expansion finds zero friends.
+
+**Effect on the bench**: IC11 has been re-translated to use the
+`type` column on `:Organisation` / `:Place` (the loader doesn't
+synthesize `:Company` / `:Country` sub-labels — see "encoding of
+sub-types" in each ic-cypher comment block). After that fix, Kuzu
+and gqlite produce byte-identical IC11 rows, but graphqlite still
+returns 0 on the one IC11 parameter row where the expected result
+is non-empty (LDBC interactive_11_param.txt row 1, person
+`24189255811707`). The graphqlite outlier on this row is a
+graphqlite runtime bug, not a translation bug.
+
+**Tested versions**: graphqlite 0.4.4. Reproduces with the literal
+queries above; not yet reported upstream.
