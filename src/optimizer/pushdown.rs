@@ -16,8 +16,10 @@
 //!   `(x:{a bool, value_preds=[k = 7]})-[y:{b str}]->(z)`
 //!
 //! Only works for top-level AND conjuncts. OR expressions cannot be pushed down
-//! because neither side is guaranteed to hold. Value pushdown is restricted to
-//! node descriptors today; edges fall through to the residual WHERE.
+//! because neither side is guaranteed to hold. Value pushdown applies to both
+//! node and edge descriptors: nodes feed `FilterKind::NodeAttrCmp` (with
+//! optional index folding); edges feed `FilterKind::EdgeAttrCmp` whose runtime
+//! resolves the edge_id from the already-bound src/tgt + edge label.
 
 use std::collections::HashMap;
 
@@ -78,10 +80,15 @@ fn rewrite(p: PathPattern) -> PathPattern {
                         .or_default()
                         .push((tc.attr, tc.ty));
                 } else if let Some(vp) = extract_value_pred(&c) {
-                    // Restrict value pushdown to node descriptors. Edge value
-                    // predicates need edge_props lookup at LTJ time, which is
-                    // a follow-up.
-                    if matches!(var_kinds.get(&vp.var), Some(VarKind::Node)) {
+                    // Push value predicates on both nodes AND edges. Nodes
+                    // become `FilterKind::NodeAttrCmp`; edges become
+                    // `FilterKind::EdgeAttrCmp` (resolved in pattern_extract).
+                    // References to variables not bound by this pattern
+                    // (sub-pattern correlation) stay in the residual WHERE.
+                    if matches!(
+                        var_kinds.get(&vp.var),
+                        Some(VarKind::Node) | Some(VarKind::Edge)
+                    ) {
                         constraints
                             .values
                             .entry(vp.var)
@@ -327,9 +334,11 @@ fn merge_into_node_desc(desc: Option<Descriptor>, c: &Constraints) -> Option<Des
     Some(d)
 }
 
-/// Merge only type constraints into an edge descriptor; value predicates on
-/// edges are left in the residual WHERE for now. Anonymous edges (no `var`)
-/// follow the same rule as anonymous nodes: nothing to merge, but the
+/// Merge type and value constraints into an edge descriptor. Value
+/// predicates land in `value_preds` and become `FilterKind::EdgeAttrCmp`
+/// at pattern-extract time (the LTJ runner resolves the edge_id from the
+/// already-bound src/tgt + edge label and then reads `edge_props`).
+/// Anonymous edges (no `var`) carry no merged constraints, but the
 /// descriptor must survive so its label reaches the LTJ extractor.
 fn merge_into_edge_desc(desc: Option<Descriptor>, c: &Constraints) -> Option<Descriptor> {
     let mut d = desc?;
@@ -339,6 +348,9 @@ fn merge_into_edge_desc(desc: Option<Descriptor>, c: &Constraints) -> Option<Des
             for (attr, ty) in attrs {
                 d.dtype.props.extend(attr.clone(), ty.clone());
             }
+        }
+        if let Some(preds) = c.values.get(&var_name) {
+            d.value_preds.extend(preds.iter().cloned());
         }
     }
     Some(d)
@@ -369,16 +381,16 @@ mod tests {
     }
 
     #[test]
-    fn test_pushdown_partial() {
+    fn test_pushdown_partial_drops_filter_when_all_pushable() {
         // ((x)-[y]->(z) WHERE x.a bool and y.b > 10)
-        // → (x:{a:bool})-[y]->(z) WHERE y.b > 10
+        // → (x:{a:bool})-[y:{value_preds=[b > 10]}]->(z); both conjuncts
+        // are pushable now that edges accept value predicates.
         let p = parse("((x)-[y]->(z) WHERE x.a bool and y.b > 10)").unwrap();
         let optimized = optimize(p);
 
-        // Should still have a filter for the non-pushable y.b > 10
         assert!(
-            matches!(&optimized, PathPattern::Filter(_, _)),
-            "expected remaining filter, got: {optimized}"
+            !matches!(&optimized, PathPattern::Filter(_, _)),
+            "expected no remaining filter, got: {optimized}"
         );
     }
 
@@ -487,12 +499,52 @@ mod tests {
     }
 
     #[test]
-    fn test_pushdown_value_pred_on_edge_stays_in_filter() {
-        // Edge value predicates are not pushed (no edge_props lookup at LTJ
-        // time yet); Filter must remain.
+    fn test_pushdown_value_pred_on_edge() {
+        // Edge value predicates push into the edge descriptor's value_preds;
+        // the LTJ runner resolves edge_id from adjacency to evaluate them.
         let p = parse("((x)-[y]->(z) WHERE y.amount > 10)").unwrap();
         let optimized = optimize(p);
-        assert!(matches!(&optimized, PathPattern::Filter(_, _)));
+        assert!(
+            !matches!(&optimized, PathPattern::Filter(_, _)),
+            "expected no remaining filter, got: {optimized}"
+        );
+        let preds = first_edge_value_preds(&optimized, "y");
+        assert_eq!(preds.len(), 1);
+        assert_eq!(preds[0].0, "amount");
+        assert_eq!(preds[0].1, BinOp::Gt);
+        assert_eq!(preds[0].2, Value::Int(10));
+    }
+
+    fn first_edge_value_preds(p: &PathPattern, var: &str) -> Vec<(String, BinOp, Value)> {
+        let edge_desc = match p {
+            PathPattern::EdgeRight(Some(d))
+            | PathPattern::EdgeLeft(Some(d))
+            | PathPattern::EdgeUndirected(Some(d))
+            | PathPattern::EdgeAnyDirection(Some(d))
+                if d.var.as_deref() == Some(var) =>
+            {
+                Some(d.clone())
+            }
+            _ => None,
+        };
+        if let Some(d) = edge_desc {
+            return d.value_preds;
+        }
+        match p {
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                let mut left = first_edge_value_preds(a, var);
+                if !left.is_empty() {
+                    return left;
+                }
+                left.extend(first_edge_value_preds(b, var));
+                left
+            }
+            PathPattern::Filter(inner, _) | PathPattern::Questioned(inner) => {
+                first_edge_value_preds(inner, var)
+            }
+            PathPattern::Repeat { pattern, .. } => first_edge_value_preds(pattern, var),
+            _ => vec![],
+        }
     }
 
     #[test]

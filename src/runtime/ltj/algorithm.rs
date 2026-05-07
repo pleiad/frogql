@@ -1,10 +1,22 @@
 use crate::model::graph_access::GraphAccess;
-use crate::model::value::Value;
+use crate::model::value::{Id, Value};
 use crate::runtime::cmp_values;
 use crate::syntax::expr::BinOp;
+use crate::typing::label_type::LabelType;
 
 use super::iterator::{LtjIterator, SpoPos};
 use super::veo::Veo;
+
+/// Direction of the edge inside the original pattern. Used by
+/// `FilterKind::EdgeAttrCmp` to know which adjacency to walk when
+/// resolving the bound `(src_id, tgt_id)` pair to a concrete edge_id
+/// for `edge_props` lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeDir {
+    Right,
+    Left,
+    Undirected,
+}
 
 /// A filter placed at a specific level in the VEO.
 /// Evaluated after binding the variable at that level, before descending further.
@@ -41,6 +53,24 @@ pub enum FilterKind {
         var_id: u8,
         /// Sorted ascending so membership is a binary search.
         set: std::sync::Arc<Vec<u32>>,
+    },
+    /// Edge attribute compared against a literal: `var.attr <op> value` on
+    /// an edge. The edge has no slot in the LTJ tuple (LTJ binds nodes;
+    /// edge_ids are derived from `(src, label, tgt)`); the runtime resolves
+    /// the concrete edge_id by walking the adjacency from the bound
+    /// `src_id` looking for an edge with the given label whose other
+    /// endpoint is `tgt_id`. Evaluated at the VEO level where both
+    /// endpoint variables are bound. Until Phase 2 (auto-built edge
+    /// indexes), this avoids the post-LTJ residual WHERE scan and lets
+    /// the seek prune sub-trees inside leapfrog.
+    EdgeAttrCmp {
+        src_var: u8,
+        tgt_var: u8,
+        edge_label: Option<String>,
+        dir: EdgeDir,
+        attr: String,
+        op: BinOp,
+        value: Value,
     },
 }
 
@@ -393,8 +423,93 @@ impl<'a, G: GraphAccess> LtjRunner<'a, G> {
                         }
                     }
                 }
+                FilterKind::EdgeAttrCmp {
+                    src_var,
+                    tgt_var,
+                    edge_label,
+                    dir,
+                    attr,
+                    op,
+                    value,
+                } => {
+                    let src_id = tuple
+                        .iter()
+                        .find(|(v, _)| *v == *src_var)
+                        .map(|&(_, id)| id);
+                    let tgt_id = tuple
+                        .iter()
+                        .find(|(v, _)| *v == *tgt_var)
+                        .map(|&(_, id)| id);
+                    let (Some(src_id), Some(tgt_id)) = (src_id, tgt_id) else {
+                        // Filter placed before both endpoints are bound;
+                        // this is a placement bug — fail safe by passing.
+                        continue;
+                    };
+                    let Some(edge_id) =
+                        find_edge_id(self.graph, src_id, tgt_id, edge_label.as_deref(), *dir)
+                    else {
+                        // No edge between (src,tgt) with this label means
+                        // the LTJ triple-index hit was a stale ghost; reject.
+                        return false;
+                    };
+                    let props = self.graph.edge_props(edge_id);
+                    match props.get(attr) {
+                        Some(actual) => {
+                            if !cmp_values(actual, *op, value) {
+                                return false;
+                            }
+                        }
+                        // Missing property → predicate is null → reject
+                        None => return false,
+                    }
+                }
             }
         }
         true
     }
+}
+
+/// Resolve the edge_id between `src_id` and `tgt_id` carrying `edge_label`
+/// (or any label when `None`). The triple decomposition has already
+/// normalized `(src_var, tgt_var)` to the physical edge direction
+/// (`Left` patterns are swapped in `decompose_flat_chain`), so for
+/// directed edges we always look from `src_id`'s outgoing adjacency
+/// regardless of the surface-level `dir`. `dir` only distinguishes
+/// directed (Right/Left) from undirected. Phase 1: O(degree(src)) per
+/// filter call — acceptable as long as the filter prunes selectively.
+/// Phase 2 will fold range/eq predicates against an edge btree to skip
+/// this entirely.
+fn find_edge_id<G: GraphAccess>(
+    graph: &G,
+    src_id: Id,
+    tgt_id: Id,
+    edge_label: Option<&str>,
+    dir: EdgeDir,
+) -> Option<Id> {
+    let undirected = matches!(dir, EdgeDir::Undirected);
+    let candidates = if undirected {
+        graph.undirected_edges_of(src_id)
+    } else {
+        graph.outgoing_edges(src_id)
+    };
+    for eid in candidates {
+        let (es, et) = (graph.src(eid), graph.tgt(eid));
+        let endpoints_match = if undirected {
+            (es == src_id && et == tgt_id) || (es == tgt_id && et == src_id)
+        } else {
+            es == src_id && et == tgt_id
+        };
+        if !endpoints_match {
+            continue;
+        }
+        if let Some(label) = edge_label {
+            let actual = graph.edge_labels(eid);
+            let required = LabelType::Label(label.to_string());
+            if !LabelType::is_subtype(&actual, &required) {
+                continue;
+            }
+        }
+        return Some(eid);
+    }
+    None
 }

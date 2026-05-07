@@ -8,7 +8,7 @@ use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::BinOp;
 use crate::syntax::path_pattern::PathPattern;
 
-use super::algorithm::{FilterKind, LtjAlgorithm, LtjRunner, PlacedFilter, ResultTuple};
+use super::algorithm::{EdgeDir, FilterKind, LtjAlgorithm, LtjRunner, PlacedFilter, ResultTuple};
 use super::iterator::{LtjIterator, SpoPos, Term, TriplePattern};
 use super::triple_index::TripleIndex;
 use super::veo::{Veo, VeoSimple};
@@ -163,6 +163,9 @@ fn try_ltj_inner<G: GraphAccess>(
                     | FilterKind::NodeProperty { var_id, .. }
                     | FilterKind::NodeAttrCmp { var_id, .. }
                     | FilterKind::NodeInSet { var_id, .. } => *var_id != pin_var_id,
+                    // Edge filter depends on both endpoints, neither
+                    // of which is the pinned scalar — keep it.
+                    FilterKind::EdgeAttrCmp { .. } => true,
                 });
             }
         }
@@ -477,6 +480,15 @@ fn estimate_var_weights(num_vars: usize, filters: &[ExtractedFilter], total: usi
             // treat it as the strongest equality (weight 1) so the variable
             // binds early and rejects non-members before recursion.
             FilterKind::NodeInSet { var_id, .. } => has_eq[*var_id as usize] = true,
+            // Edge filters narrow the (src, tgt) pair, so flag both
+            // endpoints as cmp-narrowed for VEO ordering. The runner
+            // resolves edge_id from adjacency at eval time.
+            FilterKind::EdgeAttrCmp {
+                src_var, tgt_var, ..
+            } => {
+                has_cmp[*src_var as usize] = true;
+                has_cmp[*tgt_var as usize] = true;
+            }
         }
     }
 
@@ -772,6 +784,7 @@ fn decompose_flat_chain(
             terms: [Term::Variable(src_var), p_term, Term::Variable(tgt_var)],
         });
         triple_info.push((src_var, tgt_var, edge_var_name, *kind));
+        emit_edge_filters(*edge_desc, src_var, tgt_var, *kind, filters);
 
         current_node = next_var;
         i += 2;
@@ -792,6 +805,7 @@ fn decompose_flat_chain(
                 terms: [Term::Variable(src_var), p_term, Term::Variable(tgt_var)],
             });
             triple_info.push((src_var, tgt_var, edge_var_name, *kind));
+            emit_edge_filters(*edge_desc, src_var, tgt_var, *kind, filters);
             current_node = next_var;
         }
     }
@@ -877,6 +891,56 @@ fn fresh_var(
 
 /// Build the P-term of a triple pattern from an edge descriptor: a label
 /// constant when there's exactly one required label, a fresh variable
+/// Emit `FilterKind::EdgeAttrCmp` for every value predicate the optimizer
+/// pushed into the edge descriptor's `value_preds`. The filter binds at
+/// the VEO level where both endpoints are bound (the runner walks src's
+/// adjacency to resolve the concrete edge_id once `(src_id, tgt_id)` are
+/// known). Anonymous edges and edges without `value_preds` produce no
+/// filters.
+fn emit_edge_filters(
+    edge_desc: Option<&Descriptor>,
+    src_var: u8,
+    tgt_var: u8,
+    kind: EdgeKind,
+    filters: &mut Vec<ExtractedFilter>,
+) {
+    let Some(d) = edge_desc else {
+        return;
+    };
+    if d.value_preds.is_empty() {
+        return;
+    }
+    let labels = d.dtype.label.required_labels();
+    // Single required label is the common case (e.g. `:hasMember`); use
+    // it to disambiguate parallel edges between the same endpoints.
+    // Multiple or zero labels → don't filter by label, trust the triple
+    // index plus endpoint match.
+    let edge_label = if labels.len() == 1 {
+        Some(labels[0].to_string())
+    } else {
+        None
+    };
+    let dir = match kind {
+        EdgeKind::Right => EdgeDir::Right,
+        EdgeKind::Left => EdgeDir::Left,
+        EdgeKind::Undirected => EdgeDir::Undirected,
+    };
+    for (attr, op, value) in &d.value_preds {
+        filters.push(ExtractedFilter {
+            depends_on: vec![src_var, tgt_var],
+            kind: FilterKind::EdgeAttrCmp {
+                src_var,
+                tgt_var,
+                edge_label: edge_label.clone(),
+                dir,
+                attr: attr.clone(),
+                op: *op,
+                value: value.clone(),
+            },
+        });
+    }
+}
+
 /// otherwise (wildcard / multi-label).
 fn build_p_term(
     edge_desc: Option<&Descriptor>,

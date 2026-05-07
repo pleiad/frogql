@@ -257,11 +257,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     }
                 )
             });
-            if only_count_star
-                && query.group_by.is_none()
-                && !query.distinct
-                && !has_order
-            {
+            if only_count_star && query.group_by.is_none() && !query.distinct && !has_order {
                 let n = Value::Int(ir.rows.len() as i64);
                 vec![vec![n; return_items.len()]]
             } else {
@@ -650,8 +646,11 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     ) -> Vec<Vec<Value>> {
         let mut projected: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
         // O(N) dedup via HashSet; the previous `Vec::contains` was O(N²).
-        let mut seen: Option<HashSet<GroupKey>> =
-            if distinct { Some(HashSet::with_capacity(rows.len())) } else { None };
+        let mut seen: Option<HashSet<GroupKey>> = if distinct {
+            Some(HashSet::with_capacity(rows.len()))
+        } else {
+            None
+        };
         for row in rows {
             let vals: Vec<Value> = items
                 .iter()
@@ -733,7 +732,8 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                         .filter(|it| !it.is_aggregate())
                         .map(|it| self.eval_expr_item(it, &row.assignment))
                         .collect();
-                    let accs: Vec<Accumulator> = aggs.iter().copied().map(Accumulator::new).collect();
+                    let accs: Vec<Accumulator> =
+                        aggs.iter().copied().map(Accumulator::new).collect();
                     let i = states.len();
                     states.push(GroupState { proj, accs });
                     key_to_index.insert(key, i);
@@ -2165,7 +2165,7 @@ impl Accumulator {
         let value = match runtime.run_expr(mu, expr) {
             ExprResult::Success(Value::Null) => return, // null-eliminated
             ExprResult::Success(v) => v,
-            ExprResult::Failure(_) => return,           // null-eliminated
+            ExprResult::Failure(_) => return, // null-eliminated
         };
         match self {
             Accumulator::CountStar(_) => unreachable!(),
