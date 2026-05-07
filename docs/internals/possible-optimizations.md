@@ -38,7 +38,7 @@ requires multiple seeks. But LazyGraphStore already does this anyway.
 
 ## ~~2. Label index for compound labels (A&B)~~ (DONE)
 
-Implemented. See `docs/implemented-optimizations.md`.
+Implemented. See `implemented-optimizations.md`.
 
 
 ## 3. Sorted adjacency lists for intersection
@@ -56,7 +56,7 @@ This is a prerequisite for implementing any leapfrog-style join.
 
 ## ~~4. Remove string names from topology~~ (DONE)
 
-Implemented. See `docs/implemented-optimizations.md`.
+Implemented. See `implemented-optimizations.md`.
 
 
 ## 5. Propagate limit into join sub-queries

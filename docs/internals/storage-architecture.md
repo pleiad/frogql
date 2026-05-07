@@ -489,7 +489,7 @@ is not saved to disk — it's rebuilt each time from whatever backend
 (`Graph`, `LazyGraphStore`, etc.) is in use.
 
 For a full explanation of LTJ and why it matters, see
-`docs/JOIN_STRATEGY_NOTES.md`.
+`JOIN_STRATEGY_NOTES.md`.
 
 ### 6.1 What it stores
 

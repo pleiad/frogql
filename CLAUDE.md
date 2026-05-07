@@ -71,7 +71,7 @@ Other top-level directories:
 - `src/` — library crate (`parser/`, `elaborate/`, `typing/`, `optimizer/`, `runtime/`, `model/`, `store/`, `lib.rs`)
 - `tests/` — integration tests (one file per concern; see test list above)
 - `examples/` — pre-built `.gdb` databases (movies, fraud_detection, bom, ldbc-sf01, etc.) plus matching `*_queries.json` query bundles
-- `docs/` — `storage-architecture.md`, `JOIN_STRATEGY_NOTES.md`, `implemented-optimizations.md`, `iso-gql-gaps.md`, `graph-type-catalog-plan.md`, `typechecker_migration.md`, `rules.md`
+- `docs/internals/` — `storage-architecture.md`, `JOIN_STRATEGY_NOTES.md`, `implemented-optimizations.md`, `iso-gql-gaps.md`, `graph-type-catalog-plan.md`, `typechecker_migration.md`, `rules.md`
 - `bench/` — benchmark scaffolding: `BENCHMARK_PLAN.md`, `LDBC_BENCH_PLAN.md`, `TYPECHECKER_BENCHMARK.md`, `ldbc-queries/*.toml`, `queries/`, `scripts/`, `results/` (benchmark datasets in `bench/data/` are gitignored and downloaded via `bench_setup`)
 
 Python API surface (`python/src/lib.rs`): `frogql.open(path)`, `frogql.import_json(db, json)`, `frogql.import_csv(db, dir)`, and a `Connection` class with `execute(query, limit)`, `schema()`, `graph_types()`, `node_count`, `edge_count`. `execute` returns a list of dicts:
@@ -128,7 +128,7 @@ For local downstream development against a not-yet-published change: `cd python 
 
 ### Graph-type catalog
 
-`LazyGraphStore` owns a `RefCell<GraphTypeCatalog>` (`src/runtime/catalog.rs`) loaded from the page chain at `header.catalog_root` on open. The REPL and Python bindings route input via `parse_statement`, dispatch DDL through `catalog_mut()` + `save_catalog()`, and compile queries with `catalog.active_schema()`. The reserved name `DEFAULT` is auto-populated by `infer_simple_schema(&store)` (`src/typing/inference.rs`) at import time and on `USE GRAPH TYPE DEFAULT`; both `CREATE` and `DROP` of `DEFAULT` are rejected. Persistence detail lives in `docs/storage-architecture.md` §3.5.
+`LazyGraphStore` owns a `RefCell<GraphTypeCatalog>` (`src/runtime/catalog.rs`) loaded from the page chain at `header.catalog_root` on open. The REPL and Python bindings route input via `parse_statement`, dispatch DDL through `catalog_mut()` + `save_catalog()`, and compile queries with `catalog.active_schema()`. The reserved name `DEFAULT` is auto-populated by `infer_simple_schema(&store)` (`src/typing/inference.rs`) at import time and on `USE GRAPH TYPE DEFAULT`; both `CREATE` and `DROP` of `DEFAULT` are rejected. Persistence detail lives in `docs/internals/storage-architecture.md` §3.5.
 
 DDL surface today: `CREATE / USE / DROP GRAPH TYPE`, plus inspection / validation:
 
@@ -372,7 +372,7 @@ Adjacency has two on-disk representations and the loader prefers whichever is pr
 - **CSR (preferred, header `csr_adjacency_root`)** — six `Vec<u32>` page chains: `[out_offsets, out_flat, in_offsets, in_flat, und_offsets, und_flat]`. Loaded in O(N + E) total via six big sequential reads; node `n`'s edges are `flat[offsets[n]..offsets[n+1]]`. Stored in memory as three `AdjCsr { offsets: Vec<u32>, flat: Vec<u32> }` on `LazyGraphStore`. Built and written by every `save_graph` call after the format was added (commit `34d97c0`).
 - **Legacy per-node chains (header `adjacency_root`)** — one small page chain per node listing `(edge_id, other_node, kind)` triples (kind 0=out, 1=in, 2=und). The loader still understands this format and rebuilds CSR in memory at open via bucket-sort; legacy `.gdb` files keep working but pay ~30× more time on the topology phase (~5s vs ~0.1s for SF0.1) until they're re-saved into the new format.
 
-See `docs/storage-architecture.md` for the full spec.
+See `docs/internals/storage-architecture.md` for the full spec.
 
 `StringTable::str_to_id` (the String→ID dedup map used for writes and label-index lookups) is built lazily on first access. `load()` only fills `id_to_str`; the dedup map is `RefCell<Option<HashMap>>` and populated by the first `intern` or `id_for_str` call. Read-only LazyGraphStore queries never trigger the build, saving ~50% of the load cost.
 
@@ -434,36 +434,29 @@ Measured impact on LDBC IC2 over `bench/data/ldbc-sf0.1.gdb` (15 params × 3 ite
 
 For reference, GraphQLite (a SQLite extension with Cypher) measures 32.82 ms median on the same query — gqlite is ~3.75× faster after the cache lands. The single biggest win is the TripleIndex cache; secondary indexes account for the early phases of the speedup but are dwarfed by the savings of not rebuilding the six-ordering edge index per query.
 
-## Key conventions
+## Conventions
 
 - Labels in patterns require the `:` prefix: `-[:Transfer]->`, not `-[Transfer]->`.
-- Run `cargo fmt --all`, then `cargo clippy --workspace --all-targets -- -D clippy::all`, then **`cargo test`** before every commit (see *Pre-commit checklist*). fmt + clippy alone do not catch parser/lexer regressions.
 - The `bench_test` integration target has pre-existing failures — exclude it from regular runs.
 - `bench/data/` is gitignored (large datasets, downloaded via `cargo run --bin bench_setup`).
 - Example databases in `examples/*.gdb` ARE committed (small, useful for testing).
 - Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6); changing the order is a breaking on-disk format change.
-- The Python wheel (`frogql` on PyPI) MUST stay independent of `repl` / `bench` features — never reference `rustyline`, `ureq`, `zstd`, `tar`, `sysinfo`, or `toml` from library code.
-- New bins that need optional deps: declare them as explicit `[[bin]]` entries in `Cargo.toml` with `required-features = [...]`. Auto-discovery still picks up bins that use only always-on deps.
 
-## Implementation status (handoff 2026-05-06)
+## Extending the surface
 
-DML phases implemented and committed to `main`:
+- **New DML op** (e.g. `MERGE`): lexer (token), grammar (`parse_*` arm), `src/syntax/dm.rs` (variant in `DmOp`), `src/runtime/dm.rs` (`apply_*` per binding), `GraphAccessMut` (if it touches disk), test file `tests/dm_<op>_test.rs`. The MATCH chain must run through `elaborate::elaborate_query` before iteration so descriptor `value_filters` lower into WHERE.
+- **New built-in expression**: `Token` + lexer arm, parser of `factor` / `call`, `Expr::*`, runtime in `engine.rs::run_expr`, typechecker in `typing/` if it returns a non-trivial type.
+- **ISO syntactic sugar**: lives in `src/elaborate/`. Anything that changes *which* rows the query produces. The optimizer is reserved for performance-preserving transforms only.
+- **Persisting something new in `.gdb`**: `pager/header.rs` (root `u32`), `store/io.rs::save_graph_*` (write side), `store/lazy.rs::open` (load side), `docs/internals/storage-architecture.md` (spec), and `fig:layout` in `latex/main.tex` if it ships in the paper.
 
-- **MVP-0** (`feat(dml)` commit `c3f93d4`): full surface — `INSERT`, `MATCH ... [DETACH|NODETACH] DELETE`, optional `RETURN`, `.save`, `.dump-json`, `open_or_create`, G2000, DEFAULT dirty flag. 58 tests across 7 files.
-- **MVP-1.A**: INSERT property expressions (`{prop: a.attr}`). `Runtime::run_expr` is now public and used by `runtime/dm::eval_props_from_descriptor`.
-- **MVP-1.B**: ISO §13.3 SET. `DmOp::Set(Vec<SetItem>)` with `Property` and `AllProperties` (clear+set per GR8 b.i). Overlay: `mod_node_props` / `mod_edge_props` with `PropMods { cleared, set: HashMap<String, Option<Value>> }`. `GraphAccessMut`: `set_node_prop`, `replace_node_props`, edge equivalents. Tests: `tests/dm_set_test.rs`.
-- **MVP-1.C**: ISO §13.4 REMOVE. `DmOp::Remove(Vec<RemoveItem>)` reuses the same overlay (`set[k] = None`). `GraphAccessMut`: `remove_node_prop`, `remove_edge_prop`. Tests: `tests/dm_remove_test.rs`.
-- **MVP-1.D**: ISO §13.3 / §13.4 SET / REMOVE labels (Feature GD02). `SetItem::Label` / `RemoveItem::Label`; the parser accepts `x:Label` and `x IS Label` after the var. Overlay: `mod_node_labels` / `mod_edge_labels` with `LabelMods { added, removed }`; `GraphAccessMut` gains `add_node_label`, `remove_node_label`, edge equivalents. `nodes_with_label` / `directed_edges_with_label` / `undirected_edges_with_label` honour the label overlay so reads stay coherent post-mutation. Tests: `tests/dm_label_test.rs` (12 cases, including G2000 enforcement).
-- **MVP-1.E**: ISO §13.5 DELETE with value expressions (Feature GD04). `DmOp::Delete.targets` is now `Vec<Expr>`; `parse_delete_op` calls `self.expr()`; `apply_delete` evaluates each target through `runtime.run_expr`, expects `Value::Node` / `Value::Edge`, treats `Null` as a no-op (§13.5 GR4 a). Tests: `tests/dm_delete_expr_test.rs`.
-- **MVP-1.F**: `.dump-gql`. `src/store/dump.rs::dump_to_gql_string` / `dump_to_gql_file` emit `INSERT (:L1 & L2 {_dump_id: 'n_K', ...})` per node, `MATCH (a:* {_dump_id: 'n_S'}), (b:* {_dump_id: 'n_T'}) INSERT (a)-[:E {...}]->(b)` per edge, then `MATCH (n) REMOVE n._dump_id` to strip the synthetic key. Collision detection falls back to `__dump_id_v1`, `__dump_id_v2`, .... String values that contain a literal `'` raise an error (the lexer has no escape support). REPL: `.dump-gql <path>`. Tests: `tests/dump_test.rs::dump_gql_round_trip_reproduces_graph_shape` and `dump_gql_avoids_dump_id_collision`.
+## Anti-patterns
 
-Two bugs fixed in the same commit:
+- Do **not** add an always-on dep for a bench- or REPL-only crate. Gate it behind the `bench` / `repl` feature and add `required-features = [...]` to the bin entry. The Python wheel (`frogql` on PyPI) MUST stay independent of `repl` / `bench` — never reference `rustyline`, `ureq`, `zstd`, `tar`, `sysinfo`, or `toml` from library code.
+- Do **not** put semantic lowering in `src/optimizer/`. The optimizer is performance-preserving; anything that changes which rows the query produces belongs in `src/elaborate/`.
+- Do **not** persist structures that rebuild cheaply at open. The TripleIndex (LTJ, ~670 ms on 1.5 M edges) and the auto-built secondary indexes (~420 ms on 327 K nodes) are deliberately memory-only; the file-size vs. open-time trade-off is in `docs/internals/storage-architecture.md`.
+- Do **not** skip `cargo test` before commit even if `cargo fmt` and `cargo clippy` pass. Lexer / grammar regressions slip past linters; the `--` line-comment change that broke `-->` edge sugar across three suites is the standing precedent.
+- Do **not** call `run_dm` on a raw query. The MATCH chain must go through `elaborate::elaborate_query` first, otherwise descriptor `value_filters` (`{name: 'Alice'}`) get silently ignored at runtime and the DM matches too many rows.
 
-- `.save` followed by reopen reported "graph type 'DEFAULT' not found". `save_graph` only persisted graph data; the catalog page chain was lost on every save. Fix: new `save_graph_with_catalog_atomic` in `src/store/io.rs` writes the catalog into the new file before `rename`. `LazyGraphStore::save` seeds DEFAULT when missing (the empty fresh-DB case never installed it). `refresh_default_if_dirty` re-infers when DEFAULT is absent, not only when dirty.
-- `MATCH (x)-[y]->{1,n}() RETURN y` projected NULL because `Expr::Var` returned `Failure` on `PathValue::Group`. Replaced the case with `path_value_to_value(pv)` (see `src/runtime/engine.rs`); groups now lift to `Value::List(items mapped)`.
+## Pending and roadmap
 
-MVP-1 is now feature-complete on `main` (sub-phases A–F all landed). Notable carve-outs that did **not** ship and stay deferred:
-
-- **Multi-DML chains** (`MATCH α INSERT β SET γ` in one statement). ISO §13.1 permits arbitrary chains; the parser still accepts at most one DML op per statement. Tests work around this by splitting into separate `run_dm` calls.
-- **Cross-quote string round-trip in `.dump-gql`**. The lexer has no escape syntax, so a property string containing `'` can't survive a dump→reload cycle; `dump_to_gql_string` raises an error rather than emitting an unparseable script.
-- **Incremental secondary indexes under DML overlay**. With a non-empty overlay, `lookup_node_eq` / `lookup_node_range` return `None` so the caller falls back to a scan; landing in MVP-2.
+ISO/IEC 39075:2024 features and known carve-outs live in `docs/internals/iso-gql-gaps.md`. Storage-format roadmap (incremental secondary indexes under DML overlay, persisting the TripleIndex, WAL) lives in `docs/internals/storage-architecture.md`.

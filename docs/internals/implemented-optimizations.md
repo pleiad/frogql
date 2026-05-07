@@ -162,7 +162,7 @@ the limit and stops early once enough results are collected.
 **Limitation:** The limit doesn't propagate into join sub-queries
 (they still evaluate fully with limit=0). This is because the join
 can't predict how many pre-join rows it needs. See
-`docs/possible-optimizations.md` item 5 for future work.
+`possible-optimizations.md` item 5 for future work.
 
 **Files changed:** `runtime/engine.rs` (added `limit` parameter to
 `run_path_pattern`, `run_concat_pattern`, `run_join`, `concat_with_*`,

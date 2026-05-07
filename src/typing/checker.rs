@@ -2,7 +2,7 @@
 //!
 //! Ported from `fppc/src/typechecker/checker.rs`. Public surface mirrors
 //! fppc's `Typechecker` / `TypecheckResult`; the differences are documented
-//! in `docs/typechecker_migration.md`.
+//! in `docs/internals/typechecker_migration.md`.
 
 use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
@@ -714,7 +714,7 @@ fn create_context(desc: &Option<Descriptor>, t: VariableType) -> TypeEnvironment
 /// List and Record values get a deliberately loose type — the precise
 /// element/field types would require recursive typing of values, which
 /// fppc doesn't do (it has no list literals). Documented in
-/// `docs/typechecker_migration.md` as a phase-1 punt.
+/// `docs/internals/typechecker_migration.md` as a phase-1 punt.
 fn simple_type_of_value(v: &Value) -> SimpleType {
     match v {
         // Null literal is the SQL untyped null: it inhabits every type for

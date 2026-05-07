@@ -1,6 +1,6 @@
 //! Spec-driven proptest suite for the typing lattice.
 //!
-//! Spec is `docs/rules.md` (FPPC). Section refs (`§3.1`, etc.) point
+//! Spec is `docs/internals/rules.md` (FPPC). Section refs (`§3.1`, etc.) point
 //! there. Failure messages name the violated rule. Hand-picked locks
 //! for impl-specific behaviors live as inline `mod tests` in
 //! `src/typing/*.rs`; this file is the proptest layer. Regression seeds

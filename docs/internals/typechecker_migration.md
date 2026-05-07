@@ -340,7 +340,7 @@ work; phase-2 changes land here too.
 
 | Criterion (from the source spec) | Status |
 |---|---|
-| `docs/typechecker_migration.md` complete and accurate | done — this file |
+| `typechecker_migration.md` complete and accurate | done — this file |
 | `src/typing/checker.rs` and `src/typing/type_environment.rs` exist, compile, expose entry points | done; also `path_type.rs` per option 1 |
 | `src/lib.rs` wires the checker between elaborate and optimize, surfacing errors as `String`. On by default | done — `Typechecker::untyped()` (Schema::star) is the default |
 | Opt-out path exists | done — `compile_unchecked` / `compile_query_unchecked` |

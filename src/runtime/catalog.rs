@@ -4,7 +4,7 @@
 //! `Schema` values, plus an "active" pointer that the typechecker consults
 //! when compiling queries. The catalog is serialized to JSON and stored in
 //! a chained page run inside the `.gdb`; the active name lives in the file
-//! header. See `docs/graph-type-catalog-plan.md` for the surface DDL
+//! header. See `docs/internals/graph-type-catalog-plan.md` for the surface DDL
 //! (`CREATE / USE / DROP GRAPH TYPE`) and the `DEFAULT` reservation rules.
 
 use std::collections::BTreeMap;

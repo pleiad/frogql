@@ -1,5 +1,5 @@
 //! Tests for the graph-type catalog (CREATE / USE / DROP GRAPH TYPE).
-//! Coverage tracks the test plan in `docs/graph-type-catalog-plan.md`.
+//! Coverage tracks the test plan in `docs/internals/graph-type-catalog-plan.md`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

@@ -7,7 +7,7 @@
 //!
 //! The known costs of this representation (clones at concat/union, parallel
 //! info with `VariableType` at every edge position) are documented in
-//! `docs/typechecker_migration.md` and accepted for phase 1.
+//! `docs/internals/typechecker_migration.md` and accepted for phase 1.
 
 use super::descriptor_type::DescriptorType;
 use super::variable_type::{Schema, VariableType};
