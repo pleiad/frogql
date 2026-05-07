@@ -187,15 +187,18 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             .as_ref()
             .is_some_and(|specs| specs.iter().any(|s| matches!(s.key, SortKey::Column(_))));
 
-        // BTree-LTJ "real": when the precondition holds, drive the sort
-        // variable from the btree in key order, calling the LTJ once per
-        // (value, ids) pair with the variable pre-pinned. Replaces the
-        // entire `run_match_chain → sort` flow with k LTJ runs and an
-        // early-exit at LIMIT k. Activated only via the explicit force
-        // flag — no auto path because the win is conditional on join
-        // selectivity (see bitácora 10 §13).
+        // BTree-LTJ "real": drive the primary sort variable from the
+        // btree in key order, calling the LTJ once per `(value, ids)`
+        // pair with the variable pre-pinned. Replaces the
+        // `run_match_chain → sort` flow with `~k` LTJ runs and a
+        // cohort-aware early-exit at LIMIT k. Auto-activates whenever
+        // the precondition holds; falls back closed (returns None) on
+        // any precondition miss, so adding it to the auto path costs
+        // nothing for queries that can't use it. Force off with
+        // `GQLITE_ORDERBY_FORCE=pdqsort` or `topk`.
         let force = std::env::var("GQLITE_ORDERBY_FORCE").ok();
-        let real_rows = if has_order && force.as_deref() == Some("btree-ltj-real") {
+        let force_off = matches!(force.as_deref(), Some("pdqsort") | Some("topk"));
+        let real_rows = if has_order && !force_off {
             self.try_btree_ltj_real(query, limit)
         } else {
             None
@@ -322,14 +325,23 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             return None;
         }
         let specs = query.order_by.as_ref()?;
-        if specs.len() != 1 {
+        if specs.is_empty() {
             return None;
         }
-        let spec = &specs[0];
-        let SortKey::Expr(Expr::AttrLookup { var, attr }) = &spec.key else {
+        // Primary spec drives the btree walk. Secondaries (if any) are
+        // resolved by the in-memory sort over the surviving cohort.
+        // All specs must be `SortKey::Expr` so the in-memory sort can
+        // evaluate them against the binding-table assignment; any
+        // `SortKey::Column` would have to land on the post-projection
+        // path, which is incompatible with cohort-driven top-k.
+        if specs.iter().any(|s| matches!(s.key, SortKey::Column(_))) {
+            return None;
+        }
+        let primary = &specs[0];
+        let SortKey::Expr(Expr::AttrLookup { var, attr }) = &primary.key else {
             return None;
         };
-        if matches!(spec.nulls.unwrap_or(NullsOrder::Last), NullsOrder::First) {
+        if matches!(primary.nulls.unwrap_or(NullsOrder::Last), NullsOrder::First) {
             return None;
         }
 
@@ -343,7 +355,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         if labels.is_empty() {
             return None;
         }
-        let asc = matches!(spec.dir, SortDir::Asc);
+        let asc = matches!(primary.dir, SortDir::Asc);
         let (label, ordered_ids) = labels.iter().find_map(|l| {
             self.graph
                 .lookup_node_ordered(l, attr, asc)
@@ -365,16 +377,62 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let index = self.triple_index();
 
         let cap = if limit == 0 { usize::MAX } else { limit };
+        let single_spec = specs.len() == 1;
         let mut out: Vec<ResultRow> = Vec::with_capacity(cap.min(label_total));
 
+        // Cohort-aware early exit (multi-spec case): once we have ≥ k
+        // rows AND the next btree id's primary value differs from the
+        // previous one, every remaining id has a strictly worse primary
+        // key and can't enter the top-k. Stop, then sort the buffer
+        // by all specs (primary already in sorted order; secondaries
+        // resolve in-memory) and truncate to k. For the single-spec
+        // case the original early-exit at `out.len() >= cap` is
+        // semantically optimal — no secondary tie-break to consider.
+        // For multi-spec, snapshot the primary attr value of every
+        // processed id so we can detect the cohort boundary. Reading
+        // `node_props` is a page-cache hit on the LDBC workload; cheap
+        // enough to do per id and avoids needing a separate
+        // value-aware iterator on the btree.
+        let mut last_primary_value: Option<Value> = None;
         for id in ordered_ids {
+            let cur_primary: Option<Value> = if single_spec {
+                None
+            } else {
+                self.graph.node_props(id).get(attr).cloned()
+            };
+
+            // Cohort boundary: stop once we have ≥ k rows and the
+            // current id's primary value differs from the last
+            // processed id's. The `last_primary_value.is_some()` guard
+            // keeps the first iteration after `out` first reaches `cap`
+            // from triggering on `Some(_) != None` and breaking without
+            // ever giving the secondary keys a chance.
+            if !single_spec
+                && out.len() >= cap
+                && last_primary_value.is_some()
+                && cur_primary != last_primary_value
+            {
+                break;
+            }
+
             let ir = pattern_extract::try_ltj_with_pin(self.graph, &pattern, &index, 0, var, id)?;
             for row in ir.rows {
                 out.push(row);
-                if out.len() >= cap {
+                if single_spec && out.len() >= cap {
                     return Some(out);
                 }
             }
+            last_primary_value = cur_primary;
+        }
+
+        if !single_spec && specs.len() > 1 && !out.is_empty() {
+            // Sort the cohort buffer by all specs and truncate. The
+            // existing pre-projection sort handles top-k internally
+            // when `limit > 0`.
+            self.sort_rows(&mut out, specs, cap);
+        }
+        if cap < out.len() {
+            out.truncate(cap);
         }
         Some(out)
     }
