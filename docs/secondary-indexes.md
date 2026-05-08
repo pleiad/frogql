@@ -55,6 +55,40 @@ The optimizer wires both kinds into the LTJ pre-pass:
   precomputed sorted set, replace the per-row property comparison with
   an O(log n) binary-search membership test (`FilterKind::NodeInSet`).
 
-All indexes are in-memory (rebuilt every open). Persistence in the .gdb
-file header chain — so declared indexes survive close/reopen — is the
-next step on the roadmap.
+## Persistence
+
+Auto-built indexes are memory-only — they live in `RefCell<SecondaryIndex>`
+on the `LazyGraphStore` and `build_auto_indexes_bulk` reproduces them
+on every open in a single O(N) pass over the node records. Storing them
+on disk would just duplicate work and grow the `.gdb`.
+
+Declared (DDL) indexes ARE persisted. `header.secondary_index_root` (a
+new slot at bytes 100-103 of the file header) points at a chain of
+`PageType::SecondaryIndex` pages that hold a JSON-encoded list of
+`(name, label, prop, kind)` tuples. The save path (`.save` /
+`Connection.save()`) writes the chain in the same atomic `.tmp` rename
+that persists the catalog; the open path replays each entry via
+`build_declared` after the auto-build, so
+
+```
+gql> CREATE BTREE INDEX msg_date ON :Message(creationDate);
+gql> .save
+gql> .quit
+$ frogql my.gdb
+gql> .indexes
+msg_date  BTREE  :Message {creationDate}  286592  declared
+```
+
+works without re-issuing the DDL each session.
+
+**Backward compatibility.** Legacy `.gdb` files written before this
+slot existed have `secondary_index_root == 0` (the byte range was
+reserved and zero-initialised). The loader treats `0` as "no DDL
+list" — identical behaviour to the pre-persistence path. A doc-comment
+TODO records that the `0` legacy interpretation can be dropped once
+every stored database has been re-saved with the slot populated.
+
+DML invalidates indexes for the duration of the session (the runtime
+clears `secondary` after every successful INSERT / SET / REMOVE /
+DELETE). The next `.save` re-builds them from the post-mutation graph
+and persists the DDL list back into the new file.

@@ -167,3 +167,276 @@ can't predict how many pre-join rows it needs. See
 **Files changed:** `runtime/engine.rs` (added `limit` parameter to
 `run_path_pattern`, `run_concat_pattern`, `run_join`, `concat_with_*`,
 `hash_join`, `apply_filter`)
+
+
+## 6. OPTIONAL MATCH bind-pushdown (correlated nested-loop)
+
+**Before:** `run_match_chain` evaluated the inner pattern of an
+`OPTIONAL MATCH` against the entire graph and then performed a
+`left_outer_join` against the accumulated rows. For LDBC IS5-style
+chains where the OPTIONAL pattern shared variables with the outer
+(`OPTIONAL MATCH (otherPerson)<-[:hasCreator]-(post)<-[:containerOf]-(forum)`,
+where `otherPerson` and `forum` are already bound by the outer chain),
+the global enumeration produced millions of `(Person, Post, Forum)`
+triples that the join then filtered down to a handful of valid rows —
+all the global work wasted.
+
+**After:** When the inner pattern shares Node-typed variables with the
+outer, `optional_via_bind_pushdown` extracts those bindings as pin
+values and runs `try_ltj_with_pins` once per outer row, restricting
+the inner search to ids consistent with the outer's bindings. The
+LTJ's pinning machinery (originally added for the btree-driven ORDER
+BY path) substitutes `Term::Variable → Term::Constant` in every
+triple position before the search, so the inner LTJ never enumerates
+the pinned variables' domains.
+
+This is SQLite's correlated nested-loop strategy mapped onto the
+six-ordering TripleIndex: outer rows drive the loop, inner side runs
+as a small LTJ per pin, no global pattern materialisation.
+
+**Falls back to the original global path** when:
+- the optimization is disabled (`GQLITE_DISABLE_OPTIONAL_PUSHDOWN=1`);
+- there are no shared variables (no correlation to exploit);
+- any outer row binds a shared variable to a non-Node value (edges,
+  `Nothing` from a prior empty OPTIONAL, repetition `Group`s);
+- the inner pattern is not LTJ-decomposable.
+
+**Impact (LDBC SF0.1, IS5-shape with `~[:knows]~{1,2}` outer):**
+
+| Variant | Before | After | Speedup |
+|---|---|---|---|
+| `RETURN forum.title, forum.id, COUNT(post) GROUP BY ... LIMIT 20` | 52.3 s | 0.56 s | ~93× |
+| `RETURN COUNT(*)` (full chain enumeration, 20 400 rows) | 72.7 s | 0.58 s | ~126× |
+
+**Files changed:** `runtime/engine.rs` (added `optional_via_bind_pushdown`
+called from the `MatchStatement::Optional` branch in `run_match_chain`),
+`runtime/ltj/pattern_extract.rs` (new public `try_ltj_with_pins` that
+generalises `try_ltj_with_pin` to multiple pinned variables; the
+internal `try_ltj_inner` now takes `&[(&str, u32)]`).
+
+
+## 7. Repeat unrolling for fixed-bound `(P){lb, ub}`
+
+**Before:** `Repeat` was always evaluated by the runtime's
+`run_repetition_pattern` / `run_repetition_range`, a hash-join
+cross-product over the inner pattern's first→last node map. That
+fallback never invoked the LTJ on the chain that contained the
+repetition, so predicate pushdown, btree-driven range filters, and
+worst-case-optimal join evaluation were all disabled across the
+repetition boundary. For LDBC IC2-style patterns
+`(p:Person {id})~[:knows]~{1,2}(o:Person)<-[:hasCreator]-(m)`, the
+post-repetition chain enumerated ~200 k rows even when the anchored
+endpoints were point-lookups.
+
+**After:** `optimizer::unroll_repeat` rewrites `(P){lb, ub}` into
+`(P)^lb | (P)^{lb+1} | ... | (P)^ub`. Each arm is a flat concat that
+the LTJ extractor decomposes to triples and runs as a multi-way join.
+The pass distributes Concat over Union
+(`Concat(prefix, Union(a, b)) ≡ Union(Concat(prefix, a), Concat(prefix, b))`)
+so each arm becomes a complete chain rather than leaving Union
+embedded inside an outer Concat — Union inside Concat is one of the
+LTJ decomposer's carve-outs and would force the whole chain back onto
+hash-join.
+
+**Activation guards:**
+- `ub - lb + 1 ≤ MAX_UNROLL` (4) — bounds the AST blow-up;
+- `P.freevars().is_empty()` — repetitions with named edge / node
+  variables produce `Group` bindings whose length depends on the
+  repetition count, which the pattern-level unroll can't express;
+- `lb ≥ 1` — length-0 base case has different semantics (one row per
+  graph node) and would require synthesising a Node descriptor;
+- `ub` must be bounded — unbounded `{n,}` is a transitive closure and
+  stays on the existing fallback;
+- `P` must be a single edge pattern — the unroll inserts an anonymous
+  `Node(None)` between consecutive copies and that boundary insertion
+  is unambiguous only for edge inners.
+
+**Disable** with `GQLITE_DISABLE_REPEAT_UNROLL=1`.
+
+**Impact (LDBC SF0.1, IC2 with `~[:knows]~{1, 2}`):**
+
+| Stage | Cost |
+|---|---|
+| Chain enumeration (no unroll) | 1.35 s |
+| Chain enumeration (unroll + adjacent-edge LTJ fix) | 0.89 s (-34%) |
+
+**Files changed:** `optimizer/unroll_repeat.rs` (new module),
+`optimizer/mod.rs` (added to the per-pattern pipeline after `pushdown`).
+
+
+## 8. LTJ decomposer accepts adjacent / trailing edges
+
+**Before:** `decompose_flat_chain` required strict
+`Node Edge Node Edge Node` alternation. Two consecutive edges
+(`~[:knows]~~[:knows]~`, written by users or produced by the unroll
+pass for `{1,2}` repetitions) failed at the second iteration of the
+loop and the whole chain bailed to hash-join, even when an explicit
+`()` between the edges would have made the same query LTJ-decomposable.
+
+**After:** the loop consumes an Edge with an *optional* trailing
+Node:
+- if `elems[i + 1]` is a Node, use its descriptor and advance by 2
+  (original behaviour);
+- otherwise — adjacent edges, or a dangling trailing edge —
+  synthesise a fresh internal variable and advance by 1.
+
+The runtime `Concat` evaluator already handles back-to-back edges via
+path-merge on `last_node_id` / `first_node_id`; this brings the LTJ
+decomposer in line with that semantics. The earlier trailing-edge
+special case folds into the same loop.
+
+**Impact (LDBC SF0.1, isolated 2-hop):**
+
+| Pattern | Before | After |
+|---|---|---|
+| `(a)~[:knows]~~[:knows]~(b)<-[:hasCreator]-(m:Comment\|Post) ... LIMIT 20` | 271 ms | **1 ms (~270×)** |
+| `(a)~[:knows]~()~[:knows]~(b)...` (explicit boundary) | 1 ms | 1 ms (unchanged) |
+
+**Files changed:** `runtime/ltj/pattern_extract.rs::decompose_flat_chain`.
+
+
+## 9. ORDER BY alias resolution
+
+**Before:** the parser stored `ORDER BY <alias>` as
+`SortKey::Column(idx)` (an index into the projected row). The runtime
+treated any `Column` sort key as a post-projection sort, which means
+every row had to be fully projected — including expensive `COALESCE`
+evaluations and multi-attr lookups — *before* the top-k truncate.
+The btree-driven `try_btree_ltj_real` precondition also requires
+`SortKey::Expr(AttrLookup)` and so was disabled by alias references.
+
+**After:** `optimizer::order_by_alias` walks `Query.order_by` and
+rewrites `Column(idx)` to `Expr(AttrLookup{var, attr})` when
+`returns[idx]` is a non-aggregate `Expr::AttrLookup`. The runtime
+then routes the sort through the pre-projection top-k heap (or
+`try_btree_ltj_real`) and only the surviving k rows get projected.
+
+**All-or-nothing rewrite:** `sort_projected_rows` and `sort_rows`
+each require a uniform spec list. If any spec is non-resolvable
+(alias of `COALESCE`, arithmetic, multi-var) the rewrite is skipped
+for the entire ORDER BY. Aggregate / GROUP BY queries also bail —
+the post-aggregation IR is `Vec<Vec<Value>>`, no surviving
+binding-table to evaluate `Expr` against.
+
+**Impact (LDBC SF0.1 IC2 with alias-keyed ORDER BY):**
+2.31 s → 1.34 s (~42%; matches the raw-expression `ORDER BY` baseline).
+
+**Files changed:** `optimizer/order_by_alias.rs` (new module),
+`optimizer/mod.rs`, `lib.rs::optimize_query`.
+
+
+## 10. Auto-activated btree-LTJ-real with multi-spec + Or-merge
+
+**Before:** `try_btree_ltj_real` was gated behind
+`GQLITE_ORDERBY_FORCE=btree-ltj-real`, only fired for single-spec
+ORDER BY, and bailed for descriptors with `Or` labels (`Comment|Post`)
+because `LabelType::required_labels()` returns empty for `Or` and the
+function picks the first label whose btree exists. The pdqsort
+fallback enumerated every chain row and post-sorted, regardless of
+how small the LIMIT was.
+
+**After (three layered changes):**
+
+1. **Auto-activation.** Drop the env-var gate; the function now runs
+   on every ORDER BY query and fails closed (returns `None`) on any
+   precondition miss. Force off with `GQLITE_ORDERBY_FORCE=pdqsort`
+   or `topk` (still useful for A/B benchmarking).
+
+2. **Multi-spec support with cohort early-exit.** When the primary
+   spec drives the btree walk, snapshot the primary attr value of
+   each visited id; once `out.len() ≥ cap` and the next id's primary
+   value differs from the previously processed id's, every remaining
+   id has a strictly worse primary key and can't enter the top-k —
+   stop the walk and sort the cohort buffer by all specs in memory
+   before truncating to `k`.
+
+3. **K-way `Or`-merge.** `LabelType::or_candidate_labels()` returns
+   the leaf labels of a pure `Or`-of-leaves expression;
+   `or_candidate_labels_for_var` aggregates them across every
+   descriptor declaration of the variable. When `required_labels()`
+   is empty but the var carries an `Or`, the function builds one
+   `BtreeMergeCursor` per candidate label and walks them via
+   `pick_best_cursor` (linear scan picks the cursor whose head value
+   is best per asc/desc; for the typical `Or` arity of 2-3 this
+   beats a heap and avoids the allocation). Ids appearing in two
+   cursors at once (a node carrying multiple Or leaves) are filtered
+   via a `HashSet` so the LTJ pin runs only once per id.
+
+   `pinned_run` (the per-pin dispatcher) also handles `Union`
+   (introduced by the unroll pass) by recursing into each arm and
+   concatenating, and unwraps `Filter` by post-filtering the inner
+   run. Without it, a pattern like `Filter(Union(arm1, arm2), Ne(...))`
+   would `decompose` to None and the merge would silently fall back
+   per pin.
+
+   Coverage relaxation: `ids.len() < label_total` is permitted — the
+   auto-built btree omits null-valued nodes, and `NULLS LAST` (already
+   a precondition) keeps them out of the top-k anyway.
+
+   **Correctness fix bundled in:** the original pin retain dropped
+   every filter for the pinned variable, including `NodeAttrCmp`.
+   Pinning fixes the `NodeId` but not the property value;
+   range / equality predicates need the LTJ to read the pinned
+   binding's actual prop and compare. Keep `NodeAttrCmp` /
+   `NodeInSet` in the filter list so the LTJ evaluates them at level
+   0 against the pinned binding.
+
+**Impact (LDBC SF0.1, IC2 shape with `~[:knows]~{1,2}` and
+`(message:Comment|Post)`, alias-keyed `ORDER BY`):**
+
+| Stage | Tiempo |
+|---|---|
+| pdqsort baseline (force off) | 3.96 s |
+| Auto-activation only | 1.87 s (still bails on `Or`) |
+| `Or`-merge + pinned_run + filter retain fix | **0.12 s** (~33×) |
+| Single-label `Comment`-only IC2 (`required_labels()` non-empty) | **0.004 s** from 2.64 s baseline (~660×) |
+
+**Files changed:** `runtime/engine.rs` (`try_btree_ltj_real`,
+`pinned_run`, `BtreeMergeCursor`, `pick_best_cursor`,
+`or_candidate_labels_for_var`), `typing/label_type.rs`
+(`or_candidate_labels`), `runtime/ltj/pattern_extract.rs`
+(filter retain on pinned vars).
+
+
+## 11. DDL secondary indexes persisted in `.gdb`
+
+**Before:** secondary indexes lived only in memory. Every
+`LazyGraphStore::open` ran `build_auto_indexes_bulk` (which only
+covers `(label, prop)` pairs whose values are unique within the
+label) and discarded any DDL-declared indexes from previous sessions.
+Users had to re-issue `CREATE INDEX` before every session — and the
+sister btree-LTJ-real path silently fell back to pdqsort when the
+manual DDL was missing.
+
+**After:** the `.gdb` header reserves `secondary_index_root: u32`
+(bytes 100-103, previously zeroed and reserved); a new chain of
+`PageType::SecondaryIndex` pages stores a JSON-encoded
+`Vec<PersistedSpec>` of DDL-declared specs. The save side
+(`save_graph_with_catalog_and_indexes_atomic` in `store/io.rs`)
+writes the chain after the catalog and updates the header in the
+same `.tmp` open. The load side
+(`secondary_index_io::read_specs` + `LazyGraphStore::open`) replays
+each persisted entry via `build_declared` after the auto-build runs.
+Auto entries are not persisted — they're reproduced deterministically
+on every open.
+
+**Backward compat:** legacy `.gdb` files written before the slot
+existed have `secondary_index_root == 0`, which `read_specs` reports
+as an empty list — no replay, identical behaviour to the
+pre-persistence path. A doc-comment TODO on `secondary_index_root`
+records that the legacy interpretation can be dropped once every
+stored database has been re-saved.
+
+**Round-trip:** `CREATE BTREE INDEX my_idx ON :Foo(bar); .save;
+.quit`, reopen → `.indexes` lists `my_idx` with no manual
+re-declaration. For LDBC SF0.1 IC2 with the manual
+`CREATE BTREE INDEX ON :Post(creationDate)` saved into the file,
+reopen + run goes from 1.11 s (auto-only fallback) to 0.086 s (the
+`Or`-merge fires from the replayed DDL index).
+
+**Files changed:** `pager/page.rs` (new `PageType::SecondaryIndex`),
+`pager/header.rs` (new `secondary_index_root` slot),
+`store/secondary_index_io.rs` (new chain reader / writer),
+`store/io.rs::save_graph_with_catalog_and_indexes_atomic`,
+`store/lazy.rs` (load on open, pass spec list on save),
+`store/mod.rs`.

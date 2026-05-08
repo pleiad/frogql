@@ -297,11 +297,15 @@ If decomposition fails, the runtime falls back to pairwise hash-join — guarant
 
 #### Current limits
 
-1. **Repetitions**: `{n,m}` is not unrolled to triples (could be done for fixed bounds; not implemented). Falls back.
+1. **Repetitions**: `{n,m}` is unrolled by `optimizer::unroll_repeat` for bounded ranges with no named inner variables (single-edge inner only). Other shapes — unbounded `{n,}`, repetitions with named edge / node variables, ranges wider than `MAX_UNROLL = 4` — stay on the hash-join repetition path. The unroll injects anonymous `Node(None)` between consecutive copies and distributes Union out of any surrounding Concat so each arm is a flat chain that decomposes natively.
 2. **Any-direction edges (without tilde)**: not modelled as triples.
-3. **WHERE expressions**: label and pushed value predicates run inside the loop; arbitrary WHERE (e.g. `x.age > y.age` involving multiple bound vars) post-filters.
+3. **WHERE expressions**: label and pushed value predicates run inside the loop; arbitrary WHERE (e.g. `x.age > y.age` involving multiple bound vars) post-filters. Var-vs-var predicates (`a <> b`) are recognised but not pushed into the LTJ filter set yet — they evaluate post-pattern via `PathPattern::Filter`.
 4. **TripleIndex not persisted**: cached on `Runtime` via `RefCell<Option<Arc<TripleIndex>>>` and built once per Runtime (eagerly at REPL/Connection open via `warm_triple_index()`); the same Arc is shared across every Runtime spawned for that connection. Persisting in the .gdb header chain would skip the build entirely at the cost of ~12% file size.
 5. **Static VEO**: variable order is fixed before search. An adaptive VEO that re-estimates cardinalities mid-search would help queries with skewed selectivity. With secondary indexes (see below), an `Eq` predicate on an indexed `(label, prop)` is now a true point lookup via constant-folding; vars without an index still scan their position.
+
+#### Adjacent / trailing edges
+
+`decompose_flat_chain` consumes an `Edge` with an *optional* trailing `Node`: when two edges sit adjacent (`~[:knows]~~[:knows]~`, written by users or produced by the unroll pass) it synthesises a fresh anonymous variable as the boundary, mirroring the runtime `Concat` evaluator's `last_node_id` / `first_node_id` path-merge. Same for a dangling trailing edge. Without this, two consecutive edges fell off the LTJ path entirely and the chain ran via hash-join — a 270× regression on `(person)~[:knows]~~[:knows]~(other)<-[:hasCreator]-(msg)` style chains.
 
 #### Benchmark results (soc-LiveJournal1-100k, limit=1000)
 
@@ -387,6 +391,7 @@ See `docs/internals/storage-architecture.md` for the full spec.
 | topology + indexes | ~70 ms | `load_from_indexes` — six CSR sub-chains read sequentially |
 | catalog | ~0 ms | `catalog_io::read_catalog` |
 | secondary index auto-build | ~420 ms | `build_auto_indexes_bulk` — single pass over node records, u32-keyed buckets |
+| secondary index DDL replay | ~per-DDL | `secondary_index_io::read_specs` + `build_declared` per persisted entry; `0 ms` when the file has no DDL list (legacy or no `CREATE INDEX`) |
 | LTJ TripleIndex (eager) | ~670 ms | `Runtime::warm_triple_index` — six sorted orderings of all triples |
 | **total** | **~570 ms warm** | (from a 6.30 s baseline before the optimisation series) |
 
@@ -396,12 +401,18 @@ Existing `.gdb` files written before commit `34d97c0` lack the CSR adjacency roo
 
 ### Optimizer
 
+Pipeline (`src/optimizer/mod.rs`): `pushdown` → `unroll_repeat` per pattern; then `existential::fold_empty_existentials` and `order_by_alias::optimize` over the full Query.
+
 - **Leapfrog Triejoin**: multi-way join + concat optimisation (see above).
 - **Type-predicate pushdown**: extracts `x.attr is T` from WHERE conjunctions and merges into the descriptor's property type.
 - **Value-predicate pushdown**: extracts `x.attr <op> literal` (for `=`, `!=`, `<`, `<=`, `>`, `>=`) and stores it on the node descriptor's `value_preds` field. Pattern extraction emits a `FilterKind::NodeAttrCmp` per predicate; the LTJ runner evaluates it in-loop. Restricted to nodes today; edge value predicates fall through to the residual WHERE.
 - **Index-driven constant folding**: when a `NodeAttrCmp { Eq, value }` predicate matches a known secondary index on the variable's `(label, prop)`, `pattern_extract::fold_indexed_constants` resolves the predicate to a single NodeId via `GraphAccess::lookup_node_eq`, substitutes `Term::Variable → Term::Constant` in every triple position, drops the satisfied filter, and pre-binds the variable in the result tuple. The variable is excluded from the VEO so leapfrog never enumerates its position. An empty index hit short-circuits the entire pattern to zero rows. See `runtime/ltj/pattern_extract.rs::FoldOutcome`.
 - **VEO selectivity-aware tiebreaker**: per-variable weights bias the binding order within each lonely / non-lonely group toward filter-narrowed candidates.
 - **Label index selection**: picks the smallest indexed set for compound labels like `A & B` via `LabelType::required_labels()`.
+- **Repeat unrolling** (`src/optimizer/unroll_repeat.rs`): `(P){lb, ub: Some(ub)}` → `(P)^lb | (P)^{lb+1} | ... | (P)^ub`. Activates when `ub - lb + 1 ≤ MAX_UNROLL` (4), `P.freevars().is_empty()`, `lb ≥ 1`, and `P` is a single edge pattern. The pass inserts anonymous `Node(None)` between consecutive copies (so the LTJ decomposer sees strict `Node Edge Node Edge ... Node` alternation in the surrounding chain) and then distributes Union over any enclosing Concat (`Concat(prefix, Union(a, b)) ≡ Union(Concat(prefix, a), Concat(prefix, b))`) so each arm is a flat chain that decomposes natively. Disable with `GQLITE_DISABLE_REPEAT_UNROLL=1`.
+- **ORDER BY alias resolution** (`src/optimizer/order_by_alias.rs`): rewrites `SortKey::Column(idx)` to `SortKey::Expr(AttrLookup{var, attr})` when the alias maps to a pure non-aggregate `Expr::AttrLookup` in `RETURN`. Lets the runtime route the sort through the pre-projection top-k heap (and `try_btree_ltj_real`) instead of fully projecting every row before post-sorting. **All-or-nothing**: if any spec is non-resolvable (alias of `COALESCE`, arithmetic, multi-var) the rewrite is skipped — `sort_projected_rows` and `sort_rows` each require a uniform `Column`/`Expr` list. Aggregate / GROUP BY queries also bail (the post-aggregation IR is `Vec<Vec<Value>>`, no surviving binding-table to evaluate `Expr` against).
+- **OPTIONAL MATCH bind-pushdown** (`engine.rs::optional_via_bind_pushdown`, runtime side): for each outer row, extract the shared-var Node bindings as pins and run `try_ltj_with_pins` correlated on those values, mirroring SQLite's nested-loop with index lookup. Falls back to the global-eval + `left_outer_join` path when there are no shared vars, when a shared binding is non-Node (Edge / Nothing / Group), or when the inner pattern is not LTJ-decomposable. Disable with `GQLITE_DISABLE_OPTIONAL_PUSHDOWN=1`. Cuts the LDBC IS5-style `OPTIONAL MATCH (msg) <-[:hasCreator]- ... <-[:containerOf]- (forum)` query from 52.3 s → 0.56 s on SF0.1 (~93×).
+- **BTree-LTJ-real top-k** (`engine.rs::try_btree_ltj_real`, runtime side): when the sort key is `var.attr` (alias-resolved or literal), the variable carries a btree-indexable label, the pattern is single-MATCH non-OPTIONAL with at least one edge, and `NULLS LAST` holds, the engine drives the search by walking the btree in primary-attr sort order, calls `try_ltj_with_pin` once per id (via `pinned_run` which dispatches Union by recursing into each arm), and stops at `LIMIT k` (single-spec) or at the first cohort boundary past `out.len() ≥ k` (multi-spec, with a final in-memory sort over the cohort buffer). Auto-activated; `GQLITE_ORDERBY_FORCE=pdqsort | topk` forces it off. For `Or`-of-leaves descriptors (`message:Comment | Post`), `or_candidate_labels_for_var` collects the candidate labels and a k-way merge driven by `BtreeMergeCursor` + `pick_best_cursor` walks the per-label btrees in interleaved primary-attr order; ids appearing in both label cursors (a node carrying multiple Or leaves) are de-duplicated by a `HashSet` to avoid running the LTJ pin twice. The pin retains `NodeAttrCmp` / `NodeInSet` filters on the pinned variable so the LTJ rejects pins whose actual attribute value violates a pushed-down predicate (only `NodeLabel` / `NodeProperty` are dropped — those are guaranteed by the btree's `(label, attr)` keying).
 
 ### Secondary indexes
 
@@ -420,7 +431,9 @@ LTJ wiring (`pattern_extract::fold_indexed_constants` and `fold_range_filters`):
 - Eq predicates that hit a hash index → constant-fold the variable everywhere (drops the filter, removes the var from VEO, pre-binds it in the result tuple). An empty index hit short-circuits to zero rows.
 - Range predicates that hit a btree → precompute the matching sorted set, replace the `NodeAttrCmp` with `FilterKind::NodeInSet { var, set }`. The runner does an O(log n) binary search instead of reading the candidate's property from the page cache.
 
-Memory-only for now (rebuilt every open). Persistence in the .gdb file header chain — so DDL-declared indexes survive close/reopen — is the next roadmap item.
+Auto-built indexes are memory-only (rebuilt every open by `build_auto_indexes_bulk`). DDL-declared indexes (`auto = false`) ARE persisted in the `.gdb`: `header.secondary_index_root` points at a chain of `PageType::SecondaryIndex` pages holding a JSON-encoded `Vec<PersistedSpec>` of `(name, label, prop, kind)` tuples. Save side: `save_graph_with_catalog_and_indexes_atomic` (`store/io.rs`) writes the chain after the catalog and updates the header. Load side: after the auto-build, `LazyGraphStore::open` reads the persisted list and replays each entry via `build_declared`. Auto entries are not persisted — the auto pass reproduces them deterministically, so storing them would just duplicate bytes. See `store/secondary_index_io.rs`.
+
+Backward compat: legacy `.gdb` files written before this slot existed have `secondary_index_root == 0` (the byte range was reserved + zeroed), which `read_specs` reports as an empty list — no replay, behaviour identical to the pre-persistence path. The doc-comment on `secondary_index_root` carries a TODO to drop the `0` legacy interpretation once every stored database has been re-saved with the slot populated.
 
 Diagnostic env vars: `GQLITE_DEBUG_INDEXES=1` prints the auto-built indexes and pinned variables; `GQLITE_DISABLE_INDEX_FOLD=1` disables the LTJ pre-pass for A/B benchmarking; `GQLITE_DISABLE_AUTO_INDEXES=1` skips the auto-build at open; `GQLITE_TRACE_OPEN=1` prints per-phase open timings.
 

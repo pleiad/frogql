@@ -95,7 +95,7 @@ Regenerate from CSV: `./target/release/frogql examples/movies.gdb --import-csv <
 | Query | `MATCH`, `OPTIONAL MATCH`, comma-joins, `WHERE`, `RETURN`, `EXISTS`, repetition `{n,m}`, label algebra. | [`docs/query-language.md`](docs/query-language.md) |
 | Mutate | `INSERT`, `SET`, `REMOVE`, `[DETACH] DELETE` (ISO §13 MVP-1). In-RAM overlay until `.save`. | [`docs/data-modification.md`](docs/data-modification.md) |
 | Schemas | Persistent named graph types with `CREATE / USE / DROP / SHOW / VALIDATE GRAPH TYPE`; reserved `DEFAULT` is auto-inferred. | [`docs/graph-types.md`](docs/graph-types.md) |
-| Indexes | Auto-built hash index on every uniquely-keyed `(label, prop)`; explicit `CREATE [HASH \| BTREE] INDEX` for the rest. | [`docs/secondary-indexes.md`](docs/secondary-indexes.md) |
+| Indexes | Auto-built hash + btree on every uniquely-keyed `(label, prop)` (rebuilt on open); explicit `CREATE [HASH \| BTREE] INDEX` for the rest, persisted in the `.gdb` header chain so they survive close/reopen. | [`docs/secondary-indexes.md`](docs/secondary-indexes.md) |
 
 ## Storage
 
@@ -115,12 +115,49 @@ binds variables one at a time across all participating patterns
 simultaneously, with no intermediate materialisation. Each directed edge
 is modelled as a triple `(src, label, tgt)` indexed in six sorted
 orderings. LTJ activates automatically when the pattern decomposes into
-triples; non-decomposable shapes (unions, repetitions, any-direction
-edges) fall back to pairwise hash-join. Speedups on
-`soc-LiveJournal1-100k` (limit 1000) range from **14× (3-clique) to
-4097× (4-path)**, with a 4-clique going from "hung" to 43 ms. See
-[`docs/internals/JOIN_STRATEGY_NOTES.md`](docs/internals/JOIN_STRATEGY_NOTES.md) and `gqlrust/CLAUDE.md` for the algorithm
-in detail.
+triples; non-decomposable shapes (any-direction edges, repetitions with
+named variables, unbounded `{n,}`) fall back to pairwise hash-join.
+Speedups on `soc-LiveJournal1-100k` (limit 1000) range from
+**14× (3-clique) to 4097× (4-path)**, with a 4-clique going from "hung"
+to 43 ms. See [`docs/internals/JOIN_STRATEGY_NOTES.md`](docs/internals/JOIN_STRATEGY_NOTES.md)
+and `CLAUDE.md` for the algorithm in detail.
+
+## Optimizer
+
+The compiler pipeline is `parse → elaborate → typecheck → optimize → run`.
+The optimizer is reserved for performance-preserving rewrites; ISO
+syntactic sugar lives in `elaborate`. Major passes:
+
+- **WHERE pushdown** into descriptor `value_preds` and `value_filters`
+  (type ascriptions like `is T`, value comparisons like `<`, `<=`, `=`).
+- **Index-driven constant folding**: `Eq` predicates that hit a hash
+  index resolve to a single NodeId, get pre-bound in the result tuple,
+  and excluded from the VEO. `<` / `<=` / `>` / `>=` that hit a btree
+  precompute the matching sorted set and become an O(log n) membership
+  test.
+- **Bounded `Repeat` unrolling**: `(P){lb, ub}` with single-edge inner
+  and `ub - lb + 1 ≤ 4` rewrites to `Union(P^lb, …, P^ub)` and
+  distributes the Union out of any surrounding Concat — each arm
+  becomes a flat chain that decomposes natively into triples.
+- **ORDER BY alias resolution**: `ORDER BY <RETURN-alias>` lowers to
+  the underlying `AttrLookup` so the runtime routes the sort through
+  the pre-projection top-k heap (and the btree-driven path) instead of
+  fully projecting every row before truncating.
+- **OPTIONAL MATCH bind-pushdown** (runtime-side, in `run_match_chain`):
+  for each outer row, the inner pattern runs as a small LTJ with the
+  shared variables pre-pinned — SQLite's correlated nested-loop with
+  index lookup, mapped onto the LTJ. Cuts a representative LDBC IS5
+  query from 52 s → 0.56 s on SF0.1 (~93×).
+- **BTree-driven top-k**: when the sort key has a btree (auto-built or
+  declared) the runtime walks the btree in primary-attr order, runs an
+  LTJ pin per id, and stops at `LIMIT k` (or at the first cohort
+  boundary past `k` for multi-spec ORDER BY). Multi-label `Or`
+  descriptors (`Comment | Post`) drive the search via a k-way merge
+  over per-label btrees. Drops LDBC IC2 on SF0.1 from 3.0 s → 0.086 s
+  with the right indexes declared.
+
+See [`docs/internals/implemented-optimizations.md`](docs/internals/implemented-optimizations.md)
+for benchmark numbers and code-level detail.
 
 ## Building and Testing
 
