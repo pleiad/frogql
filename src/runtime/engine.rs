@@ -460,10 +460,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         // to k. The single-spec case gets the original early-exit at
         // `out.len() >= cap` — no secondary tie-break to consider.
         let mut last_primary_value: Option<Value> = None;
-        loop {
-            let Some(idx) = pick_best_cursor(&cursors, asc) else {
-                break;
-            };
+        while let Some(idx) = pick_best_cursor(&cursors, asc) {
             let id = cursors[idx]
                 .current_id()
                 .expect("pick_best_cursor returns only live cursors");
