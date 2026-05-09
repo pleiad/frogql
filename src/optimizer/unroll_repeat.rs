@@ -35,11 +35,15 @@
 
 use crate::syntax::path_pattern::PathPattern;
 
-/// Max number of arms the union may grow to. Each arm is its own LTJ
-/// run, so the cost is roughly linear in the arm count; 4 keeps the
-/// `{1,4}` and `{2,5}` shapes practical without letting a misuse of
-/// `{1,20}` quietly explode the AST.
-const MAX_UNROLL: usize = 4;
+/// Max number of arms the union may grow to. `can_unroll` already restricts
+/// the inner to a single edge with no freevars, so each arm has exactly `k`
+/// edges (`k-1` anonymous boundary nodes) and the total triple count across
+/// all arms is `lb + (lb+1) + ... + ub` — bounded and proportional. With the
+/// inner pinned to single-edge shape, 8 covers the practical span (`{1,8}`,
+/// `{2,8}`, `{3,7}`, …) while still rejecting misuses like `{1,20}` that
+/// would clone the surrounding Concat too many times after
+/// `distribute_union_over_concat` runs.
+const MAX_UNROLL: usize = 8;
 
 pub fn optimize(p: PathPattern) -> PathPattern {
     if std::env::var("GQLITE_DISABLE_REPEAT_UNROLL").is_ok() {
@@ -170,9 +174,13 @@ fn can_unroll(p: &PathPattern, lb: usize, ub: usize) -> bool {
 }
 
 /// Build `(P)^lb | (P)^{lb+1} | ... | (P)^ub` as a left-leaning Union
-/// of concats. For `lb == ub` this produces the single concat (no
-/// Union wrapper) since the loop only runs once.
+/// of concats. The fixed-length case `lb == ub` short-circuits to a
+/// single concat with no Union envelope: the LTJ extractor sees one
+/// flat chain instead of a 1-arm Union it has to peel back.
 fn unroll_to_union(inner: PathPattern, lb: usize, ub: usize) -> PathPattern {
+    if lb == ub {
+        return repeat_concat(&inner, lb);
+    }
     let mut acc: Option<PathPattern> = None;
     for k in lb..=ub {
         let copy = repeat_concat(&inner, k);
@@ -181,7 +189,7 @@ fn unroll_to_union(inner: PathPattern, lb: usize, ub: usize) -> PathPattern {
             Some(prev) => PathPattern::Union(Box::new(prev), Box::new(copy)),
         });
     }
-    acc.expect("can_unroll guarantees lb <= ub so the range is non-empty")
+    acc.expect("lb < ub so the range is non-empty")
 }
 
 /// `repeat_concat(P, k)` builds `Edge Node(None) Edge Node(None) ... Edge`
@@ -311,5 +319,44 @@ mod tests {
             PathPattern::Concat(_, _) => {}
             other => panic!("expected Concat, got {other:#?}"),
         }
+    }
+
+    #[test]
+    fn lb_eq_ub_one_collapses_to_inner() {
+        let p = PathPattern::Repeat {
+            pattern: Box::new(knows_edge()),
+            lb: 1,
+            ub: Some(1),
+        };
+        match optimize(p) {
+            PathPattern::EdgeUndirected(_) => {}
+            other => panic!("expected bare EdgeUndirected, got {other:#?}"),
+        }
+    }
+
+    #[test]
+    fn unrolls_one_to_eight() {
+        // {1,8} = 8 arms, exactly at MAX_UNROLL.
+        let p = PathPattern::Repeat {
+            pattern: Box::new(knows_edge()),
+            lb: 1,
+            ub: Some(8),
+        };
+        // Eight arms means a left-leaning Union seven levels deep.
+        assert!(matches!(optimize(p), PathPattern::Union(_, _)));
+    }
+
+    #[test]
+    fn keeps_repeat_when_range_is_nine() {
+        // {1,9} = 9 arms, just past MAX_UNROLL.
+        let p = PathPattern::Repeat {
+            pattern: Box::new(knows_edge()),
+            lb: 1,
+            ub: Some(9),
+        };
+        assert!(matches!(
+            optimize(p),
+            PathPattern::Repeat { ub: Some(9), .. }
+        ));
     }
 }
