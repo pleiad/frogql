@@ -1,0 +1,28 @@
+[package]
+name = "frogql-node"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[lib]
+# crate-type = ["cdylib"] only; no `name` override. napi-cli expects the
+# cargo artifact to match the package name (frogql_node), then renames it
+# to whatever `napi.binaryName` in package.json says (`frogql`).
+crate-type = ["cdylib"]
+
+[dependencies]
+# Same default-features = false trick as `python/`: the wheel and the
+# .node both ship only the library half of gqlrust (no rustyline / ureq /
+# zstd / tar / sysinfo / toml). Resolver v2 at the workspace level keeps
+# features per-target so cross-builds stay clean.
+gqlrust = { path = "..", default-features = false }
+napi = { version = "2", default-features = false, features = ["napi6", "serde-json"] }
+napi-derive = "2"
+serde_json = "1"
+
+[build-dependencies]
+napi-build = "2"
+
+# NOTE: workspace ignores non-root [profile.release], so per-crate LTO /
+# strip settings would silently no-op. Release builds inherit the
+# workspace default; CI can layer `RUSTFLAGS=-C strip=symbols` for wheels.

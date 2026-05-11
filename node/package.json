@@ -1,0 +1,48 @@
+{
+  "name": "frogql",
+  "version": "0.2.0",
+  "description": "froGQL — embedded GQL graph database with ISO GQL path patterns (Rust core, Node.js bindings via napi-rs)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "author": "Matías Toro <mtoro.cl@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pleiad/frogql.git"
+  },
+  "keywords": [
+    "gql",
+    "graph",
+    "database",
+    "query",
+    "ltj",
+    "leapfrog-triejoin",
+    "iso-gql",
+    "napi-rs"
+  ],
+  "engines": {
+    "node": ">= 16"
+  },
+  "napi": {
+    "binaryName": "frogql",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node --test __test__/"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ]
+}
