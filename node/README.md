@@ -1,162 +1,269 @@
-# frogql — Node.js bindings
+# frogql
 
-Native Node.js addon for [froGQL](https://github.com/pleiad/frogql), an embedded GQL graph database with ISO GQL path patterns. Built via [napi-rs](https://napi.rs); ships per-platform prebuilds (Linux x64+arm64, macOS x64+arm64, Windows x64).
+[![npm](https://img.shields.io/npm/v/frogql?color=blue)](https://www.npmjs.com/package/frogql)
+[![PyPI](https://img.shields.io/pypi/v/frogql?label=pypi)](https://pypi.org/project/frogql/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Use case: VSCode extension
+Embedded GQL graph database for Node.js. ISO GQL path-pattern queries, single-file `.gdb` storage, Leapfrog-Triejoin runtime, ships as a native addon. Designed to drop into a VSCode extension, an Electron app, or any Node service that needs an in-process graph DB without spinning up Neo4j.
 
-The Node addon runs in-process inside the VSCode extension host. Open a `.gdb` once, execute queries, get JS objects back. No subprocess, no IPC, no serialisation overhead.
+Rust core compiled to a native `.node` binary via [napi-rs](https://napi.rs). Sibling Python package on [PyPI](https://pypi.org/project/frogql/) shares the same engine + on-disk format.
 
-## Use in another project
-
-Until the package is published to npm, install from the local checkout. Three options.
-
-### Option A: `file:` dependency (recommended for monorepos / VSCode extensions)
-
-In your consumer's `package.json`:
-
-```json
-{
-  "dependencies": {
-    "frogql": "file:../path/to/gqlrust/node"
-  }
-}
-```
-
-Then `npm install`. The consumer picks up the `index.js`, `index.d.ts`, and the platform `.node` from the linked directory. Re-run `npm install` (or `npm run build` inside `node/`) when the binding changes — `file:` deps don't auto-rebuild.
-
-### Option B: `npm link` (fast iteration)
-
-```bash
-# inside this repo:
-cd node
-npm run build
-npm link
-
-# inside the consumer project:
-npm link frogql
-```
-
-`npm link` symlinks the package into the consumer's `node_modules/`. Edit, rebuild, and the consumer sees the new binary on next require — no reinstall needed.
-
-### Option C: `npm pack` (sandboxed install, mirrors what npm publish would ship)
-
-```bash
-cd node
-npm run build
-npm pack            # produces frogql-0.2.0.tgz
-
-# inside the consumer:
-npm install /absolute/path/to/frogql-0.2.0.tgz
-```
-
-The `.tgz` includes only what's listed in `package.json`'s `files` array (`index.js`, `index.d.ts`) plus the platform `.node` binary built locally. Useful when you want to test exactly what consumers would get from the registry.
-
-### VSCode extension specifics
-
-Add `frogql` to the extension's `dependencies` (any of A/B/C). On `vsce package`, the `.vsix` bundles `node_modules/frogql/` including the platform `.node`. Caveats:
-
-- **Desktop only.** Native `.node` files don't load in the web extension host (`vscode.dev`, github.dev, Codespaces web). For web targets, use a WASM build path instead.
-- **Per-platform packaging.** A `.vsix` built on macOS-arm64 only carries the arm64 binary. To ship a single extension that runs on every OS, either publish per-platform `.vsix` (`vsce package --target darwin-arm64`, etc., per the [marketplace platform-specific extensions guide](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#platformspecific-extensions)), or ship one `.vsix` per platform and gate by `os` / `cpu` in `engines`.
-
-```ts
-// extension.ts
-import { open } from "frogql";
-
-export function activate(ctx: vscode.ExtensionContext) {
-  const conn = open(ctx.asAbsolutePath("examples/movies.gdb"));
-  vscode.commands.registerCommand("frogql.runQuery", async () => {
-    const q = await vscode.window.showInputBox({ prompt: "GQL query" });
-    if (!q) return;
-    const rows = conn.execute(q, 100);
-    vscode.window.showInformationMessage(JSON.stringify(rows));
-  });
-}
-```
-
-### Once published to npm
+## Install
 
 ```bash
 npm install frogql
 ```
 
-The registry serves prebuilt platform binaries via `optionalDependencies` (`frogql-darwin-arm64`, `frogql-linux-x64-gnu`, etc.). `npm install` picks the right one for the host. No build step on the consumer side.
+Prebuilt binaries for macOS x64 + arm64, Linux x64 + arm64 (glibc), Windows x64. npm picks the right one for the host at install time via `optionalDependencies` — no compilation step, no build toolchain needed.
 
 ## Quick start
 
 ```ts
 import { open } from "frogql";
 
-const conn = open("movies.gdb");
+const conn = open("examples/movies.gdb");
+
+// 1. Count nodes / edges
 console.log(conn.nodeCount, conn.edgeCount);
 
+// 2. Run a query — alias-keyed rows.
 const rows = conn.execute(
-  "MATCH (m:Movie {released: 1999})<-[:ACTED_IN]-(p:Person) RETURN p.name AS actor, m.title AS film",
+  `MATCH (m:Movie {released: 1999})<-[:ACTED_IN]-(p:Person)
+   RETURN p.name AS actor, m.title AS film`,
   20
-);
-// [{ actor: "Keanu Reeves", film: "The Matrix" }, ...]
+) as Array<{ actor: string; film: string }>;
+
+console.log(rows);
+// [
+//   { actor: "Keanu Reeves",      film: "The Matrix" },
+//   { actor: "Carrie-Anne Moss",  film: "The Matrix" },
+//   ...
+// ]
 ```
 
-## API surface
+## Why frogql
 
-Mirrors the Python `frogql` package on PyPI.
+- **ISO/IEC 39075:2024 path patterns.** Real Graph Query Language, not Cypher-flavoured pseudocode. Union (`|`), concat, repetition (`{n,m}`), `OPTIONAL MATCH`, `EXISTS`, `WHERE`, aggregates, `ORDER BY ... LIMIT`. Type system with subtyping, label algebra, and structural row types.
+- **Worst-case-optimal join.** Leapfrog Triejoin over six sorted orderings of the edge set. 14×–4000× faster than pairwise hash-join on shape-heavy LDBC queries (numbers in [`docs/internals/JOIN_STRATEGY_NOTES.md`](https://github.com/pleiad/frogql/blob/main/docs/internals/JOIN_STRATEGY_NOTES.md)).
+- **Single-file storage** (`.gdb`). 4 KB pages, slotted layout, CSR adjacency, page-cached property store. One file moves with your app.
+- **Embeddable.** No server, no daemon, no HTTP. Open a path, run queries, close. Lives in the same process as your extension / Electron app / CLI.
+- **Secondary indexes.** Hash for equality, B-tree for ranges. Auto-built per `(label, property)` pair where values are unique within a label. Optional DDL: `CREATE INDEX ... ON :Label(prop)`.
+- **Data modification.** ISO §13 `INSERT`, `SET`, `REMOVE`, `DELETE`, `DETACH DELETE`. Overlay-on-disk model: mutations live in RAM until you call `conn.save()`, SQLite-style.
 
-### Module functions
+## API
 
-- `open(path: string): Connection` — open or create a `.gdb`. Eagerly warms the LTJ TripleIndex.
-- `importJson(dbPath: string, jsonPath: string): void` — write a fresh `.gdb` from a JSON graph file.
-- `importCsv(dbPath: string, csvDir: string): void` — write a fresh `.gdb` from a directory of CSVs configured via `spanner_import_config.json`.
+### `open(path: string): Connection`
 
-### `Connection`
+Open or create a `.gdb`. Eagerly warms the LTJ TripleIndex so the first query runs at warm-cache speed.
 
-Properties:
+### `importJson(dbPath: string, jsonPath: string): void`
 
-- `nodeCount: number` — live node count (base + overlay).
-- `edgeCount: number` — live edge count (base + overlay).
+Build a fresh `.gdb` from a JSON file shaped `{ nodes: [...], edges: [...] }`. Overwrites the destination.
 
-Methods (all strongly typed in `index.d.ts`):
+### `importCsv(dbPath: string, csvDir: string): void`
 
-- `execute(query: string, limit?: number): unknown` — run any GQL statement. The return type is `unknown` because the shape depends on the statement; cast to the expected interface (see table). `limit` defaults to 100; ignored for DDL / DML.
-- `save(): void` — persist the merged base + overlay back to the file the connection was opened from. Until you call this, DML mutations and `CREATE INDEX` declarations live only in memory.
-- `schema(): SchemaSummary` — `{ nodeLabels, edgeLabels, nodeCount, edgeCount }` derived from live graph.
-- `graphTypes(): GraphTypeSummary[]` — list of `{ name, active, nodes?, edges? }` from the catalog.
+Build a fresh `.gdb` from a directory of CSVs configured via `spanner_import_config.json`. Used by the LDBC ingest pipeline; see [Cloud Spanner import format docs](https://cloud.google.com/spanner/docs/import).
 
-### `execute()` return shapes
+### `class Connection`
 
-Each row uses the named interface from `index.d.ts`. Cast at the call site:
+| Member | Returns | Notes |
+|---|---|---|
+| `nodeCount` | `number` | Live count (base + overlay). |
+| `edgeCount` | `number` | Live count (base + overlay). |
+| `execute(query, limit?)` | `unknown` | Polymorphic — see [Return shapes](#executequery-limit-return-shapes). |
+| `save()` | `void` | Persist base + overlay to the file the connection was opened from. |
+| `schema()` | `SchemaSummary` | Sorted node / edge label sets + counts. |
+| `graphTypes()` | `GraphTypeSummary[]` | Catalog entries with active markers. |
+
+### `execute(query, limit?)` return shapes
+
+`execute` returns `unknown` because the shape depends on the statement kind. Cast at the call site:
 
 ```ts
-import type { NodeRef, DdlOk, IndexSummary, DmCounters } from "frogql";
-
-const rows  = conn.execute("MATCH (n) RETURN n LIMIT 10") as Array<{ n: NodeRef }>;
-const ddl   = conn.execute("USE GRAPH TYPE DEFAULT") as DdlOk;
-const idx   = conn.execute("SHOW INDEXES") as IndexSummary[];
-const count = conn.execute("INSERT (:Tag {name: 'foo'})") as DmCounters;
+import type {
+  NodeRef, EdgeRef, DmCounters, DdlOk, IndexResult, IndexSummary,
+  GraphTypeSummary, SchemaSummary,
+} from "frogql";
 ```
 
 | Statement | Cast target |
 |---|---|
-| Query with `RETURN` | `Array<Record<string, unknown>>` (alias-keyed; refine per-query as `Array<{ alias: T }>`) |
-| Query without `RETURN` | `Array<{ _paths: unknown[]; [var: string]: unknown }>` |
+| Query with `RETURN` | `Array<Record<string, unknown>>` keyed by alias |
+| Query without `RETURN` | `Array<{ _paths: unknown[]; [v: string]: unknown }>` |
 | `CREATE / USE / DROP GRAPH TYPE` | `DdlOk` |
 | `SHOW GRAPH TYPES` | `GraphTypeSummary[]` |
-| `SHOW GRAPH TYPE <name>` / `SHOW CURRENT GRAPH TYPE` | object with `name`, `active`, `nodes`, `edges`, `formatted`, optional `validation` |
-| `VALIDATE GRAPH TYPE` | `{ ok, name, nodesChecked, edgesChecked, nodeViolations, edgeViolations, samples }` |
+| `SHOW GRAPH TYPE <name>` | object with `name`, `active`, `nodes`, `edges`, `formatted`, optional `validation` |
 | `CREATE / DROP INDEX` | `IndexResult` |
 | `SHOW INDEXES` | `IndexSummary[]` |
 | `INSERT / SET / REMOVE / DELETE / DETACH DELETE` | `DmCounters` |
 
-Node and edge references inside row values use `NodeRef` / `EdgeRef`. The `props` field on `EdgeRef` is optional: present when returned via `RETURN e` (top-level), omitted in path context to keep payloads small.
+Node and edge references inside row values use `NodeRef` / `EdgeRef`. The `props` field on `EdgeRef` is optional: present when returned via `RETURN e` at the top level, omitted in path-internal context to keep payloads small.
 
-## Build from source
+## Examples
+
+### Pattern matching with repetition
+
+```ts
+const friends = conn.execute(
+  `MATCH (p:Person {id: 12345})~[:knows]~{1,2}(f:Person)
+   WHERE p <> f
+   RETURN f.firstName AS name, f.lastName AS surname
+   LIMIT 20`,
+  20
+) as Array<{ name: string; surname: string }>;
+```
+
+Bounded repetition `{1,2}` unrolls to a worst-case-optimal join per length. See [perf series](https://github.com/pleiad/frogql/blob/main/docs/internals/implemented-optimizations.md) for the optimizer pipeline.
+
+### Aggregation + ordering
+
+```ts
+const top = conn.execute(
+  `MATCH (m:Movie)<-[:ACTED_IN]-(p:Person)
+   RETURN m.title AS film, COUNT(p) AS cast
+   GROUP BY m.title
+   ORDER BY cast DESC, film ASC
+   LIMIT 10`,
+  10
+) as Array<{ film: string; cast: number }>;
+```
+
+`ORDER BY ... LIMIT` drives through a btree-backed top-k path when an index exists on the sort key; otherwise pdqsort.
+
+### Optional match
+
+```ts
+const rows = conn.execute(
+  `MATCH (p:Person)
+   OPTIONAL MATCH (p)-[:ACTED_IN]->(m:Movie)
+   RETURN p.name AS actor, m.title AS film
+   LIMIT 50`,
+  50
+) as Array<{ actor: string; film: string | null }>;
+```
+
+Left-outer join with bind-pushdown: per outer row, pin shared variables and pin-execute the inner. SQLite-style nested-loop. ~93× speedup vs the global-evaluate-and-join baseline on LDBC IS5.
+
+### Insert, modify, persist
+
+```ts
+import type { DmCounters } from "frogql";
+
+const a = conn.execute("INSERT (:Person {name: 'Alice', age: 30})") as DmCounters;
+console.log(a.nodesInserted); // 1
+
+conn.execute("MATCH (p:Person {name: 'Alice'}) SET p.age = 31");
+conn.execute("MATCH (p:Person {name: 'Alice'}) REMOVE p.age");
+
+// Until you save(), mutations live in the in-memory overlay only.
+conn.save();
+```
+
+### Schema introspection
+
+```ts
+const s = conn.schema();
+// { nodeLabels: ['Movie', 'Person'], edgeLabels: ['ACTED_IN', ...], nodeCount: 171, edgeCount: 253 }
+
+const types = conn.graphTypes();
+// [{ name: 'DEFAULT', active: true, nodes: 2, edges: 6 }]
+```
+
+### Indexes
+
+```ts
+const r = conn.execute("CREATE INDEX ON :Person(name) USING HASH") as IndexResult;
+const r2 = conn.execute("CREATE INDEX ON :Person(age) USING BTREE") as IndexResult;
+const idx = conn.execute("SHOW INDEXES") as IndexSummary[];
+// auto-built indexes appear here too (auto: true).
+```
+
+`HASH` accelerates equality lookups (`x.name = 'Alice'`); `BTREE` powers range scans (`x.age >= 18`) and ORDER BY top-k.
+
+## Use in a VSCode extension
+
+The Node addon runs in-process inside the extension host (which is Node.js). No subprocess, no IPC, no serialisation overhead.
+
+```ts
+import * as vscode from "vscode";
+import { open } from "frogql";
+import type { NodeRef } from "frogql";
+
+export function activate(ctx: vscode.ExtensionContext) {
+  const dbPath = ctx.asAbsolutePath("data/movies.gdb");
+  const conn = open(dbPath);
+
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand("frogql.queryActors", async () => {
+      const film = await vscode.window.showInputBox({ prompt: "Movie title" });
+      if (!film) return;
+      const rows = conn.execute(
+        `MATCH (m:Movie {title: '${film.replace(/'/g, "\\'")}'})<-[:ACTED_IN]-(p:Person)
+         RETURN p.name AS actor`,
+        50
+      ) as Array<{ actor: string }>;
+      vscode.window.showInformationMessage(rows.map(r => r.actor).join(", "));
+    })
+  );
+}
+```
+
+Add `frogql` to `dependencies` in `package.json`. `vsce package` bundles the platform `.node` into the `.vsix`.
+
+**Caveats**
+
+- Desktop only. Native addons don't load in `vscode.dev` / github.dev / Codespaces web. Use a WASM build for web targets.
+- Per-platform packaging. A `.vsix` carries one platform binary. To ship for every OS, run `vsce package --target darwin-arm64`, `--target win32-x64`, etc. and publish per-platform on the marketplace.
+
+## Platforms
+
+| OS | Arch | npm package |
+|---|---|---|
+| macOS | x64 | `frogql-darwin-x64` |
+| macOS | arm64 (Apple Silicon) | `frogql-darwin-arm64` |
+| Linux | x64 (glibc) | `frogql-linux-x64-gnu` |
+| Linux | arm64 (glibc) | `frogql-linux-arm64-gnu` |
+| Windows | x64 | `frogql-win32-x64-msvc` |
+
+Other targets (musl Linux, FreeBSD, Windows arm64) aren't built today. If you need one, open an issue at [pleiad/frogql](https://github.com/pleiad/frogql/issues).
+
+## Performance
+
+Numbers from `bench/data/ldbc-sf0.1.gdb` (LDBC Social Network scale-factor 0.1: 327K nodes, 1.5M edges) on an Apple M-series laptop, lazy backend, three iterations, warm cache:
+
+| Query | gqlrust (with indexes) | GraphQLite (Cypher + SQLite reference) | Speedup |
+|---|---|---|---|
+| LDBC IC2 (recent messages) | **8.7 ms** | 32.8 ms | 3.8× |
+| LDBC IS5 (forum on creator) | varies, indexed lookup + bind-pushdown | — | — |
+
+Open time on the same DB: ~570 ms warm (string table 80 ms + topology 70 ms + secondary index auto-build 420 ms + TripleIndex 670 ms — the last two are memory-only and rebuild each open).
+
+For the full benchmark suite see [`docs/internals/JOIN_STRATEGY_NOTES.md`](https://github.com/pleiad/frogql/blob/main/docs/internals/JOIN_STRATEGY_NOTES.md) and [`bench/cross-system/`](https://github.com/pleiad/frogql/tree/main/bench/cross-system).
+
+## Versioning
+
+Released in lock-step with the PyPI `frogql` package: a single `v*` git tag fires both release workflows. Same Rust core, same `.gdb` format, fully interoperable.
+
+Pre-releases (`0.2.0-rc.1`, `-rc.2`, …) publish to dist-tag `next` so `npm install frogql` keeps pointing at the latest stable. Install a pre-release explicitly with `npm install frogql@next`.
+
+## Develop locally
 
 ```bash
-cd node
+git clone https://github.com/pleiad/frogql.git
+cd frogql/node
 npm install
 npm run build       # produces frogql.<platform>.node + index.js + index.d.ts
 npm test            # runtime smoke tests (node --test)
 npm run typecheck   # tsc --noEmit against __test__/types.test.ts
 ```
 
-## Versioning
+Requires Node ≥ 16 and a stable Rust toolchain.
 
-Released in lock-step with the PyPI `frogql` package: one `v*` git tag fires both release workflows. Same `gqlrust` core, same on-disk format, fully interoperable.
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+## Related
+
+- [`frogql` on PyPI](https://pypi.org/project/frogql/) — Python bindings, same engine.
+- [`pleiad/frogql`](https://github.com/pleiad/frogql) — main repository, Rust core, CLI (`frogql` binary modelled on `sqlite3`), benchmark suite, architecture docs.
