@@ -150,14 +150,49 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
+          DIST_TAG: ${{ steps.dist.outputs.tag }}
         run: |
           npm config set "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}"
-          # Publish each platform sub-package
+
+          # Helper: skip if version already exists, soft-fail on spam
+          # detector (npm flags new platform packages occasionally and
+          # support has to whitelist them — block host publish on that).
+          publish_if_new() {
+            local dir="$1"
+            local name version
+            name=$(node -p "require('./${dir}/package.json').name")
+            version=$(node -p "require('./${dir}/package.json').version")
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "::notice::${name}@${version} already on npm — skipping"
+              return 0
+            fi
+            (cd "${dir}" && npm publish --tag "${DIST_TAG}" --access public --provenance) || {
+              echo "::warning::publish failed for ${name}@${version} (continuing)"
+              FAILED_PLATFORM_PUBLISHES="${FAILED_PLATFORM_PUBLISHES} ${name}"
+              return 1
+            }
+          }
+
+          FAILED_PLATFORM_PUBLISHES=""
           for pkg in npm/*/; do
-            echo "::group::Publishing $pkg"
-            (cd "$pkg" && npm publish --tag ${{ steps.dist.outputs.tag }} --access public --provenance)
+            echo "::group::${pkg}"
+            publish_if_new "${pkg%/}" || true
             echo "::endgroup::"
           done
-          # Publish the host package last so consumers don't see a
-          # version that references missing optionalDependencies.
-          npm publish --tag ${{ steps.dist.outputs.tag }} --access public --provenance
+
+          if [ -n "${FAILED_PLATFORM_PUBLISHES}" ]; then
+            echo "::warning::Failed platform packages:${FAILED_PLATFORM_PUBLISHES}"
+            echo "::warning::Host publish proceeds anyway; consumers on those platforms get a 'No native build' install error until the missing packages land."
+          fi
+
+          # Host package goes last so its optionalDependencies resolve
+          # for consumers that hit a supported platform.
+          host_name=$(node -p "require('./package.json').name")
+          host_version=$(node -p "require('./package.json').version")
+          if npm view "${host_name}@${host_version}" version >/dev/null 2>&1; then
+            echo "::notice::${host_name}@${host_version} already on npm — skipping"
+          else
+            echo "::group::${host_name}@${host_version}"
+            npm publish --tag "${DIST_TAG}" --access public --provenance
+            echo "::endgroup::"
+          fi
