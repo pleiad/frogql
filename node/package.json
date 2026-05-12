@@ -1,6 +1,6 @@
 {
   "name": "frogql",
-  "version": "0.2.0",
+  "version": "0.2.0-rc.1",
   "description": "froGQL — embedded GQL graph database with ISO GQL path patterns (Rust core, Node.js bindings via napi-rs)",
   "main": "index.js",
   "types": "index.d.ts",
@@ -62,10 +62,10 @@
     "provenance": true
   },
   "optionalDependencies": {
-    "frogql-darwin-x64": "0.2.0",
-    "frogql-darwin-arm64": "0.2.0",
-    "frogql-linux-x64-gnu": "0.2.0",
-    "frogql-linux-arm64-gnu": "0.2.0",
-    "frogql-win32-x64-msvc": "0.2.0"
+    "frogql-darwin-x64": "0.2.0-rc.1",
+    "frogql-darwin-arm64": "0.2.0-rc.1",
+    "frogql-linux-x64-gnu": "0.2.0-rc.1",
+    "frogql-linux-arm64-gnu": "0.2.0-rc.1",
+    "frogql-win32-x64-msvc": "0.2.0-rc.1"
   }
 }
