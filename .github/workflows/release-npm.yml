@@ -77,7 +77,14 @@ jobs:
 
       - name: Install dependencies
         working-directory: ${{ env.NAPI_WORKDIR }}
-        run: npm ci
+        # `npm install`, not `ci`. The host's `optionalDependencies`
+        # reference the 5 platform sub-packages this very workflow
+        # publishes. `npm ci` strict-mode rejects a lock file that
+        # doesn't list packages npm can now resolve from the registry,
+        # and we can't keep the lock in sync with the chicken-and-egg
+        # of self-publishing optionalDependencies. `npm install` is
+        # forgiving and only needs the devDependencies (napi-cli, tsc).
+        run: npm install --no-audit --no-fund
 
       - name: Build
         working-directory: ${{ env.NAPI_WORKDIR }}
@@ -111,7 +118,14 @@ jobs:
 
       - name: Install dependencies
         working-directory: ${{ env.NAPI_WORKDIR }}
-        run: npm ci
+        # `npm install`, not `ci`. The host's `optionalDependencies`
+        # reference the 5 platform sub-packages this very workflow
+        # publishes. `npm ci` strict-mode rejects a lock file that
+        # doesn't list packages npm can now resolve from the registry,
+        # and we can't keep the lock in sync with the chicken-and-egg
+        # of self-publishing optionalDependencies. `npm install` is
+        # forgiving and only needs the devDependencies (napi-cli, tsc).
+        run: npm install --no-audit --no-fund
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
