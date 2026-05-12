@@ -257,6 +257,16 @@ fn try_ltj_inner<G: GraphAccess>(
         }
     }
 
+    // Flag triples that bind an edge variable. The LTJ base case uses this
+    // to fan out one row per parallel entry in those triples — the only
+    // way to recover edges that share the same (src, label, tgt) prefix,
+    // since the trie collapses them by design.
+    let triple_has_edge_var: Vec<bool> = decomp
+        .triple_info
+        .iter()
+        .map(|(_, _, edge_var, _)| edge_var.is_some())
+        .collect();
+
     // Run LTJ
     let algorithm = LtjAlgorithm::new(
         iterators,
@@ -266,6 +276,7 @@ fn try_ltj_inner<G: GraphAccess>(
         filters_at_level,
         num_vars,
         pinned,
+        triple_has_edge_var,
     );
 
     let mut runner = LtjRunner::new(algorithm, graph);
@@ -922,7 +933,7 @@ fn convert_results<G: GraphAccess>(
         let mut assignment = Assignment::new();
 
         // Build assignment, excluding internal variables
-        for &(var_id, value) in tuple {
+        for &(var_id, value) in &tuple.vars {
             if decomp.internal_vars.contains(&var_id) {
                 continue;
             }
@@ -936,14 +947,33 @@ fn convert_results<G: GraphAccess>(
             let mut path_elements = Vec::new();
             for ti in start..end {
                 let (src_var, tgt_var, ref edge_var, _kind) = decomp.triple_info[ti];
-                let src_id = tuple.iter().find(|(v, _)| *v == src_var).map(|(_, id)| *id);
-                let tgt_id = tuple.iter().find(|(v, _)| *v == tgt_var).map(|(_, id)| *id);
+                let src_id = tuple
+                    .vars
+                    .iter()
+                    .find(|(v, _)| *v == src_var)
+                    .map(|(_, id)| *id);
+                let tgt_id = tuple
+                    .vars
+                    .iter()
+                    .find(|(v, _)| *v == tgt_var)
+                    .map(|(_, id)| *id);
 
                 if let (Some(src), Some(tgt)) = (src_id, tgt_id) {
                     if path_elements.is_empty() {
                         path_elements.push(PathValue::Node(src));
                     }
-                    if let Some(eid) = find_edge(graph, src, tgt) {
+                    // Prefer the eid carried out of the LTJ trie (matches
+                    // the bound (src, label, tgt) exactly). Fall back to
+                    // adjacency only when the per-triple eid is unset, e.g.
+                    // when the iterator never bottomed out — defensive,
+                    // shouldn't fire on well-formed patterns.
+                    let resolved_eid = tuple
+                        .triple_eids
+                        .get(ti)
+                        .copied()
+                        .filter(|&e| e != u32::MAX)
+                        .or_else(|| find_edge(graph, src, tgt));
+                    if let Some(eid) = resolved_eid {
                         // Use edge_path_value so undirected edges land as
                         // PathValue::EdgeUndirectional rather than being
                         // forced into the directional variant.

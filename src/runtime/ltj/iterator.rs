@@ -179,4 +179,52 @@ impl<'a> LtjIterator<'a> {
     pub fn nfixed(&self) -> usize {
         self.stack.len()
     }
+
+    /// With all three positions (S, P, O) fixed via constants + stack,
+    /// return the edge id of the first index entry that matches. Used by
+    /// LTJ result reconstruction when the triple does not bind an edge
+    /// variable — a single eid is enough to recover the canonical edge
+    /// for display in `_paths`.
+    pub fn current_eid(&self) -> Option<u32> {
+        let (slice, begin, end) = self.current_range()?;
+        if begin < end {
+            Some(slice[begin].3)
+        } else {
+            None
+        }
+    }
+
+    /// All edge ids whose entries share the bound (src, label, tgt) prefix.
+    /// Used when the triple binds an edge variable: the LTJ trie collapses
+    /// parallel edges (same src, label, tgt, different eid) into a single
+    /// search path, so the base case has to fan out one tuple per physical
+    /// entry. Without this, `(a)-[e:KNOWS]->(b)` would return one row per
+    /// distinct (a, KNOWS, b) triple and silently drop the rest.
+    pub fn current_eids_all(&self) -> Vec<u32> {
+        let Some((slice, begin, end)) = self.current_range() else {
+            return Vec::new();
+        };
+        slice[begin..end].iter().map(|e| e.3).collect()
+    }
+
+    /// Walk SPO with the constants + stack to find the entry range whose
+    /// (S, P, O) prefix matches the current bindings. Returns the slice
+    /// reference and the matched range. Bails if any position is still
+    /// unbound — callers should only invoke this at the base case.
+    fn current_range(&self) -> Option<(&'a [IndexEntry], usize, usize)> {
+        let slice = self.index.get_ordering(TrieOrder::SPO);
+        let mut by_pos: [Option<u32>; 3] = [None; 3];
+        for &(pos, val) in self.constants.iter().chain(self.stack.iter()) {
+            by_pos[pos as usize] = Some(val);
+        }
+        let mut begin = 0usize;
+        let mut end = slice.len();
+        for (depth, slot) in by_pos.iter().enumerate() {
+            let val = (*slot)?;
+            let (lo, hi) = TripleIndex::range_for_key(slice, begin, end, depth, val);
+            begin = lo;
+            end = hi;
+        }
+        Some((slice, begin, end))
+    }
 }

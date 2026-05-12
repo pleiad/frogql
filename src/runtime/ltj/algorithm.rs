@@ -6,6 +6,30 @@ use crate::syntax::expr::BinOp;
 use super::iterator::{LtjIterator, SpoPos};
 use super::veo::Veo;
 
+/// Iterate every combination across `lists`. Empty `lists` yields one
+/// empty combo; a single empty inner vector kills the product. Used at
+/// the LTJ base case to fan out parallel-edge entries per triple.
+fn cartesian(lists: &[Vec<u32>]) -> impl Iterator<Item = Vec<u32>> + '_ {
+    let lens: Vec<usize> = lists.iter().map(|l| l.len()).collect();
+    let total: usize = if lens.is_empty() {
+        1
+    } else if lens.contains(&0) {
+        0
+    } else {
+        lens.iter().product()
+    };
+    (0..total).map(move |idx| {
+        let mut out = Vec::with_capacity(lists.len());
+        let mut k = idx;
+        for (list, &len) in lists.iter().zip(lens.iter()) {
+            let pick = k % len;
+            k /= len;
+            out.push(list[pick]);
+        }
+        out
+    })
+}
+
 /// A filter placed at a specific level in the VEO.
 /// Evaluated after binding the variable at that level, before descending further.
 #[derive(Clone)]
@@ -44,8 +68,22 @@ pub enum FilterKind {
     },
 }
 
-/// A result tuple: variable bindings as (var_id, value).
-pub type ResultTuple = Vec<(u8, u32)>;
+/// A result tuple: variable bindings as (var_id, value), plus the source
+/// edge id per triple. `triple_eids[i]` is the edge id of the index entry
+/// that produced the binding for triple `i`. Replaces the older
+/// `find_edge(src, tgt)` reconstruction, which ignored the bound label
+/// and aliased parallel edges of different labels onto a single eid.
+#[derive(Debug, Clone, Default)]
+pub struct ResultTuple {
+    pub vars: Vec<(u8, u32)>,
+    pub triple_eids: Vec<u32>,
+}
+
+impl ResultTuple {
+    pub fn new(vars: Vec<(u8, u32)>, triple_eids: Vec<u32>) -> Self {
+        ResultTuple { vars, triple_eids }
+    }
+}
 
 /// Main LTJ algorithm.
 /// Holds iterators, variable-to-iterator mapping, VEO, and placed filters.
@@ -67,9 +105,17 @@ pub struct LtjAlgorithm<'a> {
     /// search starts. These slots are pre-populated in the result tuple and
     /// never written to by the search loop.
     pinned: Vec<(u8, u32)>,
+    /// Parallel to `iterators`: `true` when the triple binds an edge
+    /// variable, so the base case has to fan out one tuple per physical
+    /// parallel edge (same src/label/tgt, distinct eid). When `false`,
+    /// the canonical first eid is enough — the LTJ trie collapses the
+    /// parallel siblings, which is the right behavior for joins on
+    /// vertex variables but loses them when the user binds the edge.
+    triple_has_edge_var: Vec<bool>,
 }
 
 impl<'a> LtjAlgorithm<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         iterators: Vec<LtjIterator<'a>>,
         var_to_iterators: Vec<Vec<usize>>,
@@ -78,7 +124,9 @@ impl<'a> LtjAlgorithm<'a> {
         filters_at_level: Vec<Vec<PlacedFilter>>,
         num_vars: usize,
         pinned: Vec<(u8, u32)>,
+        triple_has_edge_var: Vec<bool>,
     ) -> Self {
+        debug_assert_eq!(triple_has_edge_var.len(), iterators.len());
         LtjAlgorithm {
             iterators,
             var_to_iterators,
@@ -87,6 +135,7 @@ impl<'a> LtjAlgorithm<'a> {
             filters_at_level,
             num_vars,
             pinned,
+            triple_has_edge_var,
         }
     }
 
@@ -168,9 +217,44 @@ impl<'a> LtjAlgorithm<'a> {
             return false;
         }
 
-        // Base case: all variables bound
+        // Base case: all variables bound. Triples with an edge variable
+        // fan out one tuple per parallel entry sharing the bound (s,p,o);
+        // others contribute a single canonical eid. The cartesian product
+        // across triples preserves multi-triple joins — typically all but
+        // one factor is a singleton, so this stays O(rows) in practice.
         if j >= self.veo.size() {
-            results.push(tuple[..self.num_vars].to_vec());
+            let eid_lists: Vec<Vec<u32>> = self
+                .iterators
+                .iter()
+                .enumerate()
+                .map(|(i, it)| {
+                    if self.triple_has_edge_var[i] {
+                        let eids = it.current_eids_all();
+                        if eids.is_empty() {
+                            vec![u32::MAX]
+                        } else {
+                            eids
+                        }
+                    } else {
+                        vec![it.current_eid().unwrap_or(u32::MAX)]
+                    }
+                })
+                .collect();
+            let var_bindings = tuple[..self.num_vars].to_vec();
+            let mut accepted_any = false;
+            for combo in cartesian(&eid_lists) {
+                accepted_any = true;
+                results.push(ResultTuple::new(var_bindings.clone(), combo));
+                if limit > 0 && results.len() >= limit {
+                    return false;
+                }
+            }
+            // Defensive: when no iterator could produce a triple_eid at
+            // all (degenerate empty index), still emit one row so callers
+            // see the variable bindings.
+            if !accepted_any {
+                results.push(ResultTuple::new(var_bindings, Vec::new()));
+            }
             return true;
         }
 
@@ -288,7 +372,41 @@ impl<'a, G: GraphAccess> LtjRunner<'a, G> {
         }
 
         if j >= self.algorithm.veo.size() {
-            results.push(tuple[..self.algorithm.num_vars].to_vec());
+            // Same fan-out logic as `LtjAlgorithm::search`: a triple that
+            // binds an edge variable emits one row per parallel entry
+            // sharing the (s, p, o) prefix, others contribute a single
+            // canonical eid. The product accommodates joins where one
+            // triple has parallels and the others do not.
+            let eid_lists: Vec<Vec<u32>> = self
+                .algorithm
+                .iterators
+                .iter()
+                .enumerate()
+                .map(|(i, it)| {
+                    if self.algorithm.triple_has_edge_var[i] {
+                        let eids = it.current_eids_all();
+                        if eids.is_empty() {
+                            vec![u32::MAX]
+                        } else {
+                            eids
+                        }
+                    } else {
+                        vec![it.current_eid().unwrap_or(u32::MAX)]
+                    }
+                })
+                .collect();
+            let var_bindings = tuple[..self.algorithm.num_vars].to_vec();
+            let mut accepted_any = false;
+            for combo in cartesian(&eid_lists) {
+                accepted_any = true;
+                results.push(ResultTuple::new(var_bindings.clone(), combo));
+                if limit > 0 && results.len() >= limit {
+                    return false;
+                }
+            }
+            if !accepted_any {
+                results.push(ResultTuple::new(var_bindings, Vec::new()));
+            }
             return true;
         }
 
