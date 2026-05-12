@@ -31,19 +31,19 @@ jobs:
         settings:
           - host: macos-13
             target: x86_64-apple-darwin
-            build: napi build --platform --release --target x86_64-apple-darwin
+            build: npx napi build --platform --release --target x86_64-apple-darwin
           - host: macos-14
             target: aarch64-apple-darwin
-            build: napi build --platform --release --target aarch64-apple-darwin
+            build: npx napi build --platform --release --target aarch64-apple-darwin
           - host: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            build: napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross
+            build: npx napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross
           - host: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
-            build: napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross
+            build: npx napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross
           - host: windows-2022
             target: x86_64-pc-windows-msvc
-            build: napi build --platform --release --target x86_64-pc-windows-msvc
+            build: npx napi build --platform --release --target x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
 
