@@ -8,6 +8,17 @@ Released in lock-step with the [PyPI `frogql` package](https://pypi.org/project/
 
 ## [Unreleased]
 
+## [0.2.0-rc.3] — 2026-05-12
+
+### Fixed
+
+- Host package now ships `index.js` and `index.d.ts`. The `0.2.0-rc.2` tarball uploaded those files as build artifacts only and they never reached the publish job, so the package on npm contained README + LICENSE + package.json with no JavaScript. `require('frogql')` returned `Cannot find module './index.js'` for every consumer.
+- Both files are now checked into git (canonical napi-rs pattern). Removed from `node/.gitignore`.
+
+### Deprecated
+
+- `frogql@0.2.0-rc.2` — broken, use `frogql@0.2.0-rc.3` or later.
+
 ## [0.2.0-rc.2] — 2026-05-12
 
 ### Added
