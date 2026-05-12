@@ -29,7 +29,11 @@ jobs:
       fail-fast: false
       matrix:
         settings:
-          - host: macos-13
+          # x86_64-apple-darwin cross-compiles from the macos-14 (arm64)
+          # runner. macos-13 (Intel) has multi-hour queues as GitHub
+          # winds it down. Apple Silicon includes the x86_64 toolchain
+          # natively so no zig / cross-cc needed.
+          - host: macos-14
             target: x86_64-apple-darwin
             build: npx napi build --platform --release --target x86_64-apple-darwin
           - host: macos-14
