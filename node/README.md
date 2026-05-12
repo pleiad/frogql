@@ -159,4 +159,4 @@ npm run typecheck   # tsc --noEmit against __test__/types.test.ts
 
 ## Versioning
 
-Tracks the PyPI `frogql` version (`0.2.0`). Same `gqlrust` core, same on-disk format, fully interoperable.
+Released in lock-step with the PyPI `frogql` package: one `v*` git tag fires both release workflows. Same `gqlrust` core, same on-disk format, fully interoperable.

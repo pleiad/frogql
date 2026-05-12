@@ -1,0 +1,140 @@
+name: Release npm
+
+# Build per-platform .node binaries and publish to npm when a tag like
+# v0.2.0 or v0.2.0-rc.1 is pushed. Mirrors `release.yml` (PyPI) so a
+# single tag fires both: PyPI workflow + this one.
+#
+# Setup: a repo secret named `NPM_TOKEN` (npm Automation token) must
+# exist. Never commit the value.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  APP_NAME: frogql
+  NAPI_WORKDIR: node
+
+jobs:
+  build:
+    name: Build ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-13
+            target: x86_64-apple-darwin
+            build: napi build --platform --release --target x86_64-apple-darwin
+          - host: macos-14
+            target: aarch64-apple-darwin
+            build: napi build --platform --release --target aarch64-apple-darwin
+          - host: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            build: napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross
+          - host: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            build: napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross
+          - host: windows-2022
+            target: x86_64-pc-windows-msvc
+            build: napi build --platform --release --target x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          check-latest: true
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+
+      - name: Install dependencies
+        working-directory: ${{ env.NAPI_WORKDIR }}
+        run: npm ci
+
+      - name: Build
+        working-directory: ${{ env.NAPI_WORKDIR }}
+        run: ${{ matrix.settings.build }}
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: ${{ env.NAPI_WORKDIR }}/${{ env.APP_NAME }}.*.node
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-22.04
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          check-latest: true
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.NAPI_WORKDIR }}
+        run: npm ci
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ env.NAPI_WORKDIR }}/artifacts
+
+      - name: Move artifacts to npm/<target>/ subdirs
+        working-directory: ${{ env.NAPI_WORKDIR }}
+        run: npx napi artifacts
+
+      - name: List packages to publish
+        working-directory: ${{ env.NAPI_WORKDIR }}
+        run: ls -R ./npm
+
+      - name: Set npm dist-tag based on version
+        id: dist
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Publishing $VERSION → dist-tag=$(grep tag= "$GITHUB_OUTPUT" | cut -d= -f2)"
+
+      - name: Publish platform packages + host
+        working-directory: ${{ env.NAPI_WORKDIR }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+        run: |
+          npm config set "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}"
+          # Publish each platform sub-package
+          for pkg in npm/*/; do
+            echo "::group::Publishing $pkg"
+            (cd "$pkg" && npm publish --tag ${{ steps.dist.outputs.tag }} --access public --provenance)
+            echo "::endgroup::"
+          done
+          # Publish the host package last so consumers don't see a
+          # version that references missing optionalDependencies.
+          npm publish --tag ${{ steps.dist.outputs.tag }} --access public --provenance

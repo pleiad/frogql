@@ -6,9 +6,12 @@
   "types": "index.d.ts",
   "license": "MIT",
   "author": "Matías Toro <mtoro.cl@gmail.com>",
+  "homepage": "https://github.com/pleiad/frogql#readme",
+  "bugs": "https://github.com/pleiad/frogql/issues",
   "repository": {
     "type": "git",
-    "url": "https://github.com/pleiad/frogql.git"
+    "url": "https://github.com/pleiad/frogql.git",
+    "directory": "node"
   },
   "keywords": [
     "gql",
@@ -34,10 +37,13 @@
     ]
   },
   "scripts": {
+    "artifacts": "napi artifacts",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
+    "prepublishOnly": "napi prepublish -t npm --skip-gh-release",
     "test": "node --test __test__/smoke.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "version": "napi version"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0",
@@ -46,6 +52,20 @@
   },
   "files": [
     "index.js",
-    "index.d.ts"
-  ]
+    "index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/",
+    "provenance": true
+  },
+  "optionalDependencies": {
+    "frogql-darwin-x64": "0.2.0",
+    "frogql-darwin-arm64": "0.2.0",
+    "frogql-linux-x64-gnu": "0.2.0",
+    "frogql-linux-arm64-gnu": "0.2.0",
+    "frogql-win32-x64-msvc": "0.2.0"
+  }
 }
