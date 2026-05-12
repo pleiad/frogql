@@ -118,6 +118,14 @@ jobs:
         with:
           path: ${{ env.NAPI_WORKDIR }}/artifacts
 
+      # napi-cli v2 needs the per-target dirs (`npm/<triple>/`) populated
+      # with their own package.json before `napi artifacts` can move the
+      # .node files in. `create-npm-dir` reads `napi.triples.additional`
+      # from package.json and scaffolds each subdir.
+      - name: Create per-platform npm dirs
+        working-directory: ${{ env.NAPI_WORKDIR }}
+        run: npx napi create-npm-dir -t .
+
       - name: Move artifacts to npm/<target>/ subdirs
         working-directory: ${{ env.NAPI_WORKDIR }}
         run: npx napi artifacts
