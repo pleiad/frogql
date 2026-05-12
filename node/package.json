@@ -43,7 +43,6 @@
     "artifacts": "napi artifacts",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "prepublishOnly": "napi prepublish -t npm --skip-gh-release",
     "test": "node --test __test__/smoke.mjs",
     "typecheck": "tsc --noEmit",
     "version": "napi version"

@@ -180,7 +180,10 @@ jobs:
               echo "::notice::${name}@${version} already on npm — skipping"
               return 0
             fi
-            (cd "${dir}" && npm publish --tag "${DIST_TAG}" --access public --provenance) || {
+            # `--ignore-scripts`: defensive. Platform sub-packages don't
+            # have any lifecycle hooks today, but `--ignore-scripts`
+            # makes that explicit and shields against future surprises.
+            (cd "${dir}" && npm publish --tag "${DIST_TAG}" --access public --provenance --ignore-scripts) || {
               echo "::warning::publish failed for ${name}@${version} (continuing)"
               FAILED_PLATFORM_PUBLISHES="${FAILED_PLATFORM_PUBLISHES} ${name}"
               return 1
@@ -207,6 +210,10 @@ jobs:
             echo "::notice::${host_name}@${host_version} already on npm — skipping"
           else
             echo "::group::${host_name}@${host_version}"
-            npm publish --tag "${DIST_TAG}" --access public --provenance
+            # `--ignore-scripts` is essential here: a `prepublishOnly`
+            # hook would invoke `napi prepublish` which tries to
+            # re-publish every platform sub-package and crashes the
+            # workflow once any one of them is already on npm.
+            npm publish --tag "${DIST_TAG}" --access public --provenance --ignore-scripts
             echo "::endgroup::"
           fi
