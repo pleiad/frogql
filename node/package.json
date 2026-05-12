@@ -36,10 +36,13 @@
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "test": "node --test __test__/"
+    "test": "node --test __test__/smoke.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.0"
+    "@napi-rs/cli": "^2.18.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
   },
   "files": [
     "index.js",

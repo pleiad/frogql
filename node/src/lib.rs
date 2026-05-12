@@ -41,6 +41,114 @@ fn err<E: ToString>(e: E) -> napi::Error {
     napi::Error::from_reason(e.to_string())
 }
 
+// === Exported TS types ======================================================
+//
+// `#[napi(object)]` structs surface as TS interfaces in the generated
+// `index.d.ts` even when no method returns them directly. They give
+// consumers names to cast `execute()` results to, since execute() is
+// polymorphic and returns `unknown` (we'd need to split it into
+// executeQuery / executeDdl / executeDml to give it a single static
+// type, which loses parity with the Python binding).
+
+/// Result of `Connection.schema()`.
+#[napi(object)]
+pub struct SchemaSummary {
+    pub node_labels: Vec<String>,
+    pub edge_labels: Vec<String>,
+    pub node_count: u32,
+    pub edge_count: u32,
+}
+
+/// One entry in `Connection.graphTypes()`.
+#[napi(object)]
+pub struct GraphTypeSummary {
+    pub name: String,
+    pub active: bool,
+    /// Number of node types declared in this graph type, if known.
+    pub nodes: Option<u32>,
+    /// Number of edge types declared in this graph type, if known.
+    pub edges: Option<u32>,
+}
+
+/// Shape of a node reference inside an `execute()` row. `kind` is
+/// always `"node"`. Cast `execute()` rows to `{ x: NodeRef }` etc.
+#[napi(object)]
+pub struct NodeRef {
+    pub kind: String,
+    pub id: u32,
+    pub labels: Vec<String>,
+    /// Free-form property bag. Values are JSON-compatible (number /
+    /// string / boolean / null / nested object / array).
+    pub props: serde_json::Value,
+}
+
+/// Shape of an edge reference inside an `execute()` row. `kind` is
+/// always `"edge"`. `props` is present when returned via `RETURN e`
+/// (top-level `Value::Edge`); omitted in path context to keep payloads
+/// small.
+#[napi(object)]
+pub struct EdgeRef {
+    pub kind: String,
+    pub id: u32,
+    pub labels: Vec<String>,
+    pub props: Option<serde_json::Value>,
+}
+
+/// Counters returned from a successful DML statement (INSERT / SET /
+/// REMOVE / DELETE / DETACH DELETE).
+#[napi(object)]
+pub struct DmCounters {
+    pub nodes_inserted: u32,
+    pub edges_inserted: u32,
+    pub nodes_deleted: u32,
+    pub edges_deleted: u32,
+    pub nodes_modified: u32,
+    pub edges_modified: u32,
+    pub rows: u32,
+}
+
+/// Result envelope for `CREATE / USE / DROP GRAPH TYPE`.
+#[napi(object)]
+pub struct DdlOk {
+    pub ok: bool,
+    /// Always `"ddl"` for catalog statements.
+    pub kind: String,
+    pub message: String,
+}
+
+/// Result envelope for `CREATE / DROP INDEX`.
+#[napi(object)]
+pub struct IndexResult {
+    pub ok: bool,
+    /// Always `"index"`.
+    pub kind: String,
+    pub name: String,
+    /// Present on CREATE, absent on DROP.
+    pub label: Option<String>,
+    /// Present on CREATE, absent on DROP.
+    pub prop: Option<String>,
+    /// `"HASH"` or `"BTREE"`. Present on CREATE only.
+    pub index_kind: Option<String>,
+    /// Number of (label, prop) entries indexed. Present on CREATE only.
+    pub entries: Option<u32>,
+    /// Present when DROP failed (index not found).
+    pub error: Option<String>,
+}
+
+/// One entry in `SHOW INDEXES`.
+#[napi(object)]
+pub struct IndexSummary {
+    pub name: String,
+    pub label: String,
+    pub prop: String,
+    /// `"HASH"` or `"BTREE"`.
+    pub kind: String,
+    /// `true` for auto-built indexes (memory-only), `false` for
+    /// DDL-declared (persisted in `.gdb`).
+    pub auto: bool,
+    pub entries: u32,
+}
+
 #[napi]
 pub struct Connection {
     store: LazyGraphStore,
@@ -68,10 +176,20 @@ impl Connection {
         self.store.edge_count()
     }
 
-    /// Run a GQL statement. Returns the same shapes the Python binding
-    /// produces (see module docstring). `limit` defaults to 100 for
-    /// queries; it's ignored for DDL / DML.
-    #[napi]
+    /// Run a GQL statement. The return is polymorphic — depends on
+    /// statement kind:
+    /// - Query with RETURN: `Array<Record<string, unknown>>` keyed by alias
+    /// - Query without RETURN: `Array<{ _paths, ...vars }>`
+    /// - CREATE / USE / DROP GRAPH TYPE: `DdlOk`
+    /// - SHOW GRAPH TYPES: `Array<GraphTypeSummary>`
+    /// - SHOW GRAPH TYPE / SHOW CURRENT GRAPH TYPE / VALIDATE GRAPH TYPE: object
+    /// - CREATE / DROP INDEX: `IndexResult`
+    /// - SHOW INDEXES: `Array<IndexSummary>`
+    /// - DML: `DmCounters`
+    ///
+    /// Cast the return to the expected shape:
+    /// `const rows = conn.execute("MATCH ...") as Array<{ x: NodeRef }>`
+    #[napi(ts_return_type = "unknown")]
     pub fn execute(&self, query: String, limit: Option<u32>) -> napi::Result<JsonValue> {
         let limit = limit.unwrap_or(100) as usize;
         let stmt = parse_statement(&query).map_err(err)?;
@@ -111,14 +229,14 @@ impl Connection {
 
     /// List graph types currently in the catalog with active markers.
     #[napi]
-    pub fn graph_types(&self) -> JsonValue {
-        self.list_graph_types()
+    pub fn graph_types(&self) -> Vec<GraphTypeSummary> {
+        self.list_graph_types_typed()
     }
 
     /// Lightweight schema summary derived from the live graph: sorted
     /// label sets + node / edge counts. Does NOT consult the catalog.
     #[napi]
-    pub fn schema(&self) -> JsonValue {
+    pub fn schema(&self) -> SchemaSummary {
         use std::collections::BTreeSet;
         let mut node_labels: BTreeSet<String> = BTreeSet::new();
         for nid in 0..self.store.node_count() {
@@ -132,12 +250,12 @@ impl Connection {
                 edge_labels.insert(l.to_string());
             }
         }
-        json!({
-            "nodeLabels": node_labels.into_iter().collect::<Vec<_>>(),
-            "edgeLabels": edge_labels.into_iter().collect::<Vec<_>>(),
-            "nodeCount": self.store.node_count(),
-            "edgeCount": self.store.edge_count(),
-        })
+        SchemaSummary {
+            node_labels: node_labels.into_iter().collect(),
+            edge_labels: edge_labels.into_iter().collect(),
+            node_count: self.store.node_count(),
+            edge_count: self.store.edge_count(),
+        }
     }
 }
 
@@ -155,20 +273,48 @@ impl Connection {
         Runtime::with_triple_index(&self.store, idx)
     }
 
-    fn list_graph_types(&self) -> JsonValue {
+    fn list_graph_types_typed(&self) -> Vec<GraphTypeSummary> {
         let cat = self.store.catalog();
-        let mut out: Vec<JsonValue> = Vec::new();
-        for (name, is_active) in cat.list() {
-            let mut entry = Map::new();
-            entry.insert("name".into(), JsonValue::String(name.clone()));
-            entry.insert("active".into(), JsonValue::Bool(is_active));
-            if let Some(sch) = cat.types.get(name) {
-                entry.insert("nodes".into(), json!(sch.nodes.len()));
-                entry.insert("edges".into(), json!(sch.edges.len()));
-            }
-            out.push(JsonValue::Object(entry));
-        }
-        JsonValue::Array(out)
+        cat.list()
+            .into_iter()
+            .map(|(name, is_active)| {
+                let (nodes, edges) = cat
+                    .types
+                    .get(name)
+                    .map(|s| (Some(s.nodes.len() as u32), Some(s.edges.len() as u32)))
+                    .unwrap_or((None, None));
+                GraphTypeSummary {
+                    name: name.clone(),
+                    active: is_active,
+                    nodes,
+                    edges,
+                }
+            })
+            .collect()
+    }
+
+    /// Same content as `list_graph_types_typed`, hand-converted to
+    /// JsonValue for the polymorphic `execute()` return path. Adding a
+    /// `serde::Serialize` derive on `GraphTypeSummary` would shave the
+    /// boilerplate but napi-rs's `#[napi(object)]` macro doesn't add it.
+    fn list_graph_types(&self) -> JsonValue {
+        JsonValue::Array(
+            self.list_graph_types_typed()
+                .into_iter()
+                .map(|t| {
+                    let mut entry = Map::new();
+                    entry.insert("name".into(), JsonValue::String(t.name));
+                    entry.insert("active".into(), JsonValue::Bool(t.active));
+                    if let Some(n) = t.nodes {
+                        entry.insert("nodes".into(), json!(n));
+                    }
+                    if let Some(e) = t.edges {
+                        entry.insert("edges".into(), json!(e));
+                    }
+                    JsonValue::Object(entry)
+                })
+                .collect(),
+        )
     }
 
     fn exec_query(&self, query: &str, limit: usize) -> napi::Result<JsonValue> {
