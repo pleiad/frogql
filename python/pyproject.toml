@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "frogql"
-version = "0.2.0rc3"
+version = "0.2.1"
 description = "froGQL — embedded GQL graph database with ISO GQL path patterns (Rust core, Python bindings)"
 readme = "README.md"
 requires-python = ">=3.8"
