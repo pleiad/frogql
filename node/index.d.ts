@@ -35,15 +35,18 @@ export interface NodeRef {
 }
 /**
  * Shape of an edge reference inside an `execute()` row. `kind` is
- * always `"edge"`. `props` is present when returned via `RETURN e`
- * (top-level `Value::Edge`); omitted in path context to keep payloads
- * small.
+ * always `"edge"`. Symmetric with `NodeRef`: `props` is always
+ * populated, whether the edge arrives via `_paths` or via `RETURN e`.
  */
 export interface EdgeRef {
   kind: string
   id: number
   labels: Array<string>
-  props?: any
+  /**
+   * Free-form property bag. Values are JSON-compatible (number /
+   * string / boolean / null / nested object / array).
+   */
+  props: any
 }
 /**
  * Counters returned from a successful DML statement (INSERT / SET /

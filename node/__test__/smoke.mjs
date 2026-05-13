@@ -72,6 +72,27 @@ test("schema query: labels surface in node refs", () => {
   assert.equal(typeof rows[0].title, "string");
 });
 
+test("edges expose props in _paths and RETURN e (symmetric with nodes)", () => {
+  const conn = open(moviesDb);
+  // Top-level binding (no RETURN): row has `_paths` + every pattern var.
+  const noReturn = conn.execute("MATCH ()-[e]->() LIMIT 1", 1);
+  assert.ok(noReturn.length > 0);
+  const row = noReturn[0];
+  assert.ok("e" in row && "_paths" in row);
+  assert.equal(row.e.kind, "edge");
+  assert.ok(row.e.props && typeof row.e.props === "object");
+  // The same edge inside _paths must also carry props.
+  const pathEdge = row._paths[0].find((pv) => pv && pv.kind === "edge");
+  assert.ok(pathEdge);
+  assert.ok(pathEdge.props && typeof pathEdge.props === "object");
+
+  // RETURN e: top-level Value::Edge route also includes props.
+  const ret = conn.execute("MATCH ()-[e]->() RETURN e LIMIT 1", 1);
+  assert.ok(ret.length > 0);
+  assert.equal(ret[0].e.kind, "edge");
+  assert.ok(ret[0].e.props && typeof ret[0].e.props === "object");
+});
+
 test("module exports import helpers", () => {
   assert.equal(typeof importJson, "function");
   assert.equal(typeof importCsv, "function");

@@ -83,15 +83,16 @@ pub struct NodeRef {
 }
 
 /// Shape of an edge reference inside an `execute()` row. `kind` is
-/// always `"edge"`. `props` is present when returned via `RETURN e`
-/// (top-level `Value::Edge`); omitted in path context to keep payloads
-/// small.
+/// always `"edge"`. Symmetric with `NodeRef`: `props` is always
+/// populated, whether the edge arrives via `_paths` or via `RETURN e`.
 #[napi(object)]
 pub struct EdgeRef {
     pub kind: String,
     pub id: u32,
     pub labels: Vec<String>,
-    pub props: Option<serde_json::Value>,
+    /// Free-form property bag. Values are JSON-compatible (number /
+    /// string / boolean / null / nested object / array).
+    pub props: serde_json::Value,
 }
 
 /// Counters returned from a successful DML statement (INSERT / SET /
@@ -680,7 +681,7 @@ fn value_to_json(store: &LazyGraphStore, v: &Value) -> JsonValue {
             JsonValue::Object(obj)
         }
         Value::Node(id) => node_to_json(store, *id),
-        Value::Edge(id) => edge_to_json(store, *id, false),
+        Value::Edge(id) => edge_to_json(store, *id),
     }
 }
 
@@ -703,25 +704,23 @@ fn node_to_json(store: &LazyGraphStore, id: u32) -> JsonValue {
     })
 }
 
-fn edge_to_json(store: &LazyGraphStore, id: u32, include_props: bool) -> JsonValue {
+fn edge_to_json(store: &LazyGraphStore, id: u32) -> JsonValue {
     let labels: Vec<JsonValue> = store
         .edge_labels(id)
         .required_labels()
         .into_iter()
         .map(|s| JsonValue::String(s.to_string()))
         .collect();
-    let mut out = Map::new();
-    out.insert("kind".into(), JsonValue::String("edge".into()));
-    out.insert("id".into(), json!(id));
-    out.insert("labels".into(), JsonValue::Array(labels));
-    if include_props {
-        let mut props = Map::new();
-        for (k, vv) in store.edge_props(id).iter() {
-            props.insert(k.clone(), value_to_json(store, vv));
-        }
-        out.insert("props".into(), JsonValue::Object(props));
+    let mut props = Map::new();
+    for (k, vv) in store.edge_props(id).iter() {
+        props.insert(k.clone(), value_to_json(store, vv));
     }
-    JsonValue::Object(out)
+    json!({
+        "kind": "edge",
+        "id": id,
+        "labels": labels,
+        "props": JsonValue::Object(props),
+    })
 }
 
 fn raw_to_json(store: &LazyGraphStore, ir: &IntermediateResult) -> JsonValue {
@@ -750,7 +749,7 @@ fn pathvalue_to_json(store: &LazyGraphStore, pv: &PathValue) -> JsonValue {
     match pv {
         PathValue::Node(id) => node_to_json(store, *id),
         PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => {
-            edge_to_json(store, *id, false)
+            edge_to_json(store, *id)
         }
         PathValue::Nothing => JsonValue::Null,
         PathValue::Group(items) => JsonValue::Array(

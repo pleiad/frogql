@@ -714,6 +714,11 @@ fn pathvalue_to_py<'py>(
                 .map(|s| s.to_string())
                 .collect();
             d.set_item("labels", labels)?;
+            let props = PyDict::new_bound(py);
+            for (k, vv) in store.edge_props(*id).iter() {
+                props.set_item(k, value_to_py(py, store, vv)?)?;
+            }
+            d.set_item("props", props)?;
             d.into_py(py)
         }
         PathValue::Nothing => py.None(),
