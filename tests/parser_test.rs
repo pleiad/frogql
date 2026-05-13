@@ -135,6 +135,50 @@ fn test_descriptor_value_filter_with_colon_still_works() {
     assert!(s.contains("\"age\""), "got: {s}");
 }
 
+// ISO/IEC 39075:2024 §16: `elementPropertySpecification` is a sibling of
+// `isLabelExpression` under `elementPatternFiller`, so the colon is
+// optional in front of the `{...}` record.
+
+#[test]
+fn test_node_bare_property_spec_anonymous() {
+    // `({k: v})` — no variable, no colon, just a property spec. Label
+    // defaults to Star (any), value filter hoisted by elaboration.
+    let parsed = parse("({age: 30})").unwrap();
+    let s = format!("{parsed:?}");
+    assert!(s.contains("value_filters"), "got: {s}");
+    assert!(s.contains("\"age\""), "got: {s}");
+    assert!(s.contains("Star"), "got: {s}");
+}
+
+#[test]
+fn test_node_bare_property_spec_with_var() {
+    // `(x {k: v})` — variable plus property spec, no colon.
+    let parsed = parse("(x {age: 30})").unwrap();
+    let s = format!("{parsed:?}");
+    assert!(s.contains("value_filters"), "got: {s}");
+    assert!(s.contains("\"x\""), "got: {s}");
+    assert!(s.contains("\"age\""), "got: {s}");
+}
+
+#[test]
+fn test_edge_bare_property_spec_anonymous() {
+    // `-[{k: v}]->` — no variable, no colon, just a property spec.
+    let parsed = parse("-[{since: 2020}]->").unwrap();
+    let s = format!("{parsed:?}");
+    assert!(s.contains("value_filters"), "got: {s}");
+    assert!(s.contains("\"since\""), "got: {s}");
+}
+
+#[test]
+fn test_edge_bare_property_spec_with_var() {
+    // `-[e {k: v}]->` — variable plus property spec, no colon.
+    let parsed = parse("-[e {since: 2020}]->").unwrap();
+    let s = format!("{parsed:?}");
+    assert!(s.contains("value_filters"), "got: {s}");
+    assert!(s.contains("\"e\""), "got: {s}");
+    assert!(s.contains("\"since\""), "got: {s}");
+}
+
 #[test]
 fn test_typed_predicate_in_where_explicit() {
     // `TYPED` is the explicit type-predicate operator in expressions.

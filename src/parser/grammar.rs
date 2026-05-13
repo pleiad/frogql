@@ -729,8 +729,11 @@ impl Parser {
         }
     }
 
-    // Try to parse element_pattern_filler: variable? (":" type_schema)? (WHERE expr)?
-    // Returns Ok((Descriptor, Option<Expr>)) on success.
+    // Try to parse element_pattern_filler:
+    //   variable? (":" type_schema | "{" record_type)? (WHERE expr)?
+    // Per ISO/IEC 39075:2024 §16, `elementPropertySpecification` ({...}) is a
+    // sibling of `isLabelExpression`, so the colon is optional in front of
+    // the record. `({k: v})` and `(x {k: v})` are both valid node patterns.
     fn try_element_pattern_filler(&mut self) -> Result<(Descriptor, Option<Expr>), String> {
         let mut var: Option<String> = None;
         let mut dtype: Option<DescriptorType> = None;
@@ -742,7 +745,7 @@ impl Parser {
             let saved = self.pos;
             self.advance();
             match self.peek() {
-                Token::Colon | Token::Where | Token::RParen => {
+                Token::Colon | Token::Where | Token::RParen | Token::LBrace => {
                     var = Some(name);
                 }
                 _ => {
@@ -752,8 +755,10 @@ impl Parser {
             }
         }
 
-        // Optional ": type_schema"
-        if self.eat(&Token::Colon) {
+        // Optional ": type_schema" or bare "{ record_type }". The LBrace-first
+        // arm of `type_schema` defaults the label to Star, which matches the
+        // ISO semantics for an absent isLabelExpression.
+        if self.eat(&Token::Colon) || matches!(self.peek(), Token::LBrace) {
             let (dt, filters) = self.type_schema()?;
             dtype = Some(dt);
             value_filters = filters;
@@ -859,7 +864,10 @@ impl Parser {
             var = Some(name);
         }
 
-        if self.eat(&Token::Colon) {
+        // Optional ": type_schema" or bare "{ record_type }" — same ISO §16
+        // shape as node fillers. `-[{since: 2020}]->` and
+        // `-[e {since: 2020}]->` are valid edge patterns.
+        if self.eat(&Token::Colon) || matches!(self.peek(), Token::LBrace) {
             let (dt, filters) = self.type_schema()?;
             dtype = Some(dt);
             value_filters = filters;

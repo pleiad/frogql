@@ -78,6 +78,33 @@ fn test_concat_selector() {
     assert_eq!(fraud_run("()(x:{isDummy bool})"), 1);
 }
 
+// ISO §16 elementPropertySpecification without isLabelExpression.
+// Same value-filter semantics as the colonised forms.
+
+#[test]
+fn test_node_bare_prop_spec_anonymous_runtime() {
+    // 1 node has isBlocked=true (p2 Mike).
+    assert_eq!(fraud_run("({isBlocked: true})"), 1);
+    // 4 nodes have isBlocked=false (a1, a2, p1, d1).
+    assert_eq!(fraud_run("({isBlocked: false})"), 4);
+}
+
+#[test]
+fn test_node_bare_prop_spec_with_var_runtime() {
+    assert_eq!(fraud_run("(x {owner: 'Aretha'})"), 1);
+}
+
+#[test]
+fn test_edge_bare_prop_spec_anonymous_runtime() {
+    // 2 transfers/edges with amount=2000000 (t4 Transfer, t5 Foo).
+    assert_eq!(fraud_run("()-[{amount: 2000000}]->()"), 2);
+}
+
+#[test]
+fn test_edge_bare_prop_spec_with_var_runtime() {
+    assert_eq!(fraud_run("()-[e {amount: 2500000}]->()"), 1);
+}
+
 #[test]
 fn test_union() {
     assert_eq!(fraud_run("(x: Dummy) | (y: Account)"), 5);
