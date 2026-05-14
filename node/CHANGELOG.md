@@ -8,6 +8,35 @@ Released in lock-step with the [PyPI `frogql` package](https://pypi.org/project/
 
 ## [Unreleased]
 
+### Documentation
+
+- README: expanded the "Insert, modify, persist" section into "Incremental writes" with explicit upsert and delete-by-id snippets, and a notes block covering auto-commit, LTJ cache invalidation per mutation, per-statement transaction granularity, no `MERGE`, no multi-DML chains, and `importJson` not being incremental.
+- README: corrected the `EdgeRef.props` paragraph — props is always populated since `0.2.3`, not just on top-level `RETURN e`.
+
+## [0.2.3] — 2026-05-13
+
+### Added
+
+- Parser accepts `elementPropertySpecification` without `isLabelExpression` per ISO/IEC 39075:2024 §16. Now valid: `({k: v})`, `(x {k: v})`, `-[{k: v}]->`, `-[e {k: v}]->`. Previously these were rejected with `expected path pattern, got LBrace`; the colonised forms (`(:Label {k: v})`, `(: {k: v})`) already worked and behave identically.
+
+## [0.2.2] — 2026-05-13
+
+### Fixed
+
+- Edges expose `props` symmetrically with nodes — both via `RETURN e` and inside `_paths`. `EdgeRef.props` in `index.d.ts` is no longer optional. Pre-`0.2.2` versions silently dropped edge properties in both code paths despite the `EdgeRef` doc-comment claiming `RETURN e` would include them.
+
+## [0.2.1] — 2026-05-12
+
+### Changed
+
+- Re-release of `0.2.0` after the lock-step PyPI + npm pipeline reached steady state; no surface or on-disk format changes.
+
+## [0.2.0] — 2026-05-12
+
+### Added
+
+- First stable release. Surface, on-disk format, and the multi-package npm publish flow validated end-to-end through the `-rc.x` series.
+
 ## [0.2.0-rc.3] — 2026-05-12
 
 ### Fixed

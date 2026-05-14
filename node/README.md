@@ -97,7 +97,7 @@ import type {
 | `SHOW INDEXES` | `IndexSummary[]` |
 | `INSERT / SET / REMOVE / DELETE / DETACH DELETE` | `DmCounters` |
 
-Node and edge references inside row values use `NodeRef` / `EdgeRef`. The `props` field on `EdgeRef` is optional: present when returned via `RETURN e` at the top level, omitted in path-internal context to keep payloads small.
+Node and edge references inside row values use `NodeRef` / `EdgeRef`. Both shapes are symmetric — `kind`, `id`, `labels`, and `props` are always populated, whether the element arrives via `RETURN x` at the top level or inside a `_paths` entry. (Pre-`0.2.3` versions omitted `props` on edges in `_paths`; that gap is closed.)
 
 ## Examples
 
@@ -144,20 +144,64 @@ const rows = conn.execute(
 
 Left-outer join with bind-pushdown: per outer row, pin shared variables and pin-execute the inner. SQLite-style nested-loop. ~93× speedup vs the global-evaluate-and-join baseline on LDBC IS5.
 
-### Insert, modify, persist
+### Incremental writes (insert / upsert / delete)
+
+The full ISO §13 DML surface is reachable through `execute()` — there is no dedicated `connection.insert()` / `connection.delete()` method, the same way SQLite doesn't have one. Writes go in as GQL statements.
 
 ```ts
 import type { DmCounters } from "frogql";
 
-const a = conn.execute("INSERT (:Person {name: 'Alice', age: 30})") as DmCounters;
+// Insert.
+const a = conn.execute("INSERT (:Person {id: 'u-42', name: 'Alice', age: 30})") as DmCounters;
 console.log(a.nodesInserted); // 1
 
-conn.execute("MATCH (p:Person {name: 'Alice'}) SET p.age = 31");
-conn.execute("MATCH (p:Person {name: 'Alice'}) REMOVE p.age");
+// Update a property.
+conn.execute("MATCH (p:Person {id: 'u-42'}) SET p.age = 31");
 
-// Until you save(), mutations live in the in-memory overlay only.
+// Remove a property without dropping the node.
+conn.execute("MATCH (p:Person {id: 'u-42'}) REMOVE p.age");
+
+// Delete by id. DETACH first removes incident edges; NODETACH errors out
+// if the node still has neighbours.
+conn.execute("MATCH (p:Person {id: 'u-42'}) DETACH DELETE p");
+
+// Mutations live in an in-memory overlay until you call save().
 conn.save();
 ```
+
+#### Upsert pattern
+
+There is no `MERGE` yet (deferred per the ISO §13 MVP). Upsert is a two-step probe + branch:
+
+```ts
+function upsertPerson(conn: Connection, id: string, name: string) {
+  const hits = conn.execute(
+    `MATCH (p:Person {id: '${id}'}) RETURN p.id AS id LIMIT 1`,
+    1
+  ) as Array<{ id: string }>;
+  if (hits.length === 0) {
+    conn.execute(`INSERT (:Person {id: '${id}', name: '${name}'})`);
+  } else {
+    conn.execute(`MATCH (p:Person {id: '${id}'}) SET p.name = '${name}'`);
+  }
+}
+```
+
+A unique secondary index on `(Person, id)` makes the probe a point lookup:
+
+```ts
+conn.execute("CREATE INDEX ON :Person(id) USING HASH");
+```
+
+`execute()` takes a raw query string — there is no parameter-binding API. **Escape user input yourself** (`String#replace(/'/g, "\\'")` at minimum) or you'll have a query-injection vector.
+
+#### Operational notes for sync / streaming workloads
+
+- **Auto-commit is off.** Mutations stay in the RAM overlay until `conn.save()` writes a fresh `.gdb` atomically. A crashed process loses the unsaved overlay. Batch writes and save on a cadence (every N statements / every T seconds) rather than per-mutation.
+- **LTJ cache invalidation per mutation.** Each successful DML drops the cached six-ordering TripleIndex; the next read rebuilds it (~670 ms on an LDBC SF0.1-shaped graph). Tight write-read loops pay this per mutation. If your workload is write-heavy with occasional reads, that's fine; if it interleaves writes and reads, batch reads after a batch of writes.
+- **Transactions are per-statement.** A failed statement rolls back its own overlay delta. There's no multi-statement transaction boundary yet (deferred until WAL).
+- **No `MERGE`, no multi-DML chains** (`MATCH … INSERT … SET …` in one statement). One DML op per `execute()` call.
+- **`importJson` is not incremental.** It builds a fresh `.gdb` from scratch and overwrites the destination. Use `execute("INSERT …")` against an open `Connection` for incremental ingest.
 
 ### Schema introspection
 
