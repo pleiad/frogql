@@ -1,6 +1,6 @@
 # froGQL
 
-A Rust graph database implementing ISO GQL path pattern matching, with single-file storage inspired by SQLite.
+A Rust graph database implementing ISO GQL, with single-file storage inspired by SQLite.
 
 ## Install
 
