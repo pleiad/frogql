@@ -2,13 +2,13 @@
 //! list literals, `[T]` type annotations, and .gdb storage roundtrip.
 
 use gqlrust::compile_query;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 use gqlrust::store::lazy::LazyGraphStore;
 
-fn graph_with_lists() -> Graph {
+fn graph_with_lists() -> MemoryGraphStore {
     let json = r#"{
       "nodes": [
         {"id": "a1", "labels": ["Actor"], "props": {"name": "Keanu", "roles": ["Neo", "Agent"]}},
@@ -17,10 +17,10 @@ fn graph_with_lists() -> Graph {
       ],
       "edges": []
     }"#;
-    Graph::from_json_str(json).unwrap()
+    MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-fn run(g: &Graph, q: &str) -> Vec<Vec<Value>> {
+fn run(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     match rt.run_query(&query, 0) {
@@ -143,7 +143,7 @@ fn test_list_type_discriminates_element_types() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     // n1 is a list of int; n2 is a list of bool. `is [int]` must pick only n1.
     let r = run(&g, "MATCH (x: T) WHERE x.xs [int] RETURN x.xs");
     assert_eq!(r.len(), 1);

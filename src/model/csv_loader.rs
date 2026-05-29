@@ -9,12 +9,12 @@ use std::fs;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use crate::model::graph::{Graph, Props};
+use crate::model::graph::{MemoryGraphStore, Props};
 use crate::model::value::{Id, Value};
 use crate::typing::label_type::LabelType;
 
 /// Load a graph from a directory containing spanner_import_config.json and CSV files.
-pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
+pub fn load_from_csv_dir(dir: &Path) -> io::Result<MemoryGraphStore> {
     let config_path = dir.join("spanner_import_config.json");
     let config_str = fs::read_to_string(&config_path)?;
     let config: serde_json::Value = serde_json::from_str(&config_str)
@@ -144,7 +144,7 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<Graph> {
         }
     }
 
-    Ok(Graph::from_raw(
+    Ok(MemoryGraphStore::from_raw(
         node_names,
         node_labels,
         node_props,
@@ -427,7 +427,7 @@ struct LdbcFile {
 }
 
 /// Load a graph from an LDBC SNB CSV-Basic dataset directory.
-pub fn load_from_ldbc_csv_dir(dir: &Path) -> io::Result<Graph> {
+pub fn load_from_ldbc_csv_dir(dir: &Path) -> io::Result<MemoryGraphStore> {
     let files = collect_and_classify_ldbc(dir)?;
 
     let mut node_names: Vec<String> = Vec::new();
@@ -484,7 +484,7 @@ pub fn load_from_ldbc_csv_dir(dir: &Path) -> io::Result<Graph> {
         }
     }
 
-    Ok(Graph::from_raw(
+    Ok(MemoryGraphStore::from_raw(
         node_names,
         node_labels,
         node_props,
@@ -723,7 +723,7 @@ fn load_ldbc_node_file(
 
         let nid = node_names.len() as Id;
         node_name_to_id.insert(key, nid);
-        // Prefix with the entity label so the Graph's internal node-name
+        // Prefix with the entity label so the MemoryGraphStore's internal node-name
         // index stays unique across the LDBC entity types that share id 0.
         node_names.push(format!("{label}:{id_str}"));
         node_labels.push(lt);
@@ -986,7 +986,7 @@ mod ldbc_tests {
         let mut knows_count = 0;
         let mut directed_count = 0;
         for eid in 0..g.edge_count() as Id {
-            let labels = Graph::label_strings(&g.edge_labels(eid));
+            let labels = MemoryGraphStore::label_strings(&g.edge_labels(eid));
             if labels.iter().any(|s| s == "knows") {
                 knows_count += 1;
                 if !g.is_directed(eid) {
@@ -1005,7 +1005,7 @@ mod ldbc_tests {
         let mut country_count = 0;
         let mut continent_count = 0;
         for nid in 0..g.node_count() as Id {
-            let labels = Graph::label_strings(&g.node_labels(nid));
+            let labels = MemoryGraphStore::label_strings(&g.node_labels(nid));
             if labels.contains(&"City".to_string()) {
                 city_count += 1;
             }

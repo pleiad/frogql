@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
 
-use crate::model::graph::Graph;
+use crate::model::graph::MemoryGraphStore;
 use crate::model::graph_access::GraphAccess;
 use crate::model::value::{Id, Value};
 
@@ -191,7 +191,7 @@ impl SecondaryIndex {
                 .nodes()
                 .into_iter()
                 .filter(|&nid| {
-                    Graph::label_strings(&store.node_labels(nid))
+                    MemoryGraphStore::label_strings(&store.node_labels(nid))
                         .iter()
                         .any(|l| l == label)
                 })
@@ -326,7 +326,7 @@ impl SecondaryIndex {
 
         for nid in store.nodes() {
             let labels = store.node_labels(nid);
-            let label_strs = Graph::label_strings(&labels);
+            let label_strs = MemoryGraphStore::label_strings(&labels);
             let props = store.node_props(nid);
             for label in &label_strs {
                 *per_label_count.entry(label.clone()).or_insert(0) += 1;
@@ -391,10 +391,10 @@ impl SecondaryIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::graph::Graph;
+    use crate::model::graph::MemoryGraphStore;
     use crate::model::value::Value;
 
-    fn small_graph() -> Graph {
+    fn small_graph() -> MemoryGraphStore {
         let json = r#"{
             "nodes": [
                 {"id":"p1","labels":["Person"],"props":{"id":1,"firstName":"Alice"}},
@@ -405,7 +405,7 @@ mod tests {
             ],
             "edges": []
         }"#;
-        Graph::from_json_str(json).expect("parse")
+        MemoryGraphStore::from_json_str(json).expect("parse")
     }
 
     #[test]

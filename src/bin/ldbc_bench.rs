@@ -27,7 +27,7 @@
 //! spec-faithful `LIMIT N`); there is no `--limit` flag to override.
 //!
 //! Three GraphAccess backends:
-//!   - **memory** — `Graph` from `csv_loader::load_from_ldbc_csv_dir`.
+//!   - **memory** — `MemoryGraphStore` from `csv_loader::load_from_ldbc_csv_dir`.
 //!     Needs `--csv-dir`; the .gdb path is ignored.
 //!   - **lazy** — `LazyGraphStore::open(.gdb)`. Default.
 //!   - **disk** — `DiskGraphStore::open(.gdb)`.
@@ -686,7 +686,7 @@ fn main() {
                 eprintln!("--csv-dir is required when --backend memory is used");
                 std::process::exit(1);
             });
-            eprintln!("Loading LDBC CSV from {dir} into Graph (in-memory)...");
+            eprintln!("Loading LDBC CSV from {dir} into MemoryGraphStore (in-memory)...");
             let t0 = Instant::now();
             let g = csv_loader::load_from_ldbc_csv_dir(Path::new(&dir)).unwrap_or_else(|e| {
                 eprintln!("failed to load LDBC CSV from {dir}: {e}");

@@ -7,7 +7,7 @@
 
 use gqlrust::compile_query;
 use gqlrust::compile_query_unchecked;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
@@ -16,7 +16,7 @@ use gqlrust::syntax::query::{NullsOrder, SortDir};
 /// Five users with varying `age` properties; one is missing `age`
 /// entirely so the engine's implicit-null path kicks in. Designed for
 /// testing every direction × null-ordering combination.
-fn graph_with_users() -> Graph {
+fn graph_with_users() -> MemoryGraphStore {
     let json = r#"{
       "nodes": [
         {"id": "u1", "labels": ["User"], "props": {"name": "Alice", "age": 30}},
@@ -27,10 +27,10 @@ fn graph_with_users() -> Graph {
       ],
       "edges": []
     }"#;
-    Graph::from_json_str(json).unwrap()
+    MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-fn run_projected(g: &Graph, q: &str) -> Vec<Vec<Value>> {
+fn run_projected(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     match rt.run_query(&query, 0) {
@@ -372,7 +372,7 @@ fn runtime_order_by_cross_kind_falls_back_to_equal() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     let rows = run_projected(&g, "MATCH (x: X) RETURN x.v ORDER BY x.v");
     // All three rows preserved; Int vs Str returns None from value_cmp,
     // so they are treated as Equal and the stable sort keeps original
@@ -393,7 +393,7 @@ fn runtime_order_by_int_float_promote() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     let rows = run_projected(&g, "MATCH (x: X) RETURN x.v ORDER BY x.v");
     assert_eq!(
         rows,

@@ -13,7 +13,7 @@
 //!     read-only; reads merge the two slices)
 //!
 //! See plan §"Arquitectura: overlay sobre LazyGraphStore" for the full
-//! design rationale (overlay vs. materialize-to-Graph vs. in-place).
+//! design rationale (overlay vs. materialize-to-MemoryGraphStore vs. in-place).
 
 use std::collections::{HashMap, HashSet};
 
@@ -218,4 +218,52 @@ impl MutationOverlay {
         self.new_incoming.clear();
         self.new_undirected.clear();
     }
+}
+
+// --- Label-mutation helpers shared by every overlay-backed backend ---
+// (LazyGraphStore and MemoryGraphStore both apply these against the base
+// label set when reconstructing the merged view.)
+
+/// Apply a `LabelMods` (if any) to an in-place vector of label strings:
+/// drops every name in `removed`, then appends every name in `added`
+/// that is not already present. Preserves the relative order of base
+/// labels for stable display.
+pub(crate) fn apply_label_mods(labels: &mut Vec<String>, mods: Option<&LabelMods>) {
+    let Some(mods) = mods else { return };
+    if !mods.removed.is_empty() {
+        labels.retain(|l| !mods.removed.contains(l));
+    }
+    for l in &mods.added {
+        if !labels.iter().any(|x| x == l) {
+            labels.push(l.clone());
+        }
+    }
+}
+
+/// Reverse of the on-disk label decode over a string vector. Empty input
+/// collapses to `Star` to mirror the "no labels" encoding.
+pub(crate) fn labels_from_strings(labels: Vec<String>) -> LabelType {
+    if labels.is_empty() {
+        LabelType::Star
+    } else {
+        LabelType::from_list(&labels)
+    }
+}
+
+/// Add `label` to a label type (a `Label`, `And` chain, or `Star`).
+/// Idempotent — the label is only appended when not already present.
+pub(crate) fn label_type_with_added(lt: &LabelType, label: &str) -> LabelType {
+    let mut labels = crate::model::graph::MemoryGraphStore::label_strings(lt);
+    if !labels.iter().any(|l| l == label) {
+        labels.push(label.to_string());
+    }
+    labels_from_strings(labels)
+}
+
+/// Drop `label` from a label type. Idempotent — missing labels are a
+/// no-op (ISO §13.4 GR4 b).
+pub(crate) fn label_type_with_removed(lt: &LabelType, label: &str) -> LabelType {
+    let mut labels = crate::model::graph::MemoryGraphStore::label_strings(lt);
+    labels.retain(|l| l != label);
+    labels_from_strings(labels)
 }

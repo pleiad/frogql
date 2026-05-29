@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::graph_access::GraphAccess;
 use gqlrust::parser::parse_statement;
 use gqlrust::runtime::dm::run_dm;
@@ -31,7 +31,7 @@ fn temp_db(name: &str) -> PathBuf {
 fn fraud_store(name: &str) -> LazyGraphStore {
     let db_path = temp_db(name);
     let json_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-    let g = Graph::from_file(&json_path).unwrap();
+    let g = MemoryGraphStore::from_file(&json_path).unwrap();
     g.save(&db_path).unwrap();
     LazyGraphStore::open(&db_path).unwrap()
 }
@@ -44,7 +44,7 @@ fn parse_dm_or_panic(input: &str) -> gqlrust::syntax::dm::DmStatement {
 }
 
 fn label_strings_for(store: &LazyGraphStore, id: u32) -> Vec<String> {
-    Graph::label_strings(&store.node_labels(id))
+    MemoryGraphStore::label_strings(&store.node_labels(id))
 }
 
 #[test]
@@ -283,7 +283,7 @@ fn save_persists_label_mods_through_reopen() {
     let path = temp_db("set_label_persist.gdb");
     {
         let json_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-        let g = Graph::from_file(&json_path).unwrap();
+        let g = MemoryGraphStore::from_file(&json_path).unwrap();
         g.save(&path).unwrap();
         let store = LazyGraphStore::open(&path).unwrap();
         let dm = parse_dm_or_panic("MATCH (a:Account {owner: 'Aretha'}) SET a:VIP");

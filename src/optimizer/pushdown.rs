@@ -409,12 +409,12 @@ mod tests {
     #[test]
     fn test_pushdown_preserves_semantics() {
         // Verify that pushed-down queries produce the same results as originals
-        use crate::model::graph::Graph;
+        use crate::model::graph::MemoryGraphStore;
         use crate::runtime::engine::Runtime;
         use std::path::Path;
 
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-        let g = Graph::from_file(&path).unwrap();
+        let g = MemoryGraphStore::from_file(&path).unwrap();
         let rt = Runtime::new(&g);
 
         let queries = vec![

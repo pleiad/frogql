@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::graph_access::GraphAccess;
 
 fn temp_path(name: &str) -> PathBuf {
@@ -17,9 +17,9 @@ fn temp_path(name: &str) -> PathBuf {
     p
 }
 
-fn fraud_graph() -> Graph {
+fn fraud_graph() -> MemoryGraphStore {
     let json_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-    Graph::from_file(&json_path).unwrap()
+    MemoryGraphStore::from_file(&json_path).unwrap()
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn dump_then_load_round_trips_node_and_edge_counts() {
     let dump_path = temp_path("round_trip.json");
     gqlrust::store::dump::dump_to_json_file(&g, &dump_path).unwrap();
 
-    let loaded = Graph::from_file(&dump_path).unwrap();
+    let loaded = MemoryGraphStore::from_file(&dump_path).unwrap();
     assert_eq!(loaded.node_count(), g.node_count());
     assert_eq!(loaded.edge_count(), g.edge_count());
 }
@@ -38,7 +38,7 @@ fn dump_includes_node_labels_and_props() {
     let g = fraud_graph();
     let dump_path = temp_path("labels_props.json");
     gqlrust::store::dump::dump_to_json_file(&g, &dump_path).unwrap();
-    let loaded = Graph::from_file(&dump_path).unwrap();
+    let loaded = MemoryGraphStore::from_file(&dump_path).unwrap();
 
     // Every Account node should still be tagged Account in the reload.
     let pre_accounts = g.nodes_with_label("Account").map(|v| v.len()).unwrap_or(0);
@@ -67,7 +67,7 @@ fn dump_after_mutation_captures_new_data() {
     let dump_path = temp_path("mutate_then_dump.json");
     gqlrust::store::dump::dump_to_json_file(&store, &dump_path).unwrap();
 
-    let loaded = Graph::from_file(&dump_path).unwrap();
+    let loaded = MemoryGraphStore::from_file(&dump_path).unwrap();
     assert_eq!(loaded.node_count(), pre + 1);
     assert!(
         loaded

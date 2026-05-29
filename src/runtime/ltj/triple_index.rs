@@ -228,12 +228,12 @@ impl TripleIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::graph::Graph;
+    use crate::model::graph::MemoryGraphStore;
     use std::path::Path;
 
     #[test]
     fn test_build_from_fraud_graph() {
-        let graph = Graph::from_file(Path::new("test_data/fraud.json")).unwrap();
+        let graph = MemoryGraphStore::from_file(Path::new("test_data/fraud.json")).unwrap();
         let idx = TripleIndex::from_graph(&graph);
         assert!(!idx.is_empty());
 

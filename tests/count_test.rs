@@ -7,14 +7,14 @@
 //!  - Commit 7: implicit GROUP BY (RETURN mixing aggregates with plain exprs).
 
 use gqlrust::compile_query;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 
 /// Three-user fixture used across most aggregate tests. Two users in
 /// Boston, one in Seattle; ages 30/25/40.
-fn graph_three_users() -> Graph {
+fn graph_three_users() -> MemoryGraphStore {
     let json = r#"{
       "nodes": [
         {"id": "u1", "labels": ["User"], "props": {
@@ -29,11 +29,11 @@ fn graph_three_users() -> Graph {
       ],
       "edges": []
     }"#;
-    Graph::from_json_str(json).unwrap()
+    MemoryGraphStore::from_json_str(json).unwrap()
 }
 
 /// Helper: compile + run a query and return the projected rows.
-fn run(g: &Graph, q: &str) -> Vec<Vec<Value>> {
+fn run(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     match rt.run_query(&query, 0) {
@@ -116,7 +116,7 @@ fn test_count_expr_skips_failures() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     assert_eq!(
         run(&g, "MATCH (x: User) RETURN COUNT(x.nickname)"),
         vec![vec![Value::Int(2)]]
@@ -158,7 +158,7 @@ fn test_count_distinct_skips_failures() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     assert_eq!(
         run(&g, "MATCH (x: User) RETURN COUNT(DISTINCT x.nickname)"),
         vec![vec![Value::Int(2)]]
@@ -232,7 +232,7 @@ fn test_sum_promotes_to_float_on_mixed() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     assert_eq!(
         run(&g, "MATCH (x: P) RETURN SUM(x.v)"),
         vec![vec![Value::Float(6.5)]]
@@ -250,7 +250,7 @@ fn test_sum_distinct() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     assert_eq!(
         run(&g, "MATCH (x: P) RETURN SUM(DISTINCT x.v)"),
         vec![vec![Value::Int(70)]]
@@ -444,7 +444,7 @@ fn test_groupby_two_columns() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     let rs = sort_by_first_two(run(
         &g,
         "MATCH (x: U) GROUP BY x.country, x.city RETURN x.country, x.city, COUNT(*)",
@@ -552,7 +552,7 @@ fn test_return_distinct_with_aggregate_dedupes_output() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     let rt = Runtime::new(&g);
 
     let q = compile_query("MATCH (x: P) RETURN DISTINCT COUNT(*)").unwrap();
@@ -665,7 +665,7 @@ fn test_groupby_explicit_two_keys() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     let rs = sort_by_first_two(run(
         &g,
         "MATCH (x: U) GROUP BY x.country, x.city RETURN x.country, x.city, COUNT(*)",

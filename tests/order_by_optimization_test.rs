@@ -4,13 +4,13 @@
 //! env var pins one path so the test exercises it deterministically.
 
 use gqlrust::compile_query;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 use gqlrust::store::lazy::LazyGraphStore;
 
-fn build_users(n: usize) -> Graph {
+fn build_users(n: usize) -> MemoryGraphStore {
     let mut nodes = String::new();
     for i in 0..n {
         if i > 0 {
@@ -34,10 +34,10 @@ fn build_users(n: usize) -> Graph {
         ));
     }
     let json = format!("{{\"nodes\":[{nodes}],\"edges\":[]}}");
-    Graph::from_json_str(&json).expect("graph json")
+    MemoryGraphStore::from_json_str(&json).expect("graph json")
 }
 
-fn run_with_force(g: &Graph, q: &str, force: Option<&str>) -> Vec<Vec<Value>> {
+fn run_with_force(g: &MemoryGraphStore, q: &str, force: Option<&str>) -> Vec<Vec<Value>> {
     let prev = std::env::var("GQLITE_ORDERBY_FORCE").ok();
     match force {
         Some(v) => std::env::set_var("GQLITE_ORDERBY_FORCE", v),
@@ -87,10 +87,10 @@ fn topk_handles_desc_with_nulls_last() {
 
 #[test]
 fn btree_path_matches_pdqsort_when_index_present() {
-    // Auto-build only indexes unique-valued columns. We use Graph (no auto
+    // Auto-build only indexes unique-valued columns. We use MemoryGraphStore (no auto
     // build) but populate a unique-valued column anyway so the actual
     // output is unambiguous; we then force `btree-ltj` and check it
-    // *gracefully falls back* to pdqsort because in-memory `Graph`
+    // *gracefully falls back* to pdqsort because in-memory `MemoryGraphStore`
     // returns None from `lookup_node_ordered`. The interesting wiring
     // tested elsewhere is via LazyGraphStore.
     let mut nodes = String::new();
@@ -104,7 +104,7 @@ fn btree_path_matches_pdqsort_when_index_present() {
         ));
     }
     let json = format!("{{\"nodes\":[{nodes}],\"edges\":[]}}");
-    let g = Graph::from_json_str(&json).unwrap();
+    let g = MemoryGraphStore::from_json_str(&json).unwrap();
     let q = "MATCH (x: User) RETURN x.age ORDER BY x.age LIMIT 5";
     let pdq = run_with_force(&g, q, Some("pdqsort"));
     let bt = run_with_force(&g, q, Some("btree-ltj"));
@@ -135,7 +135,7 @@ fn btree_path_emits_same_rows_as_pdqsort_via_lazy_store() {
         ));
     }
     let json = format!("{{\"nodes\":[{nodes}],\"edges\":[]}}");
-    let g = Graph::from_json_str(&json).unwrap();
+    let g = MemoryGraphStore::from_json_str(&json).unwrap();
     let tmp = std::env::temp_dir().join("gqlite_orderby_optim.gdb");
     let _ = std::fs::remove_file(&tmp);
     g.save(&tmp).unwrap();
@@ -206,7 +206,7 @@ fn btree_ltj_real_matches_pdqsort_on_join_query() {
         }
     }
     let json = format!("{{\"nodes\":[{nodes}],\"edges\":[{edges}]}}");
-    let g = Graph::from_json_str(&json).unwrap();
+    let g = MemoryGraphStore::from_json_str(&json).unwrap();
     let tmp = std::env::temp_dir().join("gqlite_orderby_real_join.gdb");
     let _ = std::fs::remove_file(&tmp);
     g.save(&tmp).unwrap();
@@ -294,7 +294,7 @@ fn topk_with_distinct_keeps_full_sort() {
         ));
     }
     json.push_str("],\"edges\":[]}");
-    let g = Graph::from_json_str(&json).unwrap();
+    let g = MemoryGraphStore::from_json_str(&json).unwrap();
     let q = "MATCH (x: User) RETURN DISTINCT x.category ORDER BY x.category LIMIT 5";
     let pdq = run_with_force(&g, q, Some("pdqsort"));
     let topk = run_with_force(&g, q, Some("topk"));

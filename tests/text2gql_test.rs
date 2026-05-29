@@ -5,12 +5,12 @@
 use std::path::Path;
 
 use gqlrust::model::csv_loader;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 
-fn movies_graph() -> Graph {
+fn movies_graph() -> MemoryGraphStore {
     // Load directly from CSV files (no JSON conversion needed)
     let csv_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("bench/data/text2gql/dataset/dataset/train/movies/gql/Spanner_Instance");
@@ -19,24 +19,24 @@ fn movies_graph() -> Graph {
     } else {
         // Fallback to JSON for CI/environments without the dataset
         let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/movies.json");
-        Graph::from_file(&p).unwrap()
+        MemoryGraphStore::from_file(&p).unwrap()
     }
 }
 
-fn run_query(g: &Graph, q: &str) -> QueryResult {
+fn run_query(g: &MemoryGraphStore, q: &str) -> QueryResult {
     let rt = Runtime::new(g);
     let query = gqlrust::compile_query(q).unwrap();
     rt.run_query(&query, 0)
 }
 
-fn projected_rows(g: &Graph, q: &str) -> Vec<Vec<Value>> {
+fn projected_rows(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
     match run_query(g, q) {
         QueryResult::Projected(rows) => rows,
         QueryResult::Raw(_) => panic!("expected Projected result"),
     }
 }
 
-fn row_count(g: &Graph, q: &str) -> usize {
+fn row_count(g: &MemoryGraphStore, q: &str) -> usize {
     run_query(g, q).row_count()
 }
 
@@ -88,7 +88,7 @@ fn test_csv_loader_edge_labels() {
     assert_eq!(acted_in.unwrap().len(), 172);
 }
 
-// ==================== Graph structure tests ====================
+// ==================== MemoryGraphStore structure tests ====================
 
 #[test]
 fn test_movies_graph_loads() {

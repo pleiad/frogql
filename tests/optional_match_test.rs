@@ -11,21 +11,21 @@ use std::path::Path;
 
 use gqlrust::compile_query;
 use gqlrust::compile_query_unchecked;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 use gqlrust::syntax::query::MatchStatement;
 
-fn fraud_graph() -> Graph {
+fn fraud_graph() -> MemoryGraphStore {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-    Graph::from_file(&p).unwrap()
+    MemoryGraphStore::from_file(&p).unwrap()
 }
 
 /// Tiny graph with two users; only one has a Pet relationship. Used to
 /// exercise the unsuccess branch on a query whose optional cannot match
 /// for some accumulated rows.
-fn graph_with_optional_pet() -> Graph {
+fn graph_with_optional_pet() -> MemoryGraphStore {
     let json = r#"{
       "nodes": [
         {"id": "u1", "labels": ["User"], "props": {"name": "Alice"}},
@@ -37,10 +37,10 @@ fn graph_with_optional_pet() -> Graph {
          "endpoints": ["u1", "pet1"], "directionality": "->"}
       ]
     }"#;
-    Graph::from_json_str(json).unwrap()
+    MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-fn run_projected(g: &Graph, q: &str) -> Vec<Vec<Value>> {
+fn run_projected(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     match rt.run_query(&query, 0) {
@@ -49,7 +49,7 @@ fn run_projected(g: &Graph, q: &str) -> Vec<Vec<Value>> {
     }
 }
 
-fn run_raw_count(g: &Graph, q: &str) -> usize {
+fn run_raw_count(g: &MemoryGraphStore, q: &str) -> usize {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     match rt.run_query(&query, 0) {

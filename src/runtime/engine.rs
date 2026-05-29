@@ -48,7 +48,7 @@ fn combine_limits(query_limit: Option<u32>, runtime_limit: usize) -> usize {
 }
 
 /// Runtime engine for evaluating GQL path patterns on a graph.
-/// Generic over `GraphAccess` — works with both in-memory Graph and file-backed GraphStore.
+/// Generic over `GraphAccess` — works with both in-memory MemoryGraphStore and file-backed GraphStore.
 ///
 /// Optimizations:
 /// - Label-indexed scanning: uses label index when descriptor has a simple label

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::syntax::descriptor::Descriptor;
@@ -11,14 +11,14 @@ use gqlrust::typing::label_type::LabelType;
 use gqlrust::typing::property_type::PropertyType;
 use gqlrust::typing::simple_type::SimpleType;
 
-fn fraud_graph() -> Graph {
+fn fraud_graph() -> MemoryGraphStore {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-    Graph::from_file(&p).unwrap()
+    MemoryGraphStore::from_file(&p).unwrap()
 }
 
-fn social_graph() -> Graph {
+fn social_graph() -> MemoryGraphStore {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/social-network.json");
-    Graph::from_file(&p).unwrap()
+    MemoryGraphStore::from_file(&p).unwrap()
 }
 
 /// Helper: descriptor with just a label
@@ -802,7 +802,7 @@ fn test_query_limit_zero_overrides_runtime_cap() {
 /// Alices before dedup, yielding 1 row instead of 2.
 #[test]
 fn test_distinct_limit_does_not_truncate_input_before_dedup() {
-    let g = Graph::from_json_str(
+    let g = MemoryGraphStore::from_json_str(
         r#"{
             "nodes": [
                 {"id": "a", "labels": ["Person"], "props": {"name": "Alice"}},

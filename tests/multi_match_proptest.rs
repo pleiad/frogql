@@ -5,15 +5,15 @@
 use std::path::Path;
 
 use gqlrust::elaborate::elaborate_query;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::parser;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::syntax::query::{MatchStatement, Query};
 use proptest::prelude::*;
 
-fn fraud_graph() -> Graph {
+fn fraud_graph() -> MemoryGraphStore {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-    Graph::from_file(&p).unwrap()
+    MemoryGraphStore::from_file(&p).unwrap()
 }
 
 fn pattern() -> impl Strategy<Value = String> {
@@ -56,7 +56,7 @@ fn match_query(left: &str, right: &str) -> gqlrust::syntax::query::Query {
     gqlrust::compile_query_unchecked(&input).unwrap()
 }
 
-fn run_query_count(g: &Graph, q: &gqlrust::syntax::query::Query) -> usize {
+fn run_query_count(g: &MemoryGraphStore, q: &gqlrust::syntax::query::Query) -> usize {
     let rt = Runtime::new(g);
     rt.run_query(q, 0).row_count()
 }

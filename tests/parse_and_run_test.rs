@@ -4,12 +4,12 @@
 use std::path::Path;
 
 use gqlrust::compile;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::runtime::engine::Runtime;
 
 fn fraud_run(query: &str) -> usize {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-    let g = Graph::from_file(&p).unwrap();
+    let g = MemoryGraphStore::from_file(&p).unwrap();
     let r = Runtime::new(&g);
     let pattern = compile(query).unwrap();
     r.run(&pattern).rows.len()
@@ -17,7 +17,7 @@ fn fraud_run(query: &str) -> usize {
 
 fn social_run(query: &str) -> usize {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/social-network.json");
-    let g = Graph::from_file(&p).unwrap();
+    let g = MemoryGraphStore::from_file(&p).unwrap();
     let r = Runtime::new(&g);
     let pattern = compile(query).unwrap();
     r.run(&pattern).rows.len()

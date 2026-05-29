@@ -13,17 +13,17 @@
 use std::path::Path;
 
 use gqlrust::compile_query;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 
-fn fraud_graph() -> Graph {
+fn fraud_graph() -> MemoryGraphStore {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-    Graph::from_file(&p).unwrap()
+    MemoryGraphStore::from_file(&p).unwrap()
 }
 
-fn run_projected(g: &Graph, q: &str) -> Vec<Vec<Value>> {
+fn run_projected(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     match rt.run_query(&query, 0) {
@@ -32,7 +32,7 @@ fn run_projected(g: &Graph, q: &str) -> Vec<Vec<Value>> {
     }
 }
 
-fn run_raw_count(g: &Graph, q: &str) -> usize {
+fn run_raw_count(g: &MemoryGraphStore, q: &str) -> usize {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     match rt.run_query(&query, 0) {

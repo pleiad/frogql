@@ -2,14 +2,14 @@
 //! `IS NULL` / `IS NOT NULL` operators.
 
 use gqlrust::compile_query;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 
 /// Three users, with Carol missing the `email` property. Used to exercise
 /// the missing-attribute path that the engine treats as null.
-fn graph_with_optional_email() -> Graph {
+fn graph_with_optional_email() -> MemoryGraphStore {
     let json = r#"{
       "nodes": [
         {"id": "u1", "labels": ["User"], "props": {
@@ -24,10 +24,10 @@ fn graph_with_optional_email() -> Graph {
       ],
       "edges": []
     }"#;
-    Graph::from_json_str(json).unwrap()
+    MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-fn run(g: &Graph, q: &str) -> Vec<Vec<Value>> {
+fn run(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     match rt.run_query(&query, 0) {

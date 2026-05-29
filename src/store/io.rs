@@ -1,10 +1,10 @@
-//! Serialization: save a Graph to a .gql file and load it back.
+//! Serialization: save a MemoryGraphStore to a .gql file and load it back.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
-use crate::model::graph::{Graph, Props};
+use crate::model::graph::{MemoryGraphStore, Props};
 use crate::model::value::Value;
 use crate::pager::page::{Page, PageType, PAGE_SIZE};
 use crate::pager::pager::Pager;
@@ -21,7 +21,7 @@ use super::string_table::StringTable;
 /// target sits on the same filesystem (`Pager::create` only ever opens
 /// local paths). Falls back to a non-atomic write if the directory is
 /// not writable for the temp file (rare but worth a clear error).
-pub fn save_graph_atomic(graph: &Graph, db_path: &Path) -> io::Result<()> {
+pub fn save_graph_atomic(graph: &MemoryGraphStore, db_path: &Path) -> io::Result<()> {
     let mut tmp = db_path.to_path_buf().into_os_string();
     tmp.push(".tmp");
     let tmp_path = std::path::PathBuf::from(tmp);
@@ -37,7 +37,7 @@ pub fn save_graph_atomic(graph: &Graph, db_path: &Path) -> io::Result<()> {
 /// 'DEFAULT' not found" because `save_graph` alone never writes the
 /// catalog page chain.
 pub fn save_graph_with_catalog_atomic(
-    graph: &Graph,
+    graph: &MemoryGraphStore,
     catalog: &crate::runtime::catalog::GraphTypeCatalog,
     db_path: &Path,
 ) -> io::Result<()> {
@@ -51,7 +51,7 @@ pub fn save_graph_with_catalog_atomic(
 /// them from the data without help. Pass `&[]` (or use the wrapper
 /// above) when there's nothing to persist.
 pub fn save_graph_with_catalog_and_indexes_atomic(
-    graph: &Graph,
+    graph: &MemoryGraphStore,
     catalog: &crate::runtime::catalog::GraphTypeCatalog,
     index_specs: &[super::secondary_index::IndexSpec],
     db_path: &Path,
@@ -78,8 +78,8 @@ pub fn save_graph_with_catalog_and_indexes_atomic(
     Ok(())
 }
 
-/// Save a Graph to a .gql database file.
-pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
+/// Save a MemoryGraphStore to a .gql database file.
+pub fn save_graph(graph: &MemoryGraphStore, db_path: &Path) -> io::Result<()> {
     let mut pager = Pager::create(db_path)?;
     let mut strings = StringTable::new();
     strings.init(&mut pager)?;
@@ -93,7 +93,7 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
 
     // Write nodes
     for (nid, name) in graph.node_names.iter().enumerate() {
-        let labels = Graph::label_strings(&graph.node_labels[nid]);
+        let labels = MemoryGraphStore::label_strings(&graph.node_labels[nid]);
         let user_id_sid = strings.intern(name, &mut pager)?;
         let label_sids = intern_strings(&labels, &mut strings, &mut pager)?;
         let encoded_props = encode_props(&graph.node_props[nid], &mut strings, &mut pager)?;
@@ -104,7 +104,7 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
 
     // Write edges
     for (eid, name) in graph.edge_names.iter().enumerate() {
-        let labels = Graph::label_strings(&graph.edge_labels[eid]);
+        let labels = MemoryGraphStore::label_strings(&graph.edge_labels[eid]);
         let user_id_sid = strings.intern(name, &mut pager)?;
         let label_sids = intern_strings(&labels, &mut strings, &mut pager)?;
         let encoded_props = encode_props(&graph.edge_props[eid], &mut strings, &mut pager)?;
@@ -127,13 +127,13 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
     let mut label_edge_map: HashMap<u32, Vec<u32>> = HashMap::new();
 
     for (nid, lt) in graph.node_labels.iter().enumerate() {
-        for l in Graph::label_strings(lt) {
+        for l in MemoryGraphStore::label_strings(lt) {
             let sid = strings.intern(&l, &mut pager)?;
             label_node_map.entry(sid).or_default().push(nid as u32);
         }
     }
     for (eid, lt) in graph.edge_labels.iter().enumerate() {
-        for l in Graph::label_strings(lt) {
+        for l in MemoryGraphStore::label_strings(lt) {
             let sid = strings.intern(&l, &mut pager)?;
             label_edge_map.entry(sid).or_default().push(eid as u32);
         }
@@ -229,8 +229,8 @@ pub fn save_graph(graph: &Graph, db_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Load a Graph from a .gql database file.
-pub fn load_graph(db_path: &Path) -> io::Result<Graph> {
+/// Load a MemoryGraphStore from a .gql database file.
+pub fn load_graph(db_path: &Path) -> io::Result<MemoryGraphStore> {
     let mut pager = Pager::open(db_path)?;
 
     let st_root = pager.header.string_table_root;
@@ -307,7 +307,7 @@ pub fn load_graph(db_path: &Path) -> io::Result<Graph> {
         }
     }
 
-    let graph = Graph::from_raw(
+    let graph = MemoryGraphStore::from_raw(
         node_names,
         node_labels,
         node_props,

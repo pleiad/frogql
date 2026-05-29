@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::parser::parse_statement;
 use gqlrust::runtime::catalog::GraphTypeCatalog;
 use gqlrust::store::lazy::LazyGraphStore;
@@ -400,7 +400,7 @@ fn save_minimal_graph(path: &std::path::Path) {
             {"id": "e1", "labels": ["WROTE"], "props": {}, "endpoints": ["ada", "post1"], "directionality": "->"}
         ]
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     g.save(path).unwrap();
 }
 
@@ -409,7 +409,7 @@ fn store_default_load_yields_empty_catalog_on_legacy_save() {
     let path = temp_db("legacy.gdb");
     save_minimal_graph(&path);
     let store = LazyGraphStore::open(&path).unwrap();
-    // Graph::save doesn't populate DEFAULT — that's done by the import
+    // MemoryGraphStore::save doesn't populate DEFAULT — that's done by the import
     // pipeline in the gqlite binary. The catalog is empty here.
     assert!(store.catalog().active_name().is_none());
 }

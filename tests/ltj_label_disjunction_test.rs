@@ -15,13 +15,13 @@
 use std::path::Path;
 
 use gqlrust::compile_query;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 
-fn graph() -> Graph {
+fn graph() -> MemoryGraphStore {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/ltj_label_disjunction.json");
-    Graph::from_file(&p).unwrap()
+    MemoryGraphStore::from_file(&p).unwrap()
 }
 
 fn run_ids(query: &str) -> Vec<i64> {

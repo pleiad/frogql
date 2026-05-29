@@ -16,13 +16,13 @@
 //! bind an edge variable — one row per parallel edge instead of one per
 //! distinct triple.
 
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 use gqlrust::typing::label_type::LabelType;
 
-fn build_parallel_graph() -> Graph {
+fn build_parallel_graph() -> MemoryGraphStore {
     // Three nodes; the (a, b) pair carries two edges with different
     // labels, and the (b, c) pair carries one edge.
     //
@@ -47,7 +47,7 @@ fn build_parallel_graph() -> Graph {
     let edge_tgt = vec![1, 1, 2];
     let edge_directed = vec![true, true, true];
 
-    Graph::from_raw(
+    MemoryGraphStore::from_raw(
         node_names,
         node_labels,
         node_props,
@@ -137,7 +137,7 @@ fn labelled_edge_var_resolves_to_correct_eid() {
     assert_eq!(ids, vec![0, 2]);
 }
 
-fn build_same_label_parallel_graph() -> Graph {
+fn build_same_label_parallel_graph() -> MemoryGraphStore {
     // Two nodes and three :REFERENCES edges all going a → b. Mirrors the
     // rocq.gdb case where a Lemma references the same Constructor several
     // times: ISO §6.7 wants one row per physical edge, but the LTJ trie
@@ -161,7 +161,7 @@ fn build_same_label_parallel_graph() -> Graph {
     let edge_tgt = vec![1, 1, 1];
     let edge_directed = vec![true, true, true];
 
-    Graph::from_raw(
+    MemoryGraphStore::from_raw(
         node_names,
         node_labels,
         node_props,

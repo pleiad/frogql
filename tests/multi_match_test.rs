@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use gqlrust::elaborate::elaborate_query;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::parser;
 use gqlrust::runtime::engine::Runtime;
@@ -20,9 +20,9 @@ use gqlrust::typing::checker::Typechecker;
 use gqlrust::typing::label_type::LabelType;
 use gqlrust::typing::variable_type::VariableType;
 
-fn fraud_graph() -> Graph {
+fn fraud_graph() -> MemoryGraphStore {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-    Graph::from_file(&p).unwrap()
+    MemoryGraphStore::from_file(&p).unwrap()
 }
 
 fn multi_match_query(patterns: &[&str]) -> Query {
@@ -225,7 +225,7 @@ fn runtime_constraining_match_order_independent() {
 // that the projected values are exactly what we expect — no double
 // counting from the cartesian product, no NULL on shared bindings.
 
-fn run_compiled(g: &Graph, q: &str) -> Vec<Vec<Value>> {
+fn run_compiled(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
     let rt = Runtime::new(g);
     let query = gqlrust::compile_query(q).unwrap();
     match rt.run_query(&query, 0) {

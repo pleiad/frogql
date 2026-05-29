@@ -423,7 +423,7 @@ fn collect_st_pages(pager: &mut Pager) -> io::Result<Vec<u32>> {
 mod tests {
     use super::*;
     use crate::compile;
-    use crate::model::graph::Graph;
+    use crate::model::graph::MemoryGraphStore;
     use crate::runtime::engine::Runtime;
     use std::path::PathBuf;
 
@@ -445,7 +445,7 @@ mod tests {
         cleanup(&db_path);
 
         let json_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-        let graph = Graph::from_file(&json_path).unwrap();
+        let graph = MemoryGraphStore::from_file(&json_path).unwrap();
         graph.save(&db_path).unwrap();
 
         let store = DiskGraphStore::open(&db_path).unwrap();

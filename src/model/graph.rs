@@ -1,10 +1,16 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 use serde_json;
 
+use crate::model::graph_access::GraphAccess;
 use crate::model::value::{Id, PathValue, Value};
+use crate::store::overlay::{
+    apply_label_mods, label_type_with_added, label_type_with_removed, labels_from_strings,
+    MutationOverlay,
+};
 use crate::typing::label_type::LabelType;
 
 /// Property map: attribute name → Value.
@@ -14,7 +20,7 @@ pub type Props = HashMap<String, Value>;
 ///
 /// String user-facing IDs (from JSON) are mapped to sequential u32 IDs at load time.
 /// All internal operations use u32 IDs for performance.
-pub struct Graph {
+pub struct MemoryGraphStore {
     // --- User-facing names (indexed by internal ID) ---
     pub node_names: Vec<String>,
     pub edge_names: Vec<String>,
@@ -41,16 +47,17 @@ pub struct Graph {
     // --- Reverse lookup (user name → internal ID) ---
     node_name_to_id: HashMap<String, Id>,
 
-    // --- Mutation tombstones (ISO §13 DML) ---
-    /// Per-node liveness flag. Defaults to `true` (existing data is alive
-    /// at load time). Set to `false` by `delete_node_no_detach` /
-    /// `detach_delete_node`. Reads filter dead nodes; they get compacted
-    /// out at save() time.
-    node_alive: Vec<bool>,
-    edge_alive: Vec<bool>,
+    // --- Mutation overlay (ISO §13 DML) ---
+    /// All mutations applied since load: inserted nodes/edges (IDs dense
+    /// above the base counts), tombstones for deletions, and per-record
+    /// property / label modifications. Reads merge base + overlay exactly
+    /// like `LazyGraphStore`, so both backends share the same DML
+    /// semantics. The base Vecs above stay immutable until `save()`
+    /// compacts the merged view.
+    overlay: RefCell<MutationOverlay>,
 }
 
-impl Graph {
+impl MemoryGraphStore {
     pub fn node_count(&self) -> usize {
         self.node_names.len()
     }
@@ -185,9 +192,11 @@ impl Graph {
             edge_names.push(name);
         }
 
-        let node_alive = vec![true; node_names.len()];
-        let edge_alive = vec![true; edge_names.len()];
-        Ok(Graph {
+        let overlay = RefCell::new(MutationOverlay::new(
+            node_names.len() as u32,
+            edge_names.len() as u32,
+        ));
+        Ok(MemoryGraphStore {
             node_names,
             edge_names,
             edge_src,
@@ -204,12 +213,11 @@ impl Graph {
             incoming,
             undirected_adj,
             node_name_to_id,
-            node_alive,
-            edge_alive,
+            overlay,
         })
     }
 
-    /// Build a Graph from pre-parsed components (used by store::io::load_graph).
+    /// Build a MemoryGraphStore from pre-parsed components (used by store::io::load_graph).
     // 9 parallel Vecs — one per columnar field. Bundling into a struct is
     // a refactor for another day.
     #[allow(clippy::too_many_arguments)]
@@ -259,9 +267,11 @@ impl Graph {
             }
         }
 
-        let node_alive = vec![true; node_names.len()];
-        let edge_alive = vec![true; edge_names.len()];
-        Graph {
+        let overlay = RefCell::new(MutationOverlay::new(
+            node_names.len() as u32,
+            edge_names.len() as u32,
+        ));
+        MemoryGraphStore {
             node_names,
             edge_names,
             edge_src,
@@ -278,8 +288,7 @@ impl Graph {
             incoming,
             undirected_adj,
             node_name_to_id,
-            node_alive,
-            edge_alive,
+            overlay,
         }
     }
 
@@ -340,7 +349,10 @@ impl Graph {
                 }
                 Ok(Value::List(out))
             }
-            serde_json::Value::Null => Err("null not supported".into()),
+            // `Value::Null` is a first-class variant; accepting it on import
+            // makes the JSON dump round-trip losslessly (the on-disk `.gdb`
+            // format already carries null via tag 6).
+            serde_json::Value::Null => Ok(Value::Null),
             serde_json::Value::Object(map) => {
                 let mut fields = std::collections::BTreeMap::new();
                 for (k, v) in map {
@@ -355,199 +367,551 @@ impl Graph {
     pub fn node_id_by_name(&self, name: &str) -> Option<Id> {
         self.node_name_to_id.get(name).copied()
     }
+
+    /// Serialise the live merged view (base + overlay) to a `serde_json`
+    /// value in the same shape `from_json_value` consumes. No filesystem
+    /// access, so it works under `wasm32`. Round-trips losslessly:
+    /// `from_json_value(&g.to_json_value())` reproduces `g`'s shape
+    /// (internal ids may renumber; user-facing names are preserved).
+    pub fn to_json_value(&self) -> serde_json::Value {
+        crate::store::dump::dump_to_json_value(self)
+    }
+
+    /// `to_json_value` rendered as a compact JSON string — the unit a
+    /// browser binding hands to IndexedDB for persistence.
+    pub fn to_json_string(&self) -> String {
+        self.to_json_value().to_string()
+    }
 }
 
-impl super::graph_access::GraphAccess for Graph {
+impl super::graph_access::GraphAccess for MemoryGraphStore {
     fn nodes(&self) -> Vec<Id> {
-        (0..self.node_names.len() as Id)
-            .filter(|&id| self.node_alive[id as usize])
-            .collect()
+        let overlay = self.overlay.borrow();
+        let mut out: Vec<Id> = (0..overlay.base_node_count)
+            .filter(|id| !overlay.is_node_deleted(*id))
+            .collect();
+        for offset in 0..overlay.new_nodes.len() as u32 {
+            let id = overlay.base_node_count + offset;
+            if !overlay.is_node_deleted(id) {
+                out.push(id);
+            }
+        }
+        out
     }
     fn edges_directed(&self) -> Vec<Id> {
-        (0..self.edge_names.len() as Id)
-            .filter(|&eid| self.edge_alive[eid as usize] && self.edge_directed[eid as usize])
-            .collect()
+        let overlay = self.overlay.borrow();
+        let mut out: Vec<Id> = (0..overlay.base_edge_count)
+            .filter(|i| !overlay.is_edge_deleted(*i) && self.edge_directed[*i as usize])
+            .collect();
+        for (offset, e) in overlay.new_edges.iter().enumerate() {
+            let id = overlay.base_edge_count + offset as u32;
+            if !overlay.is_edge_deleted(id) && e.directed {
+                out.push(id);
+            }
+        }
+        out
     }
     fn edges_undirected(&self) -> Vec<Id> {
-        (0..self.edge_names.len() as Id)
-            .filter(|&eid| self.edge_alive[eid as usize] && !self.edge_directed[eid as usize])
-            .collect()
+        let overlay = self.overlay.borrow();
+        let mut out: Vec<Id> = (0..overlay.base_edge_count)
+            .filter(|i| !overlay.is_edge_deleted(*i) && !self.edge_directed[*i as usize])
+            .collect();
+        for (offset, e) in overlay.new_edges.iter().enumerate() {
+            let id = overlay.base_edge_count + offset as u32;
+            if !overlay.is_edge_deleted(id) && !e.directed {
+                out.push(id);
+            }
+        }
+        out
     }
     fn node_labels(&self, id: Id) -> LabelType {
-        self.node_labels[id as usize].clone()
+        let overlay = self.overlay.borrow();
+        if let Some(n) = overlay.get_new_node(id) {
+            return n.labels.clone();
+        }
+        let mut labels = Self::label_strings(&self.node_labels[id as usize]);
+        apply_label_mods(&mut labels, overlay.mod_node_labels.get(&id));
+        labels_from_strings(labels)
     }
     fn edge_labels(&self, id: Id) -> LabelType {
-        self.edge_labels[id as usize].clone()
+        let overlay = self.overlay.borrow();
+        if let Some(e) = overlay.get_new_edge(id) {
+            return e.labels.clone();
+        }
+        let mut labels = Self::label_strings(&self.edge_labels[id as usize]);
+        apply_label_mods(&mut labels, overlay.mod_edge_labels.get(&id));
+        labels_from_strings(labels)
     }
     fn node_props(&self, id: Id) -> Props {
-        self.node_props[id as usize].clone()
+        let overlay = self.overlay.borrow();
+        if let Some(n) = overlay.get_new_node(id) {
+            return n.props.clone();
+        }
+        let mut base = self.node_props[id as usize].clone();
+        apply_prop_mods(&mut base, overlay.mod_node_props.get(&id));
+        base
     }
     fn edge_props(&self, id: Id) -> Props {
-        self.edge_props[id as usize].clone()
+        let overlay = self.overlay.borrow();
+        if let Some(e) = overlay.get_new_edge(id) {
+            return e.props.clone();
+        }
+        let mut base = self.edge_props[id as usize].clone();
+        apply_prop_mods(&mut base, overlay.mod_edge_props.get(&id));
+        base
     }
     fn src(&self, edge_id: Id) -> Id {
+        if let Some(e) = self.overlay.borrow().get_new_edge(edge_id) {
+            return e.src;
+        }
         self.edge_src[edge_id as usize]
     }
     fn tgt(&self, edge_id: Id) -> Id {
+        if let Some(e) = self.overlay.borrow().get_new_edge(edge_id) {
+            return e.tgt;
+        }
         self.edge_tgt[edge_id as usize]
     }
     fn is_directed(&self, edge_id: Id) -> bool {
+        if let Some(e) = self.overlay.borrow().get_new_edge(edge_id) {
+            return e.directed;
+        }
         self.edge_directed[edge_id as usize]
     }
     fn edge_path_value(&self, edge_id: Id) -> PathValue {
-        if self.edge_directed[edge_id as usize] {
+        if self.is_directed(edge_id) {
             PathValue::EdgeDirectional(edge_id)
         } else {
             PathValue::EdgeUndirectional(edge_id)
         }
     }
     fn node_name(&self, id: Id) -> &str {
+        // Overlay-allocated nodes have no entry in the base name vec; hand
+        // back a synthetic display name (leaked, like LazyGraphStore — only
+        // hit on the display path, never the hot loop).
+        if id >= self.overlay.borrow().base_node_count {
+            return Box::leak(Box::new(format!("auto-n-{id}")));
+        }
         &self.node_names[id as usize]
     }
     fn edge_name(&self, id: Id) -> &str {
+        if id >= self.overlay.borrow().base_edge_count {
+            return Box::leak(Box::new(format!("auto-e-{id}")));
+        }
         &self.edge_names[id as usize]
     }
     fn nodes_with_label(&self, label: &str) -> Option<Vec<Id>> {
-        self.label_to_nodes.get(label).map(|v| {
-            v.iter()
-                .copied()
-                .filter(|id| self.node_alive[*id as usize])
-                .collect()
-        })
+        let overlay = self.overlay.borrow();
+        let base = self.label_to_nodes.get(label);
+        let overlay_dirty = !overlay.new_nodes.is_empty()
+            || !overlay.deleted_nodes.is_empty()
+            || !overlay.mod_node_labels.is_empty();
+        if !overlay_dirty {
+            return base.cloned();
+        }
+        let mut out: Vec<Id> = base
+            .map(|v| {
+                v.iter()
+                    .copied()
+                    .filter(|id| !overlay.is_node_deleted(*id))
+                    .filter(|id| {
+                        overlay
+                            .mod_node_labels
+                            .get(id)
+                            .map(|m| !m.removed.contains(label))
+                            .unwrap_or(true)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (id, mods) in &overlay.mod_node_labels {
+            if mods.added.contains(label) && !overlay.is_node_deleted(*id) && !out.contains(id) {
+                out.push(*id);
+            }
+        }
+        for (offset, n) in overlay.new_nodes.iter().enumerate() {
+            let id = overlay.base_node_count + offset as u32;
+            if overlay.is_node_deleted(id) {
+                continue;
+            }
+            if Self::label_strings(&n.labels).iter().any(|l| l == label) {
+                out.push(id);
+            }
+        }
+        if base.is_some() || !out.is_empty() {
+            Some(out)
+        } else {
+            None
+        }
     }
     fn directed_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
-        self.label_to_edges_d.get(label).map(|v| {
-            v.iter()
-                .copied()
-                .filter(|id| self.edge_alive[*id as usize])
-                .collect()
-        })
+        self.edges_with_label_dir(label, true)
     }
     fn undirected_edges_with_label(&self, label: &str) -> Option<Vec<Id>> {
-        self.label_to_edges_u.get(label).map(|v| {
-            v.iter()
-                .copied()
-                .filter(|id| self.edge_alive[*id as usize])
-                .collect()
-        })
+        self.edges_with_label_dir(label, false)
     }
     fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {
-        self.outgoing[node_id as usize]
+        let overlay = self.overlay.borrow();
+        let mut out: Vec<Id> = base_adj(&self.outgoing, node_id)
             .iter()
             .copied()
-            .filter(|id| self.edge_alive[*id as usize])
-            .collect()
+            .filter(|id| !overlay.is_edge_deleted(*id))
+            .collect();
+        if let Some(extra) = overlay.new_outgoing.get(&node_id) {
+            for &eid in extra {
+                if !overlay.is_edge_deleted(eid) {
+                    out.push(eid);
+                }
+            }
+        }
+        out
     }
     fn incoming_edges(&self, node_id: Id) -> Vec<Id> {
-        self.incoming[node_id as usize]
+        let overlay = self.overlay.borrow();
+        let mut out: Vec<Id> = base_adj(&self.incoming, node_id)
             .iter()
             .copied()
-            .filter(|id| self.edge_alive[*id as usize])
-            .collect()
+            .filter(|id| !overlay.is_edge_deleted(*id))
+            .collect();
+        if let Some(extra) = overlay.new_incoming.get(&node_id) {
+            for &eid in extra {
+                if !overlay.is_edge_deleted(eid) {
+                    out.push(eid);
+                }
+            }
+        }
+        out
     }
     fn undirected_edges_of(&self, node_id: Id) -> Vec<Id> {
-        self.undirected_adj[node_id as usize]
+        let overlay = self.overlay.borrow();
+        let mut out: Vec<Id> = base_adj(&self.undirected_adj, node_id)
             .iter()
             .copied()
-            .filter(|id| self.edge_alive[*id as usize])
-            .collect()
+            .filter(|id| !overlay.is_edge_deleted(*id))
+            .collect();
+        if let Some(extra) = overlay.new_undirected.get(&node_id) {
+            for &eid in extra {
+                if !overlay.is_edge_deleted(eid) {
+                    out.push(eid);
+                }
+            }
+        }
+        out
     }
 }
 
-impl super::graph_access::GraphAccessMut for Graph {
-    fn insert_node(&self, _labels: LabelType, _props: Props) -> Id {
-        // `Graph` is the in-RAM JSON-backed fixture used by tests; its
-        // fields are plain Vecs without RefCell, so true `&self`
-        // mutability would require a wider refactor that's not on the
-        // MVP-0 critical path. The user-visible motor is `LazyGraphStore`,
-        // and that one *does* implement `GraphAccessMut` correctly.
-        unimplemented!(
-            "Graph::insert_node: in-RAM Graph mutability is not wired in MVP-0 (use LazyGraphStore)"
-        );
+impl MemoryGraphStore {
+    /// Shared body for `directed_edges_with_label` / `undirected_edges_with_label`.
+    /// The base label maps are already split by direction, so `want_directed`
+    /// only filters the overlay contributions.
+    fn edges_with_label_dir(&self, label: &str, want_directed: bool) -> Option<Vec<Id>> {
+        let overlay = self.overlay.borrow();
+        let base = if want_directed {
+            self.label_to_edges_d.get(label)
+        } else {
+            self.label_to_edges_u.get(label)
+        };
+        let overlay_dirty = !overlay.new_edges.is_empty()
+            || !overlay.deleted_edges.is_empty()
+            || !overlay.mod_edge_labels.is_empty();
+        if !overlay_dirty {
+            return base.cloned();
+        }
+        let mut out: Vec<Id> = base
+            .map(|ids| {
+                ids.iter()
+                    .copied()
+                    .filter(|iid| !overlay.is_edge_deleted(*iid))
+                    .filter(|iid| {
+                        overlay
+                            .mod_edge_labels
+                            .get(iid)
+                            .map(|m| !m.removed.contains(label))
+                            .unwrap_or(true)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (id, mods) in &overlay.mod_edge_labels {
+            if mods.added.contains(label)
+                && (*id as usize) < self.edge_directed.len()
+                && self.edge_directed[*id as usize] == want_directed
+                && !overlay.is_edge_deleted(*id)
+                && !out.contains(id)
+            {
+                out.push(*id);
+            }
+        }
+        for (offset, e) in overlay.new_edges.iter().enumerate() {
+            let id = overlay.base_edge_count + offset as u32;
+            if overlay.is_edge_deleted(id) || e.directed != want_directed {
+                continue;
+            }
+            if Self::label_strings(&e.labels).iter().any(|l| l == label) {
+                out.push(id);
+            }
+        }
+        if base.is_some() || !out.is_empty() {
+            Some(out)
+        } else {
+            None
+        }
+    }
+}
+
+impl super::graph_access::GraphAccessMut for MemoryGraphStore {
+    fn insert_node(&self, labels: LabelType, props: Props) -> Id {
+        self.overlay.borrow_mut().insert_node(labels, props)
     }
 
-    fn insert_edge(
-        &self,
-        _src: Id,
-        _tgt: Id,
-        _directed: bool,
-        _labels: LabelType,
-        _props: Props,
-    ) -> Id {
-        unimplemented!(
-            "Graph::insert_edge: in-RAM Graph mutability is not wired in MVP-0 (use LazyGraphStore)"
-        );
+    fn insert_edge(&self, src: Id, tgt: Id, directed: bool, labels: LabelType, props: Props) -> Id {
+        // Endpoint validation lives in the runtime so the caller can raise
+        // the right ISO error code; here we only record the mutation.
+        self.overlay
+            .borrow_mut()
+            .insert_edge(src, tgt, directed, labels, props)
     }
 
-    fn delete_edge(&self, _id: Id) {
-        unimplemented!(
-            "Graph::delete_edge: in-RAM Graph mutability is not wired in MVP-0 (use LazyGraphStore)"
-        );
+    fn delete_edge(&self, id: Id) {
+        self.overlay.borrow_mut().delete_edge(id);
     }
 
-    fn detach_delete_node(&self, _id: Id) {
-        unimplemented!(
-            "Graph::detach_delete_node: in-RAM Graph mutability is not wired in MVP-0 (use LazyGraphStore)"
-        );
+    fn detach_delete_node(&self, id: Id) {
+        // Snapshot incident edges from the merged view before mutating —
+        // borrowing the overlay mutably below would otherwise alias the
+        // reads inside outgoing_edges/etc.
+        let incident: Vec<Id> = self
+            .outgoing_edges(id)
+            .into_iter()
+            .chain(self.incoming_edges(id))
+            .chain(self.undirected_edges_of(id))
+            .collect();
+        let mut overlay = self.overlay.borrow_mut();
+        for eid in incident {
+            overlay.delete_edge(eid);
+        }
+        overlay.delete_node(id);
     }
 
-    fn delete_node_no_detach(&self, _id: Id) -> Result<(), super::graph_access::G1001> {
-        unimplemented!(
-            "Graph::delete_node_no_detach: in-RAM Graph mutability is not wired in MVP-0 (use LazyGraphStore)"
-        );
+    fn delete_node_no_detach(&self, id: Id) -> Result<(), super::graph_access::G1001> {
+        let remaining: Vec<Id> = self
+            .outgoing_edges(id)
+            .into_iter()
+            .chain(self.incoming_edges(id))
+            .chain(self.undirected_edges_of(id))
+            .collect();
+        if !remaining.is_empty() {
+            return Err(super::graph_access::G1001 {
+                node: id,
+                remaining_edges: remaining,
+            });
+        }
+        self.overlay.borrow_mut().delete_node(id);
+        Ok(())
     }
 
     fn is_node_alive(&self, id: Id) -> bool {
-        self.node_alive.get(id as usize).copied().unwrap_or(false)
+        let overlay = self.overlay.borrow();
+        if overlay.is_node_deleted(id) {
+            return false;
+        }
+        if id < overlay.base_node_count {
+            return true;
+        }
+        overlay.get_new_node(id).is_some()
     }
 
     fn is_edge_alive(&self, id: Id) -> bool {
-        self.edge_alive.get(id as usize).copied().unwrap_or(false)
+        let overlay = self.overlay.borrow();
+        if overlay.is_edge_deleted(id) {
+            return false;
+        }
+        if id < overlay.base_edge_count {
+            return true;
+        }
+        overlay.get_new_edge(id).is_some()
     }
 
     fn rollback_session(&self) {
-        // No overlay to rewind; mutability is unimplemented in MVP-0.
+        let mut overlay = self.overlay.borrow_mut();
+        let bn = overlay.base_node_count;
+        let be = overlay.base_edge_count;
+        overlay.clear(bn, be);
     }
 
-    fn set_node_prop(&self, _id: Id, _prop: &str, _value: super::value::Value) {
-        unimplemented!("Graph::set_node_prop: use LazyGraphStore for mutability");
+    fn set_node_prop(&self, id: Id, prop: &str, value: super::value::Value) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_node_count {
+            let off = (id - overlay.base_node_count) as usize;
+            if let Some(n) = overlay.new_nodes.get_mut(off) {
+                n.props.insert(prop.to_string(), value);
+            }
+            return;
+        }
+        let entry = overlay.mod_node_props.entry(id).or_default();
+        entry.set.insert(prop.to_string(), Some(value));
     }
 
-    fn set_edge_prop(&self, _id: Id, _prop: &str, _value: super::value::Value) {
-        unimplemented!("Graph::set_edge_prop: use LazyGraphStore for mutability");
+    fn set_edge_prop(&self, id: Id, prop: &str, value: super::value::Value) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_edge_count {
+            let off = (id - overlay.base_edge_count) as usize;
+            if let Some(e) = overlay.new_edges.get_mut(off) {
+                e.props.insert(prop.to_string(), value);
+            }
+            return;
+        }
+        let entry = overlay.mod_edge_props.entry(id).or_default();
+        entry.set.insert(prop.to_string(), Some(value));
     }
 
-    fn replace_node_props(&self, _id: Id, _props: Props) {
-        unimplemented!("Graph::replace_node_props: use LazyGraphStore for mutability");
+    fn replace_node_props(&self, id: Id, props: Props) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_node_count {
+            let off = (id - overlay.base_node_count) as usize;
+            if let Some(n) = overlay.new_nodes.get_mut(off) {
+                n.props = props;
+            }
+            return;
+        }
+        // ISO §13.3 GR8 b.i: clear existing props, then apply the new map.
+        let mut entry = crate::store::overlay::PropMods {
+            cleared: true,
+            set: HashMap::new(),
+        };
+        for (k, v) in props {
+            entry.set.insert(k, Some(v));
+        }
+        overlay.mod_node_props.insert(id, entry);
     }
 
-    fn replace_edge_props(&self, _id: Id, _props: Props) {
-        unimplemented!("Graph::replace_edge_props: use LazyGraphStore for mutability");
+    fn replace_edge_props(&self, id: Id, props: Props) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_edge_count {
+            let off = (id - overlay.base_edge_count) as usize;
+            if let Some(e) = overlay.new_edges.get_mut(off) {
+                e.props = props;
+            }
+            return;
+        }
+        let mut entry = crate::store::overlay::PropMods {
+            cleared: true,
+            set: HashMap::new(),
+        };
+        for (k, v) in props {
+            entry.set.insert(k, Some(v));
+        }
+        overlay.mod_edge_props.insert(id, entry);
     }
 
-    fn remove_node_prop(&self, _id: Id, _prop: &str) {
-        unimplemented!("Graph::remove_node_prop: use LazyGraphStore for mutability");
+    fn remove_node_prop(&self, id: Id, prop: &str) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_node_count {
+            let off = (id - overlay.base_node_count) as usize;
+            if let Some(n) = overlay.new_nodes.get_mut(off) {
+                n.props.remove(prop);
+            }
+            return;
+        }
+        let entry = overlay.mod_node_props.entry(id).or_default();
+        entry.set.insert(prop.to_string(), None);
     }
 
-    fn remove_edge_prop(&self, _id: Id, _prop: &str) {
-        unimplemented!("Graph::remove_edge_prop: use LazyGraphStore for mutability");
+    fn remove_edge_prop(&self, id: Id, prop: &str) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_edge_count {
+            let off = (id - overlay.base_edge_count) as usize;
+            if let Some(e) = overlay.new_edges.get_mut(off) {
+                e.props.remove(prop);
+            }
+            return;
+        }
+        let entry = overlay.mod_edge_props.entry(id).or_default();
+        entry.set.insert(prop.to_string(), None);
     }
 
-    fn add_node_label(&self, _id: Id, _label: &str) {
-        unimplemented!("Graph::add_node_label: use LazyGraphStore for mutability");
+    fn add_node_label(&self, id: Id, label: &str) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_node_count {
+            let off = (id - overlay.base_node_count) as usize;
+            if let Some(n) = overlay.new_nodes.get_mut(off) {
+                n.labels = label_type_with_added(&n.labels, label);
+            }
+            return;
+        }
+        let entry = overlay.mod_node_labels.entry(id).or_default();
+        entry.removed.remove(label);
+        entry.added.insert(label.to_string());
     }
 
-    fn add_edge_label(&self, _id: Id, _label: &str) {
-        unimplemented!("Graph::add_edge_label: use LazyGraphStore for mutability");
+    fn add_edge_label(&self, id: Id, label: &str) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_edge_count {
+            let off = (id - overlay.base_edge_count) as usize;
+            if let Some(e) = overlay.new_edges.get_mut(off) {
+                e.labels = label_type_with_added(&e.labels, label);
+            }
+            return;
+        }
+        let entry = overlay.mod_edge_labels.entry(id).or_default();
+        entry.removed.remove(label);
+        entry.added.insert(label.to_string());
     }
 
-    fn remove_node_label(&self, _id: Id, _label: &str) {
-        unimplemented!("Graph::remove_node_label: use LazyGraphStore for mutability");
+    fn remove_node_label(&self, id: Id, label: &str) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_node_count {
+            let off = (id - overlay.base_node_count) as usize;
+            if let Some(n) = overlay.new_nodes.get_mut(off) {
+                n.labels = label_type_with_removed(&n.labels, label);
+            }
+            return;
+        }
+        let entry = overlay.mod_node_labels.entry(id).or_default();
+        entry.added.remove(label);
+        entry.removed.insert(label.to_string());
     }
 
-    fn remove_edge_label(&self, _id: Id, _label: &str) {
-        unimplemented!("Graph::remove_edge_label: use LazyGraphStore for mutability");
+    fn remove_edge_label(&self, id: Id, label: &str) {
+        let mut overlay = self.overlay.borrow_mut();
+        if id >= overlay.base_edge_count {
+            let off = (id - overlay.base_edge_count) as usize;
+            if let Some(e) = overlay.new_edges.get_mut(off) {
+                e.labels = label_type_with_removed(&e.labels, label);
+            }
+            return;
+        }
+        let entry = overlay.mod_edge_labels.entry(id).or_default();
+        entry.added.remove(label);
+        entry.removed.insert(label.to_string());
     }
+}
+
+/// Apply a `PropMods` (if any) to a base property map in place: honor a
+/// prior `SET x = {...}` clear, then overwrite / remove per-prop.
+fn apply_prop_mods(base: &mut Props, mods: Option<&crate::store::overlay::PropMods>) {
+    let Some(mods) = mods else { return };
+    if mods.cleared {
+        base.clear();
+    }
+    for (name, op) in &mods.set {
+        match op {
+            Some(v) => {
+                base.insert(name.clone(), v.clone());
+            }
+            None => {
+                base.remove(name);
+            }
+        }
+    }
+}
+
+/// Base adjacency slice for `node_id`, or an empty slice when the id is
+/// overlay-allocated (its base adjacency lists never existed).
+fn base_adj(adj: &[Vec<Id>], node_id: Id) -> &[Id] {
+    adj.get(node_id as usize)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[])
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -562,14 +926,14 @@ pub enum GraphError {
 mod tests {
     use super::*;
 
-    fn fraud_graph() -> Graph {
+    fn fraud_graph() -> MemoryGraphStore {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-        Graph::from_file(&path).unwrap()
+        MemoryGraphStore::from_file(&path).unwrap()
     }
 
-    fn social_graph() -> Graph {
+    fn social_graph() -> MemoryGraphStore {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/social-network.json");
-        Graph::from_file(&path).unwrap()
+        MemoryGraphStore::from_file(&path).unwrap()
     }
 
     #[test]

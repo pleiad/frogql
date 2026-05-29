@@ -2,13 +2,13 @@
 //! comparison, type predicates, and .gdb storage roundtrip.
 
 use gqlrust::compile_query;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 use gqlrust::store::lazy::LazyGraphStore;
 
-fn graph_with_floats() -> Graph {
+fn graph_with_floats() -> MemoryGraphStore {
     let json = r#"{
       "nodes": [
         {"id": "p1", "labels": ["Product"], "props": {"name": "A", "price": 9.99, "stock": 10}},
@@ -17,10 +17,10 @@ fn graph_with_floats() -> Graph {
       ],
       "edges": []
     }"#;
-    Graph::from_json_str(json).unwrap()
+    MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-fn run(g: &Graph, q: &str) -> QueryResult {
+fn run(g: &MemoryGraphStore, q: &str) -> QueryResult {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     rt.run_query(&query, 0)

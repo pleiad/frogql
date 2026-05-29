@@ -1,10 +1,10 @@
 //! End-to-end tests: save to .gql file → reopen → compile queries → run.
-//! These must produce identical results to the in-memory JSON-loaded Graph tests.
+//! These must produce identical results to the in-memory JSON-loaded MemoryGraphStore tests.
 
 use std::path::{Path, PathBuf};
 
 use gqlrust::compile;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::runtime::engine::Runtime;
 
 fn temp_path(name: &str) -> PathBuf {
@@ -24,17 +24,17 @@ fn query_hash(q: &str) -> u64 {
     h.finish()
 }
 
-/// Load JSON → save to .gql → run query on the saved Graph
+/// Load JSON → save to .gql → run query on the saved MemoryGraphStore
 fn fraud_store_run(query: &str) -> usize {
     let db_path = temp_path(&format!("fraud_rt_{}.gql", query_hash(query)));
     cleanup(&db_path);
 
     let json_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-    let graph = Graph::from_file(&json_path).unwrap();
+    let graph = MemoryGraphStore::from_file(&json_path).unwrap();
     graph.save(&db_path).unwrap();
 
     // Reopen from .gql
-    let graph = Graph::open(&db_path).unwrap();
+    let graph = MemoryGraphStore::open(&db_path).unwrap();
     let r = Runtime::new(&graph);
     let pattern = compile(query).unwrap();
     let result = r.run(&pattern).rows.len();
@@ -48,10 +48,10 @@ fn social_store_run(query: &str) -> usize {
     cleanup(&db_path);
 
     let json_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data/social-network.json");
-    let graph = Graph::from_file(&json_path).unwrap();
+    let graph = MemoryGraphStore::from_file(&json_path).unwrap();
     graph.save(&db_path).unwrap();
 
-    let graph = Graph::open(&db_path).unwrap();
+    let graph = MemoryGraphStore::open(&db_path).unwrap();
     let r = Runtime::new(&graph);
     let pattern = compile(query).unwrap();
     let result = r.run(&pattern).rows.len();

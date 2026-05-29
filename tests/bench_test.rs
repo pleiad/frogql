@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use gqlrust::compile;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::graph_access::GraphAccess;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::store::disk::DiskGraphStore;
@@ -80,7 +80,7 @@ fn fmt_bytes(bytes: usize) -> String {
 }
 
 // ============================================================================
-// Graph generator — realistic social/financial network with:
+// MemoryGraphStore generator — realistic social/financial network with:
 //   - Multi-label nodes (Person & Employee, Account & Premium, etc.)
 //   - Multiple typed properties (str, int, bool)
 //   - Directed AND undirected edges
@@ -323,7 +323,7 @@ fn bench_compare<G1: GraphAccess, G2: GraphAccess>(
     );
 }
 
-fn print_graph_stats(graph: &Graph) {
+fn print_graph_stats(graph: &MemoryGraphStore) {
     let nc = graph.node_count();
     let ec = graph.edge_count();
     let dc = graph.edge_directed.iter().filter(|&&d| d).count();
@@ -364,7 +364,7 @@ fn bench_medium_graph() {
 
     let json = generate_graph(10_000, 50_000, 5_000);
     let start = Instant::now();
-    let graph = Graph::from_json_value(&json).unwrap();
+    let graph = MemoryGraphStore::from_json_value(&json).unwrap();
     println!(
         "  Load time: {:.1}ms",
         start.elapsed().as_secs_f64() * 1000.0
@@ -481,7 +481,7 @@ fn bench_large_graph() {
 
     let json = generate_graph(50_000, 250_000, 25_000);
     let start = Instant::now();
-    let graph = Graph::from_json_value(&json).unwrap();
+    let graph = MemoryGraphStore::from_json_value(&json).unwrap();
     println!(
         "  Load time: {:.1}ms",
         start.elapsed().as_secs_f64() * 1000.0
@@ -513,7 +513,7 @@ fn bench_large_graph() {
 #[test]
 fn bench_graph_vs_lazy() {
     println!("\n============================================================");
-    println!("  COMPARISON: Graph (in-memory) vs LazyGraphStore (page cache)");
+    println!("  COMPARISON: MemoryGraphStore (in-memory) vs LazyGraphStore (page cache)");
     println!("  10K nodes, 50K directed, 5K undirected");
     println!("============================================================");
 
@@ -522,14 +522,14 @@ fn bench_graph_vs_lazy() {
 
     // Generate and save
     let json = generate_graph(10_000, 50_000, 5_000);
-    let graph_tmp = Graph::from_json_value(&json).unwrap();
+    let graph_tmp = MemoryGraphStore::from_json_value(&json).unwrap();
     graph_tmp.save(&db_path).unwrap();
     drop(graph_tmp);
     drop(json);
 
     // --- Measure memory for all three ---
     let before = allocated_bytes();
-    let g_mem = Graph::open(&db_path).unwrap();
+    let g_mem = MemoryGraphStore::open(&db_path).unwrap();
     let mem_graph = allocated_bytes() - before;
 
     let before = allocated_bytes();
@@ -542,7 +542,7 @@ fn bench_graph_vs_lazy() {
 
     print_graph_stats(&g_mem);
     println!("\n  Memory:");
-    println!("    Graph:  {}", fmt_bytes(mem_graph));
+    println!("    MemoryGraphStore:  {}", fmt_bytes(mem_graph));
     println!(
         "    Lazy:   {} ({:.1}x less)",
         fmt_bytes(mem_lazy),
@@ -556,7 +556,7 @@ fn bench_graph_vs_lazy() {
 
     println!(
         "\n  {:35} {:>7}  {:>8}  {:>8}  {:>8}",
-        "Query", "Rows", "Graph", "Lazy", "Disk"
+        "Query", "Rows", "MemoryGraphStore", "Lazy", "Disk"
     );
     println!(
         "  {:35} {:>7}  {:>8}  {:>8}  {:>8}",
@@ -621,11 +621,11 @@ fn bench_graph_vs_lazy() {
 #[test]
 fn bench_memory_scaling() {
     println!("\n============================================================");
-    println!("  MEMORY SCALING: Graph vs Lazy vs Disk at different sizes");
+    println!("  MEMORY SCALING: MemoryGraphStore vs Lazy vs Disk at different sizes");
     println!("============================================================");
     println!(
         "  {:>8} {:>8} {:>12} {:>12} {:>12}",
-        "Nodes", "Edges", "Graph", "Lazy", "Disk"
+        "Nodes", "Edges", "MemoryGraphStore", "Lazy", "Disk"
     );
     println!(
         "  {:>8} {:>8} {:>12} {:>12} {:>12}",
@@ -642,14 +642,14 @@ fn bench_memory_scaling() {
         cleanup(&db_path);
 
         let json = generate_graph(nodes, edges, undirected);
-        let g = Graph::from_json_value(&json).unwrap();
+        let g = MemoryGraphStore::from_json_value(&json).unwrap();
         g.save(&db_path).unwrap();
         drop(g);
         drop(json);
 
-        // Measure Graph memory
+        // Measure MemoryGraphStore memory
         let before = allocated_bytes();
-        let g = Graph::open(&db_path).unwrap();
+        let g = MemoryGraphStore::open(&db_path).unwrap();
         let graph_mem = allocated_bytes() - before;
         drop(g);
 

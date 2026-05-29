@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::graph_access::{GraphAccess, GraphAccessMut};
 use gqlrust::model::value::Value;
 use gqlrust::store::lazy::LazyGraphStore;
@@ -24,7 +24,7 @@ fn temp_db(name: &str) -> PathBuf {
 fn fraud_store(name: &str) -> (LazyGraphStore, PathBuf) {
     let db_path = temp_db(name);
     let json_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-    let g = Graph::from_file(&json_path).unwrap();
+    let g = MemoryGraphStore::from_file(&json_path).unwrap();
     g.save(&db_path).unwrap();
     let store = LazyGraphStore::open(&db_path).unwrap();
     (store, db_path)

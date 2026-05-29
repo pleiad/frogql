@@ -11,13 +11,13 @@ use std::collections::BTreeMap;
 
 use gqlrust::compile_query;
 use gqlrust::compile_query_unchecked;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 use gqlrust::syntax::expr::Expr;
 
-fn graph_users_pets() -> Graph {
+fn graph_users_pets() -> MemoryGraphStore {
     let json = r#"{
       "nodes": [
         {"id": "u1", "labels": ["User"], "props": {"name": "Alice"}},
@@ -29,10 +29,10 @@ fn graph_users_pets() -> Graph {
          "endpoints": ["u1", "p1"], "directionality": "->"}
       ]
     }"#;
-    Graph::from_json_str(json).unwrap()
+    MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-fn run_projected(g: &Graph, q: &str) -> Vec<Vec<Value>> {
+fn run_projected(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     match rt.run_query(&query, 0) {

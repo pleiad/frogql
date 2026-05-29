@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::graph::Graph;
+use crate::model::graph::MemoryGraphStore;
 use crate::model::graph_access::GraphAccess;
 use crate::model::value::Value;
 
@@ -217,7 +217,7 @@ fn element_descriptor(labels: &LabelType, props: &BTreeMap<String, SimpleType>) 
 }
 
 fn sorted_label_strings(lt: &LabelType) -> Vec<String> {
-    let mut v = Graph::label_strings(lt);
+    let mut v = MemoryGraphStore::label_strings(lt);
     v.sort();
     v
 }
@@ -280,8 +280,8 @@ mod tests {
     use super::*;
     use crate::typing::inference::infer_simple_schema;
 
-    fn build_graph(json: &str) -> Graph {
-        Graph::from_json_str(json).expect("test graph")
+    fn build_graph(json: &str) -> MemoryGraphStore {
+        MemoryGraphStore::from_json_str(json).expect("test graph")
     }
 
     #[test]

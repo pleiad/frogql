@@ -4,7 +4,7 @@
 
 use gqlrust::compile_query;
 use gqlrust::compile_query_with;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
@@ -114,7 +114,7 @@ fn runtime_accepts_unknown_attr_in_sort_key_under_permissive_schema() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     let q = compile_query("MATCH (x: User) RETURN x.name ORDER BY x.nonexistent")
         .expect("permissive schema accepts undeclared attribute");
     let rt = Runtime::new(&g);
@@ -141,7 +141,7 @@ fn runtime_alias_of_expr_sorts_identically_to_underlying_expr() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
 
     let rt = Runtime::new(&g);
     let q1 = compile_query("MATCH (x: User) RETURN x.name AS n ORDER BY n").unwrap();
@@ -178,7 +178,7 @@ fn runtime_alias_of_aggregate_orders_groups_by_count() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     let rt = Runtime::new(&g);
     let q = compile_query(
         "MATCH (x: User) RETURN x.city, COUNT(*) AS c GROUP BY x.city ORDER BY c DESC",
@@ -209,7 +209,7 @@ fn runtime_direct_count_star_sorts_groups_by_cardinality() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     let rt = Runtime::new(&g);
     let q = compile_query(
         "MATCH (x: User) RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY COUNT(*) DESC",
@@ -237,7 +237,7 @@ fn runtime_aggregate_query_sorts_by_implicit_grouping_column() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     let rt = Runtime::new(&g);
     let q = compile_query("MATCH (x: U) RETURN x.city, COUNT(*) GROUP BY x.city ORDER BY x.city")
         .unwrap();
@@ -282,7 +282,7 @@ fn runtime_treats_list_sort_key_as_equal_so_input_order_preserved() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     let q = compile_query("MATCH (x: User) RETURN x.name ORDER BY x.tags").unwrap();
     let rt = Runtime::new(&g);
     match rt.run_query(&q, 0) {

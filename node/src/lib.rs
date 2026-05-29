@@ -20,7 +20,7 @@ use napi_derive::napi;
 use serde_json::{json, Map, Value as JsonValue};
 
 use gqlrust::model::csv_loader;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::graph_access::GraphAccess;
 use gqlrust::model::value::{PathValue, Value};
 use gqlrust::parser::parse_statement;
@@ -783,7 +783,8 @@ pub fn open(path: String) -> napi::Result<Connection> {
 /// `.gdb` at `dbPath`. Overwrites the destination.
 #[napi]
 pub fn import_json(db_path: String, json_path: String) -> napi::Result<()> {
-    let g = Graph::from_file(Path::new(&json_path)).map_err(|e| err(format!("load json: {e}")))?;
+    let g = MemoryGraphStore::from_file(Path::new(&json_path))
+        .map_err(|e| err(format!("load json: {e}")))?;
     g.save(Path::new(&db_path))
         .map_err(|e| err(format!("save: {e}")))?;
     Ok(())

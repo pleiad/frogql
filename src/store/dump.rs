@@ -1,6 +1,6 @@
 //! Serialise a `GraphAccess` view to a `pg_dump`-style JSON document.
 //!
-//! Mirrors the on-disk format consumed by `Graph::from_json_value`:
+//! Mirrors the on-disk format consumed by `MemoryGraphStore::from_json_value`:
 //! ```json
 //! { "nodes": [{ "id": "...", "labels": [...], "props": {...} }, ...],
 //!   "edges": [{ "id": "...", "labels": [...], "endpoints": ["...", "..."],
@@ -20,12 +20,12 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value as Json};
 
-use crate::model::graph::{Graph, Props};
+use crate::model::graph::{MemoryGraphStore, Props};
 use crate::model::graph_access::GraphAccess;
 use crate::model::value::Value;
 
 /// Serialise the full graph to a JSON value. Produced shape matches what
-/// `Graph::from_json_value` expects (the import path).
+/// `MemoryGraphStore::from_json_value` expects (the import path).
 pub fn dump_to_json_value<G: GraphAccess>(g: &G) -> Json {
     let mut nodes: Vec<Json> = Vec::new();
     for nid in g.nodes() {
@@ -34,7 +34,7 @@ pub fn dump_to_json_value<G: GraphAccess>(g: &G) -> Json {
         entry.insert(
             "labels".to_string(),
             Json::Array(
-                Graph::label_strings(&g.node_labels(nid))
+                MemoryGraphStore::label_strings(&g.node_labels(nid))
                     .into_iter()
                     .map(Json::String)
                     .collect(),
@@ -51,7 +51,7 @@ pub fn dump_to_json_value<G: GraphAccess>(g: &G) -> Json {
         entry.insert(
             "labels".to_string(),
             Json::Array(
-                Graph::label_strings(&g.edge_labels(eid))
+                MemoryGraphStore::label_strings(&g.edge_labels(eid))
                     .into_iter()
                     .map(Json::String)
                     .collect(),
@@ -190,7 +190,7 @@ fn format_node_insert<G: GraphAccess>(
     nid: u32,
     dump_id_prop: &str,
 ) -> Result<String, String> {
-    let labels = Graph::label_strings(&g.node_labels(nid));
+    let labels = MemoryGraphStore::label_strings(&g.node_labels(nid));
     let mut props = g.node_props(nid);
     props.insert(dump_id_prop.to_string(), Value::Str(format!("n_{nid}")));
     let descriptor = format_descriptor(&labels, &props)?;
@@ -205,7 +205,7 @@ fn format_edge_insert<G: GraphAccess>(
     let src = g.src(eid);
     let tgt = g.tgt(eid);
     let directed = g.is_directed(eid);
-    let labels = Graph::label_strings(&g.edge_labels(eid));
+    let labels = MemoryGraphStore::label_strings(&g.edge_labels(eid));
     let props = g.edge_props(eid);
     let edge_descriptor = format_descriptor(&labels, &props)?;
     let arrow = if directed {

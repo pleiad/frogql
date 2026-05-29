@@ -4,7 +4,7 @@
 //! property, varies `n`, distribution of `id`, and `LIMIT k`, and
 //! times each implementation under both backends:
 //!
-//! - **memory** (`Graph`) — no secondary index, btree path falls back
+//! - **memory** (`MemoryGraphStore`) — no secondary index, btree path falls back
 //!   to pdqsort.
 //! - **lazy** (`LazyGraphStore`) — auto-builds a btree on `(User, id)`
 //!   because `id` is unique within the label, so the btree path is
@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gqlrust::compile_query;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::ltj::triple_index::TripleIndex;
 use gqlrust::store::lazy::LazyGraphStore;
@@ -161,7 +161,7 @@ fn make_join_queries(n: usize) -> Vec<(String, String)> {
     out
 }
 
-fn build_user_with_knows(n: usize, dist: &str, avg_degree: usize) -> Graph {
+fn build_user_with_knows(n: usize, dist: &str, avg_degree: usize) -> MemoryGraphStore {
     let ids: Vec<usize> = match dist {
         "sorted_asc" => (0..n).collect(),
         "sorted_desc" => (0..n).rev().collect(),
@@ -201,7 +201,7 @@ fn build_user_with_knows(n: usize, dist: &str, avg_degree: usize) -> Graph {
     edges.push(']');
 
     let json = format!("{{\"nodes\":{nodes},\"edges\":{edges}}}");
-    Graph::from_json_str(&json).expect("parse synthetic join graph")
+    MemoryGraphStore::from_json_str(&json).expect("parse synthetic join graph")
 }
 
 fn make_queries(n: usize) -> Vec<(String, String)> {
@@ -240,7 +240,7 @@ fn bench_median<F: FnMut() -> f64>(iters: usize, mut f: F) -> f64 {
     times[times.len() / 2]
 }
 
-fn build_user_graph(n: usize, dist: &str) -> Graph {
+fn build_user_graph(n: usize, dist: &str) -> MemoryGraphStore {
     // The `id` column drives the sort. Distribution controls how
     // input row order relates to sort order — pdqsort branches on
     // already-sorted input via the pdq dist-detection, so this
@@ -263,7 +263,7 @@ fn build_user_graph(n: usize, dist: &str) -> Graph {
     }
     nodes.push(']');
     let json = format!("{{\"nodes\":{nodes},\"edges\":[]}}");
-    Graph::from_json_str(&json).expect("parse synthetic graph")
+    MemoryGraphStore::from_json_str(&json).expect("parse synthetic graph")
 }
 
 fn deterministic_shuffle(n: usize, seed: u64) -> Vec<usize> {

@@ -13,7 +13,7 @@ use std::time::Instant;
 use rustyline::DefaultEditor;
 
 use gqlrust::model::csv_loader;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::graph_access::GraphAccess;
 use gqlrust::model::value::PathValue;
 use gqlrust::parser::parse_statement;
@@ -439,7 +439,9 @@ fn import(db_path: &Path, mode: &str, source: &str) {
         "--import-ldbc-csv" => {
             csv_loader::load_from_ldbc_csv_dir(Path::new(source)).expect("failed to load LDBC CSV")
         }
-        "--import-json" => Graph::from_file(Path::new(source)).expect("failed to load JSON"),
+        "--import-json" => {
+            MemoryGraphStore::from_file(Path::new(source)).expect("failed to load JSON")
+        }
         _ => {
             eprintln!(
                 "Unknown import mode: {mode}. Use --import-csv, --import-ldbc-csv, or --import-json"
@@ -718,7 +720,7 @@ impl NodeType {
         } else {
             store.edge_labels(id)
         };
-        let mut labels = Graph::label_strings(&lt);
+        let mut labels = MemoryGraphStore::label_strings(&lt);
         labels.sort();
 
         let raw_props = if is_node {
@@ -790,7 +792,7 @@ fn print_schema(store: &LazyGraphStore) {
         let directed = store.is_directed(eid);
 
         let lt = store.edge_labels(eid);
-        let mut labels = Graph::label_strings(&lt);
+        let mut labels = MemoryGraphStore::label_strings(&lt);
         labels.sort();
 
         let raw_props = store.edge_props(eid);
@@ -883,7 +885,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
         HashMap::new();
 
     for nid in 0..store.node_count() {
-        let mut labels = Graph::label_strings(&store.node_labels(nid));
+        let mut labels = MemoryGraphStore::label_strings(&store.node_labels(nid));
         labels.sort();
 
         let raw_props = store.node_props(nid);
@@ -926,7 +928,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
     // We track this by checking if any node had props beyond the common set
     let mut node_has_optional: HashMap<Vec<String>, bool> = HashMap::new();
     for nid in 0..store.node_count() {
-        let mut labels = Graph::label_strings(&store.node_labels(nid));
+        let mut labels = MemoryGraphStore::label_strings(&store.node_labels(nid));
         labels.sort();
         let raw_props = store.node_props(nid);
         let common = node_groups[&labels].0.as_ref().unwrap();
@@ -954,11 +956,11 @@ fn print_schema_simple(store: &LazyGraphStore) {
     let mut edge_has_optional: HashMap<SimpleEdgeKey, bool> = HashMap::new();
 
     for eid in 0..store.edge_count() {
-        let mut edge_labels = Graph::label_strings(&store.edge_labels(eid));
+        let mut edge_labels = MemoryGraphStore::label_strings(&store.edge_labels(eid));
         edge_labels.sort();
-        let mut src_labels = Graph::label_strings(&store.node_labels(store.src(eid)));
+        let mut src_labels = MemoryGraphStore::label_strings(&store.node_labels(store.src(eid)));
         src_labels.sort();
-        let mut tgt_labels = Graph::label_strings(&store.node_labels(store.tgt(eid)));
+        let mut tgt_labels = MemoryGraphStore::label_strings(&store.node_labels(store.tgt(eid)));
         tgt_labels.sort();
         let directed = store.is_directed(eid);
 
@@ -1004,11 +1006,11 @@ fn print_schema_simple(store: &LazyGraphStore) {
     }
 
     for eid in 0..store.edge_count() {
-        let mut edge_labels = Graph::label_strings(&store.edge_labels(eid));
+        let mut edge_labels = MemoryGraphStore::label_strings(&store.edge_labels(eid));
         edge_labels.sort();
-        let mut src_labels = Graph::label_strings(&store.node_labels(store.src(eid)));
+        let mut src_labels = MemoryGraphStore::label_strings(&store.node_labels(store.src(eid)));
         src_labels.sort();
-        let mut tgt_labels = Graph::label_strings(&store.node_labels(store.tgt(eid)));
+        let mut tgt_labels = MemoryGraphStore::label_strings(&store.node_labels(store.tgt(eid)));
         tgt_labels.sort();
         let directed = store.is_directed(eid);
         let key = SimpleEdgeKey {

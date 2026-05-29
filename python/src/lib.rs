@@ -12,7 +12,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use gqlrust::model::csv_loader;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::graph_access::GraphAccess;
 use gqlrust::model::value::{PathValue, Value};
 use gqlrust::parser::parse_statement;
@@ -571,7 +571,7 @@ fn open(path: &str) -> PyResult<Connection> {
 
 #[pyfunction]
 fn import_json(db_path: &str, json_path: &str) -> PyResult<()> {
-    let g = Graph::from_file(Path::new(json_path))
+    let g = MemoryGraphStore::from_file(Path::new(json_path))
         .map_err(|e| PyRuntimeError::new_err(format!("load json: {e}")))?;
     g.save(Path::new(db_path))
         .map_err(|e| PyRuntimeError::new_err(format!("save: {e}")))?;

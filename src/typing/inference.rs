@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::model::graph::Graph;
+use crate::model::graph::MemoryGraphStore;
 use crate::model::graph_access::GraphAccess;
 use crate::model::value::Value;
 
@@ -131,7 +131,7 @@ struct EdgeKey {
 fn group_nodes<G: GraphAccess>(g: &G) -> BTreeMap<Vec<String>, Group> {
     let mut groups: BTreeMap<Vec<String>, Group> = BTreeMap::new();
     for nid in g.nodes() {
-        let mut labels = Graph::label_strings(&g.node_labels(nid));
+        let mut labels = MemoryGraphStore::label_strings(&g.node_labels(nid));
         labels.sort();
         let props: BTreeMap<String, SimpleType> = g
             .node_props(nid)
@@ -152,11 +152,11 @@ fn group_edges<G: GraphAccess>(
 ) -> BTreeMap<EdgeKey, Group> {
     let mut groups: BTreeMap<EdgeKey, Group> = BTreeMap::new();
     for eid in g.edges_directed().into_iter().chain(g.edges_undirected()) {
-        let mut edge_labels = Graph::label_strings(&g.edge_labels(eid));
+        let mut edge_labels = MemoryGraphStore::label_strings(&g.edge_labels(eid));
         edge_labels.sort();
-        let mut src_labels = Graph::label_strings(&g.node_labels(g.src(eid)));
+        let mut src_labels = MemoryGraphStore::label_strings(&g.node_labels(g.src(eid)));
         src_labels.sort();
-        let mut tgt_labels = Graph::label_strings(&g.node_labels(g.tgt(eid)));
+        let mut tgt_labels = MemoryGraphStore::label_strings(&g.node_labels(g.tgt(eid)));
         tgt_labels.sort();
         let directed = g.is_directed(eid);
 
@@ -254,9 +254,9 @@ fn endpoint_node(labels: &[String], node_groups: &BTreeMap<Vec<String>, Group>) 
 pub fn endpoint_label_combos<G: GraphAccess>(g: &G) -> BTreeSet<Vec<String>> {
     let mut out = BTreeSet::new();
     for eid in g.edges_directed().into_iter().chain(g.edges_undirected()) {
-        let mut s = Graph::label_strings(&g.node_labels(g.src(eid)));
+        let mut s = MemoryGraphStore::label_strings(&g.node_labels(g.src(eid)));
         s.sort();
-        let mut t = Graph::label_strings(&g.node_labels(g.tgt(eid)));
+        let mut t = MemoryGraphStore::label_strings(&g.node_labels(g.tgt(eid)));
         t.sort();
         out.insert(s);
         out.insert(t);
@@ -272,10 +272,10 @@ fn unused_silence_warnings() -> HashMap<u32, u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::graph::Graph;
+    use crate::model::graph::MemoryGraphStore;
 
-    fn graph_from_json(src: &str) -> Graph {
-        Graph::from_json_str(src).expect("test graph json")
+    fn graph_from_json(src: &str) -> MemoryGraphStore {
+        MemoryGraphStore::from_json_str(src).expect("test graph json")
     }
 
     #[test]

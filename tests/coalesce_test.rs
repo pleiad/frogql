@@ -2,13 +2,13 @@
 
 use gqlrust::compile_query;
 use gqlrust::compile_query_unchecked;
-use gqlrust::model::graph::Graph;
+use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
 use gqlrust::syntax::expr::Expr;
 
-fn graph_with_optional_email() -> Graph {
+fn graph_with_optional_email() -> MemoryGraphStore {
     let json = r#"{
       "nodes": [
         {"id": "u1", "labels": ["User"], "props": {"name": "Alice", "email": "alice@a.com"}},
@@ -17,10 +17,10 @@ fn graph_with_optional_email() -> Graph {
       ],
       "edges": []
     }"#;
-    Graph::from_json_str(json).unwrap()
+    MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-fn run_projected(g: &Graph, q: &str) -> Vec<Vec<Value>> {
+fn run_projected(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     match rt.run_query(&query, 0) {
@@ -175,7 +175,7 @@ fn runtime_int_promotion_in_coalesce_does_not_crash() {
       ],
       "edges": []
     }"#;
-    let g = Graph::from_json_str(json).unwrap();
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
     let rt = Runtime::new(&g);
     let q = compile_query("MATCH (x: X) RETURN COALESCE(x.a, x.b, 0) AS pick").unwrap();
     let rows = match rt.run_query(&q, 0) {

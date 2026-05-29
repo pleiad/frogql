@@ -1,6 +1,6 @@
 //! LazyGraphStore — page-cache-backed graph access for large graphs.
 //!
-//! Unlike `Graph` which loads everything into memory, LazyGraphStore keeps only
+//! Unlike `MemoryGraphStore` which loads everything into memory, LazyGraphStore keeps only
 //! compact indexes in memory (label→IDs, adjacency) and reads node/edge records
 //! on demand through the pager's LRU page cache.
 //!
@@ -22,7 +22,10 @@ use crate::typing::label_type::LabelType;
 
 use super::catalog_io;
 use super::disk_index;
-use super::overlay::MutationOverlay;
+use super::overlay::{
+    apply_label_mods, label_type_with_added, label_type_with_removed, labels_from_strings,
+    MutationOverlay,
+};
 use super::record::{self, PropValue};
 use super::secondary_index::SecondaryIndex;
 use super::string_table::StringTable;
@@ -159,7 +162,7 @@ impl LazyGraphStore {
     /// `save()`. If the path exists, behaves identically to `open()`.
     pub fn open_or_create(db_path: &Path) -> io::Result<Self> {
         if !db_path.exists() {
-            let empty = crate::model::graph::Graph::from_raw(
+            let empty = crate::model::graph::MemoryGraphStore::from_raw(
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -754,10 +757,10 @@ impl LazyGraphStore {
         self.pager.borrow().cache_stats()
     }
 
-    /// Materialize the merged base+overlay view into an in-RAM `Graph`.
+    /// Materialize the merged base+overlay view into an in-RAM `MemoryGraphStore`.
     /// IDs get compacted (tombstoned slots disappear); edges remap their
     /// endpoints accordingly. Used by `save()` and `dump_*()`.
-    pub fn materialize_to_graph(&self) -> crate::model::graph::Graph {
+    pub fn materialize_to_graph(&self) -> crate::model::graph::MemoryGraphStore {
         // Walk live nodes in current ID order; remember their original →
         // new (dense) id mapping so edges can be remapped.
         let mut id_map: HashMap<u32, u32> = HashMap::new();
@@ -808,7 +811,7 @@ impl LazyGraphStore {
             edge_directed.push(false);
         }
 
-        crate::model::graph::Graph::from_raw(
+        crate::model::graph::MemoryGraphStore::from_raw(
             node_names,
             node_labels,
             node_props,
@@ -1110,7 +1113,7 @@ impl GraphAccess for LazyGraphStore {
             if overlay.is_node_deleted(id) {
                 continue;
             }
-            if crate::model::graph::Graph::label_strings(&n.labels)
+            if crate::model::graph::MemoryGraphStore::label_strings(&n.labels)
                 .iter()
                 .any(|l| l == label)
             {
@@ -1173,7 +1176,7 @@ impl GraphAccess for LazyGraphStore {
             if overlay.is_edge_deleted(id) || !e.directed {
                 continue;
             }
-            if crate::model::graph::Graph::label_strings(&e.labels)
+            if crate::model::graph::MemoryGraphStore::label_strings(&e.labels)
                 .iter()
                 .any(|l| l == label)
             {
@@ -1233,7 +1236,7 @@ impl GraphAccess for LazyGraphStore {
             if overlay.is_edge_deleted(id) || e.directed {
                 continue;
             }
-            if crate::model::graph::Graph::label_strings(&e.labels)
+            if crate::model::graph::MemoryGraphStore::label_strings(&e.labels)
                 .iter()
                 .any(|l| l == label)
             {
@@ -1572,51 +1575,6 @@ impl crate::model::graph_access::GraphAccessMut for LazyGraphStore {
     }
 }
 
-/// Apply a `LabelMods` (if any) to an in-place vector of label strings:
-/// drops every name in `removed`, then appends every name in `added`
-/// that is not already present. Preserves the relative order of base
-/// labels for stable display.
-fn apply_label_mods(labels: &mut Vec<String>, mods: Option<&crate::store::overlay::LabelMods>) {
-    let Some(mods) = mods else { return };
-    if !mods.removed.is_empty() {
-        labels.retain(|l| !mods.removed.contains(l));
-    }
-    for l in &mods.added {
-        if !labels.iter().any(|x| x == l) {
-            labels.push(l.clone());
-        }
-    }
-}
-
-/// Reverse of `decode_labels_from_record` over a string vector. Empty
-/// input collapses to `Star` to mirror the on-disk "no labels" encoding.
-fn labels_from_strings(labels: Vec<String>) -> LabelType {
-    if labels.is_empty() {
-        LabelType::Star
-    } else {
-        LabelType::from_list(&labels)
-    }
-}
-
-/// Add `label` to a label type that is the result of `labels_from_dtype`
-/// (so a `Label`, `And` chain, or `Star`). Idempotent — the label is
-/// only appended when it is not already present.
-fn label_type_with_added(lt: &LabelType, label: &str) -> LabelType {
-    let mut labels = crate::model::graph::Graph::label_strings(lt);
-    if !labels.iter().any(|l| l == label) {
-        labels.push(label.to_string());
-    }
-    labels_from_strings(labels)
-}
-
-/// Drop `label` from a label type. Idempotent — missing labels are a
-/// no-op (ISO §13.4 GR4 b).
-fn label_type_with_removed(lt: &LabelType, label: &str) -> LabelType {
-    let mut labels = crate::model::graph::Graph::label_strings(lt);
-    labels.retain(|l| l != label);
-    labels_from_strings(labels)
-}
-
 fn cell_bounds(page: &Page, index: u16) -> (usize, usize) {
     let offset = page.cell_offset(index).unwrap() as usize;
     let end = if index == 0 {
@@ -1643,7 +1601,7 @@ fn collect_pages_by_type(pager: &mut Pager, pt: PageType) -> io::Result<Vec<u32>
 mod tests {
     use super::*;
     use crate::compile;
-    use crate::model::graph::Graph;
+    use crate::model::graph::MemoryGraphStore;
     use crate::runtime::engine::Runtime;
     use std::path::PathBuf;
 
@@ -1665,7 +1623,7 @@ mod tests {
         cleanup(&db_path);
 
         let json_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-        let graph = Graph::from_file(&json_path).unwrap();
+        let graph = MemoryGraphStore::from_file(&json_path).unwrap();
         graph.save(&db_path).unwrap();
 
         let store = LazyGraphStore::open(&db_path).unwrap();
@@ -1720,7 +1678,7 @@ mod tests {
         cleanup(&db_path);
 
         let json_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
-        let graph = Graph::from_file(&json_path).unwrap();
+        let graph = MemoryGraphStore::from_file(&json_path).unwrap();
         graph.save(&db_path).unwrap();
 
         // Open with a very small cache (3 pages)
