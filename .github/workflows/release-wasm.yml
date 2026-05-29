@@ -1,0 +1,78 @@
+name: Release wasm
+
+# Build the browser WASM package with wasm-pack and publish it to npm as
+# `frogql-wasm`. Fires on a `v*` tag (alongside `release.yml` for PyPI and
+# `release-npm.yml` for native Node) AND on manual `workflow_dispatch`.
+#
+# The manual trigger matters: the version is read from `wasm/Cargo.toml`
+# (via the built package.json), NOT from the tag ref, so you can ship
+# `frogql-wasm` on its own — e.g. catch it up to a version the other
+# registries already published — without re-tagging the whole suite. The
+# publish is idempotent (skips if the version already exists on npm).
+#
+# Unlike the napi package there are no per-platform binaries: WebAssembly
+# is portable, so this is one build + one publish. Reuses the `npm`
+# GitHub Environment and the `NPM_TOKEN` secret.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # npm provenance
+
+jobs:
+  publish:
+    name: Build + publish frogql-wasm
+    runs-on: ubuntu-22.04
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          check-latest: true
+          registry-url: https://registry.npmjs.org
+
+      - name: Build package
+        # `web` target (not `bundler`): it fetches the .wasm via
+        # `import.meta.url`, which Vite/Rollup/esbuild handle natively with
+        # no extra plugin. The `bundler` target requires consumers to add
+        # `vite-plugin-wasm`, which is friction for the most common setup.
+        # Consumers call `await init()` once, then use the API.
+        run: wasm-pack build wasm --target web --out-dir pkg
+
+      - name: Publish to npm (idempotent)
+        working-directory: wasm/pkg
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+        run: |
+          npm config set "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}"
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          # dist-tag from the version itself (not the git ref), so manual
+          # dispatch and tag pushes behave identically: a pre-release
+          # (contains '-') lands on `next`, a clean version on `latest`.
+          if [[ "$version" == *-* ]]; then DIST_TAG=next; else DIST_TAG=latest; fi
+          echo "Publishing ${name}@${version} → dist-tag=${DIST_TAG}"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "::notice::${name}@${version} already on npm — skipping"
+          else
+            npm publish --tag "${DIST_TAG}" --access public --provenance
+          fi

@@ -58,7 +58,7 @@ path = "src/bin/ldbc_bench.rs"
 required-features = ["bench"]
 
 [workspace]
-members = [".", "python", "node"]
+members = [".", "python", "node", "wasm"]
 # resolver = "2" computes features per-target instead of unifying them
 # globally across the workspace. Without it, building the python crate
 # with --target X drags in gqlrust's default features (repl, bench)

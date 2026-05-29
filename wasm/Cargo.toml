@@ -1,0 +1,23 @@
+[package]
+name = "frogql-wasm"
+version = "0.2.3"
+edition = "2021"
+publish = false
+description = "froGQL — embedded GQL graph database with ISO GQL path patterns (Rust core, WebAssembly bindings for the browser)"
+license = "MIT"
+repository = "https://github.com/pleiad/frogql"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Same default-features = false discipline as `python/` and `node/`: the
+# wasm bundle ships only the library half of gqlrust — no rustyline /
+# ureq / zstd / tar / sysinfo / toml (none of which build for wasm32).
+# Resolver v2 at the workspace level keeps features per-target.
+gqlrust = { path = "..", default-features = false }
+wasm-bindgen = "0.2"
+serde = "1"
+serde-wasm-bindgen = "0.6"
+serde_json = "1"
+console_error_panic_hook = "0.1"
