@@ -53,7 +53,7 @@ The path so far:
 Benchmark charts from the LDBC Social Network Benchmark are coming here as the numbers stabilize.
 
 **Papers**
-- [Gradual type system for GQL](https://dl.acm.org/doi/10.1145/3763061) — the type system, formalization, and the Emptiness theorem behind froGQL's typechecker.
+- [*Flexible and Expressive Typed Path Patterns for GQL*](https://dl.acm.org/doi/10.1145/3763061) — the gradual type system, formalization, and the Emptiness theorem behind froGQL's typechecker.
 - [CompactLTJ](https://users.dcc.uchile.cl/~gnavarro/ps/vldbj25.pdf) (Arroyuelo et al., VLDB Journal 2025) — the worst-case-optimal join algorithm froGQL uses for comma-joins and chains.
 
 ---
