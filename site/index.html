@@ -1,0 +1,930 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>froGQL — a Rust graph database for ISO GQL</title>
+<meta name="description" content="froGQL is a single-file graph database in Rust implementing ISO GQL path pattern matching. Worst-case-optimal joins, typechecking, and bindings for Python, Node, and the browser.">
+
+<!-- Open Graph -->
+<meta property="og:title" content="froGQL — a Rust graph database for ISO GQL">
+<meta property="og:description" content="Single-file graph database in Rust. ISO GQL, worst-case-optimal joins, Python / Node / WASM bindings.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="assets/og-image.png">
+<meta property="og:url" content="https://pleiad.github.io/frogql/">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="icon" type="image/png" href="assets/favicon.png">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700;800;900&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+<style>
+:root{
+  --bg:#0a1410;
+  --bg-2:#0d1a14;
+  --panel:#10211a;
+  --panel-2:#13271e;
+  --ink:#e9f3ec;
+  --ink-soft:#a9c2b1;
+  --ink-dim:#6e8a78;
+  --line:#1f3a2d;
+  --line-soft:#193024;
+  --frog:#41c463;       /* frog green */
+  --frog-bright:#5fe585;
+  --frog-deep:#1f7a3c;
+  --emerald:#0fb87a;
+  --gold:#e7b955;       /* knight gold */
+  --gold-soft:#caa24a;
+  --steel:#9fb3c8;
+  --radius:16px;
+  --maxw:1180px;
+  --shadow:0 24px 60px -28px rgba(0,0,0,.85);
+  --glow:0 0 0 1px rgba(65,196,99,.16), 0 18px 50px -20px rgba(65,196,99,.28);
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--ink);
+  font-family:"Hanken Grotesk",system-ui,sans-serif;
+  font-size:17px;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+
+/* ---------- atmosphere ---------- */
+body::before{
+  content:"";
+  position:fixed;inset:0;z-index:-3;
+  background:
+    radial-gradient(1100px 720px at 78% -8%, rgba(65,196,99,.16), transparent 60%),
+    radial-gradient(900px 620px at 8% 6%, rgba(15,184,122,.10), transparent 55%),
+    radial-gradient(1200px 900px at 50% 118%, rgba(231,185,85,.07), transparent 60%),
+    linear-gradient(180deg, var(--bg), var(--bg-2));
+}
+/* node-graph texture */
+body::after{
+  content:"";
+  position:fixed;inset:0;z-index:-2;opacity:.5;
+  background-image:
+    radial-gradient(rgba(65,196,99,.14) 1.1px, transparent 1.2px),
+    radial-gradient(rgba(65,196,99,.06) 1.1px, transparent 1.2px);
+  background-size:44px 44px, 22px 22px;
+  background-position:0 0, 11px 11px;
+  -webkit-mask-image:radial-gradient(circle at 50% 30%, #000 0%, transparent 75%);
+          mask-image:radial-gradient(circle at 50% 30%, #000 0%, transparent 75%);
+}
+/* grain */
+.grain{
+  position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.04;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+
+/* ---------- layout ---------- */
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px}
+section{position:relative}
+a{color:inherit;text-decoration:none}
+
+/* ---------- nav ---------- */
+header.nav{
+  position:sticky;top:0;z-index:50;
+  backdrop-filter:blur(12px);
+  background:rgba(10,20,16,.72);
+  border-bottom:1px solid var(--line-soft);
+}
+.nav-in{display:flex;align-items:center;gap:14px;height:66px}
+.brand{display:flex;align-items:center;gap:11px;font-family:"Cinzel",serif;font-weight:800;letter-spacing:.06em;font-size:19px}
+.brand img{width:34px;height:34px;filter:drop-shadow(0 3px 8px rgba(0,0,0,.5))}
+.brand .lo{color:var(--frog-bright)}
+.nav-links{margin-left:auto;display:flex;gap:26px;align-items:center}
+.nav-links a{color:var(--ink-soft);font-size:14.5px;font-weight:600;letter-spacing:.02em;transition:color .2s}
+.nav-links a:hover{color:var(--frog-bright)}
+.nav-cta{
+  border:1px solid var(--line);background:var(--panel);
+  padding:9px 16px;border-radius:10px;color:var(--ink)!important;
+  display:inline-flex;gap:8px;align-items:center;transition:.2s;
+}
+.nav-cta:hover{border-color:var(--frog-deep);box-shadow:var(--glow)}
+@media(max-width:760px){.nav-links a.hide-sm{display:none}}
+
+/* ---------- hero ---------- */
+.hero{padding:74px 0 40px;text-align:center}
+.crest{
+  position:relative;width:226px;height:226px;margin:0 auto 18px;
+  display:grid;place-items:center;
+  animation:floaty 7s ease-in-out infinite;
+}
+.crest img{width:200px;height:200px;filter:drop-shadow(0 22px 40px rgba(0,0,0,.6))}
+.crest::before{
+  content:"";position:absolute;inset:-6% -6%;border-radius:50%;
+  background:radial-gradient(circle, rgba(65,196,99,.30), transparent 62%);
+  filter:blur(10px);z-index:-1;
+}
+.crest::after{
+  content:"";position:absolute;inset:2%;border-radius:50%;
+  border:1px dashed rgba(231,185,85,.30);
+  animation:spin 38s linear infinite;
+}
+@keyframes floaty{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.eyebrow{
+  display:inline-flex;align-items:center;gap:9px;
+  font-family:"JetBrains Mono",monospace;font-size:12.5px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--gold);
+  border:1px solid rgba(231,185,85,.28);border-radius:100px;
+  padding:6px 15px;margin-bottom:22px;background:rgba(231,185,85,.05);
+}
+.eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--frog-bright);box-shadow:0 0 10px var(--frog-bright)}
+
+h1.title{
+  font-family:"Cinzel",serif;font-weight:900;
+  font-size:clamp(46px,9vw,108px);line-height:.96;margin:0;
+  letter-spacing:.01em;
+  background:linear-gradient(180deg,#f4fbf5 0%, #b9e7c6 58%, #57b974 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+  text-shadow:0 1px 0 rgba(0,0,0,.2);
+}
+.title .frog-syl{color:var(--frog-bright);-webkit-text-fill-color:var(--frog-bright)}
+.lead{
+  max-width:660px;margin:22px auto 0;color:var(--ink-soft);
+  font-size:clamp(17px,2.3vw,21px);line-height:1.55;
+}
+.lead b{color:var(--ink)}
+
+.hero-cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:34px}
+.btn{
+  display:inline-flex;align-items:center;gap:10px;
+  padding:14px 24px;border-radius:12px;font-weight:700;font-size:15.5px;
+  letter-spacing:.01em;transition:transform .15s, box-shadow .2s, background .2s;
+  border:1px solid transparent;cursor:pointer;
+}
+.btn:active{transform:translateY(1px)}
+.btn-primary{background:linear-gradient(180deg,var(--frog-bright),var(--frog-deep));color:#05130a;box-shadow:0 14px 34px -14px rgba(65,196,99,.7)}
+.btn-primary:hover{box-shadow:0 18px 42px -12px rgba(65,196,99,.9)}
+.btn-ghost{background:var(--panel);border-color:var(--line);color:var(--ink)}
+.btn-ghost:hover{border-color:var(--frog-deep);box-shadow:var(--glow)}
+
+.install-pill{
+  margin:30px auto 0;max-width:430px;
+  display:flex;align-items:center;gap:14px;
+  background:var(--panel);border:1px solid var(--line);
+  border-radius:13px;padding:14px 16px;
+  font-family:"JetBrains Mono",monospace;font-size:15px;
+  box-shadow:var(--shadow);
+}
+.install-pill .pr{color:var(--frog-bright)}
+.install-pill code{color:var(--ink);flex:1;text-align:left;white-space:nowrap;overflow:auto}
+.copy-btn{
+  border:1px solid var(--line);background:var(--panel-2);color:var(--ink-soft);
+  border-radius:8px;padding:6px 11px;font-size:12px;cursor:pointer;font-family:inherit;transition:.18s;
+}
+.copy-btn:hover{color:var(--frog-bright);border-color:var(--frog-deep)}
+
+/* ---------- stat strip ---------- */
+.stats{
+  display:grid;grid-template-columns:repeat(4,1fr);gap:18px;
+  margin:64px auto 0;
+}
+.stat{
+  background:linear-gradient(180deg,var(--panel),var(--bg-2));
+  border:1px solid var(--line-soft);border-radius:14px;padding:22px 20px;text-align:center;
+}
+.stat .n{font-family:"Cinzel",serif;font-weight:800;font-size:clamp(26px,4vw,38px);color:var(--frog-bright);line-height:1}
+.stat .l{margin-top:9px;color:var(--ink-dim);font-size:13.5px;letter-spacing:.02em}
+@media(max-width:720px){.stats{grid-template-columns:repeat(2,1fr)}}
+
+/* ---------- section heading ---------- */
+.sec-head{text-align:center;max-width:680px;margin:0 auto 46px}
+.sec-tag{font-family:"JetBrains Mono",monospace;font-size:12.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--gold-soft)}
+.sec-head h2{
+  font-family:"Cinzel",serif;font-weight:800;font-size:clamp(30px,5vw,46px);
+  margin:12px 0 0;line-height:1.05;letter-spacing:.01em;
+}
+.sec-head p{color:var(--ink-soft);margin:16px 0 0;font-size:17.5px}
+
+.divider{height:1px;background:linear-gradient(90deg,transparent,var(--line),transparent);margin:0}
+.block{padding:96px 0}
+
+/* ---------- demo ---------- */
+.demo-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:34px;align-items:center}
+@media(max-width:900px){.demo-grid{grid-template-columns:1fr}}
+.terminal{
+  background:#08120d;border:1px solid var(--line);border-radius:14px;overflow:hidden;
+  box-shadow:var(--shadow);
+}
+.term-bar{display:flex;align-items:center;gap:8px;padding:12px 15px;background:#0b170f;border-bottom:1px solid var(--line-soft)}
+.term-bar .d{width:11px;height:11px;border-radius:50%}
+.term-bar .d.r{background:#ec6a5e}.term-bar .d.y{background:#f4bf4f}.term-bar .d.g{background:#61c554}
+.term-bar .t{margin-left:8px;font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--ink-dim)}
+.term-body{padding:20px 20px 24px;font-family:"JetBrains Mono",monospace;font-size:13.6px;line-height:1.75;overflow:auto}
+.term-body .pr{color:var(--frog-bright)}
+.term-body .kw{color:var(--gold)}
+.term-body .va{color:#8fd6ff}
+.term-body .st{color:#c8e6a8}
+.term-body .cm{color:var(--ink-dim)}
+.term-body .res{color:var(--ink-soft)}
+.term-body .sep{color:var(--line)}
+.demo-copy h3{font-family:"Cinzel",serif;font-weight:700;font-size:26px;margin:0 0 14px}
+.demo-copy p{color:var(--ink-soft);margin:0 0 14px}
+.demo-copy ul{list-style:none;padding:0;margin:18px 0 0}
+.demo-copy li{display:flex;gap:12px;align-items:flex-start;margin:0 0 13px;color:var(--ink-soft);font-size:15.5px}
+.demo-copy li svg{flex:none;margin-top:3px;color:var(--frog-bright)}
+.demo-copy li b{color:var(--ink)}
+
+/* ---------- features ---------- */
+.features{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+@media(max-width:900px){.features{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){.features{grid-template-columns:1fr}}
+.card{
+  background:linear-gradient(180deg,var(--panel),var(--bg-2));
+  border:1px solid var(--line-soft);border-radius:var(--radius);
+  padding:26px 24px;transition:transform .22s, border-color .22s, box-shadow .22s;
+  position:relative;overflow:hidden;
+}
+.card::after{
+  content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:radial-gradient(420px 160px at var(--mx,50%) -10%, rgba(65,196,99,.12), transparent 60%);
+  opacity:0;transition:opacity .25s;
+}
+.card:hover{transform:translateY(-5px);border-color:var(--frog-deep);box-shadow:var(--glow)}
+.card:hover::after{opacity:1}
+.card .ic{
+  width:46px;height:46px;border-radius:12px;display:grid;place-items:center;
+  background:rgba(65,196,99,.10);border:1px solid rgba(65,196,99,.22);color:var(--frog-bright);
+  margin-bottom:16px;
+}
+.card h3{font-family:"Cinzel",serif;font-weight:700;font-size:19px;margin:0 0 9px;letter-spacing:.01em}
+.card p{color:var(--ink-soft);margin:0;font-size:15px;line-height:1.6}
+.card code{font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--frog-bright);background:rgba(65,196,99,.08);padding:1px 5px;border-radius:5px}
+
+/* ---------- install tabs ---------- */
+.tabs{max-width:760px;margin:0 auto}
+.tab-row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:18px}
+.tab{
+  font-family:"JetBrains Mono",monospace;font-size:13.5px;font-weight:500;
+  padding:9px 17px;border-radius:10px;border:1px solid var(--line);
+  background:var(--panel);color:var(--ink-soft);cursor:pointer;transition:.18s;
+}
+.tab:hover{color:var(--ink)}
+.tab.active{background:linear-gradient(180deg,var(--frog-bright),var(--frog-deep));color:#05130a;border-color:transparent;font-weight:700}
+.panel-code{
+  background:#08120d;border:1px solid var(--line);border-radius:14px;
+  padding:22px 22px;box-shadow:var(--shadow);position:relative;
+}
+.panel-code pre{margin:0;font-family:"JetBrains Mono",monospace;font-size:14px;line-height:1.85;color:var(--ink);overflow:auto;white-space:pre}
+.panel-code .pr{color:var(--frog-bright)}
+.panel-code .cm{color:var(--ink-dim)}
+.panel-code .kw{color:var(--gold)}
+.panel-code .copy-btn{position:absolute;top:14px;right:14px}
+.tabpane{display:none}.tabpane.active{display:block}
+
+/* ---------- CTA banner ---------- */
+.banner{
+  text-align:center;border:1px solid var(--line);border-radius:24px;
+  padding:64px 30px;
+  background:
+    radial-gradient(700px 300px at 50% -30%, rgba(65,196,99,.18), transparent 60%),
+    linear-gradient(180deg,var(--panel),var(--bg-2));
+  box-shadow:var(--shadow);position:relative;overflow:hidden;
+}
+.banner img{width:84px;height:84px;margin-bottom:14px;filter:drop-shadow(0 12px 24px rgba(0,0,0,.5))}
+.banner h2{font-family:"Cinzel",serif;font-weight:800;font-size:clamp(28px,5vw,44px);margin:0 0 10px}
+.banner p{color:var(--ink-soft);max-width:520px;margin:0 auto 28px;font-size:17px}
+
+/* ---------- footer ---------- */
+footer{border-top:1px solid var(--line-soft);padding:46px 0 60px;margin-top:30px}
+.foot-grid{display:flex;justify-content:space-between;gap:30px;flex-wrap:wrap;align-items:flex-start}
+.foot-brand{display:flex;align-items:center;gap:11px;font-family:"Cinzel",serif;font-weight:800;letter-spacing:.05em;font-size:18px}
+.foot-brand img{width:30px;height:30px}
+.foot-cols{display:flex;gap:56px;flex-wrap:wrap}
+.foot-col h4{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-dim);margin:0 0 12px;font-weight:700}
+.foot-col a{display:block;color:var(--ink-soft);font-size:14.5px;margin-bottom:9px;transition:color .18s}
+.foot-col a:hover{color:var(--frog-bright)}
+.foot-note{margin-top:34px;color:var(--ink-dim);font-size:13.5px;text-align:center}
+.foot-note code{font-family:"JetBrains Mono",monospace;color:var(--ink-soft)}
+
+/* ---------- playground ---------- */
+.pg-wrap{max-width:1000px;margin:0 auto}
+.pg-meta{
+  display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;justify-content:center;
+  margin-bottom:20px;font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--ink-dim);
+}
+.pg-meta .badge{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);border-radius:100px;padding:5px 13px}
+.pg-meta .badge b{color:var(--frog-bright);font-weight:700}
+.pg-meta .led{width:8px;height:8px;border-radius:50%;background:var(--ink-dim);transition:background .3s, box-shadow .3s}
+.pg-meta .led.ok{background:var(--frog-bright);box-shadow:0 0 9px var(--frog-bright)}
+.pg-meta .led.busy{background:var(--gold);box-shadow:0 0 9px var(--gold);animation:pulse 1s ease-in-out infinite}
+.pg-meta .led.err{background:#ec6a5e;box-shadow:0 0 9px #ec6a5e}
+@keyframes pulse{50%{opacity:.35}}
+
+.pg-chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-bottom:18px}
+.pg-chip{
+  font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--ink-soft);
+  border:1px solid var(--line);background:var(--panel);border-radius:9px;padding:7px 13px;cursor:pointer;transition:.16s;
+}
+.pg-chip:hover{color:var(--frog-bright);border-color:var(--frog-deep);transform:translateY(-1px)}
+
+.pg-editor{
+  background:#08120d;border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--shadow);
+}
+.pg-ed-bar{display:flex;align-items:center;gap:8px;padding:11px 15px;background:#0b170f;border-bottom:1px solid var(--line-soft)}
+.pg-ed-bar .d{width:11px;height:11px;border-radius:50%}
+.pg-ed-bar .t{margin-left:6px;font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--ink-dim)}
+.pg-ed-bar .spacer{flex:1}
+.pg-run{
+  display:inline-flex;align-items:center;gap:8px;border:none;cursor:pointer;
+  background:linear-gradient(180deg,var(--frog-bright),var(--frog-deep));color:#05130a;
+  font-family:"Hanken Grotesk",sans-serif;font-weight:700;font-size:13.5px;
+  padding:8px 16px;border-radius:9px;transition:transform .12s, box-shadow .2s, opacity .2s;
+}
+.pg-run:hover{box-shadow:0 10px 24px -10px rgba(65,196,99,.8)}
+.pg-run:active{transform:translateY(1px)}
+.pg-run:disabled{opacity:.5;cursor:wait}
+.pg-run kbd{font-family:"JetBrains Mono",monospace;font-size:11px;background:rgba(5,19,10,.25);padding:1px 5px;border-radius:4px;font-weight:700}
+
+#pg-input{
+  width:100%;border:none;outline:none;resize:vertical;display:block;
+  background:transparent;color:var(--ink);
+  font-family:"JetBrains Mono",monospace;font-size:14.5px;line-height:1.7;
+  padding:18px 18px;min-height:108px;tab-size:2;
+}
+#pg-input::selection{background:rgba(65,196,99,.28)}
+
+.pg-out{
+  margin-top:16px;background:#08120d;border:1px solid var(--line);border-radius:14px;
+  min-height:120px;box-shadow:var(--shadow);overflow:hidden;
+}
+.pg-out-bar{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:10px 16px;border-bottom:1px solid var(--line-soft);background:#0b170f;
+  font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--ink-dim);
+}
+.pg-out-bar .status{color:var(--ink-soft)}
+.pg-out-body{padding:6px 4px;overflow:auto;max-height:440px}
+.pg-out-body.pad{padding:18px}
+
+table.pg-tbl{border-collapse:collapse;width:100%;font-family:"JetBrains Mono",monospace;font-size:13px}
+table.pg-tbl th{
+  text-align:left;color:var(--gold);font-weight:700;letter-spacing:.02em;
+  padding:9px 14px;border-bottom:1px solid var(--line);position:sticky;top:0;background:#0a1610;white-space:nowrap;
+}
+table.pg-tbl td{padding:8px 14px;border-bottom:1px solid var(--line-soft);color:var(--ink-soft);vertical-align:top}
+table.pg-tbl tr:hover td{background:rgba(65,196,99,.04)}
+.cell-str{color:#c8e6a8}
+.cell-num{color:#8fd6ff}
+.cell-null{color:var(--ink-dim);font-style:italic}
+.cell-ref{display:inline-flex;align-items:center;gap:6px}
+.cell-ref .lab{color:var(--frog-bright);background:rgba(65,196,99,.10);border:1px solid rgba(65,196,99,.22);border-radius:6px;padding:1px 7px;font-size:11.5px}
+.cell-ref .pp{color:var(--ink-soft)}
+
+.pg-msg{font-family:"JetBrains Mono",monospace;font-size:13px;line-height:1.7}
+.pg-msg.err{color:#f0a59c}
+.pg-msg.empty{color:var(--ink-dim)}
+.pg-msg.dm{color:var(--frog-bright)}
+.pg-msg.dm .k{color:var(--ink-soft)}
+.pg-hint{margin-top:14px;text-align:center;color:var(--ink-dim);font-size:13px}
+.pg-hint code{font-family:"JetBrains Mono",monospace;color:var(--ink-soft)}
+
+/* reveal */
+.reveal{opacity:0;transform:translateY(22px);transition:opacity .7s ease, transform .7s ease}
+.reveal.in{opacity:1;transform:none}
+</style>
+</head>
+<body>
+<div class="grain"></div>
+
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top"><img src="assets/frogql-logo.png" alt="">fro<span class="lo">GQL</span></a>
+    <nav class="nav-links">
+      <a class="hide-sm" href="#playground">Playground</a>
+      <a class="hide-sm" href="#features">Features</a>
+      <a class="hide-sm" href="#install">Install</a>
+      <a class="hide-sm" href="https://github.com/pleiad/frogql/tree/main/docs">Docs</a>
+      <a class="nav-cta" href="https://github.com/pleiad/frogql" target="_blank" rel="noopener">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<a id="top"></a>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="wrap">
+    <div class="crest"><img src="assets/frogql-logo.png" alt="froGQL knight-frog mascot holding a shield with a graph network"></div>
+    <span class="eyebrow"><span class="dot"></span> ISO GQL · written in Rust</span>
+    <h1 class="title"><span class="frog-syl">fro</span>GQL</h1>
+    <p class="lead">A single-file graph database that speaks <b>ISO GQL</b>. Worst-case-optimal joins, a real typechecker, and one <code style="font-family:'JetBrains Mono',monospace;color:var(--frog-bright)">.gdb</code> file you can carry anywhere &mdash; the SQLite of property graphs.</p>
+
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="#playground">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
+        Try it in your browser
+      </a>
+      <a class="btn btn-ghost" href="https://github.com/pleiad/frogql" target="_blank" rel="noopener">
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        Star on GitHub
+      </a>
+    </div>
+
+    <div class="install-pill">
+      <span class="pr">$</span>
+      <code id="hero-cmd">pip install frogql</code>
+      <button class="copy-btn" data-copy="pip install frogql">copy</button>
+    </div>
+
+    <div class="stats reveal">
+      <div class="stat"><div class="n">4097&times;</div><div class="l">LTJ join speedup</div></div>
+      <div class="stat"><div class="n">8.7 ms</div><div class="l">LDBC IC2 (SF0.1)</div></div>
+      <div class="stat"><div class="n">1 file</div><div class="l">portable <code style="color:var(--ink-dim)">.gdb</code> storage</div></div>
+      <div class="stat"><div class="n">4</div><div class="l">targets: CLI · Py · Node · WASM</div></div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- PLAYGROUND -->
+<section class="block" id="playground">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="sec-tag">// live in your browser</span>
+      <h2>Run GQL right here</h2>
+      <p>This page loads the real <code>frogql-wasm</code> engine and a 171-node movies graph. Nothing is sent to a server &mdash; the database lives in your tab.</p>
+    </div>
+
+    <div class="pg-wrap reveal">
+      <div class="pg-meta">
+        <span class="badge"><span class="led busy" id="pg-led"></span> <span id="pg-engine">loading frogql-wasm…</span></span>
+        <span class="badge">graph <b id="pg-nodes">—</b> nodes · <b id="pg-edges">—</b> edges</span>
+        <span class="badge">labels <b id="pg-labels">—</b></span>
+      </div>
+
+      <div class="pg-chips" id="pg-chips"></div>
+
+      <div class="pg-editor">
+        <div class="pg-ed-bar">
+          <span class="d" style="background:#ec6a5e"></span>
+          <span class="d" style="background:#f4bf4f"></span>
+          <span class="d" style="background:#61c554"></span>
+          <span class="t">query.gql</span>
+          <span class="spacer"></span>
+          <button class="pg-run" id="pg-run" disabled>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M5 3l14 9-14 9V3z"/></svg>
+            Run <kbd>⌘↵</kbd>
+          </button>
+        </div>
+        <textarea id="pg-input" spellcheck="false" autocomplete="off">MATCH (p:Person)-[:ACTED_IN]->(m:Movie)
+WHERE m.released = 1999
+RETURN p.name, m.title</textarea>
+      </div>
+
+      <div class="pg-out">
+        <div class="pg-out-bar">
+          <span>result</span>
+          <span class="status" id="pg-status">ready</span>
+        </div>
+        <div class="pg-out-body pad" id="pg-output">
+          <span class="pg-msg empty">Press <b style="color:var(--ink-soft)">Run</b> to execute the query.</span>
+        </div>
+      </div>
+
+      <p class="pg-hint">Try <code>INSERT</code>, <code>SET</code>, <code>DELETE</code> too &mdash; mutations apply in-memory. Reload the page to reset the graph.</p>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- DEMO -->
+<section class="block" id="demo">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="sec-tag">// the REPL</span>
+      <h2>Query graphs like you query SQLite</h2>
+      <p>Open a database, ask a path-pattern question, get rows back. No server, no setup ceremony.</p>
+    </div>
+
+    <div class="demo-grid">
+      <div class="terminal reveal">
+        <div class="term-bar"><span class="d r"></span><span class="d y"></span><span class="d g"></span><span class="t">frogql movies.gdb</span></div>
+        <div class="term-body">
+<span class="cm"># open an existing single-file database</span>
+<span class="pr">$</span> frogql movies.gdb
+
+<span class="pr">gql&gt;</span> <span class="kw">MATCH</span> (p:<span class="va">Person</span>) -[:<span class="va">ACTED_IN</span>]-&gt; (m:<span class="va">Movie</span>)
+   .   <span class="kw">WHERE</span> m.released = <span class="va">1999</span>
+   .   <span class="kw">RETURN</span> p.name, m.title
+
+<span class="res">p.name             | m.title</span>
+<span class="sep">-------------------+------------</span>
+<span class="st">"Keanu Reeves"</span>     <span class="sep">|</span> <span class="st">"The Matrix"</span>
+<span class="st">"Carrie-Anne Moss"</span> <span class="sep">|</span> <span class="st">"The Matrix"</span>
+<span class="st">"Laurence Fishburne"</span><span class="sep">|</span> <span class="st">"The Matrix"</span>
+
+<span class="pr">gql&gt;</span> <span class="cm">-- comma-joins run on a worst-case-optimal join</span>
+   .   <span class="kw">MATCH</span> (a)-[:<span class="va">ACTED_IN</span>]-&gt;(m), (d)-[:<span class="va">DIRECTED</span>]-&gt;(m)
+   .   <span class="kw">RETURN</span> a.name, d.name
+</div>
+      </div>
+
+      <div class="demo-copy reveal">
+        <h3>The full ISO GQL surface</h3>
+        <p>froGQL parses, elaborates, typechecks, optimizes, and runs. Path patterns are first-class: concatenation, union, repetition, and filters compose freely.</p>
+        <ul>
+          <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg><span><b>MATCH / OPTIONAL MATCH</b>, comma-joins, <code>WHERE</code>, <code>RETURN</code>, <code>EXISTS</code></span></li>
+          <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg><span>Repetition <code>{n,m}</code>, label algebra, and a lattice-based <b>typechecker</b></span></li>
+          <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg><span><b>INSERT / SET / REMOVE / DELETE</b> (ISO §13) with an in-RAM overlay until <code>.save</code></span></li>
+          <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg><span>Persistent named <b>graph types</b> with <code>CREATE / USE / VALIDATE</code></span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- FEATURES -->
+<section class="block" id="features">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="sec-tag">// why froGQL</span>
+      <h2>A graph database forged for speed</h2>
+      <p>Single-file storage meets a worst-case-optimal join engine and embeddings for every runtime you ship to.</p>
+    </div>
+
+    <div class="features">
+      <div class="card reveal">
+        <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7c0-1.66 3.58-3 8-3s8 1.34 8 3-3.58 3-8 3-8-1.34-8-3z"/><path d="M4 7v5c0 1.66 3.58 3 8 3s8-1.34 8-3V7"/><path d="M4 12v5c0 1.66 3.58 3 8 3s8-1.34 8-3v-5"/></svg></div>
+        <h3>Single-file storage</h3>
+        <p>Everything lives in one <code>.gdb</code> file with 4 KB slotted pages &mdash; SQLite's portability for property graphs. Copy it, ship it, version it.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M7.6 7.6L11 16M16.4 7.6L13 16M8 6h8"/></svg></div>
+        <h3>Worst-case-optimal joins</h3>
+        <p>Comma-joins and chains run on <b>Leapfrog Triejoin</b>: edges as triples in six sorted orderings, variables bound one at a time. <b>14&times;–4097&times;</b> over pairwise hash-join.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></div>
+        <h3>Real typechecker</h3>
+        <p>A lattice-based type system with meet, join, and subtyping checks every query against the active graph type before it runs.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg></div>
+        <h3>Bindings everywhere</h3>
+        <p>One Rust core, four faces: a <code>frogql</code> CLI, a PyPI wheel, an npm native module, and a <b>WASM</b> build that runs in the browser.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg></div>
+        <h3>Auto + declared indexes</h3>
+        <p>Hash and B-tree indexes auto-build on every uniquely-keyed property at open. Declare more with <code>CREATE INDEX</code> &mdash; persisted in the file header.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4v6c0 5-3.4 8.5-8 10-4.6-1.5-8-5-8-10V6l8-4z"/><path d="M9 12l2 2 4-4"/></svg></div>
+        <h3>Schemas you can validate</h3>
+        <p>Named graph types persist alongside the data. The reserved <code>DEFAULT</code> type is inferred from your graph automatically at import.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- INSTALL -->
+<section class="block" id="install">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="sec-tag">// install</span>
+      <h2>Pick your runtime</h2>
+      <p>froGQL ships to PyPI, npm (native + WASM), and as a standalone Rust CLI.</p>
+    </div>
+
+    <div class="tabs reveal">
+      <div class="tab-row">
+        <button class="tab active" data-tab="py">Python</button>
+        <button class="tab" data-tab="cli">Rust CLI</button>
+        <button class="tab" data-tab="node">Node.js</button>
+        <button class="tab" data-tab="wasm">Browser</button>
+      </div>
+
+      <div class="panel-code">
+        <button class="copy-btn" data-copy-target>copy</button>
+
+        <div class="tabpane active" data-pane="py"><pre><span class="cm"># Wheels for CPython 3.8+ on Linux, macOS, Windows</span>
+pip install frogql
+
+<span class="cm"># then, in Python</span>
+<span class="kw">import</span> frogql
+conn = frogql.open(<span style="color:#c8e6a8">"movies.gdb"</span>)
+rows = conn.execute(<span style="color:#c8e6a8">"MATCH (p:Person) RETURN p.name"</span>, limit=<span class="kw">10</span>)</pre></div>
+
+        <div class="tabpane" data-pane="cli"><pre><span class="cm"># build the frogql binary from source</span>
+git clone https://github.com/pleiad/frogql
+<span class="kw">cd</span> frogql && cargo build --release
+
+<span class="cm"># import a CSV dataset and open the REPL</span>
+./target/release/frogql movies.gdb --import-csv path/to/csv_dir/</pre></div>
+
+        <div class="tabpane" data-pane="node"><pre><span class="cm"># native addon, prebuilt for mac / linux / windows</span>
+npm install frogql
+
+<span class="cm"># then, in JS</span>
+<span class="kw">const</span> frogql = require(<span style="color:#c8e6a8">"frogql"</span>);
+<span class="kw">const</span> conn = frogql.open(<span style="color:#c8e6a8">"movies.gdb"</span>);
+conn.execute(<span style="color:#c8e6a8">"MATCH (p:Person) RETURN p.name"</span>, 10);</pre></div>
+
+        <div class="tabpane" data-pane="wasm"><pre><span class="cm"># runs entirely in the browser, no server</span>
+npm install frogql-wasm
+
+<span class="kw">import</span> init, { open_json } <span class="kw">from</span> <span style="color:#c8e6a8">"frogql-wasm"</span>;
+<span class="kw">await</span> init();
+<span class="kw">const</span> conn = open_json(graphJsonString);
+conn.execute(<span style="color:#c8e6a8">"MATCH (n) RETURN n"</span>, 10);</pre></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="block" style="padding-top:30px">
+  <div class="wrap">
+    <div class="banner reveal">
+      <img src="assets/frogql-logo.png" alt="">
+      <h2>Carry your graph in one file</h2>
+      <p>Clone the repo, open an example database, and run your first path pattern in under a minute.</p>
+      <div class="hero-cta" style="margin-top:6px">
+        <a class="btn btn-primary" href="https://github.com/pleiad/frogql" target="_blank" rel="noopener">Open the repo</a>
+        <a class="btn btn-ghost" href="https://github.com/pleiad/frogql/tree/main/docs">Read the docs</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <div class="foot-brand"><img src="assets/frogql-logo.png" alt="">froGQL</div>
+        <p style="color:var(--ink-dim);max-width:300px;margin:14px 0 0;font-size:14.5px">A Rust graph database for ISO GQL path pattern matching. An academic research project by <a href="https://pleiad.cl" style="color:var(--ink-soft)">PLEIAD</a>.</p>
+      </div>
+      <div class="foot-cols">
+        <div class="foot-col">
+          <h4>Project</h4>
+          <a href="https://github.com/pleiad/frogql">GitHub</a>
+          <a href="https://github.com/pleiad/frogql/tree/main/docs">Documentation</a>
+          <a href="https://github.com/pleiad/frogql/blob/main/LICENSE">License (MIT)</a>
+        </div>
+        <div class="foot-col">
+          <h4>Packages</h4>
+          <a href="https://pypi.org/project/frogql/">PyPI · frogql</a>
+          <a href="https://www.npmjs.com/package/frogql">npm · frogql</a>
+          <a href="https://www.npmjs.com/package/frogql-wasm">npm · frogql-wasm</a>
+        </div>
+        <div class="foot-col">
+          <h4>Learn</h4>
+          <a href="https://github.com/pleiad/frogql/blob/main/docs/query-language.md">Query language</a>
+          <a href="https://github.com/pleiad/frogql/blob/main/docs/data-modification.md">Data modification</a>
+          <a href="https://github.com/pleiad/frogql/blob/main/docs/internals/storage-architecture.md">Storage format</a>
+        </div>
+      </div>
+    </div>
+    <div class="foot-note">Built in Rust · <code>parse → elaborate → typecheck → optimize → run</code> · &copy; 2026 PLEIAD</div>
+  </div>
+</footer>
+
+<script>
+// copy buttons
+function flash(btn){const t=btn.textContent;btn.textContent="copied!";setTimeout(()=>btn.textContent=t,1300);}
+document.querySelectorAll(".copy-btn[data-copy]").forEach(b=>{
+  b.addEventListener("click",()=>{navigator.clipboard.writeText(b.dataset.copy);flash(b);});
+});
+
+// install tabs
+const tabs=document.querySelectorAll(".tab");
+const panes=document.querySelectorAll(".tabpane");
+tabs.forEach(t=>t.addEventListener("click",()=>{
+  tabs.forEach(x=>x.classList.remove("active"));
+  panes.forEach(p=>p.classList.remove("active"));
+  t.classList.add("active");
+  document.querySelector(`.tabpane[data-pane="${t.dataset.tab}"]`).classList.add("active");
+}));
+// copy active pane
+document.querySelector("[data-copy-target]").addEventListener("click",function(){
+  const active=document.querySelector(".tabpane.active pre");
+  const text=active.innerText.split("\n").filter(l=>!l.trim().startsWith("#")&&l.trim()).join("\n");
+  navigator.clipboard.writeText(text);flash(this);
+});
+
+// card spotlight
+document.querySelectorAll(".card").forEach(c=>{
+  c.addEventListener("mousemove",e=>{
+    const r=c.getBoundingClientRect();
+    c.style.setProperty("--mx",(e.clientX-r.left)+"px");
+  });
+});
+
+// scroll reveal
+const io=new IntersectionObserver((es)=>{
+  es.forEach(e=>{if(e.isIntersecting){e.target.classList.add("in");io.unobserve(e.target);}});
+},{threshold:.12});
+document.querySelectorAll(".reveal").forEach(el=>io.observe(el));
+</script>
+
+<!-- LIVE PLAYGROUND: real frogql-wasm engine, in-browser -->
+<script type="module">
+import init, { open_json } from "https://cdn.jsdelivr.net/npm/frogql-wasm@0.2.3/frogql_wasm.js";
+
+const $ = (id) => document.getElementById(id);
+const led = $("pg-led"), engine = $("pg-engine"), runBtn = $("pg-run");
+const input = $("pg-input"), output = $("pg-output"), status = $("pg-status");
+
+const EXAMPLES = [
+  { label: "Actors of 1999", q: `MATCH (p:Person)-[:ACTED_IN]->(m:Movie)\nWHERE m.released = 1999\nRETURN p.name, m.title` },
+  { label: "Directors", q: `MATCH (p:Person)-[:DIRECTED]->(m:Movie)\nRETURN m.title AS movie, p.name AS director` },
+  { label: "Keanu's co-stars", q: `MATCH (a:Person)-[:ACTED_IN]->(m:Movie),\n      (b:Person)-[:ACTED_IN]->(m)\nWHERE a.name = 'Keanu Reeves'\nRETURN b.name AS costar, m.title AS film` },
+  { label: "Reviews + ratings", q: `MATCH (p:Person)-[r:REVIEWED]->(m:Movie)\nRETURN m.title AS film, r.rating AS rating` },
+  { label: "Count movies", q: `MATCH (m:Movie) RETURN count(m) AS movies` },
+  { label: "Whole nodes", q: `MATCH (m:Movie) WHERE m.released > 2005 RETURN m` },
+  { label: "INSERT a node", q: `INSERT (n:Person {name: 'Ada Lovelace', born: 1815})` },
+];
+
+let conn = null;
+// Tracked in JS: the `node_count` getter reads the base store and does not
+// reflect in-overlay INSERT/DELETE, so we adjust by the DM deltas instead.
+let nodeCount = 0, edgeCount = 0;
+
+function setLed(state, text){
+  led.className = "led " + state;
+  if (text) engine.textContent = text;
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+
+function refSummary(o){
+  const labels = (o.labels && o.labels.length) ? o.labels.join("&") : (o.kind === "edge" ? "?" : "");
+  const p = o.props || {};
+  const key = p.name ?? p.title ?? p.summary ?? null;
+  const open = o.kind === "edge" ? "[:" : "(:";
+  const close = o.kind === "edge" ? "]" : ")";
+  let inner = `<span class="lab">${escapeHtml((o.kind==="edge"?":":":")+labels)}</span>`;
+  if (key !== null) inner += ` <span class="pp">${formatScalar(key)}</span>`;
+  return `<span class="cell-ref">${o.kind==="edge"?"[":"("}${inner}${o.kind==="edge"?"]":")"}</span>`;
+}
+
+function formatScalar(v){
+  if (v === null || v === undefined) return `<span class="cell-null">null</span>`;
+  if (typeof v === "number") return `<span class="cell-num">${v}</span>`;
+  if (typeof v === "boolean") return `<span class="cell-num">${v}</span>`;
+  return `<span class="cell-str">"${escapeHtml(v)}"</span>`;
+}
+
+function formatCell(v){
+  if (v === null || v === undefined) return `<span class="cell-null">null</span>`;
+  if (Array.isArray(v)) return v.map(formatCell).join(", ");
+  if (typeof v === "object"){
+    if (v.kind === "node" || v.kind === "edge") return refSummary(v);
+    return `<span class="cell-str">${escapeHtml(JSON.stringify(v))}</span>`;
+  }
+  return formatScalar(v);
+}
+
+function renderRows(rows){
+  if (!rows.length){
+    output.classList.add("pad");
+    output.innerHTML = `<span class="pg-msg empty">0 rows.</span>`;
+    return 0;
+  }
+  // Column order: keys of the first row, minus the internal _paths key.
+  const cols = [];
+  for (const r of rows){
+    for (const k of Object.keys(r)){
+      if (k !== "_paths" && !cols.includes(k)) cols.push(k);
+    }
+  }
+  output.classList.remove("pad");
+  let html = `<table class="pg-tbl"><thead><tr>` +
+    cols.map(c => `<th>${escapeHtml(c)}</th>`).join("") +
+    `</tr></thead><tbody>`;
+  for (const r of rows){
+    html += "<tr>" + cols.map(c => `<td>${formatCell(r[c])}</td>`).join("") + "</tr>";
+  }
+  html += "</tbody></table>";
+  output.innerHTML = html;
+  return rows.length;
+}
+
+function renderDm(o){
+  output.classList.add("pad");
+  const parts = [];
+  const fields = [
+    ["nodes_inserted","node(s) inserted"],["edges_inserted","edge(s) inserted"],
+    ["nodes_deleted","node(s) deleted"],["edges_deleted","edge(s) deleted"],
+    ["nodes_modified","node(s) modified"],["edges_modified","edge(s) modified"],
+  ];
+  for (const [k,desc] of fields){ if (o[k]) parts.push(`<b>${o[k]}</b> <span class="k">${desc}</span>`); }
+  const body = parts.length ? parts.join(" · ") : `<span class="k">statement applied (no rows changed)</span>`;
+  output.innerHTML = `<span class="pg-msg dm">✓ ${body}</span>`;
+}
+
+function run(){
+  if (!conn) return;
+  const q = input.value.trim();
+  if (!q) return;
+  const t0 = performance.now();
+  try {
+    const res = conn.execute(q, 200);
+    const ms = (performance.now() - t0).toFixed(1);
+    if (Array.isArray(res)){
+      const n = renderRows(res);
+      status.textContent = `${n} row${n===1?"":"s"} · ${ms} ms`;
+      status.style.color = "var(--frog-bright)";
+    } else {
+      renderDm(res);
+      // The getter doesn't see the overlay; apply the reported deltas.
+      nodeCount += (res.nodes_inserted||0) - (res.nodes_deleted||0);
+      edgeCount += (res.edges_inserted||0) - (res.edges_deleted||0);
+      $("pg-nodes").textContent = nodeCount;
+      $("pg-edges").textContent = edgeCount;
+      status.textContent = `done · ${ms} ms`;
+      status.style.color = "var(--frog-bright)";
+    }
+  } catch (e){
+    output.classList.add("pad");
+    output.innerHTML = `<span class="pg-msg err">✗ ${escapeHtml(e.message || e)}</span>`;
+    status.textContent = "error";
+    status.style.color = "#ec6a5e";
+  }
+}
+
+function refreshCounts(){
+  nodeCount = conn.node_count;
+  edgeCount = conn.edge_count;
+  $("pg-nodes").textContent = nodeCount;
+  $("pg-edges").textContent = edgeCount;
+}
+
+function buildChips(){
+  const wrap = $("pg-chips");
+  wrap.innerHTML = "";
+  for (const ex of EXAMPLES){
+    const b = document.createElement("button");
+    b.className = "pg-chip";
+    b.textContent = ex.label;
+    b.addEventListener("click", () => { input.value = ex.q; input.focus(); run(); });
+    wrap.appendChild(b);
+  }
+}
+
+async function boot(){
+  try {
+    setLed("busy", "loading frogql-wasm…");
+    status.textContent = "initializing engine…";
+    await init();
+
+    status.textContent = "loading movies graph…";
+    const graph = await fetch("assets/movies.json").then(r => {
+      if (!r.ok) throw new Error("could not load dataset");
+      return r.text();
+    });
+
+    conn = open_json(graph);
+    refreshCounts();
+
+    const schema = conn.schema();
+    $("pg-labels").textContent =
+      [...(schema.node_labels||[]), ...(schema.edge_labels||[])].length;
+
+    setLed("ok", "frogql-wasm 0.2.3 · ready");
+    status.textContent = "ready";
+    runBtn.disabled = false;
+    buildChips();
+  } catch (e){
+    setLed("err", "engine failed to load");
+    status.textContent = "offline";
+    status.style.color = "#ec6a5e";
+    output.classList.add("pad");
+    output.innerHTML = `<span class="pg-msg err">✗ Could not start the in-browser engine: ${escapeHtml(e.message || e)}.<br>The playground needs network access to load <code>frogql-wasm</code> from the CDN. The rest of the page works offline.</span>`;
+  }
+}
+
+runBtn.addEventListener("click", run);
+input.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter"){ e.preventDefault(); run(); }
+});
+
+boot();
+</script>
+</body>
+</html>

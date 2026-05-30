@@ -1,6 +1,34 @@
-# froGQL
+<p align="center">
+  <img src="assets/frogql-logo.png" alt="froGQL logo" width="240">
+</p>
 
-A Rust graph database implementing ISO GQL, with single-file storage inspired by SQLite.
+<h1 align="center">froGQL</h1>
+
+<p align="center">
+  A Rust graph database implementing ISO GQL, with single-file storage inspired by SQLite.
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/frogql/"><img alt="PyPI" src="https://img.shields.io/pypi/v/frogql?logo=pypi&logoColor=white&label=PyPI&color=2c8a3e"></a>
+  <a href="https://www.npmjs.com/package/frogql"><img alt="npm" src="https://img.shields.io/npm/v/frogql?logo=npm&label=npm&color=2c8a3e"></a>
+  <a href="https://www.npmjs.com/package/frogql-wasm"><img alt="npm (wasm)" src="https://img.shields.io/npm/v/frogql-wasm?logo=webassembly&logoColor=white&label=wasm&color=2c8a3e"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-2c8a3e"></a>
+  <a href="https://pleiad.github.io/frogql/"><img alt="Website" src="https://img.shields.io/badge/website-pleiad.github.io%2Ffrogql-2c8a3e"></a>
+</p>
+
+<p align="center">
+  <b><a href="https://pleiad.github.io/frogql/#playground">Live playground</a></b> ·
+  <a href="https://pleiad.github.io/frogql/">Website</a> ·
+  <a href="docs/query-language.md">Query language</a> ·
+  <a href="docs/data-modification.md">Data modification</a> ·
+  <a href="docs/internals/storage-architecture.md">Storage format</a>
+</p>
+
+<p align="center">
+  <i>Run GQL in your browser &mdash; the website loads the real <code>frogql-wasm</code> engine and a sample movies graph, no install required.</i>
+</p>
+
+---
 
 ## Install
 
