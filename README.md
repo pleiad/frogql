@@ -30,6 +30,34 @@
 
 ---
 
+## Project history and our use of AI
+
+froGQL is a research prototype that grew into a working database. Its differentiator is a typechecker grounded in a gradual type system for GQL: it detects queries that cannot return results because of type mismatches, before they run. We combine hand-written research code with AI-assisted engineering, and we are explicit about the boundary between the two.
+
+The path so far:
+
+1. **Theory first.** The project grew out of [our paper on a gradual type system for GQL](https://dl.acm.org/doi/10.1145/3763061), which contributes the formalization and the soundness theorems (we have a background in gradual typing and databases). The central result is **Emptiness**: statically detecting queries that are guaranteed to return nothing because of type mismatches.
+
+2. **A hand-written prototype.** We implemented the typechecker and the runtime semantics of the formal model in Python, by hand, without AI. This is the reference everything else is checked against.
+
+3. **The question worth testing.** Does the typechecker earn its cost? That is, is *typecheck + run* worthwhile against blindly *running* a query only to discover it returns nothing? Answering this needed performance the Python prototype could not provide.
+
+4. **Port to Rust, with AI.** We rewrote the engine in Rust with AI assistance, taking inspiration from SQLite's single-file storage architecture.
+
+5. **Worst-case-optimal joins.** Joins were slow. Colleagues who work on databases pointed us to the [CompactLTJ paper](https://users.dcc.uchile.cl/~gnavarro/ps/vldbj25.pdf) (Arroyuelo et al., VLDB Journal 2025) and its C++ reference implementation. We implemented the Leapfrog Triejoin algorithm with generative AI, keeping the test suite green throughout.
+
+6. **LDBC and language growth.** To run the LDBC Social Network Benchmark we extended the language with more features, including our centerpiece, the typechecker. We did this carefully to avoid breaking the theorems we had proved formally.
+
+7. **Where AI stopped being enough.** The benchmarks were strong on some fronts and weak on others. Closing the gaps took design decisions and research that generative AI could not deliver on its own: LTJ interacts poorly with GQL features such as `UNION`, and even with plain `ORDER BY`. We grow the system slowly, debating design strategies and testing several before each new feature lands.
+
+Benchmark charts from the LDBC Social Network Benchmark are coming here as the numbers stabilize.
+
+**Papers**
+- [Gradual type system for GQL](https://dl.acm.org/doi/10.1145/3763061) — the type system, formalization, and the Emptiness theorem behind froGQL's typechecker.
+- [CompactLTJ](https://users.dcc.uchile.cl/~gnavarro/ps/vldbj25.pdf) (Arroyuelo et al., VLDB Journal 2025) — the worst-case-optimal join algorithm froGQL uses for comma-joins and chains.
+
+---
+
 ## Install
 
 **Python (PyPI)**:
