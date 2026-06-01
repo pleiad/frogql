@@ -2,7 +2,6 @@ use std::fmt;
 
 use super::expr::Expr;
 use super::path_pattern::PathPattern;
-use super::path_prefix::PathPrefix;
 
 /// ISO 39075 §20.9 `<set quantifier>`. ALL is implicit when omitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,39 +104,22 @@ impl ReturnItem {
 /// not yet exposed; a single optional pattern is enough for the
 /// formalism described in the OOPSLA paper rule TOpt).
 ///
-/// `prefix` is the ISO §16.6 `<path pattern prefix>` (path mode +/or
-/// path search) written before the clause's pattern, e.g.
-/// `MATCH SHORTEST (a)-[:R]->{1,5}(b)`. `None` is the implicit
-/// `WALK ALL`. Deviation from ISO: the standard attaches the prefix to
-/// each `<path pattern>` in a `<path pattern list>`; froGQL attaches it
-/// once to the whole MATCH clause, so a comma-join clause shares one
-/// prefix applied over the combined paths' boundary nodes.
+/// The ISO §16.6 `<path pattern prefix>` (path mode +/or path search)
+/// is carried *inside* `pattern` as a [`PathPattern::Selected`] node,
+/// scoped to a single `<path pattern>` operand of the `<path pattern
+/// list>` exactly as the standard structures it. A comma-join clause
+/// can therefore prefix each operand independently, e.g.
+/// `MATCH SHORTEST 1 (a)-[:R]->{1,5}(b), (b)-[:R]->(c)`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchStatement {
-    Simple {
-        prefix: Option<PathPrefix>,
-        pattern: PathPattern,
-    },
-    Optional {
-        prefix: Option<PathPrefix>,
-        pattern: PathPattern,
-    },
+    Simple { pattern: PathPattern },
+    Optional { pattern: PathPattern },
 }
 
 impl MatchStatement {
     pub fn pattern(&self) -> &PathPattern {
         match self {
-            MatchStatement::Simple { pattern, .. } | MatchStatement::Optional { pattern, .. } => {
-                pattern
-            }
-        }
-    }
-
-    pub fn prefix(&self) -> Option<PathPrefix> {
-        match self {
-            MatchStatement::Simple { prefix, .. } | MatchStatement::Optional { prefix, .. } => {
-                *prefix
-            }
+            MatchStatement::Simple { pattern } | MatchStatement::Optional { pattern } => pattern,
         }
     }
 
@@ -201,10 +183,7 @@ pub struct Query {
 impl Query {
     pub fn pattern_only(pattern: PathPattern) -> Self {
         Query {
-            matches: vec![MatchStatement::Simple {
-                prefix: None,
-                pattern,
-            }],
+            matches: vec![MatchStatement::Simple { pattern }],
             group_by: None,
             returns: None,
             distinct: false,
@@ -243,12 +222,12 @@ impl Query {
         self.matches.iter().any(|m| m.is_optional())
     }
 
-    /// True when any MATCH clause carries a non-trivial path pattern prefix
-    /// (a path mode other than WALK, or a selective search). Used to keep
-    /// the chain un-collapsed so the runtime can apply each clause's prefix
-    /// to that clause's own paths.
-    pub fn has_any_prefix(&self) -> bool {
-        self.matches.iter().any(|m| m.prefix().is_some())
+    /// True when any MATCH clause contains a `<path pattern prefix>`
+    /// (a `PathPattern::Selected` node — a path mode other than WALK, or a
+    /// selective search). Used to keep the chain un-collapsed so the
+    /// runtime evaluates each selective/restrictive pattern in isolation.
+    pub fn has_any_selected(&self) -> bool {
+        self.matches.iter().any(|m| m.pattern().has_selected())
     }
 }
 
@@ -311,15 +290,11 @@ impl fmt::Display for Query {
                 f.write_str(" ")?;
             }
             first = false;
-            let (kw, prefix, pattern) = match m {
-                MatchStatement::Simple { prefix, pattern } => ("MATCH", prefix, pattern),
-                MatchStatement::Optional { prefix, pattern } => ("OPTIONAL MATCH", prefix, pattern),
+            let (kw, pattern) = match m {
+                MatchStatement::Simple { pattern } => ("MATCH", pattern),
+                MatchStatement::Optional { pattern } => ("OPTIONAL MATCH", pattern),
             };
-            write!(f, "{kw} ")?;
-            if let Some(p) = prefix {
-                write!(f, "{p} ")?;
-            }
-            write!(f, "{pattern}")?;
+            write!(f, "{kw} {pattern}")?;
         }
         if let Some(gb) = &self.group_by {
             let exprs: Vec<String> = gb.iter().map(|e| e.to_string()).collect();

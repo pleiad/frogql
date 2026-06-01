@@ -123,6 +123,15 @@ fn rewrite(p: PathPattern) -> PathPattern {
         PathPattern::Join(p1, p2) => {
             PathPattern::Join(Box::new(rewrite(*p1)), Box::new(rewrite(*p2)))
         }
+        // A selective/restrictive pattern is an isolation barrier (§16.6
+        // NOTE 233): push WHERE conjuncts down *within* it as its own unit,
+        // but never across the prefix boundary. `walk_kinds` and
+        // `merge_constraints` likewise refuse to cross it, so an enclosing
+        // Filter's conjuncts on the pattern's interior never leak in.
+        PathPattern::Selected { prefix, pattern } => PathPattern::Selected {
+            prefix,
+            pattern: Box::new(rewrite(*pattern)),
+        },
         // Leaf patterns — no rewriting needed
         other => other,
     }
@@ -304,6 +313,10 @@ fn merge_constraints(p: PathPattern, c: &Constraints) -> PathPattern {
             Box::new(merge_constraints(*p1, c)),
             Box::new(merge_constraints(*p2, c)),
         ),
+        // Isolation barrier: outer constraints must not cross into a
+        // selective/restrictive pattern. Leave it intact (its own internal
+        // constraints were already merged by `rewrite`).
+        PathPattern::Selected { prefix, pattern } => PathPattern::Selected { prefix, pattern },
     }
 }
 

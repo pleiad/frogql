@@ -118,5 +118,10 @@ pub fn validate_insert_pattern(p: &PathPattern) -> Result<(), String> {
             "INSERT path patterns inside one statement use comma at the top level only (§13.2)"
                 .into(),
         ),
+        PathPattern::Selected { .. } => Err(
+            "INSERT patterns cannot carry a path pattern prefix (WALK/TRAIL/SIMPLE/ACYCLIC/\
+             ALL/ANY/SHORTEST) (§16.5)"
+                .into(),
+        ),
     }
 }

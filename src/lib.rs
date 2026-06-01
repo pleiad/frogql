@@ -29,17 +29,14 @@ use typing::variable_type::Schema;
 /// bodies) and rewrites empty bodies to `false` / `true` literals.
 fn optimize_query(q: Query, schema: &Schema) -> Query {
     // Collapsing the chain into a single Join is sound only when no clause
-    // carries a path pattern prefix: the prefix is a per-clause selection
-    // (mode filter / SHORTEST) over that clause's boundary nodes, which a
-    // collapsed Join would erase. Treat prefixes like OPTIONAL and optimize
-    // each pattern in place, preserving the chain.
-    let mut q = if !q.has_any_optional() && !q.has_any_prefix() {
+    // contains a path pattern prefix: a `Selected` (selective/restrictive)
+    // pattern is evaluated in isolation (§16.6 NOTE 233), which a collapsed
+    // Join would erase. Treat such clauses like OPTIONAL and optimize each
+    // pattern in place, preserving the chain.
+    let mut q = if !q.has_any_optional() && !q.has_any_selected() {
         let pattern = optimizer::compile(q.collapsed_pattern());
         Query {
-            matches: vec![MatchStatement::Simple {
-                prefix: None,
-                pattern,
-            }],
+            matches: vec![MatchStatement::Simple { pattern }],
             ..q
         }
     } else {
@@ -47,12 +44,10 @@ fn optimize_query(q: Query, schema: &Schema) -> Query {
             .matches
             .into_iter()
             .map(|m| match m {
-                MatchStatement::Simple { prefix, pattern } => MatchStatement::Simple {
-                    prefix,
+                MatchStatement::Simple { pattern } => MatchStatement::Simple {
                     pattern: optimizer::compile(pattern),
                 },
-                MatchStatement::Optional { prefix, pattern } => MatchStatement::Optional {
-                    prefix,
+                MatchStatement::Optional { pattern } => MatchStatement::Optional {
                     pattern: optimizer::compile(pattern),
                 },
             })

@@ -3,6 +3,7 @@ use std::fmt;
 
 use super::descriptor::Descriptor;
 use super::expr::Expr;
+use super::path_prefix::PathPrefix;
 
 /// Path patterns — the core of GQL queries.
 #[derive(Debug, Clone, PartialEq)]
@@ -25,6 +26,18 @@ pub enum PathPattern {
     /// Semantics: cross-product of paths, keeping only rows where assignments unify.
     /// Result paths are paired (p1 × p2), assignment is mu1 ∪ mu2.
     Join(Box<PathPattern>, Box<PathPattern>),
+    /// ISO §16.6 `<path pattern>` = `<path pattern prefix> <path pattern
+    /// expression>`. A path-mode/path-search prefix scoped to exactly one
+    /// `<path pattern>` (one operand of a `<path pattern list>`), per the
+    /// standard's structure. The prefix selects/filters the paths matched
+    /// by `pattern`, which — being a *selective* or *restrictive*
+    /// `<path pattern>` — is evaluated in isolation (§16.6 NOTE 233):
+    /// the runtime materializes `pattern`'s paths, then applies the mode
+    /// filter and the search selection.
+    Selected {
+        prefix: PathPrefix,
+        pattern: Box<PathPattern>,
+    },
 }
 
 impl PathPattern {
@@ -49,6 +62,28 @@ impl PathPattern {
             PathPattern::Filter(p, _) => p.freevars(),
             PathPattern::Repeat { pattern, .. } => pattern.freevars(),
             PathPattern::Questioned(p) => p.freevars(),
+            PathPattern::Selected { pattern, .. } => pattern.freevars(),
+        }
+    }
+
+    /// True if this pattern contains any `Selected` node (a `<path pattern
+    /// prefix>`-decorated operand). Used to gate the collapsed/LTJ fast
+    /// path and the OPTIONAL bind-pushdown: a selective/restrictive pattern
+    /// must be evaluated in isolation, so callers keep it intact.
+    pub fn has_selected(&self) -> bool {
+        match self {
+            PathPattern::Selected { .. } => true,
+            PathPattern::Node(_)
+            | PathPattern::EdgeRight(_)
+            | PathPattern::EdgeLeft(_)
+            | PathPattern::EdgeUndirected(_)
+            | PathPattern::EdgeAnyDirection(_) => false,
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                a.has_selected() || b.has_selected()
+            }
+            PathPattern::Filter(p, _)
+            | PathPattern::Questioned(p)
+            | PathPattern::Repeat { pattern: p, .. } => p.has_selected(),
         }
     }
 
@@ -88,6 +123,7 @@ impl PathPattern {
                 b.collect_unbounded_lbs(out);
             }
             PathPattern::Filter(p, _) | PathPattern::Questioned(p) => p.collect_unbounded_lbs(out),
+            PathPattern::Selected { pattern, .. } => pattern.collect_unbounded_lbs(out),
             PathPattern::Repeat { pattern, lb, ub } => {
                 if ub.is_none() {
                     out.push(*lb);
@@ -130,6 +166,7 @@ impl fmt::Display for PathPattern {
             }
             PathPattern::Questioned(p) => write!(f, "({p})?"),
             PathPattern::Join(p1, p2) => write!(f, "{p1}, {p2}"),
+            PathPattern::Selected { prefix, pattern } => write!(f, "{prefix} {pattern}"),
         }
     }
 }

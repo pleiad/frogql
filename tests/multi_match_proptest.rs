@@ -33,7 +33,6 @@ fn multi_match_query(patterns: &[String]) -> Query {
     let matches: Vec<MatchStatement> = patterns
         .iter()
         .map(|s| MatchStatement::Simple {
-            prefix: None,
             pattern: parser::parse(s).expect("curated patterns must parse"),
         })
         .collect();

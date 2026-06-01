@@ -51,8 +51,8 @@ pub enum PathSearch {
 }
 
 /// ISO §16.6 `<path pattern prefix>` = `<path mode prefix>` (mode only) or
-/// `<path search prefix>` (mode + selection). Carried on a MATCH clause and
-/// applied by the runtime after the clause's paths are materialized.
+/// `<path search prefix>` (mode + selection). Carried by
+/// `PathPattern::Selected` and scoped to one `<path pattern>` operand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PathPrefix {
     pub mode: PathMode,

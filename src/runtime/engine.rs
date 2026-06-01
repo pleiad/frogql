@@ -28,11 +28,11 @@ use super::path_select::path_satisfies_mode;
 use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
 use crate::syntax::path_prefix::{PathMode, PathPrefix, UnboundedSupport};
 
-/// How a MATCH clause's prefix licenses *unbounded* repetition
+/// How a selected path pattern's prefix licenses *unbounded* repetition
 /// (`Repeat { ub: None }` — i.e. `*`, `+`, `{n,}`). Under the default
 /// WALK/ALL semantics an unbounded repeat over a cyclic graph is
 /// infinite; a prefix can make it finite in two distinct ways, each with
-/// its own evaluation strategy. Set per clause in `run_match_chain`.
+/// its own evaluation strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnboundedPolicy {
     /// No prefix, or one that does not bound the search (e.g. plain WALK):
@@ -52,7 +52,7 @@ enum UnboundedPolicy {
     Mode(PathMode),
 }
 
-/// Map a clause prefix to its unbounded-repetition policy. Defers the
+/// Map a selected pattern prefix to its unbounded-repetition policy. Defers the
 /// classification to [`PathPrefix::unbounded_support`] so the runtime and
 /// the typechecker gate agree.
 fn unbounded_policy_for(prefix: Option<PathPrefix>) -> UnboundedPolicy {
@@ -157,7 +157,7 @@ pub struct Runtime<'g, G: GraphAccess> {
     ///     those `keys` for every body row, so a per-outer-row probe
     ///     is one O(1) hash lookup. The body runs once per Runtime.
     exists_cache: RefCell<HashMap<usize, ExistsCache>>,
-    /// Set per MATCH clause from its path pattern prefix; tells the
+    /// Set while evaluating `PathPattern::Selected`; tells the
     /// `Repeat { ub: None }` arm how (or whether) it may evaluate
     /// unbounded repetition. The typechecker
     /// (`check_unbounded_repetition`) guarantees an unbounded repeat only
@@ -235,7 +235,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     pub fn run(&self, pattern: &PathPattern) -> IntermediateResult {
         self.exists_cache.borrow_mut().clear();
-        // A raw pattern carries no clause prefix, so unbounded repetition
+        // A raw pattern carries no selected-prefix context, so unbounded repetition
         // (if any) has no license here.
         self.unbounded_policy.set(UnboundedPolicy::Forbidden);
         self.run_path_pattern(pattern, 0)
@@ -714,13 +714,20 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     ///   project as `Value::Null` via the existing AttrLookup-failure path).
     fn run_match_chain(&self, query: &Query, limit: usize) -> IntermediateResult {
         // The collapsed fast path joins every clause into one pattern; it
-        // is sound only when no clause is OPTIONAL and none carries a path
-        // pattern prefix (the prefix is a per-clause selection over that
-        // clause's boundary nodes, which a collapsed Join would erase).
-        if !query.has_any_optional() && !query.has_any_prefix() {
+        // is sound only when no clause is OPTIONAL and none contains a
+        // `Selected` (selective/restrictive) pattern, which must be
+        // evaluated in isolation (§16.6 NOTE 233) and would be erased by a
+        // collapsed Join. When a `Selected` is present we walk the chain so
+        // each `Selected` arm applies its own prefix in place.
+        if !query.has_any_optional() && !query.has_any_selected() {
             self.unbounded_policy.set(UnboundedPolicy::Forbidden);
             return self.run_path_pattern(&query.collapsed_pattern(), limit);
         }
+
+        // The unbounded-repetition policy is now set locally by each
+        // `Selected` arm; outside one, an unbounded repeat is an
+        // invariant violation the typechecker has already rejected.
+        self.unbounded_policy.set(UnboundedPolicy::Forbidden);
 
         let mut iter = query.matches.iter();
         let first = iter.next().expect("Query::matches must be non-empty");
@@ -729,41 +736,39 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         // early-terminate inside `run_path_pattern`. Multi-match chains
         // pass 0 because Simple matches may filter rows out and we'd
         // lose candidates by truncating the leading binding table. A
-        // prefix also forces 0: SHORTEST/ANY must rank the full candidate
-        // set before selecting, so an early LIMIT would drop survivors.
-        let first_limit = if query.matches.len() == 1 && first.prefix().is_none() {
+        // selective pattern also forces 0: SHORTEST/ANY must rank the full
+        // candidate set before selecting, so an early LIMIT would drop
+        // survivors (the `Selected` arm already passes 0 to its inner, but
+        // the caller limit must not pre-truncate the selected operand either).
+        let first_limit = if query.matches.len() == 1 && !first.pattern().has_selected() {
             limit
         } else {
             0
         };
-        self.set_unbounded_policy(first.prefix());
         let mut acc = self.run_path_pattern(first.pattern(), first_limit);
-        acc = self.apply_clause_prefix(acc, first.prefix());
         let mut bound_vars: HashSet<String> = first.pattern().freevars();
 
         for m in iter {
             let pattern = m.pattern();
             let new_vars = pattern.freevars();
-            self.set_unbounded_policy(m.prefix());
             acc = match m {
                 MatchStatement::Simple { .. } => {
                     let ir_new = self.run_path_pattern(pattern, 0);
-                    let ir_new = self.apply_clause_prefix(ir_new, m.prefix());
                     natural_join(&acc, &ir_new, 0)
                 }
                 MatchStatement::Optional { .. } => {
                     // The bind-pushdown optimization assumes the inner
-                    // pattern is taken whole; a selective prefix has to
-                    // see every candidate first, so a prefixed OPTIONAL
-                    // falls back to global eval + select + left join.
-                    let pushed = if m.prefix().is_none() {
+                    // pattern is taken whole; a selective pattern has to
+                    // see every candidate first, so a `Selected`-bearing
+                    // OPTIONAL falls back to global eval + left join (the
+                    // selection happens inside `run_path_pattern`).
+                    let pushed = if !pattern.has_selected() {
                         self.optional_via_bind_pushdown(&acc, pattern, &bound_vars, &new_vars)
                     } else {
                         None
                     };
                     pushed.unwrap_or_else(|| {
                         let ir_new = self.run_path_pattern(pattern, 0);
-                        let ir_new = self.apply_clause_prefix(ir_new, m.prefix());
                         left_outer_join(&acc, &ir_new, &bound_vars, &new_vars)
                     })
                 }
@@ -785,32 +790,6 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
 
         acc
-    }
-
-    /// Apply a clause's optional ISO §16.6 path pattern prefix (path mode
-    /// filter + path search selection) to its materialized rows. A `None`
-    /// prefix — the implicit `WALK ALL` — is a no-op.
-    fn apply_clause_prefix(
-        &self,
-        ir: IntermediateResult,
-        prefix: Option<PathPrefix>,
-    ) -> IntermediateResult {
-        match prefix {
-            Some(p) => apply_path_prefix(ir, p),
-            None => ir,
-        }
-    }
-
-    /// Set the unbounded-repetition license for the clause about to run,
-    /// from its prefix. Mirrors the typechecker gate
-    /// (`check_unbounded_repetition`) so the runtime never reaches an
-    /// unsupported unbounded repeat:
-    ///   - single-shortest search → BFS (`Shortest`);
-    ///   - restrictive mode (TRAIL/SIMPLE/ACYCLIC) with a non-shortest
-    ///     search → finite enumeration (`Mode`);
-    ///   - anything else → `Forbidden`.
-    fn set_unbounded_policy(&self, prefix: Option<PathPrefix>) {
-        self.unbounded_policy.set(unbounded_policy_for(prefix));
     }
 
     /// OPTIONAL MATCH bind-pushdown. The naive path evaluates the inner
@@ -1161,6 +1140,26 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 ir_empty.union(ir_inner)
             }
             PathPattern::Join(q1, q2) => self.run_join(q1, q2, limit),
+            PathPattern::Selected { prefix, pattern } => {
+                // ISO §16.6: a selective/restrictive `<path pattern>` is
+                // evaluated in isolation (NOTE 233). Materialize the inner
+                // pattern's paths under the prefix's unbounded-repetition
+                // policy, then apply the path-mode filter and the search
+                // selection. Save/restore the policy so sibling patterns in
+                // a comma-join keep their own. The selection ranks the full
+                // candidate set, so the inner runs unlimited (0); any outer
+                // LIMIT is enforced by the caller.
+                let prev = self.unbounded_policy.get();
+                self.unbounded_policy
+                    .set(unbounded_policy_for(Some(*prefix)));
+                let ir = self.run_path_pattern(pattern, 0);
+                self.unbounded_policy.set(prev);
+                let mut selected = apply_path_prefix(ir, *prefix);
+                if limit > 0 && selected.rows.len() > limit {
+                    selected.rows.truncate(limit);
+                }
+                selected
+            }
         }
     }
 
@@ -1995,8 +1994,8 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// frontier is finite and the search terminates.
     ///
     /// Every admitted path of repetition count ≥ `lb` is emitted; a
-    /// non-trivial search prefix (`ANY N`, `SHORTEST N`, …) is applied
-    /// afterwards in `apply_clause_prefix` as an ordinary selection over
+    /// non-trivial search prefix (`ANY N`, `SHORTEST N`, ...) is applied
+    /// afterwards in `apply_path_prefix` as an ordinary selection over
     /// this finite set.
     fn run_repetition_unbounded_mode(
         &self,
@@ -2869,7 +2868,8 @@ fn pattern_has_edge(p: &PathPattern) -> bool {
         }
         PathPattern::Filter(p, _)
         | PathPattern::Repeat { pattern: p, .. }
-        | PathPattern::Questioned(p) => pattern_has_edge(p),
+        | PathPattern::Questioned(p)
+        | PathPattern::Selected { pattern: p, .. } => pattern_has_edge(p),
         PathPattern::Node(_) => false,
     }
 }

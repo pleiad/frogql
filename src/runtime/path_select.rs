@@ -1,7 +1,7 @@
 //! ISO/IEC 39075:2024 §16.6 path pattern prefix evaluation.
 //!
-//! A `<path pattern prefix>` is applied *after* a MATCH clause's paths
-//! have been materialized into [`ResultRow`]s (each carrying its full
+//! A `<path pattern prefix>` is applied *after* its selected `<path pattern>`
+//! operand has been materialized into [`ResultRow`]s (each carrying its full
 //! [`Path`]). Two independent steps run, in this order:
 //!
 //!  1. **Path mode filter** (§16.7, NOTE 234 — "restrictive path modes are
@@ -30,7 +30,7 @@ use crate::syntax::path_prefix::{PathMode, PathPrefix, PathSearch};
 /// falls back to `None`, which still partitions consistently.
 type BoundaryKey = (Option<Id>, Option<Id>);
 
-/// Apply a `<path pattern prefix>` to a clause's result rows.
+/// Apply a `<path pattern prefix>` to one selected pattern operand's rows.
 pub fn apply_path_prefix(ir: IntermediateResult, prefix: PathPrefix) -> IntermediateResult {
     if prefix.is_trivial() {
         return ir;
@@ -54,9 +54,9 @@ pub fn apply_path_prefix(ir: IntermediateResult, prefix: PathPrefix) -> Intermed
     IntermediateResult::new(rows)
 }
 
-/// A row passes the mode iff *every* one of its paths passes. For a plain
-/// (single-pattern) clause there is exactly one path; for a comma-join the
-/// prefix applies to each path independently.
+/// A row passes the mode iff every path it carries passes. A selected
+/// `<path pattern>` normally contributes one path, but this stays robust if
+/// an internal representation ever carries several.
 fn row_satisfies_mode(row: &ResultRow, mode: PathMode) -> bool {
     row.paths.iter().all(|p| path_satisfies_mode(p, mode))
 }

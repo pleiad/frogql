@@ -247,13 +247,13 @@ fn display_subquery(q: &Query) -> String {
             out.push(' ');
         }
         match m {
-            MatchStatement::Simple { pattern, .. } => {
+            MatchStatement::Simple { pattern } => {
                 if i > 0 {
                     out.push_str("MATCH ");
                 }
                 out.push_str(&format!("{pattern}"));
             }
-            MatchStatement::Optional { pattern, .. } => {
+            MatchStatement::Optional { pattern } => {
                 out.push_str("OPTIONAL MATCH ");
                 out.push_str(&format!("{pattern}"));
             }

@@ -364,33 +364,30 @@ impl Parser {
         Ok(pattern)
     }
 
-    /// Parse one MATCH clause's body: an optional `<path pattern prefix>`
-    /// followed by the pattern (and trailing WHERE). The MATCH /
-    /// OPTIONAL MATCH keywords are consumed by the caller, which passes
-    /// the resulting `optional` flag.
+    /// Parse one MATCH clause's body. `<path pattern prefix>` nodes are
+    /// parsed inside `query()`, per comma operand; the MATCH / OPTIONAL MATCH
+    /// keywords are consumed by the caller, which passes the `optional` flag.
     fn match_statement(&mut self, optional: bool) -> Result<MatchStatement, String> {
-        let prefix = self.parse_path_prefix()?;
         let pattern = self.match_clause_body()?;
         Ok(if optional {
-            MatchStatement::Optional { prefix, pattern }
+            MatchStatement::Optional { pattern }
         } else {
-            MatchStatement::Simple { prefix, pattern }
+            MatchStatement::Simple { pattern }
         })
     }
 
-    /// ISO §16.6 `<path pattern prefix>`. Parsed at the very start of a
-    /// MATCH clause's pattern (after the `MATCH` / `OPTIONAL MATCH`
-    /// keyword). Returns `None` when no prefix is present *or* when the
-    /// prefix reduces to the implicit `WALK ALL` (which imposes no
-    /// restriction), so the rest of the pipeline only ever sees
-    /// meaningful prefixes.
+    /// ISO §16.6 `<path pattern prefix>`. Parsed at the start of each
+    /// `<path pattern>` comma operand. Returns `None` when no prefix is
+    /// present *or* when the prefix reduces to the implicit `WALK ALL`
+    /// (which imposes no restriction), so the rest of the pipeline only
+    /// ever sees meaningful prefixes.
     ///
     /// Disambiguation: a `<path pattern>` never begins with a name or a
     /// `*` token — it starts with `(`, an edge token (`-[`, `<-`, `~`,
     /// `-`, ...), so a leading WALK / TRAIL / SIMPLE / ACYCLIC / ALL /
     /// ANY / SHORTEST is unambiguously the start of a prefix. Note `ALL`
-    /// lexes to `Token::All` and `ANY` lexes to `Token::Star` (the type
-    /// wildcard); neither can legally open a pattern.
+    /// lexes to `Token::All`, while canonical uppercase `ANY` lexes to
+    /// `Token::Star` (the type wildcard); neither can legally open a pattern.
     fn parse_path_prefix(&mut self) -> Result<Option<PathPrefix>, String> {
         let prefix = if self.eat(&Token::All) {
             // ALL [SHORTEST] [<mode>] [PATH|PATHS]
@@ -410,8 +407,8 @@ impl Parser {
                     search: PathSearch::All,
                 }
             }
-        } else if self.eat(&Token::Star) {
-            // ANY (lexed as `*`): ANY [SHORTEST | <number>] [<mode>] [PATH|PATHS]
+        } else if self.eat_any_path_prefix() {
+            // ANY: ANY [SHORTEST | <number>] [<mode>] [PATH|PATHS]
             if self.eat_keyword("SHORTEST") {
                 let mode = self.eat_path_mode().unwrap_or(PathMode::Walk);
                 self.eat_path_or_paths();
@@ -430,10 +427,11 @@ impl Parser {
                 }
             }
         } else if self.eat_keyword("SHORTEST") {
-            // SHORTEST <number> [<mode>] [PATH|PATHS]    (counted shortest path)
-            // SHORTEST [<number>] [<mode>] {GROUP|GROUPS}(counted shortest group)
+            // SHORTEST <number> [<mode>] [PATH|PATHS]                  (counted shortest path)
+            // SHORTEST [<number>] [<mode>] [PATH|PATHS] {GROUP|GROUPS} (counted shortest group)
             let count = self.eat_path_count()?;
             let mode = self.eat_path_mode().unwrap_or(PathMode::Walk);
+            self.eat_path_or_paths();
             if self.eat_keyword("GROUP") || self.eat_keyword("GROUPS") {
                 PathPrefix {
                     mode,
@@ -447,7 +445,6 @@ impl Parser {
                      or the GROUP / GROUPS keyword"
                         .to_string()
                 })?;
-                self.eat_path_or_paths();
                 PathPrefix {
                     mode,
                     search: PathSearch::ShortestPaths { count },
@@ -481,6 +478,16 @@ impl Parser {
             self.advance();
         }
         matched
+    }
+
+    /// `ANY` is lexed as `Token::Star` in its canonical uppercase form for
+    /// historical type-wildcard compatibility. Treat lowercase/mixed-case
+    /// `any` as a soft keyword only in path-prefix position.
+    fn eat_any_path_prefix(&mut self) -> bool {
+        if self.eat(&Token::Star) {
+            return true;
+        }
+        self.eat_keyword("ANY")
     }
 
     /// ISO §16.6 `<path mode>` keyword (WALK/TRAIL/SIMPLE/ACYCLIC), consumed
@@ -680,14 +687,33 @@ impl Parser {
 
     // ===== Queries (comma-join level) =====
 
-    // query = path_pattern ("," path_pattern)*
+    // ISO §16.4 `<path pattern list>` = `<path pattern> ("," <path pattern>)*`.
+    // Each `<path pattern>` may carry its own `<path pattern prefix>`
+    // (§16.6), so the prefix is parsed per comma-operand, not once for the
+    // whole clause.
     fn query(&mut self) -> Result<PathPattern, String> {
-        let mut left = self.path_pattern()?;
+        let mut left = self.path_pattern_operand()?;
         while self.eat(&Token::Comma) {
-            let right = self.path_pattern()?;
+            let right = self.path_pattern_operand()?;
             left = PathPattern::Join(Box::new(left), Box::new(right));
         }
         Ok(left)
+    }
+
+    /// One ISO §16.6 `<path pattern>`: an optional `<path pattern prefix>`
+    /// followed by a `<path pattern expression>`. A meaningful prefix wraps
+    /// the expression in `PathPattern::Selected`; the implicit `WALK ALL`
+    /// (which `parse_path_prefix` returns as `None`) leaves it bare.
+    fn path_pattern_operand(&mut self) -> Result<PathPattern, String> {
+        let prefix = self.parse_path_prefix()?;
+        let pattern = self.path_pattern()?;
+        Ok(match prefix {
+            Some(prefix) => PathPattern::Selected {
+                prefix,
+                pattern: Box::new(pattern),
+            },
+            None => pattern,
+        })
     }
 
     // ===== Path patterns =====

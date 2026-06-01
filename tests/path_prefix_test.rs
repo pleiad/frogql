@@ -9,7 +9,29 @@ use gqlrust::model::graph::MemoryGraphStore;
 use gqlrust::model::value::Value;
 use gqlrust::runtime::engine::Runtime;
 use gqlrust::runtime::result::QueryResult;
-use gqlrust::syntax::path_prefix::{PathMode, PathSearch};
+use gqlrust::syntax::path_pattern::PathPattern;
+use gqlrust::syntax::path_prefix::{PathMode, PathPrefix, PathSearch};
+use gqlrust::syntax::query::Query;
+
+/// The `<path pattern prefix>` carried by the first `Selected` node in the
+/// first match's pattern (ISO §16.6 attaches the prefix to a `<path
+/// pattern>`, modeled as `PathPattern::Selected`). `None` when the pattern
+/// has no prefix (the implicit `WALK ALL`).
+fn first_prefix(q: &Query) -> Option<PathPrefix> {
+    fn find(p: &PathPattern) -> Option<PathPrefix> {
+        match p {
+            PathPattern::Selected { prefix, .. } => Some(*prefix),
+            PathPattern::Filter(inner, _)
+            | PathPattern::Questioned(inner)
+            | PathPattern::Repeat { pattern: inner, .. } => find(inner),
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                find(a).or_else(|| find(b))
+            }
+            _ => None,
+        }
+    }
+    find(q.matches[0].pattern())
+}
 
 // =====================================================================
 // Fixtures
@@ -113,26 +135,25 @@ fn sorted_names(rows: &[Vec<Value>]) -> Vec<String> {
 #[test]
 fn parses_bare_path_mode() {
     let q = compile_query_unchecked("MATCH ACYCLIC (a)-[]->{1,3}(b) RETURN a").unwrap();
-    let prefix = q.matches[0]
-        .prefix()
-        .expect("ACYCLIC is a non-trivial prefix");
+    let prefix = first_prefix(&q).expect("ACYCLIC is a non-trivial prefix");
     assert_eq!(prefix.mode, PathMode::Acyclic);
     assert_eq!(prefix.search, PathSearch::All);
 }
 
 #[test]
 fn walk_all_is_trivial_and_dropped() {
-    // The implicit `WALK ALL` constrains nothing, so the parser stores None.
+    // The implicit `WALK ALL` constrains nothing, so the parser stores no
+    // `Selected` wrapper.
     let q = compile_query_unchecked("MATCH WALK (a)-[]->(b) RETURN a").unwrap();
-    assert!(q.matches[0].prefix().is_none());
+    assert!(first_prefix(&q).is_none());
     let q2 = compile_query_unchecked("MATCH ALL (a)-[]->(b) RETURN a").unwrap();
-    assert!(q2.matches[0].prefix().is_none());
+    assert!(first_prefix(&q2).is_none());
 }
 
 #[test]
 fn parses_counted_shortest_path() {
     let q = compile_query_unchecked("MATCH SHORTEST 2 (a)-[]->{1,3}(b) RETURN a").unwrap();
-    let prefix = q.matches[0].prefix().unwrap();
+    let prefix = first_prefix(&q).unwrap();
     assert_eq!(prefix.mode, PathMode::Walk);
     assert_eq!(prefix.search, PathSearch::ShortestPaths { count: 2 });
 }
@@ -141,8 +162,18 @@ fn parses_counted_shortest_path() {
 fn parses_all_shortest_as_one_group() {
     let q = compile_query_unchecked("MATCH ALL SHORTEST (a)-[]->{1,3}(b) RETURN a").unwrap();
     assert_eq!(
-        q.matches[0].prefix().unwrap().search,
+        first_prefix(&q).unwrap().search,
         PathSearch::ShortestGroups { count: 1 }
+    );
+}
+
+#[test]
+fn parses_counted_shortest_group_with_path_noise_word() {
+    let q =
+        compile_query_unchecked("MATCH SHORTEST 2 PATHS GROUPS (a)-[]->{1,3}(b) RETURN a").unwrap();
+    assert_eq!(
+        first_prefix(&q).unwrap().search,
+        PathSearch::ShortestGroups { count: 2 }
     );
 }
 
@@ -150,7 +181,7 @@ fn parses_all_shortest_as_one_group() {
 fn parses_any_shortest_as_one_path() {
     let q = compile_query_unchecked("MATCH ANY SHORTEST (a)-[]->{1,3}(b) RETURN a").unwrap();
     assert_eq!(
-        q.matches[0].prefix().unwrap().search,
+        first_prefix(&q).unwrap().search,
         PathSearch::ShortestPaths { count: 1 }
     );
 }
@@ -158,9 +189,18 @@ fn parses_any_shortest_as_one_path() {
 #[test]
 fn parses_any_with_count_and_mode() {
     let q = compile_query_unchecked("MATCH ANY 3 TRAIL (a)-[]->{1,3}(b) RETURN a").unwrap();
-    let prefix = q.matches[0].prefix().unwrap();
+    let prefix = first_prefix(&q).unwrap();
     assert_eq!(prefix.mode, PathMode::Trail);
     assert_eq!(prefix.search, PathSearch::Any { count: 3 });
+}
+
+#[test]
+fn parses_lowercase_any_as_path_prefix_soft_keyword() {
+    let q = compile_query_unchecked("MATCH any shortest (a)-[]->{1,3}(b) RETURN a").unwrap();
+    assert_eq!(
+        first_prefix(&q).unwrap().search,
+        PathSearch::ShortestPaths { count: 1 }
+    );
 }
 
 #[test]
@@ -173,6 +213,43 @@ fn shortest_without_count_or_groups_is_an_error() {
 fn zero_count_is_rejected() {
     let err = compile_query_unchecked("MATCH ANY 0 (a)-[]->(b) RETURN a").unwrap_err();
     assert!(err.contains("positive"), "got: {err}");
+}
+
+#[test]
+fn leading_prefix_binds_only_the_first_comma_operand() {
+    // ISO §16.6: a `<path pattern prefix>` belongs to a single
+    // `<path pattern>` of the `<path pattern list>`. A leading prefix
+    // therefore decorates ONLY the first comma-operand, never the whole
+    // clause — the structural distinction from the old per-clause model.
+    let q =
+        compile_query_unchecked("MATCH SHORTEST 1 (a)-[]->{1,3}(b), (b)-[]->(c) RETURN a").unwrap();
+    let PathPattern::Join(left, right) = q.matches[0].pattern() else {
+        panic!("expected a comma-join at the top of the clause pattern");
+    };
+    assert!(
+        matches!(**left, PathPattern::Selected { .. }),
+        "the first operand carries the SHORTEST prefix"
+    );
+    assert!(
+        !right.has_selected(),
+        "the prefix must NOT span the list — the second operand stays bare"
+    );
+}
+
+#[test]
+fn prefix_binds_to_its_own_comma_operand() {
+    // The prefix may sit on any operand: here it decorates the SECOND
+    // `<path pattern>` while the first stays bare.
+    let q =
+        compile_query_unchecked("MATCH (a)-[]->(b), SHORTEST 1 (b)-[]->{1,3}(c) RETURN a").unwrap();
+    let PathPattern::Join(left, right) = q.matches[0].pattern() else {
+        panic!("expected a comma-join at the top of the clause pattern");
+    };
+    assert!(!left.has_selected(), "the first operand is bare");
+    assert!(
+        matches!(**right, PathPattern::Selected { .. }),
+        "the second operand carries the SHORTEST prefix"
+    );
 }
 
 // =====================================================================
@@ -198,6 +275,15 @@ fn shortest_one_keeps_only_the_short_route() {
         "MATCH SHORTEST 1 (s)-[]->{1,3}(t) WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
     );
     assert_eq!(rows.len(), 1, "SHORTEST 1 keeps only the length-2 route");
+}
+
+#[test]
+fn raw_runtime_limit_is_honored_after_selected_pattern() {
+    let g = graph_two_routes();
+    let rt = Runtime::new(&g);
+    let q = compile_query("MATCH SHORTEST 2 (s)-[]->{1,3}(t) RETURN s.name").unwrap();
+    let ir = rt.run_with_limit(q.matches[0].pattern(), 1);
+    assert_eq!(ir.rows.len(), 1);
 }
 
 #[test]

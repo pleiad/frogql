@@ -4,13 +4,13 @@
 //! fppc's `Typechecker` / `TypecheckResult`; the differences are documented
 //! in `docs/internals/typechecker_migration.md`.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::path_prefix::{PathSearch, UnboundedSupport};
+use crate::syntax::path_prefix::{PathPrefix, PathSearch, UnboundedSupport};
 use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem, SortKey, SortSpec};
 
 use super::descriptor_type::DescriptorType;
@@ -169,81 +169,116 @@ impl Typechecker {
     /// is unaffected: it materializes a finite set and needs no prefix.
     fn check_unbounded_repetition(&mut self, q: &Query) {
         for m in &q.matches {
-            let lbs = m.pattern().unbounded_repeat_lbs();
-            if lbs.is_empty() {
-                continue;
-            }
-            match m.prefix().and_then(|p| p.unbounded_support()) {
-                None => self.errors.push(
-                    "Unbounded repetition (`*`, `+`, `{n,}`) is only supported under a \
-                     single-shortest path search prefix (`ANY SHORTEST`, `ALL SHORTEST`, \
-                     `SHORTEST 1`) or a restrictive path mode (`ACYCLIC`, `SIMPLE`, \
-                     `TRAIL`). Bounded repetition `{n,m}` works without any prefix."
-                        .to_string(),
-                ),
-                Some(UnboundedSupport::Shortest { .. }) => {
-                    if lbs.iter().any(|&lb| lb > 1) {
-                        self.errors.push(
-                            "SHORTEST over unbounded repetition supports `*` and `+` only; \
-                             `{n,}` with n >= 2 needs a restrictive path mode (`ACYCLIC` / \
-                             `SIMPLE` / `TRAIL`) instead."
-                                .to_string(),
-                        );
-                    }
-                }
-                // A restrictive mode bounds enumeration by |V| / |E|, so
-                // any lower bound is fine.
-                Some(UnboundedSupport::Mode(_)) => {}
-            }
+            self.check_unbounded_in(m.pattern(), None);
         }
     }
 
-    /// ISO §16.6 SR 5–8: a *selective* `<path pattern>` (one with a
-    /// search prefix other than `ALL` — i.e. `ANY` / `SHORTEST`) must be
+    /// Walk `p` looking for unbounded repetitions, carrying the prefix of
+    /// the nearest enclosing `Selected` node (`None` at the top, i.e. the
+    /// implicit `WALK ALL`). Each unbounded `Repeat` is validated against
+    /// that prefix's [`PathPrefix::unbounded_support`].
+    fn check_unbounded_in(&mut self, p: &PathPattern, prefix: Option<PathPrefix>) {
+        match p {
+            PathPattern::Selected {
+                prefix: pp,
+                pattern,
+            } => self.check_unbounded_in(pattern, Some(*pp)),
+            PathPattern::Repeat { pattern, lb, ub } => {
+                if ub.is_none() {
+                    self.validate_unbounded(*lb, prefix);
+                }
+                self.check_unbounded_in(pattern, prefix);
+            }
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                self.check_unbounded_in(a, prefix);
+                self.check_unbounded_in(b, prefix);
+            }
+            PathPattern::Filter(inner, _) | PathPattern::Questioned(inner) => {
+                self.check_unbounded_in(inner, prefix)
+            }
+            PathPattern::Node(_)
+            | PathPattern::EdgeRight(_)
+            | PathPattern::EdgeLeft(_)
+            | PathPattern::EdgeUndirected(_)
+            | PathPattern::EdgeAnyDirection(_) => {}
+        }
+    }
+
+    fn validate_unbounded(&mut self, lb: usize, prefix: Option<PathPrefix>) {
+        match prefix.and_then(|p| p.unbounded_support()) {
+            None => self.errors.push(
+                "Unbounded repetition (`*`, `+`, `{n,}`) is only supported under a \
+                 single-shortest path search prefix (`ANY SHORTEST`, `ALL SHORTEST`, \
+                 `SHORTEST 1`) or a restrictive path mode (`ACYCLIC`, `SIMPLE`, \
+                 `TRAIL`). Bounded repetition `{n,m}` works without any prefix."
+                    .to_string(),
+            ),
+            Some(UnboundedSupport::Shortest { .. }) => {
+                if lb > 1 {
+                    self.errors.push(
+                        "SHORTEST over unbounded repetition supports `*` and `+` only; \
+                         `{n,}` with n >= 2 needs a restrictive path mode (`ACYCLIC` / \
+                         `SIMPLE` / `TRAIL`) instead."
+                            .to_string(),
+                    );
+                }
+            }
+            // A restrictive mode bounds enumeration by |V| / |E|, so
+            // any lower bound is fine.
+            Some(UnboundedSupport::Mode(_)) => {}
+        }
+    }
+
+    /// ISO §16.6 SR 5–8: a *selective* `<path pattern>` (one whose search
+    /// prefix is other than `ALL` — i.e. `ANY` / `SHORTEST`) must be
     /// evaluable in isolation (NOTE 233). Its *strict interior* variables
     /// (everything it exposes except its left/right boundary node
     /// variables, SR 5) must not be equivalent to an exterior variable or
     /// to an interior variable of another selective pattern (SR 7).
     ///
-    /// gqlite carries the prefix on the whole MATCH clause (the documented
-    /// per-clause, not per-comma-operand, deviation), so a "selective
-    /// `<path pattern>`" is a selective clause and the rule becomes: a
-    /// selective clause's strict interior variable must not appear in any
-    /// other clause — only its boundary (endpoint) variables may join.
+    /// With the prefix carried per `<path pattern>` ([`PathPattern::Selected`]),
+    /// a selective pattern is exactly such a node. The rule becomes: a
+    /// strict interior variable of a `Selected` node must not occur
+    /// anywhere outside that node — only its boundary (endpoint) variables
+    /// may join. We test this by counting variable occurrences across the
+    /// whole query (`global`) versus inside the node (`local`): a strict
+    /// interior variable `v` is shared iff `global[v] > local[v]`.
     fn check_selective_isolation(&mut self, q: &Query) {
-        let clause_vars: Vec<HashSet<String>> =
-            q.matches.iter().map(|m| m.pattern().freevars()).collect();
+        let mut global: HashMap<String, usize> = HashMap::new();
+        for m in &q.matches {
+            count_var_occurrences(m.pattern(), &mut global);
+        }
 
-        for (i, m) in q.matches.iter().enumerate() {
-            let is_selective =
-                matches!(m.prefix().map(|p| p.search), Some(s) if s != PathSearch::All);
-            if !is_selective {
+        let mut selected: Vec<&PathPattern> = Vec::new();
+        for m in &q.matches {
+            collect_selected(m.pattern(), &mut selected);
+        }
+
+        for s in selected {
+            let PathPattern::Selected { prefix, pattern } = s else {
+                continue;
+            };
+            // Only *selective* patterns are constrained; a restrictive
+            // mode-only prefix (search == ALL) is not.
+            if prefix.search == PathSearch::All {
                 continue;
             }
 
-            // Strict interior = all exposed variables minus the boundary
-            // (first/last top-depth node) variables (SR 5b–5d).
-            let (left, right) = boundary_node_vars(m.pattern());
-            let mut interior = clause_vars[i].clone();
-            if let Some(v) = &left {
-                interior.remove(v);
-            }
-            if let Some(v) = &right {
-                interior.remove(v);
-            }
+            let (left, right) = boundary_node_vars(pattern);
+            let mut local: HashMap<String, usize> = HashMap::new();
+            count_var_occurrences(pattern, &mut local);
 
-            let mut elsewhere: HashSet<String> = HashSet::new();
-            for (j, vs) in clause_vars.iter().enumerate() {
-                if j != i {
-                    elsewhere.extend(vs.iter().cloned());
-                }
-            }
+            let mut shared: Vec<String> = local
+                .iter()
+                .filter(|(v, _)| Some(*v) != left.as_ref() && Some(*v) != right.as_ref())
+                .filter(|(v, &lc)| global.get(*v).copied().unwrap_or(0) > lc)
+                .map(|(v, _)| v.clone())
+                .collect();
 
-            let mut shared: Vec<String> = interior.intersection(&elsewhere).cloned().collect();
             if !shared.is_empty() {
                 shared.sort();
                 self.errors.push(format!(
-                    "Selective path pattern (a SHORTEST/ANY MATCH clause) shares interior \
+                    "Selective path pattern (a SHORTEST/ANY pattern) shares interior \
                      variable(s) `{}` with the rest of the query. ISO §16.6 SR 7 requires a \
                      selective pattern to be evaluable in isolation: only its boundary \
                      (endpoint) variables may join other patterns. Rename the interior \
@@ -450,6 +485,13 @@ impl Typechecker {
                     TypeEnvironment::union(&r1.env, &r2.env),
                 )
             }
+
+            // A `<path pattern prefix>` (mode / search) filters which paths
+            // survive; it does not change the *types* of the variables the
+            // inner pattern exposes. Type-check the inner and pass its
+            // result through unchanged (over-approximating non-emptiness, as
+            // the prefix can only shrink the row set).
+            PathPattern::Selected { pattern, .. } => self.check_path_pattern(pattern),
 
             PathPattern::Repeat {
                 pattern,
@@ -1061,7 +1103,60 @@ fn collect_top_node_vars(p: &PathPattern, out: &mut Vec<String>) {
         | PathPattern::Repeat { .. }
         | PathPattern::Questioned(_)
         | PathPattern::Union(_, _)
-        | PathPattern::Join(_, _) => {}
+        | PathPattern::Join(_, _)
+        | PathPattern::Selected { .. } => {}
+    }
+}
+
+/// Count how many times each element variable is *declared* (by a node or
+/// edge pattern) across `p`. Recurses through every structural variant,
+/// including into `Selected`, so a variable that occurs both inside and
+/// outside a selective node is counted in both. WHERE-clause references
+/// are ignored (consistent with `freevars`).
+fn count_var_occurrences(p: &PathPattern, out: &mut HashMap<String, usize>) {
+    let bump = |d: &Option<Descriptor>, out: &mut HashMap<String, usize>| {
+        if let Some(v) = d.as_ref().and_then(|d| d.var.clone()) {
+            *out.entry(v).or_insert(0) += 1;
+        }
+    };
+    match p {
+        PathPattern::Node(d)
+        | PathPattern::EdgeRight(d)
+        | PathPattern::EdgeLeft(d)
+        | PathPattern::EdgeUndirected(d)
+        | PathPattern::EdgeAnyDirection(d) => bump(d, out),
+        PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+            count_var_occurrences(a, out);
+            count_var_occurrences(b, out);
+        }
+        PathPattern::Filter(inner, _)
+        | PathPattern::Questioned(inner)
+        | PathPattern::Repeat { pattern: inner, .. }
+        | PathPattern::Selected { pattern: inner, .. } => count_var_occurrences(inner, out),
+    }
+}
+
+/// Collect every `Selected` node reachable from `p` (a selective or
+/// restrictive `<path pattern>`), descending through structural variants
+/// so nested selective patterns are also found.
+fn collect_selected<'a>(p: &'a PathPattern, out: &mut Vec<&'a PathPattern>) {
+    match p {
+        PathPattern::Selected { pattern, .. } => {
+            out.push(p);
+            collect_selected(pattern, out);
+        }
+        PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+            collect_selected(a, out);
+            collect_selected(b, out);
+        }
+        PathPattern::Filter(inner, _)
+        | PathPattern::Questioned(inner)
+        | PathPattern::Repeat { pattern: inner, .. } => collect_selected(inner, out),
+        PathPattern::Node(_)
+        | PathPattern::EdgeRight(_)
+        | PathPattern::EdgeLeft(_)
+        | PathPattern::EdgeUndirected(_)
+        | PathPattern::EdgeAnyDirection(_) => {}
     }
 }
 
