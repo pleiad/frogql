@@ -23,8 +23,42 @@ use super::cmp_values;
 use super::ltj::pattern_extract;
 use super::ltj::triple_index::TripleIndex;
 use super::path_select::apply_path_prefix;
+use super::path_select::path_satisfies_mode;
 use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
-use crate::syntax::path_prefix::{PathPrefix, PathSearch};
+use crate::syntax::path_prefix::{PathMode, PathPrefix, UnboundedSupport};
+
+/// How a MATCH clause's prefix licenses *unbounded* repetition
+/// (`Repeat { ub: None }` — i.e. `*`, `+`, `{n,}`). Under the default
+/// WALK/ALL semantics an unbounded repeat over a cyclic graph is
+/// infinite; a prefix can make it finite in two distinct ways, each with
+/// its own evaluation strategy. Set per clause in `run_match_chain`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnboundedPolicy {
+    /// No prefix, or one that does not bound the search (e.g. plain WALK):
+    /// unbounded repetition stays infinite and is rejected by the
+    /// typechecker. Reaching the runtime in this state is a bug.
+    Forbidden,
+    /// Single-shortest search (`ANY SHORTEST` / `ALL SHORTEST` /
+    /// `SHORTEST 1`): evaluate by BFS shortest-reachability, bounded at
+    /// `|V|` levels.
+    Shortest,
+    /// A restrictive mode (`TRAIL` / `SIMPLE` / `ACYCLIC`) with a
+    /// non-shortest search: enumerate every path the mode admits, pruning
+    /// partial paths that already violate it. Finite because such paths
+    /// cannot repeat a node (≤ `|V|`) or an edge (≤ `|E|`).
+    Mode(PathMode),
+}
+
+/// Map a clause prefix to its unbounded-repetition policy. Defers the
+/// classification to [`PathPrefix::unbounded_support`] so the runtime and
+/// the typechecker gate agree.
+fn unbounded_policy_for(prefix: Option<PathPrefix>) -> UnboundedPolicy {
+    match prefix.and_then(|p| p.unbounded_support()) {
+        Some(UnboundedSupport::Shortest) => UnboundedPolicy::Shortest,
+        Some(UnboundedSupport::Mode(m)) => UnboundedPolicy::Mode(m),
+        None => UnboundedPolicy::Forbidden,
+    }
+}
 
 /// Apply value predicates pushed down by the optimizer to raw graph properties.
 /// Missing key → predicate is null → reject.
@@ -81,14 +115,12 @@ pub struct Runtime<'g, G: GraphAccess> {
     ///     those `keys` for every body row, so a per-outer-row probe
     ///     is one O(1) hash lookup. The body runs once per Runtime.
     exists_cache: RefCell<HashMap<usize, ExistsCache>>,
-    /// Set per MATCH clause from its path search prefix: `true` while
-    /// evaluating a clause whose prefix is a single-shortest search
-    /// (`ANY SHORTEST` / `ALL SHORTEST` / `SHORTEST 1`). It licenses the
-    /// `Repeat { ub: None }` arm to evaluate unbounded repetition by BFS
-    /// shortest-reachability. Every other clause leaves it `false`, and
-    /// the typechecker (`check_unbounded_repetition`) guarantees an
-    /// unbounded repeat only ever reaches the runtime with this set.
-    unbounded_shortest: Cell<bool>,
+    /// Set per MATCH clause from its path pattern prefix; tells the
+    /// `Repeat { ub: None }` arm how (or whether) it may evaluate
+    /// unbounded repetition. The typechecker
+    /// (`check_unbounded_repetition`) guarantees an unbounded repeat only
+    /// reaches the runtime when this is not `Forbidden`.
+    unbounded_policy: Cell<UnboundedPolicy>,
 }
 
 /// Cached evaluation result for an existential predicate.
@@ -110,7 +142,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             graph,
             triple_index: RefCell::new(None),
             exists_cache: RefCell::new(HashMap::new()),
-            unbounded_shortest: Cell::new(false),
+            unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
         }
     }
 
@@ -123,7 +155,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             graph,
             triple_index: RefCell::new(Some(idx)),
             exists_cache: RefCell::new(HashMap::new()),
-            unbounded_shortest: Cell::new(false),
+            unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
         }
     }
 
@@ -162,15 +194,15 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     pub fn run(&self, pattern: &PathPattern) -> IntermediateResult {
         self.exists_cache.borrow_mut().clear();
         // A raw pattern carries no clause prefix, so unbounded repetition
-        // (if any) has no SHORTEST license here.
-        self.unbounded_shortest.set(false);
+        // (if any) has no license here.
+        self.unbounded_policy.set(UnboundedPolicy::Forbidden);
         self.run_path_pattern(pattern, 0)
     }
 
     /// Run with a result limit (0 = unlimited). Stops early once limit is reached.
     pub fn run_with_limit(&self, pattern: &PathPattern, limit: usize) -> IntermediateResult {
         self.exists_cache.borrow_mut().clear();
-        self.unbounded_shortest.set(false);
+        self.unbounded_policy.set(UnboundedPolicy::Forbidden);
         self.run_path_pattern(pattern, limit)
     }
 
@@ -644,7 +676,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         // pattern prefix (the prefix is a per-clause selection over that
         // clause's boundary nodes, which a collapsed Join would erase).
         if !query.has_any_optional() && !query.has_any_prefix() {
-            self.unbounded_shortest.set(false);
+            self.unbounded_policy.set(UnboundedPolicy::Forbidden);
             return self.run_path_pattern(&query.collapsed_pattern(), limit);
         }
 
@@ -727,19 +759,16 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
     }
 
-    /// Set the unbounded-repetition license for the clause about to run.
-    /// Only a single-shortest search (`ANY SHORTEST` / `ALL SHORTEST` /
-    /// `SHORTEST 1`) makes `Repeat { ub: None }` finite via BFS; every
-    /// other prefix (or none) leaves it forbidden. Mirrors the
-    /// typechecker gate so the runtime never reaches an unsupported
-    /// unbounded repeat with the flag unset.
+    /// Set the unbounded-repetition license for the clause about to run,
+    /// from its prefix. Mirrors the typechecker gate
+    /// (`check_unbounded_repetition`) so the runtime never reaches an
+    /// unsupported unbounded repeat:
+    ///   - single-shortest search → BFS (`Shortest`);
+    ///   - restrictive mode (TRAIL/SIMPLE/ACYCLIC) with a non-shortest
+    ///     search → finite enumeration (`Mode`);
+    ///   - anything else → `Forbidden`.
     fn set_unbounded_policy(&self, prefix: Option<PathPrefix>) {
-        let allowed = matches!(
-            prefix.map(|p| p.search),
-            Some(PathSearch::ShortestPaths { count: 1 })
-                | Some(PathSearch::ShortestGroups { count: 1 })
-        );
-        self.unbounded_shortest.set(allowed);
+        self.unbounded_policy.set(unbounded_policy_for(prefix));
     }
 
     /// OPTIONAL MATCH bind-pushdown. The naive path evaluates the inner
@@ -1061,19 +1090,23 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
             PathPattern::Repeat { pattern, lb, ub } => match ub {
                 Some(ub) => self.run_repetition_range(pattern, *lb, *ub, limit),
-                None => {
-                    // Unbounded repetition is finite only under a single
-                    // SHORTEST search prefix, where BFS bounds the depth
-                    // at the node count. The typechecker rejects every
-                    // other unbounded form, so the flag is an invariant
-                    // here — assert rather than silently misanswer.
-                    assert!(
-                        self.unbounded_shortest.get(),
-                        "unbounded repetition reached the runtime without a SHORTEST \
+                None => match self.unbounded_policy.get() {
+                    // BFS shortest-reachability (bounded at |V| levels).
+                    UnboundedPolicy::Shortest => {
+                        self.run_repetition_bfs_shortest(pattern, *lb, limit)
+                    }
+                    // Finite enumeration of paths the mode admits.
+                    UnboundedPolicy::Mode(mode) => {
+                        self.run_repetition_unbounded_mode(pattern, *lb, mode, limit)
+                    }
+                    // Infinite under WALK/ALL; the typechecker
+                    // (`check_unbounded_repetition`) rejects this, so
+                    // reaching here is an invariant violation.
+                    UnboundedPolicy::Forbidden => panic!(
+                        "unbounded repetition reached the runtime without a finite-making \
                          prefix; this must be rejected by check_unbounded_repetition"
-                    );
-                    self.run_repetition_bfs_shortest(pattern, *lb, limit)
-                }
+                    ),
+                },
             },
             PathPattern::Questioned(inner) => {
                 let ir_empty = self.run_path_pattern(&PathPattern::Node(None), limit);
@@ -1883,6 +1916,95 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 }
             }
             frontier = next;
+        }
+
+        if limit > 0 && result.len() > limit {
+            result.truncate(limit);
+        }
+        IntermediateResult::new(result)
+    }
+
+    /// Unbounded repetition (`*`, `+`, `{n,}`) under a *restrictive* path
+    /// mode (`TRAIL` / `SIMPLE` / `ACYCLIC`) and a non-shortest search.
+    ///
+    /// Where WALK admits infinitely many laps around a cycle, a
+    /// restrictive mode forbids the very repetition that makes the set
+    /// infinite: TRAIL cannot reuse an edge (so length ≤ `|E|`), SIMPLE /
+    /// ACYCLIC cannot reuse a node (length ≤ `|V|`). The enumeration is a
+    /// worklist DFS over the inner pattern's step relation that prunes any
+    /// partial path the mode already rejects — once a path repeats a
+    /// forbidden element, no extension can repair it, so the surviving
+    /// frontier is finite and the search terminates.
+    ///
+    /// Every admitted path of repetition count ≥ `lb` is emitted; a
+    /// non-trivial search prefix (`ANY N`, `SHORTEST N`, …) is applied
+    /// afterwards in `apply_clause_prefix` as an ordinary selection over
+    /// this finite set.
+    fn run_repetition_unbounded_mode(
+        &self,
+        p: &PathPattern,
+        lb: usize,
+        mode: PathMode,
+        limit: usize,
+    ) -> IntermediateResult {
+        // `*` admits the length-0 match (a lone node), which trivially
+        // satisfies every mode.
+        let mut result: Vec<ResultRow> = if lb == 0 {
+            self.run_repetition_pattern(p, 0).rows
+        } else {
+            Vec::new()
+        };
+
+        let grouped = self.run_path_pattern(p, 0).to_group();
+        if grouped.rows.is_empty() {
+            if limit > 0 && result.len() > limit {
+                result.truncate(limit);
+            }
+            return IntermediateResult::new(result);
+        }
+
+        let mut grouped_by_first: HashMap<Id, Vec<usize>> = HashMap::new();
+        for (i, r) in grouped.rows.iter().enumerate() {
+            if let Some(first) = r.path().first_node_id() {
+                grouped_by_first.entry(first).or_default().push(i);
+            }
+        }
+
+        // Worklist of (partial path, repetition count). Seeded with the
+        // mode-satisfying single applications (level 1).
+        let mut worklist: Vec<(ResultRow, usize)> = Vec::new();
+        for r in &grouped.rows {
+            if path_satisfies_mode(r.path(), mode) {
+                if lb <= 1 {
+                    result.push(r.clone());
+                }
+                worklist.push((r.clone(), 1));
+            }
+        }
+
+        while let Some((row, reps)) = worklist.pop() {
+            if limit > 0 && result.len() >= limit {
+                break;
+            }
+            let Some(last) = row.path().last_node_id() else {
+                continue;
+            };
+            let Some(idxs) = grouped_by_first.get(&last) else {
+                continue;
+            };
+            for &idx in idxs {
+                let new_row = row.concat_group(&grouped.rows[idx]);
+                // Pruning on the *whole* extended path is what guarantees
+                // termination: a path that already repeats a node/edge is
+                // dropped and never extended further.
+                if path_satisfies_mode(new_row.path(), mode) {
+                    let new_reps = reps + 1;
+                    if new_reps >= lb {
+                        result.push(new_row.clone());
+                    }
+                    worklist.push((new_row, new_reps));
+                }
+            }
         }
 
         if limit > 0 && result.len() > limit {

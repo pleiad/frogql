@@ -59,6 +59,25 @@ pub struct PathPrefix {
     pub search: PathSearch,
 }
 
+/// How (if at all) a prefix makes *unbounded* repetition (`*`, `+`,
+/// `{n,}`) evaluable in finite time. Under the default WALK/ALL semantics
+/// an unbounded repeat over a cyclic graph is infinite; a prefix rescues
+/// it in one of two ways. Shared between the typechecker (which gates the
+/// feature) and the runtime (which dispatches the evaluator).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnboundedSupport {
+    /// Single-shortest search (`ANY SHORTEST` / `ALL SHORTEST` /
+    /// `SHORTEST 1`): evaluable by shortest-path BFS, but only for `*`
+    /// and `+` (lower bound ≤ 1).
+    Shortest,
+    /// A restrictive mode (`TRAIL` / `SIMPLE` / `ACYCLIC`): evaluable by
+    /// finite enumeration that prunes partial paths violating the mode.
+    /// Bounded by `|E|` (TRAIL) or `|V|` (SIMPLE/ACYCLIC), so any lower
+    /// bound is fine. A later non-trivial search (e.g. `SHORTEST 2`) is
+    /// then applied to that finite set as an ordinary selection.
+    Mode(PathMode),
+}
+
 impl PathPrefix {
     /// `WALK ALL` — the implicit prefix every plain pattern carries. When a
     /// parsed prefix reduces to this, it imposes no restriction and the
@@ -66,6 +85,26 @@ impl PathPrefix {
     /// materialize-and-filter pass entirely.
     pub fn is_trivial(&self) -> bool {
         self.mode == PathMode::Walk && self.search == PathSearch::All
+    }
+
+    /// Classify how this prefix licenses unbounded repetition. `None`
+    /// means it does not — the repeat stays infinite and must be
+    /// rejected. A single-shortest search wins over the mode (BFS is the
+    /// cheaper evaluator and its results already respect any restrictive
+    /// mode), so it is checked first.
+    pub fn unbounded_support(&self) -> Option<UnboundedSupport> {
+        if matches!(
+            self.search,
+            PathSearch::ShortestPaths { count: 1 } | PathSearch::ShortestGroups { count: 1 }
+        ) {
+            return Some(UnboundedSupport::Shortest);
+        }
+        match self.mode {
+            PathMode::Trail | PathMode::Simple | PathMode::Acyclic => {
+                Some(UnboundedSupport::Mode(self.mode))
+            }
+            PathMode::Walk => None,
+        }
     }
 }
 

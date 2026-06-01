@@ -61,7 +61,11 @@ fn row_satisfies_mode(row: &ResultRow, mode: PathMode) -> bool {
     row.paths.iter().all(|p| path_satisfies_mode(p, mode))
 }
 
-fn path_satisfies_mode(path: &crate::model::value::Path, mode: PathMode) -> bool {
+/// Whether a single path satisfies a restrictive path mode. Exposed to
+/// the engine so unbounded repetition under TRAIL / SIMPLE / ACYCLIC can
+/// prune partial paths *during* enumeration (which bounds the search to a
+/// finite set) instead of materializing-then-filtering.
+pub(crate) fn path_satisfies_mode(path: &crate::model::value::Path, mode: PathMode) -> bool {
     match mode {
         PathMode::Walk => true,
         PathMode::Trail => no_repeats(

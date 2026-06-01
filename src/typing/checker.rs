@@ -8,7 +8,7 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::path_prefix::PathSearch;
+use crate::syntax::path_prefix::UnboundedSupport;
 use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem, SortKey, SortSpec};
 
 use super::descriptor_type::DescriptorType;
@@ -152,43 +152,45 @@ impl Typechecker {
 
     /// ISO §16.6 + runtime gate: unbounded repetition (`*`, `+`, `{n,}`)
     /// has no finite answer set on a cyclic graph under the default
-    /// WALK/ALL semantics. The runtime can only evaluate it when the
-    /// clause carries a *single*-shortest path search prefix (`ANY
-    /// SHORTEST`, `ALL SHORTEST`, or `SHORTEST 1`), which it computes by
-    /// BFS shortest-reachability — terminating because a shortest path
-    /// never repeats a node. Reject every other unbounded form here with
-    /// an actionable message instead of letting the runtime panic.
+    /// WALK/ALL semantics. The runtime can evaluate it in two cases:
     ///
-    /// Bounded repetition `{n,m}` is unaffected: it materializes a finite
-    /// set and needs no prefix.
+    ///  - a *single*-shortest search prefix (`ANY SHORTEST`, `ALL
+    ///    SHORTEST`, `SHORTEST 1`) → BFS shortest-reachability, but only
+    ///    for `*` / `+` (lower bound ≤ 1);
+    ///  - a *restrictive* path mode (`ACYCLIC` / `SIMPLE` / `TRAIL`) →
+    ///    finite enumeration bounded by `|V|` / `|E|`, for any lower
+    ///    bound.
+    ///
+    /// Reject every other unbounded form here with an actionable message
+    /// instead of letting the runtime panic. Bounded repetition `{n,m}`
+    /// is unaffected: it materializes a finite set and needs no prefix.
     fn check_unbounded_repetition(&mut self, q: &Query) {
         for m in &q.matches {
             let lbs = m.pattern().unbounded_repeat_lbs();
             if lbs.is_empty() {
                 continue;
             }
-            let single_shortest = matches!(
-                m.prefix().map(|p| p.search),
-                Some(PathSearch::ShortestPaths { count: 1 })
-                    | Some(PathSearch::ShortestGroups { count: 1 })
-            );
-            if !single_shortest {
-                self.errors.push(
+            match m.prefix().and_then(|p| p.unbounded_support()) {
+                None => self.errors.push(
                     "Unbounded repetition (`*`, `+`, `{n,}`) is only supported under a \
-                     single-shortest path search prefix. Prefix the MATCH with \
-                     `ANY SHORTEST`, `ALL SHORTEST`, or `SHORTEST 1` so the engine can \
-                     compute it by shortest-path BFS. Bounded repetition `{n,m}` works \
-                     without any prefix."
+                     single-shortest path search prefix (`ANY SHORTEST`, `ALL SHORTEST`, \
+                     `SHORTEST 1`) or a restrictive path mode (`ACYCLIC`, `SIMPLE`, \
+                     `TRAIL`). Bounded repetition `{n,m}` works without any prefix."
                         .to_string(),
-                );
-                continue;
-            }
-            if lbs.iter().any(|&lb| lb > 1) {
-                self.errors.push(
-                    "SHORTEST over unbounded repetition currently supports `*` and `+` \
-                     only; `{n,}` with n >= 2 is not yet implemented."
-                        .to_string(),
-                );
+                ),
+                Some(UnboundedSupport::Shortest) => {
+                    if lbs.iter().any(|&lb| lb > 1) {
+                        self.errors.push(
+                            "SHORTEST over unbounded repetition supports `*` and `+` only; \
+                             `{n,}` with n >= 2 needs a restrictive path mode (`ACYCLIC` / \
+                             `SIMPLE` / `TRAIL`) instead."
+                                .to_string(),
+                        );
+                    }
+                }
+                // A restrictive mode bounds enumeration by |V| / |E|, so
+                // any lower bound is fine.
+                Some(UnboundedSupport::Mode(_)) => {}
             }
         }
     }

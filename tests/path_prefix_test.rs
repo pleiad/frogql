@@ -65,6 +65,19 @@ fn run_projected(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
     }
 }
 
+/// Sorted first-column string values of a projected result.
+fn sorted_names(rows: &[Vec<Value>]) -> Vec<String> {
+    let mut names: Vec<String> = rows
+        .iter()
+        .map(|r| match &r[0] {
+            Value::Str(s) => s.clone(),
+            other => panic!("expected Str, got {other:?}"),
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 // =====================================================================
 // Parser — AST shape
 // =====================================================================
@@ -291,13 +304,91 @@ fn shortest_plus_reaches_every_node_once() {
         &g,
         "MATCH ANY SHORTEST (s)-[]->+(t) WHERE s.name = 'X' RETURN t.name",
     );
-    let mut names: Vec<String> = rows
-        .iter()
-        .map(|r| match &r[0] {
-            Value::Str(s) => s.clone(),
-            other => panic!("expected Str, got {other:?}"),
-        })
-        .collect();
-    names.sort();
-    assert_eq!(names, vec!["X", "Y", "Z"]);
+    assert_eq!(sorted_names(&rows), vec!["X", "Y", "Z"]);
+}
+
+// =====================================================================
+// Unbounded repetition (`*` / `+` / `{n,}`) under a restrictive mode
+// (ACYCLIC / SIMPLE / TRAIL) — finite enumeration, no SHORTEST needed
+// =====================================================================
+
+#[test]
+fn acyclic_plus_enumerates_simple_paths_and_terminates() {
+    // ACYCLIC forbids repeating a node, so on the X→Y→Z→X triangle the
+    // closing hop back to X is excluded. From X, `+` yields X→Y and
+    // X→Y→Z only — finite, and it must not hang on the cycle.
+    let g = graph_triangle();
+    let rows = run_projected(
+        &g,
+        "MATCH ACYCLIC (s)-[]->+(t) WHERE s.name = 'X' RETURN t.name",
+    );
+    assert_eq!(sorted_names(&rows), vec!["Y", "Z"]);
+}
+
+#[test]
+fn simple_plus_allows_the_closing_cycle() {
+    // SIMPLE permits first == last, so the closed triangle X→Y→Z→X
+    // survives in addition to the open prefixes.
+    let g = graph_triangle();
+    let rows = run_projected(
+        &g,
+        "MATCH SIMPLE (s)-[]->+(t) WHERE s.name = 'X' RETURN t.name",
+    );
+    assert_eq!(sorted_names(&rows), vec!["X", "Y", "Z"]);
+}
+
+#[test]
+fn trail_plus_walks_every_edge_once() {
+    // TRAIL forbids reusing an edge; the triangle's three edges form one
+    // closed trail X→Y→Z→X, so X reaches Y, Z and itself.
+    let g = graph_triangle();
+    let rows = run_projected(
+        &g,
+        "MATCH TRAIL (s)-[]->+(t) WHERE s.name = 'X' RETURN t.name",
+    );
+    assert_eq!(sorted_names(&rows), vec!["X", "Y", "Z"]);
+}
+
+#[test]
+fn acyclic_star_keeps_every_simple_route() {
+    // Unlike SHORTEST, ACYCLIC `*` keeps *all* simple A→D routes:
+    // A→B→D (len 2) and A→C→E→D (len 3).
+    let g = graph_two_routes();
+    let rows = run_projected(
+        &g,
+        "MATCH ACYCLIC (s)-[]->*(t) WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
+    );
+    assert_eq!(rows.len(), 2, "ACYCLIC keeps both simple A→D routes");
+}
+
+#[test]
+fn lower_bounded_unbounded_is_allowed_under_a_mode() {
+    // `{2,}` is infinite under WALK but finite under a restrictive mode,
+    // so the typechecker must accept it (it rejected it under SHORTEST).
+    assert!(compile_query("MATCH ACYCLIC (s)-[]->{2,}(t) RETURN s.name").is_ok());
+}
+
+#[test]
+fn counted_shortest_over_unbounded_works_with_a_mode() {
+    // SHORTEST 2 alone is rejected over `+`, but combined with ACYCLIC
+    // the engine enumerates the finite simple-path set first and then
+    // applies the SHORTEST 2 selection. Both A→D routes (len 2 and 3)
+    // are the two shortest, so both survive.
+    let g = graph_two_routes();
+    let rows = run_projected(
+        &g,
+        "MATCH SHORTEST 2 ACYCLIC (s)-[]->+(t) WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
+    );
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn unbounded_without_shortest_or_mode_is_rejected() {
+    // Bare WALK `*` has neither a single-shortest search nor a
+    // restrictive mode, so it stays infinite and is rejected.
+    let err = compile_query("MATCH WALK (s)-[]->*(t) RETURN s.name").unwrap_err();
+    assert!(
+        err.to_uppercase().contains("ACYCLIC") || err.to_uppercase().contains("SHORTEST"),
+        "got: {err}"
+    );
 }
