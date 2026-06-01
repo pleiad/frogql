@@ -63,6 +63,39 @@ impl PathPattern {
             _ => None,
         }
     }
+
+    /// Collect the lower bounds of every *unbounded* repetition (`ub ==
+    /// None`, i.e. `*`, `+`, `{n,}`) anywhere in this pattern. An empty
+    /// result means the pattern is fully bounded. The typechecker uses
+    /// this to gate unbounded repetition behind a single-SHORTEST search
+    /// prefix (the only form the BFS runtime can evaluate in finite time
+    /// on cyclic graphs) and to reject `{n,}` with `n >= 2`.
+    pub fn unbounded_repeat_lbs(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        self.collect_unbounded_lbs(&mut out);
+        out
+    }
+
+    fn collect_unbounded_lbs(&self, out: &mut Vec<usize>) {
+        match self {
+            PathPattern::Node(_)
+            | PathPattern::EdgeRight(_)
+            | PathPattern::EdgeLeft(_)
+            | PathPattern::EdgeUndirected(_)
+            | PathPattern::EdgeAnyDirection(_) => {}
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                a.collect_unbounded_lbs(out);
+                b.collect_unbounded_lbs(out);
+            }
+            PathPattern::Filter(p, _) | PathPattern::Questioned(p) => p.collect_unbounded_lbs(out),
+            PathPattern::Repeat { pattern, lb, ub } => {
+                if ub.is_none() {
+                    out.push(*lb);
+                }
+                pattern.collect_unbounded_lbs(out);
+            }
+        }
+    }
 }
 
 impl fmt::Display for PathPattern {

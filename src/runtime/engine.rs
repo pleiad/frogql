@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use super::ltj::pattern_extract;
 use super::ltj::triple_index::TripleIndex;
 use super::path_select::apply_path_prefix;
 use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
-use crate::syntax::path_prefix::PathPrefix;
+use crate::syntax::path_prefix::{PathPrefix, PathSearch};
 
 /// Apply value predicates pushed down by the optimizer to raw graph properties.
 /// Missing key → predicate is null → reject.
@@ -81,6 +81,14 @@ pub struct Runtime<'g, G: GraphAccess> {
     ///     those `keys` for every body row, so a per-outer-row probe
     ///     is one O(1) hash lookup. The body runs once per Runtime.
     exists_cache: RefCell<HashMap<usize, ExistsCache>>,
+    /// Set per MATCH clause from its path search prefix: `true` while
+    /// evaluating a clause whose prefix is a single-shortest search
+    /// (`ANY SHORTEST` / `ALL SHORTEST` / `SHORTEST 1`). It licenses the
+    /// `Repeat { ub: None }` arm to evaluate unbounded repetition by BFS
+    /// shortest-reachability. Every other clause leaves it `false`, and
+    /// the typechecker (`check_unbounded_repetition`) guarantees an
+    /// unbounded repeat only ever reaches the runtime with this set.
+    unbounded_shortest: Cell<bool>,
 }
 
 /// Cached evaluation result for an existential predicate.
@@ -102,6 +110,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             graph,
             triple_index: RefCell::new(None),
             exists_cache: RefCell::new(HashMap::new()),
+            unbounded_shortest: Cell::new(false),
         }
     }
 
@@ -114,6 +123,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             graph,
             triple_index: RefCell::new(Some(idx)),
             exists_cache: RefCell::new(HashMap::new()),
+            unbounded_shortest: Cell::new(false),
         }
     }
 
@@ -151,12 +161,16 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     pub fn run(&self, pattern: &PathPattern) -> IntermediateResult {
         self.exists_cache.borrow_mut().clear();
+        // A raw pattern carries no clause prefix, so unbounded repetition
+        // (if any) has no SHORTEST license here.
+        self.unbounded_shortest.set(false);
         self.run_path_pattern(pattern, 0)
     }
 
     /// Run with a result limit (0 = unlimited). Stops early once limit is reached.
     pub fn run_with_limit(&self, pattern: &PathPattern, limit: usize) -> IntermediateResult {
         self.exists_cache.borrow_mut().clear();
+        self.unbounded_shortest.set(false);
         self.run_path_pattern(pattern, limit)
     }
 
@@ -630,6 +644,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         // pattern prefix (the prefix is a per-clause selection over that
         // clause's boundary nodes, which a collapsed Join would erase).
         if !query.has_any_optional() && !query.has_any_prefix() {
+            self.unbounded_shortest.set(false);
             return self.run_path_pattern(&query.collapsed_pattern(), limit);
         }
 
@@ -647,6 +662,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         } else {
             0
         };
+        self.set_unbounded_policy(first.prefix());
         let mut acc = self.run_path_pattern(first.pattern(), first_limit);
         acc = self.apply_clause_prefix(acc, first.prefix());
         let mut bound_vars: HashSet<String> = first.pattern().freevars();
@@ -654,6 +670,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         for m in iter {
             let pattern = m.pattern();
             let new_vars = pattern.freevars();
+            self.set_unbounded_policy(m.prefix());
             acc = match m {
                 MatchStatement::Simple { .. } => {
                     let ir_new = self.run_path_pattern(pattern, 0);
@@ -708,6 +725,21 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             Some(p) => apply_path_prefix(ir, p),
             None => ir,
         }
+    }
+
+    /// Set the unbounded-repetition license for the clause about to run.
+    /// Only a single-shortest search (`ANY SHORTEST` / `ALL SHORTEST` /
+    /// `SHORTEST 1`) makes `Repeat { ub: None }` finite via BFS; every
+    /// other prefix (or none) leaves it forbidden. Mirrors the
+    /// typechecker gate so the runtime never reaches an unsupported
+    /// unbounded repeat with the flag unset.
+    fn set_unbounded_policy(&self, prefix: Option<PathPrefix>) {
+        let allowed = matches!(
+            prefix.map(|p| p.search),
+            Some(PathSearch::ShortestPaths { count: 1 })
+                | Some(PathSearch::ShortestGroups { count: 1 })
+        );
+        self.unbounded_shortest.set(allowed);
     }
 
     /// OPTIONAL MATCH bind-pushdown. The naive path evaluates the inner
@@ -1027,10 +1059,22 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 }
                 IntermediateResult::new(rows)
             }
-            PathPattern::Repeat { pattern, lb, ub } => {
-                let ub = ub.expect("unbounded repeat not supported");
-                self.run_repetition_range(pattern, *lb, ub, limit)
-            }
+            PathPattern::Repeat { pattern, lb, ub } => match ub {
+                Some(ub) => self.run_repetition_range(pattern, *lb, *ub, limit),
+                None => {
+                    // Unbounded repetition is finite only under a single
+                    // SHORTEST search prefix, where BFS bounds the depth
+                    // at the node count. The typechecker rejects every
+                    // other unbounded form, so the flag is an invariant
+                    // here — assert rather than silently misanswer.
+                    assert!(
+                        self.unbounded_shortest.get(),
+                        "unbounded repetition reached the runtime without a SHORTEST \
+                         prefix; this must be rejected by check_unbounded_repetition"
+                    );
+                    self.run_repetition_bfs_shortest(pattern, *lb, limit)
+                }
+            },
             PathPattern::Questioned(inner) => {
                 let ir_empty = self.run_path_pattern(&PathPattern::Node(None), limit);
                 let remaining = if limit > 0 {
@@ -1711,6 +1755,140 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             rows.truncate(limit);
         }
         IntermediateResult::new(rows)
+    }
+
+    /// Unbounded repetition (`*` → `lb == 0`, `+` → `lb == 1`) under a
+    /// single-shortest search prefix, evaluated by breadth-first search.
+    ///
+    /// Why BFS terminates where the bounded builder cannot: under the
+    /// default WALK semantics an unbounded repeat over a cyclic graph has
+    /// an infinite answer set (every extra lap round a cycle is another
+    /// match). A *shortest* path, however, never revisits a node, so its
+    /// length is bounded by `|V| - 1` edges; since each repetition adds at
+    /// least one edge, the search needs at most `|V|` levels. BFS expands
+    /// level by level (one inner-pattern application per level), so the
+    /// first time it reaches a boundary pair `(first, last)` it has found
+    /// that pair's shortest distance. Later, longer arrivals at the same
+    /// pair are dropped — which is exactly the SHORTEST selection.
+    ///
+    /// The result keeps *every* path of that minimal length per pair, so a
+    /// later `ALL SHORTEST` (`ShortestGroups { count: 1 }`) sees all of
+    /// them and `ANY SHORTEST` (`ShortestPaths { count: 1 }`) narrows to
+    /// one in `apply_clause_prefix`. Caller (`run_match_chain`) guarantees
+    /// this is only invoked with `lb <= 1` (the typechecker rejects
+    /// `{n,}` with `n >= 2`).
+    fn run_repetition_bfs_shortest(
+        &self,
+        p: &PathPattern,
+        lb: usize,
+        limit: usize,
+    ) -> IntermediateResult {
+        // `*` admits the length-0 match: one row per node (a == b), which
+        // is the shortest possible path for every self pair.
+        let mut result: Vec<ResultRow> = if lb == 0 {
+            self.run_repetition_pattern(p, 0).rows
+        } else {
+            Vec::new()
+        };
+
+        let grouped = self.run_path_pattern(p, 0).to_group();
+        if grouped.rows.is_empty() {
+            if limit > 0 && result.len() > limit {
+                result.truncate(limit);
+            }
+            return IntermediateResult::new(result);
+        }
+
+        let mut grouped_by_first: HashMap<Id, Vec<usize>> = HashMap::new();
+        for (i, r) in grouped.rows.iter().enumerate() {
+            if let Some(first) = r.path().first_node_id() {
+                grouped_by_first.entry(first).or_default().push(i);
+            }
+        }
+
+        // A shortest path spans at most |V| nodes; each repetition adds
+        // >= 1 edge, so |V| levels is a safe termination bound even on a
+        // fully cyclic graph.
+        let max_levels = self.graph.nodes().len().max(1);
+
+        // dist[(first, last)] = the level (repetition count) at which the
+        // pair was first reached. The length-0 self pairs seed it at 0 so
+        // a cycle back to the start is recognized as longer and dropped.
+        let mut dist: HashMap<(Id, Id), usize> = HashMap::new();
+        if lb == 0 {
+            for r in &result {
+                if let Some(n) = r.path().first_node_id() {
+                    dist.insert((n, n), 0);
+                }
+            }
+        }
+
+        // Level 1: the inner pattern applied once.
+        let mut frontier: Vec<ResultRow> = Vec::new();
+        for r in &grouped.rows {
+            let (Some(f), Some(l)) = (r.path().first_node_id(), r.path().last_node_id()) else {
+                continue;
+            };
+            match dist.get(&(f, l)) {
+                None => {
+                    dist.insert((f, l), 1);
+                    result.push(r.clone());
+                    frontier.push(r.clone());
+                }
+                Some(&1) => {
+                    // Another shortest path of the same (level-1) length.
+                    result.push(r.clone());
+                    frontier.push(r.clone());
+                }
+                // Reached at level 0 (a length-0 self pair): the 1-lap
+                // cycle back is strictly longer, so drop it.
+                Some(_) => {}
+            }
+        }
+
+        let mut level = 1;
+        while !frontier.is_empty() && level < max_levels {
+            level += 1;
+            let mut next: Vec<ResultRow> = Vec::new();
+            for r in &frontier {
+                let Some(last) = r.path().last_node_id() else {
+                    continue;
+                };
+                let Some(idxs) = grouped_by_first.get(&last) else {
+                    continue;
+                };
+                for &idx in idxs {
+                    let new_row = r.concat_group(&grouped.rows[idx]);
+                    let (Some(f), Some(l)) = (
+                        new_row.path().first_node_id(),
+                        new_row.path().last_node_id(),
+                    ) else {
+                        continue;
+                    };
+                    match dist.get(&(f, l)) {
+                        None => {
+                            dist.insert((f, l), level);
+                            result.push(new_row.clone());
+                            next.push(new_row);
+                        }
+                        Some(&d) if d == level => {
+                            // Equally short — keep it for ALL SHORTEST and
+                            // expand it, but do not record a new distance.
+                            result.push(new_row.clone());
+                            next.push(new_row);
+                        }
+                        // Already reached at a strictly shorter level.
+                        Some(_) => {}
+                    }
+                }
+            }
+            frontier = next;
+        }
+
+        if limit > 0 && result.len() > limit {
+            result.truncate(limit);
+        }
+        IntermediateResult::new(result)
     }
 
     // --- Helpers ---

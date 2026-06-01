@@ -208,3 +208,96 @@ fn walk_keeps_the_cycle_too() {
     );
     assert_eq!(rows.len(), 1, "the default WALK keeps the cycle");
 }
+
+// =====================================================================
+// Unbounded repetition (`*` / `+`) coupled to SHORTEST via BFS
+// =====================================================================
+
+#[test]
+fn unbounded_without_prefix_is_rejected() {
+    // `+` over a (possibly cyclic) graph has no finite WALK answer set;
+    // the typechecker must reject it with an actionable message.
+    let err = compile_query("MATCH (s)-[]->+(t) RETURN s.name").unwrap_err();
+    assert!(err.to_uppercase().contains("SHORTEST"), "got: {err}");
+
+    let err_star = compile_query("MATCH (s)-[]->*(t) RETURN s.name").unwrap_err();
+    assert!(
+        err_star.to_uppercase().contains("SHORTEST"),
+        "got: {err_star}"
+    );
+}
+
+#[test]
+fn counted_shortest_over_unbounded_is_rejected() {
+    // Only single-shortest (ANY/ALL SHORTEST, SHORTEST 1) is supported
+    // over unbounded repetition; counted k >= 2 needs k-shortest.
+    let err = compile_query("MATCH SHORTEST 2 (s)-[]->+(t) RETURN s.name").unwrap_err();
+    assert!(err.to_uppercase().contains("SHORTEST"), "got: {err}");
+}
+
+#[test]
+fn lower_bounded_unbounded_is_rejected() {
+    // `{2,}` with SHORTEST is out of scope for the current BFS.
+    let err = compile_query("MATCH ANY SHORTEST (s)-[]->{2,}(t) RETURN s.name").unwrap_err();
+    assert!(
+        err.to_lowercase().contains("n >= 2") || err.to_lowercase().contains("unbounded"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn any_shortest_plus_finds_the_short_route() {
+    // Unbounded `+`: BFS reaches D from A first at length 2 (A→B→D), so
+    // ANY SHORTEST returns exactly that one route — the length-3 A→C→E→D
+    // walk is longer and pruned.
+    let g = graph_two_routes();
+    let rows = run_projected(
+        &g,
+        "MATCH ANY SHORTEST (s)-[]->+(t) WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
+    );
+    assert_eq!(rows.len(), 1, "ANY SHORTEST over `+` keeps one A→D route");
+}
+
+#[test]
+fn star_includes_zero_length_self_reach() {
+    // `*` admits the length-0 match, so A reaches itself.
+    let g = graph_two_routes();
+    let rows = run_projected(
+        &g,
+        "MATCH ANY SHORTEST (s)-[]->*(t) WHERE s.name = 'A' AND t.name = 'A' RETURN s.name",
+    );
+    assert_eq!(rows.len(), 1, "`*` lets A reach itself in zero hops");
+}
+
+#[test]
+fn shortest_plus_terminates_on_a_cycle() {
+    // The triangle X→Y→Z→X is fully cyclic: under WALK, `+` would loop
+    // forever. BFS bounds the depth at |V| = 3, finds the shortest X→X
+    // closed walk at length 3, and terminates.
+    let g = graph_triangle();
+    let rows = run_projected(
+        &g,
+        "MATCH ANY SHORTEST (s)-[]->+(t) WHERE s.name = 'X' AND t.name = 'X' RETURN s.name",
+    );
+    assert_eq!(rows.len(), 1, "shortest closed walk X→Y→Z→X found, no hang");
+}
+
+#[test]
+fn shortest_plus_reaches_every_node_once() {
+    // From X, BFS reaches X, Y and Z (X via the 3-cycle). ANY SHORTEST
+    // keeps one path per (first, last) pair, so exactly three targets.
+    let g = graph_triangle();
+    let rows = run_projected(
+        &g,
+        "MATCH ANY SHORTEST (s)-[]->+(t) WHERE s.name = 'X' RETURN t.name",
+    );
+    let mut names: Vec<String> = rows
+        .iter()
+        .map(|r| match &r[0] {
+            Value::Str(s) => s.clone(),
+            other => panic!("expected Str, got {other:?}"),
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["X", "Y", "Z"]);
+}
