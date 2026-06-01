@@ -488,3 +488,57 @@ fn shortest_2_terminates_on_a_cycle_with_repeated_laps() {
     );
     assert_eq!(rows.len(), 2, "one-lap and two-lap closed walks");
 }
+
+// =====================================================================
+// ISO §16.6 SR 5–8 — boundary / interior variables of a selective
+// <path pattern> must be evaluable in isolation: only endpoint
+// (boundary) variables may join other patterns.
+// =====================================================================
+
+#[test]
+fn selective_endpoint_variable_may_join_other_clauses() {
+    // `t` is the right boundary of the selective clause, so joining it
+    // with a following non-selective clause is allowed (NOTE 232).
+    assert!(
+        compile_query("MATCH ANY SHORTEST (s)-[]->{1,3}(t) MATCH (t)-[]->(u) RETURN u.name")
+            .is_ok(),
+        "joining on a boundary variable must be permitted"
+    );
+}
+
+#[test]
+fn selective_interior_variable_shared_with_another_clause_is_rejected() {
+    // `m` is a strict interior variable of the selective clause; sharing
+    // it with another clause violates SR 7.
+    let err =
+        compile_query("MATCH ANY SHORTEST (s)-[]->(m)-[]->(t) MATCH (m)-[]->(x) RETURN x.name")
+            .unwrap_err();
+    assert!(
+        err.contains("§16.6") && err.to_lowercase().contains("interior"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn selective_interior_variable_in_isolation_is_accepted() {
+    // A single selective clause may expose an interior variable; there is
+    // nothing to join it with, so it is fine to RETURN it as a group.
+    assert!(compile_query("MATCH ANY SHORTEST (s)-[]->(m)-[]->(t) RETURN s.name, t.name").is_ok());
+}
+
+#[test]
+fn non_selective_clause_may_share_any_variable() {
+    // ALL (and the unprefixed default) is not selective, so interior
+    // variable sharing across clauses is unrestricted.
+    assert!(compile_query("MATCH ALL (s)-[]->(m)-[]->(t) MATCH (m)-[]->(x) RETURN x.name").is_ok());
+    assert!(compile_query("MATCH (s)-[]->(m)-[]->(t) MATCH (m)-[]->(x) RETURN x.name").is_ok());
+}
+
+#[test]
+fn restrictive_mode_only_clause_is_not_selective() {
+    // ACYCLIC is restrictive but not selective (search is still ALL), so
+    // SR 7 does not constrain its interior-variable sharing.
+    assert!(
+        compile_query("MATCH ACYCLIC (s)-[]->(m)-[]->(t) MATCH (m)-[]->(x) RETURN x.name").is_ok()
+    );
+}

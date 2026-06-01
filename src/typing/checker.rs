@@ -4,11 +4,13 @@
 //! fppc's `Typechecker` / `TypecheckResult`; the differences are documented
 //! in `docs/internals/typechecker_migration.md`.
 
+use std::collections::HashSet;
+
 use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::path_prefix::UnboundedSupport;
+use crate::syntax::path_prefix::{PathSearch, UnboundedSupport};
 use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem, SortKey, SortSpec};
 
 use super::descriptor_type::DescriptorType;
@@ -80,6 +82,7 @@ impl Typechecker {
         r.empty = r.path.is_unsatisfiable() || r.env.is_empty();
 
         self.check_unbounded_repetition(q);
+        self.check_selective_isolation(q);
 
         if let Some(group_by) = &q.group_by {
             self.check_group_by(group_by, &r.env);
@@ -191,6 +194,62 @@ impl Typechecker {
                 // A restrictive mode bounds enumeration by |V| / |E|, so
                 // any lower bound is fine.
                 Some(UnboundedSupport::Mode(_)) => {}
+            }
+        }
+    }
+
+    /// ISO §16.6 SR 5–8: a *selective* `<path pattern>` (one with a
+    /// search prefix other than `ALL` — i.e. `ANY` / `SHORTEST`) must be
+    /// evaluable in isolation (NOTE 233). Its *strict interior* variables
+    /// (everything it exposes except its left/right boundary node
+    /// variables, SR 5) must not be equivalent to an exterior variable or
+    /// to an interior variable of another selective pattern (SR 7).
+    ///
+    /// gqlite carries the prefix on the whole MATCH clause (the documented
+    /// per-clause, not per-comma-operand, deviation), so a "selective
+    /// `<path pattern>`" is a selective clause and the rule becomes: a
+    /// selective clause's strict interior variable must not appear in any
+    /// other clause — only its boundary (endpoint) variables may join.
+    fn check_selective_isolation(&mut self, q: &Query) {
+        let clause_vars: Vec<HashSet<String>> =
+            q.matches.iter().map(|m| m.pattern().freevars()).collect();
+
+        for (i, m) in q.matches.iter().enumerate() {
+            let is_selective =
+                matches!(m.prefix().map(|p| p.search), Some(s) if s != PathSearch::All);
+            if !is_selective {
+                continue;
+            }
+
+            // Strict interior = all exposed variables minus the boundary
+            // (first/last top-depth node) variables (SR 5b–5d).
+            let (left, right) = boundary_node_vars(m.pattern());
+            let mut interior = clause_vars[i].clone();
+            if let Some(v) = &left {
+                interior.remove(v);
+            }
+            if let Some(v) = &right {
+                interior.remove(v);
+            }
+
+            let mut elsewhere: HashSet<String> = HashSet::new();
+            for (j, vs) in clause_vars.iter().enumerate() {
+                if j != i {
+                    elsewhere.extend(vs.iter().cloned());
+                }
+            }
+
+            let mut shared: Vec<String> = interior.intersection(&elsewhere).cloned().collect();
+            if !shared.is_empty() {
+                shared.sort();
+                self.errors.push(format!(
+                    "Selective path pattern (a SHORTEST/ANY MATCH clause) shares interior \
+                     variable(s) `{}` with the rest of the query. ISO §16.6 SR 7 requires a \
+                     selective pattern to be evaluable in isolation: only its boundary \
+                     (endpoint) variables may join other patterns. Rename the interior \
+                     variable(s), or restructure so the shared variable is an endpoint.",
+                    shared.join("`, `")
+                ));
             }
         }
     }
@@ -958,6 +1017,51 @@ fn is_orderable_per_iso_22_14(t: &SimpleType) -> bool {
         | SimpleType::Group(_)
         | SimpleType::Node
         | SimpleType::Edge => false,
+    }
+}
+
+/// ISO §16.6 SR 5b/5c: the left/right boundary variables of a selective
+/// path pattern are the variables declared in the first / last `<node
+/// pattern>` that are exposed as *unconditional singletons* and are not
+/// inside a `<path pattern union>` / `<path multiset alternation>`.
+///
+/// We approximate this by collecting node variables at "top depth" — i.e.
+/// not buried under a quantifier (`Repeat`), `Questioned`, union, or join,
+/// all of which would make the variable a group/conditional singleton or
+/// place it inside an alternation — and taking the first and last.
+fn boundary_node_vars(p: &PathPattern) -> (Option<String>, Option<String>) {
+    let mut vars: Vec<String> = Vec::new();
+    collect_top_node_vars(p, &mut vars);
+    let left = vars.first().cloned();
+    let right = vars.last().cloned();
+    (left, right)
+}
+
+fn collect_top_node_vars(p: &PathPattern, out: &mut Vec<String>) {
+    match p {
+        PathPattern::Node(d) => {
+            if let Some(v) = d.as_ref().and_then(|d| d.var.clone()) {
+                out.push(v);
+            }
+        }
+        PathPattern::Concat(a, b) => {
+            collect_top_node_vars(a, out);
+            collect_top_node_vars(b, out);
+        }
+        // A clause-level WHERE wraps the pattern; it is transparent for the
+        // purpose of finding the endpoint nodes.
+        PathPattern::Filter(inner, _) => collect_top_node_vars(inner, out),
+        // Edges contribute no boundary node variable; quantifiers, questioned
+        // primaries, unions and joins bury their nodes below top depth, so
+        // those nodes are not unconditional-singleton boundary variables.
+        PathPattern::EdgeRight(_)
+        | PathPattern::EdgeLeft(_)
+        | PathPattern::EdgeUndirected(_)
+        | PathPattern::EdgeAnyDirection(_)
+        | PathPattern::Repeat { .. }
+        | PathPattern::Questioned(_)
+        | PathPattern::Union(_, _)
+        | PathPattern::Join(_, _) => {}
     }
 }
 
