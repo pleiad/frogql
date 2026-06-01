@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -38,14 +39,16 @@ enum UnboundedPolicy {
     /// unbounded repetition stays infinite and is rejected by the
     /// typechecker. Reaching the runtime in this state is a bug.
     Forbidden,
-    /// Single-shortest search (`ANY SHORTEST` / `ALL SHORTEST` /
-    /// `SHORTEST 1`): evaluate by BFS shortest-reachability, bounded at
-    /// `|V|` levels.
-    Shortest,
-    /// A restrictive mode (`TRAIL` / `SIMPLE` / `ACYCLIC`) with a
-    /// non-shortest search: enumerate every path the mode admits, pruning
-    /// partial paths that already violate it. Finite because such paths
-    /// cannot repeat a node (≤ `|V|`) or an edge (≤ `|E|`).
+    /// A SHORTEST-family search in WALK mode: evaluate by a length-ordered
+    /// k-shortest search (Dijkstra-like over uniform step lengths). `count`
+    /// and `groups` carry the selection — `groups: false` is `SHORTEST k
+    /// PATHS` (incl. `ANY SHORTEST` = `count 1`), `groups: true` is
+    /// `SHORTEST k GROUPS` (incl. `ALL SHORTEST` = `count 1`).
+    Shortest { count: usize, groups: bool },
+    /// A restrictive mode (`TRAIL` / `SIMPLE` / `ACYCLIC`): enumerate every
+    /// path the mode admits, pruning partial paths that already violate
+    /// it. Finite because such paths cannot repeat a node (≤ `|V|`) or an
+    /// edge (≤ `|E|`). Any subsequent search is then a plain selection.
     Mode(PathMode),
 }
 
@@ -54,9 +57,48 @@ enum UnboundedPolicy {
 /// the typechecker gate agree.
 fn unbounded_policy_for(prefix: Option<PathPrefix>) -> UnboundedPolicy {
     match prefix.and_then(|p| p.unbounded_support()) {
-        Some(UnboundedSupport::Shortest) => UnboundedPolicy::Shortest,
+        Some(UnboundedSupport::Shortest { count, groups }) => {
+            UnboundedPolicy::Shortest { count, groups }
+        }
         Some(UnboundedSupport::Mode(m)) => UnboundedPolicy::Mode(m),
         None => UnboundedPolicy::Forbidden,
+    }
+}
+
+/// Number of edges in a path = its length for shortest-path ranking.
+fn path_edge_len(path: &Path) -> usize {
+    path.0.iter().filter(|pv| pv.is_edge()).count()
+}
+
+/// Min-heap entry for the k-shortest repetition search. `BinaryHeap` is a
+/// max-heap, so `Ord` is reversed to pop the *shortest* path first; the
+/// monotone `seq` tie-breaks equal lengths deterministically.
+struct ShortestEntry {
+    len: usize,
+    seq: usize,
+    reps: usize,
+    row: ResultRow,
+}
+
+impl PartialEq for ShortestEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.len == other.len && self.seq == other.seq
+    }
+}
+impl Eq for ShortestEntry {}
+impl PartialOrd for ShortestEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for ShortestEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reversed: a smaller length compares as "greater" so the max-heap
+        // yields it first; tie-break on the smaller seq.
+        other
+            .len
+            .cmp(&self.len)
+            .then_with(|| other.seq.cmp(&self.seq))
     }
 }
 
@@ -1091,9 +1133,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             PathPattern::Repeat { pattern, lb, ub } => match ub {
                 Some(ub) => self.run_repetition_range(pattern, *lb, *ub, limit),
                 None => match self.unbounded_policy.get() {
-                    // BFS shortest-reachability (bounded at |V| levels).
-                    UnboundedPolicy::Shortest => {
-                        self.run_repetition_bfs_shortest(pattern, *lb, limit)
+                    // Length-ordered k-shortest search.
+                    UnboundedPolicy::Shortest { count, groups } => {
+                        self.run_repetition_shortest(pattern, *lb, count, groups, limit)
                     }
                     // Finite enumeration of paths the mode admits.
                     UnboundedPolicy::Mode(mode) => {
@@ -1791,33 +1833,71 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     }
 
     /// Unbounded repetition (`*` → `lb == 0`, `+` → `lb == 1`) under a
-    /// single-shortest search prefix, evaluated by breadth-first search.
+    /// SHORTEST-family search in WALK mode: the `count` shortest paths
+    /// (`groups == false`) or the paths in the `count` shortest length
+    /// groups (`groups == true`) per boundary pair `(first, last)`.
     ///
-    /// Why BFS terminates where the bounded builder cannot: under the
-    /// default WALK semantics an unbounded repeat over a cyclic graph has
-    /// an infinite answer set (every extra lap round a cycle is another
-    /// match). A *shortest* path, however, never revisits a node, so its
-    /// length is bounded by `|V| - 1` edges; since each repetition adds at
-    /// least one edge, the search needs at most `|V|` levels. BFS expands
-    /// level by level (one inner-pattern application per level), so the
-    /// first time it reaches a boundary pair `(first, last)` it has found
-    /// that pair's shortest distance. Later, longer arrivals at the same
-    /// pair are dropped — which is exactly the SHORTEST selection.
+    /// **Why it terminates on cycles.** Under WALK an unbounded repeat is
+    /// infinite (every extra lap is another match), but the k-shortest
+    /// answer is finite: a length-ordered search admits at most `count`
+    /// paths (or length groups) per boundary pair and then prunes, and on
+    /// a cycle the per-pair lengths strictly grow so every reachable pair
+    /// fills its quota in finitely many steps.
     ///
-    /// The result keeps *every* path of that minimal length per pair, so a
-    /// later `ALL SHORTEST` (`ShortestGroups { count: 1 }`) sees all of
-    /// them and `ANY SHORTEST` (`ShortestPaths { count: 1 }`) narrows to
-    /// one in `apply_clause_prefix`. Caller (`run_match_chain`) guarantees
-    /// this is only invoked with `lb <= 1` (the typechecker rejects
-    /// `{n,}` with `n >= 2`).
-    fn run_repetition_bfs_shortest(
+    /// **Why pruning is sound (optimal substructure).** If a path π to
+    /// boundary pair `(s, u)` has a length among `u`'s `count` shortest,
+    /// then its prefix π′ to the predecessor pair `(s, t)` also has a
+    /// length among `t`'s `count` shortest: otherwise there would be ≥
+    /// `count` strictly shorter prefixes to `t`, each extending to a
+    /// strictly shorter path to `u`, contradicting π's rank. So a path
+    /// whose pair is already full can never be the prefix of a wanted
+    /// path and is dropped without expansion — for both PATHS (admit ≤
+    /// `count` paths) and GROUPS (admit ≤ `count` distinct lengths). A
+    /// min-heap on length feeds paths in non-decreasing order, so this
+    /// per-pair budgeting is exact.
+    ///
+    /// `lb <= 1` is guaranteed by the caller (the typechecker routes
+    /// `{n,}` with `n >= 2` to a restrictive mode instead).
+    fn run_repetition_shortest(
         &self,
         p: &PathPattern,
         lb: usize,
+        count: usize,
+        groups: bool,
         limit: usize,
     ) -> IntermediateResult {
-        // `*` admits the length-0 match: one row per node (a == b), which
-        // is the shortest possible path for every self pair.
+        // Admit `pair` at `len` against the per-pair budget, recording it.
+        // Returns whether the path is wanted (and so worth expanding).
+        fn admit(
+            groups: bool,
+            count: usize,
+            taken: &mut HashMap<(Id, Id), usize>,
+            lens: &mut HashMap<(Id, Id), Vec<usize>>,
+            pair: (Id, Id),
+            len: usize,
+        ) -> bool {
+            if groups {
+                let v = lens.entry(pair).or_default();
+                if v.contains(&len) {
+                    return true; // another path in an already-counted group
+                }
+                if v.len() < count {
+                    v.push(len);
+                    return true; // a new (still within budget) length group
+                }
+                false
+            } else {
+                let c = taken.entry(pair).or_insert(0);
+                if *c < count {
+                    *c += 1;
+                    return true;
+                }
+                false
+            }
+        }
+
+        // `*` admits the length-0 match: one row per node (a == b), the
+        // shortest possible path for every self pair.
         let mut result: Vec<ResultRow> = if lb == 0 {
             self.run_repetition_pattern(p, 0).rows
         } else {
@@ -1839,83 +1919,61 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
         }
 
-        // A shortest path spans at most |V| nodes; each repetition adds
-        // >= 1 edge, so |V| levels is a safe termination bound even on a
-        // fully cyclic graph.
-        let max_levels = self.graph.nodes().len().max(1);
+        let mut taken: HashMap<(Id, Id), usize> = HashMap::new();
+        let mut lens: HashMap<(Id, Id), Vec<usize>> = HashMap::new();
 
-        // dist[(first, last)] = the level (repetition count) at which the
-        // pair was first reached. The length-0 self pairs seed it at 0 so
-        // a cycle back to the start is recognized as longer and dropped.
-        let mut dist: HashMap<(Id, Id), usize> = HashMap::new();
+        // The length-0 self matches occupy each self pair's first budget
+        // slot, so a 1-lap cycle back to the start competes for what
+        // remains (and is dropped under `count == 1`).
         if lb == 0 {
             for r in &result {
                 if let Some(n) = r.path().first_node_id() {
-                    dist.insert((n, n), 0);
+                    admit(groups, count, &mut taken, &mut lens, (n, n), 0);
                 }
             }
         }
 
-        // Level 1: the inner pattern applied once.
-        let mut frontier: Vec<ResultRow> = Vec::new();
+        // Seed the heap with the single inner-pattern applications.
+        let mut heap: BinaryHeap<ShortestEntry> = BinaryHeap::new();
+        let mut seq = 0usize;
         for r in &grouped.rows {
-            let (Some(f), Some(l)) = (r.path().first_node_id(), r.path().last_node_id()) else {
+            heap.push(ShortestEntry {
+                len: path_edge_len(r.path()),
+                seq,
+                reps: 1,
+                row: r.clone(),
+            });
+            seq += 1;
+        }
+
+        while let Some(entry) = heap.pop() {
+            if limit > 0 && result.len() >= limit {
+                break;
+            }
+            let (Some(f), Some(l)) = (
+                entry.row.path().first_node_id(),
+                entry.row.path().last_node_id(),
+            ) else {
                 continue;
             };
-            match dist.get(&(f, l)) {
-                None => {
-                    dist.insert((f, l), 1);
-                    result.push(r.clone());
-                    frontier.push(r.clone());
-                }
-                Some(&1) => {
-                    // Another shortest path of the same (level-1) length.
-                    result.push(r.clone());
-                    frontier.push(r.clone());
-                }
-                // Reached at level 0 (a length-0 self pair): the 1-lap
-                // cycle back is strictly longer, so drop it.
-                Some(_) => {}
+            if !admit(groups, count, &mut taken, &mut lens, (f, l), entry.len) {
+                continue;
             }
-        }
-
-        let mut level = 1;
-        while !frontier.is_empty() && level < max_levels {
-            level += 1;
-            let mut next: Vec<ResultRow> = Vec::new();
-            for r in &frontier {
-                let Some(last) = r.path().last_node_id() else {
-                    continue;
-                };
-                let Some(idxs) = grouped_by_first.get(&last) else {
-                    continue;
-                };
+            if entry.reps >= lb {
+                result.push(entry.row.clone());
+            }
+            if let Some(idxs) = grouped_by_first.get(&l) {
                 for &idx in idxs {
-                    let new_row = r.concat_group(&grouped.rows[idx]);
-                    let (Some(f), Some(l)) = (
-                        new_row.path().first_node_id(),
-                        new_row.path().last_node_id(),
-                    ) else {
-                        continue;
-                    };
-                    match dist.get(&(f, l)) {
-                        None => {
-                            dist.insert((f, l), level);
-                            result.push(new_row.clone());
-                            next.push(new_row);
-                        }
-                        Some(&d) if d == level => {
-                            // Equally short — keep it for ALL SHORTEST and
-                            // expand it, but do not record a new distance.
-                            result.push(new_row.clone());
-                            next.push(new_row);
-                        }
-                        // Already reached at a strictly shorter level.
-                        Some(_) => {}
-                    }
+                    let new_row = entry.row.concat_group(&grouped.rows[idx]);
+                    heap.push(ShortestEntry {
+                        len: path_edge_len(new_row.path()),
+                        seq,
+                        reps: entry.reps + 1,
+                        row: new_row,
+                    });
+                    seq += 1;
                 }
             }
-            frontier = next;
         }
 
         if limit > 0 && result.len() > limit {

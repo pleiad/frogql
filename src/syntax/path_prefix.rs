@@ -66,10 +66,11 @@ pub struct PathPrefix {
 /// feature) and the runtime (which dispatches the evaluator).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnboundedSupport {
-    /// Single-shortest search (`ANY SHORTEST` / `ALL SHORTEST` /
-    /// `SHORTEST 1`): evaluable by shortest-path BFS, but only for `*`
-    /// and `+` (lower bound ≤ 1).
-    Shortest,
+    /// A SHORTEST-family search in WALK mode (`SHORTEST k`, `SHORTEST k
+    /// GROUPS`, and their `ANY/ALL SHORTEST` = `count 1` forms):
+    /// evaluable by a length-ordered k-shortest search, for `*` and `+`
+    /// (lower bound ≤ 1).
+    Shortest { count: usize, groups: bool },
     /// A restrictive mode (`TRAIL` / `SIMPLE` / `ACYCLIC`): evaluable by
     /// finite enumeration that prunes partial paths violating the mode.
     /// Bounded by `|E|` (TRAIL) or `|V|` (SIMPLE/ACYCLIC), so any lower
@@ -88,22 +89,28 @@ impl PathPrefix {
     }
 
     /// Classify how this prefix licenses unbounded repetition. `None`
-    /// means it does not — the repeat stays infinite and must be
-    /// rejected. A single-shortest search wins over the mode (BFS is the
-    /// cheaper evaluator and its results already respect any restrictive
-    /// mode), so it is checked first.
+    /// means it does not — the repeat stays infinite and must be rejected.
+    ///
+    /// A *restrictive mode* takes precedence: its enumeration respects the
+    /// mode exactly (a WALK k-shortest search would wrongly admit cyclic
+    /// paths), and any search is then applied to the finite result. Only
+    /// in plain WALK does a SHORTEST-family search drive the evaluator.
     pub fn unbounded_support(&self) -> Option<UnboundedSupport> {
-        if matches!(
-            self.search,
-            PathSearch::ShortestPaths { count: 1 } | PathSearch::ShortestGroups { count: 1 }
-        ) {
-            return Some(UnboundedSupport::Shortest);
-        }
         match self.mode {
             PathMode::Trail | PathMode::Simple | PathMode::Acyclic => {
                 Some(UnboundedSupport::Mode(self.mode))
             }
-            PathMode::Walk => None,
+            PathMode::Walk => match self.search {
+                PathSearch::ShortestPaths { count } => Some(UnboundedSupport::Shortest {
+                    count,
+                    groups: false,
+                }),
+                PathSearch::ShortestGroups { count } => Some(UnboundedSupport::Shortest {
+                    count,
+                    groups: true,
+                }),
+                PathSearch::All | PathSearch::Any { .. } => None,
+            },
         }
     }
 }

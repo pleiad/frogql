@@ -39,6 +39,34 @@ fn graph_two_routes() -> MemoryGraphStore {
     MemoryGraphStore::from_json_str(json).unwrap()
 }
 
+/// Diamond with two equal-shortest A→D routes plus a longer one:
+///   A -> B -> D        (length 2)
+///   A -> C -> D        (length 2)
+///   A -> E -> F -> D   (length 3)
+/// Distinguishes SHORTEST k PATHS from SHORTEST k GROUPS.
+fn graph_diamond() -> MemoryGraphStore {
+    let json = r#"{
+      "nodes": [
+        {"id": "a", "labels": ["N"], "props": {"name": "A"}},
+        {"id": "b", "labels": ["N"], "props": {"name": "B"}},
+        {"id": "c", "labels": ["N"], "props": {"name": "C"}},
+        {"id": "d", "labels": ["N"], "props": {"name": "D"}},
+        {"id": "e", "labels": ["N"], "props": {"name": "E"}},
+        {"id": "f", "labels": ["N"], "props": {"name": "F"}}
+      ],
+      "edges": [
+        {"id": "ab", "labels": ["R"], "props": {}, "endpoints": ["a", "b"], "directionality": "->"},
+        {"id": "bd", "labels": ["R"], "props": {}, "endpoints": ["b", "d"], "directionality": "->"},
+        {"id": "ac", "labels": ["R"], "props": {}, "endpoints": ["a", "c"], "directionality": "->"},
+        {"id": "cd", "labels": ["R"], "props": {}, "endpoints": ["c", "d"], "directionality": "->"},
+        {"id": "ae", "labels": ["R"], "props": {}, "endpoints": ["a", "e"], "directionality": "->"},
+        {"id": "ef", "labels": ["R"], "props": {}, "endpoints": ["e", "f"], "directionality": "->"},
+        {"id": "fd", "labels": ["R"], "props": {}, "endpoints": ["f", "d"], "directionality": "->"}
+      ]
+    }"#;
+    MemoryGraphStore::from_json_str(json).unwrap()
+}
+
 /// Directed triangle X -> Y -> Z -> X (a 3-cycle).
 fn graph_triangle() -> MemoryGraphStore {
     let json = r#"{
@@ -241,16 +269,8 @@ fn unbounded_without_prefix_is_rejected() {
 }
 
 #[test]
-fn counted_shortest_over_unbounded_is_rejected() {
-    // Only single-shortest (ANY/ALL SHORTEST, SHORTEST 1) is supported
-    // over unbounded repetition; counted k >= 2 needs k-shortest.
-    let err = compile_query("MATCH SHORTEST 2 (s)-[]->+(t) RETURN s.name").unwrap_err();
-    assert!(err.to_uppercase().contains("SHORTEST"), "got: {err}");
-}
-
-#[test]
 fn lower_bounded_unbounded_is_rejected() {
-    // `{2,}` with SHORTEST is out of scope for the current BFS.
+    // `{2,}` with SHORTEST is out of scope for the k-shortest search.
     let err = compile_query("MATCH ANY SHORTEST (s)-[]->{2,}(t) RETURN s.name").unwrap_err();
     assert!(
         err.to_lowercase().contains("n >= 2") || err.to_lowercase().contains("unbounded"),
@@ -391,4 +411,80 @@ fn unbounded_without_shortest_or_mode_is_rejected() {
         err.to_uppercase().contains("ACYCLIC") || err.to_uppercase().contains("SHORTEST"),
         "got: {err}"
     );
+}
+
+// =====================================================================
+// k-shortest (k >= 2) over unbounded repetition in WALK — length-ordered
+// search with per-pair budgeting; PATHS vs GROUPS
+// =====================================================================
+
+#[test]
+fn shortest_2_paths_over_unbounded_keeps_two_routes() {
+    // Two A→D routes (len 2 and 3); SHORTEST 2 PATHS over `+` keeps both.
+    let g = graph_two_routes();
+    let rows = run_projected(
+        &g,
+        "MATCH SHORTEST 2 (s)-[]->+(t) WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
+    );
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn shortest_2_paths_picks_the_two_shortest_in_the_diamond() {
+    // A→D: two length-2 routes + one length-3. SHORTEST 2 PATHS keeps the
+    // two shortest (both length 2); the length-3 route is dropped.
+    let g = graph_diamond();
+    let rows = run_projected(
+        &g,
+        "MATCH SHORTEST 2 (s)-[]->+(t) WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
+    );
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn shortest_3_paths_includes_the_longer_route() {
+    // With budget 3, the length-3 route joins the two length-2 routes.
+    let g = graph_diamond();
+    let rows = run_projected(
+        &g,
+        "MATCH SHORTEST 3 (s)-[]->+(t) WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
+    );
+    assert_eq!(rows.len(), 3);
+}
+
+#[test]
+fn shortest_2_groups_keeps_every_path_in_the_two_shortest_lengths() {
+    // GROUPS counts distinct *lengths*: the length-2 group (2 paths) plus
+    // the length-3 group (1 path) = 3 paths, where SHORTEST 2 PATHS kept 2.
+    let g = graph_diamond();
+    let rows = run_projected(
+        &g,
+        "MATCH SHORTEST 2 GROUPS (s)-[]->+(t) WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
+    );
+    assert_eq!(rows.len(), 3);
+}
+
+#[test]
+fn all_shortest_is_one_group_over_unbounded() {
+    // ALL SHORTEST = SHORTEST 1 GROUP: both equal-length (2) routes, not
+    // the length-3 one.
+    let g = graph_diamond();
+    let rows = run_projected(
+        &g,
+        "MATCH ALL SHORTEST (s)-[]->+(t) WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
+    );
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn shortest_2_terminates_on_a_cycle_with_repeated_laps() {
+    // On the triangle, the two shortest X→X closed walks are one lap
+    // (length 3) and two laps (length 6). SHORTEST 2 finds both and the
+    // length-ordered search terminates once the pair's budget is spent.
+    let g = graph_triangle();
+    let rows = run_projected(
+        &g,
+        "MATCH SHORTEST 2 (s)-[]->+(t) WHERE s.name = 'X' AND t.name = 'X' RETURN s.name",
+    );
+    assert_eq!(rows.len(), 2, "one-lap and two-lap closed walks");
 }

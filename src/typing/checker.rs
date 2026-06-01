@@ -178,7 +178,7 @@ impl Typechecker {
                      `TRAIL`). Bounded repetition `{n,m}` works without any prefix."
                         .to_string(),
                 ),
-                Some(UnboundedSupport::Shortest) => {
+                Some(UnboundedSupport::Shortest { .. }) => {
                     if lbs.iter().any(|&lb| lb > 1) {
                         self.errors.push(
                             "SHORTEST over unbounded repetition supports `*` and `+` only; \
