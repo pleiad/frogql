@@ -26,14 +26,7 @@ pub enum PathPattern {
     /// Semantics: cross-product of paths, keeping only rows where assignments unify.
     /// Result paths are paired (p1 × p2), assignment is mu1 ∪ mu2.
     Join(Box<PathPattern>, Box<PathPattern>),
-    /// ISO §16.6 `<path pattern>` = `<path pattern prefix> <path pattern
-    /// expression>`. A path-mode/path-search prefix scoped to exactly one
-    /// `<path pattern>` (one operand of a `<path pattern list>`), per the
-    /// standard's structure. The prefix selects/filters the paths matched
-    /// by `pattern`, which — being a *selective* or *restrictive*
-    /// `<path pattern>` — is evaluated in isolation (§16.6 NOTE 233):
-    /// the runtime materializes `pattern`'s paths, then applies the mode
-    /// filter and the search selection.
+    /// ISO §16.6 prefix scoped to one `<path pattern>` operand.
     Selected {
         prefix: PathPrefix,
         pattern: Box<PathPattern>,
@@ -66,10 +59,7 @@ impl PathPattern {
         }
     }
 
-    /// True if this pattern contains any `Selected` node (a `<path pattern
-    /// prefix>`-decorated operand). Used to gate the collapsed/LTJ fast
-    /// path and the OPTIONAL bind-pushdown: a selective/restrictive pattern
-    /// must be evaluated in isolation, so callers keep it intact.
+    /// Whether this pattern contains a prefixed operand.
     pub fn has_selected(&self) -> bool {
         match self {
             PathPattern::Selected { .. } => true,

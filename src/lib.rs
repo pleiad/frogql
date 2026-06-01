@@ -13,26 +13,9 @@ use syntax::query::{MatchStatement, Query};
 use typing::checker::Typechecker;
 use typing::variable_type::Schema;
 
-/// Optimize a Query. Two cases:
-///
-/// - All-Simple: collapse the chain into one `PathPattern::Join`, optimize
-///   it, and store as a single `MatchStatement::Simple`. Sound because
-///   §14.4 GR 1 makes MATCH a natural join, which is exactly
-///   `PathPattern::Join`'s semantics.
-///
-/// - Has-Optional: collapse is unsound (OPTIONAL is a left-outer-join).
-///   Optimize each match's pattern in place and preserve the chain
-///   structure for the typechecker and runtime to walk per match.
-///
-/// After the per-pattern passes, the existential folder walks every
-/// `Expr` (WHERE / GROUP BY / RETURN, recursive into nested EXISTS
-/// bodies) and rewrites empty bodies to `false` / `true` literals.
+/// Optimize the query while preserving OPTIONAL and §16.6 prefix boundaries.
 fn optimize_query(q: Query, schema: &Schema) -> Query {
-    // Collapsing the chain into a single Join is sound only when no clause
-    // contains a path pattern prefix: a `Selected` (selective/restrictive)
-    // pattern is evaluated in isolation (§16.6 NOTE 233), which a collapsed
-    // Join would erase. Treat such clauses like OPTIONAL and optimize each
-    // pattern in place, preserving the chain.
+    // Selected patterns are evaluated in isolation; do not collapse across them.
     let mut q = if !q.has_any_optional() && !q.has_any_selected() {
         let pattern = optimizer::compile(q.collapsed_pattern());
         Query {

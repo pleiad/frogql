@@ -364,9 +364,7 @@ impl Parser {
         Ok(pattern)
     }
 
-    /// Parse one MATCH clause's body. `<path pattern prefix>` nodes are
-    /// parsed inside `query()`, per comma operand; the MATCH / OPTIONAL MATCH
-    /// keywords are consumed by the caller, which passes the `optional` flag.
+    /// MATCH / OPTIONAL MATCH wrapper; prefixes are parsed by `query()`.
     fn match_statement(&mut self, optional: bool) -> Result<MatchStatement, String> {
         let pattern = self.match_clause_body()?;
         Ok(if optional {
@@ -376,25 +374,13 @@ impl Parser {
         })
     }
 
-    /// ISO §16.6 `<path pattern prefix>`. Parsed at the start of each
-    /// `<path pattern>` comma operand. Returns `None` when no prefix is
-    /// present *or* when the prefix reduces to the implicit `WALK ALL`
-    /// (which imposes no restriction), so the rest of the pipeline only
-    /// ever sees meaningful prefixes.
-    ///
-    /// Disambiguation: a `<path pattern>` never begins with a name or a
-    /// `*` token — it starts with `(`, an edge token (`-[`, `<-`, `~`,
-    /// `-`, ...), so a leading WALK / TRAIL / SIMPLE / ACYCLIC / ALL /
-    /// ANY / SHORTEST is unambiguously the start of a prefix. Note `ALL`
-    /// lexes to `Token::All`, while canonical uppercase `ANY` lexes to
-    /// `Token::Star` (the type wildcard); neither can legally open a pattern.
+    /// ISO §16.6 prefix at the start of one comma operand.
     fn parse_path_prefix(&mut self) -> Result<Option<PathPrefix>, String> {
         let prefix = if self.eat(&Token::All) {
             // ALL [SHORTEST] [<mode>] [PATH|PATHS]
             if self.eat_keyword("SHORTEST") {
                 let mode = self.eat_path_mode().unwrap_or(PathMode::Walk);
                 self.eat_path_or_paths();
-                // ALL SHORTEST ≡ SHORTEST 1 GROUP (§16.6 SR 2c).
                 PathPrefix {
                     mode,
                     search: PathSearch::ShortestGroups { count: 1 },
@@ -412,7 +398,6 @@ impl Parser {
             if self.eat_keyword("SHORTEST") {
                 let mode = self.eat_path_mode().unwrap_or(PathMode::Walk);
                 self.eat_path_or_paths();
-                // ANY SHORTEST ≡ SHORTEST 1 PATH (§16.6 SR 2c).
                 PathPrefix {
                     mode,
                     search: PathSearch::ShortestPaths { count: 1 },
@@ -451,7 +436,6 @@ impl Parser {
                 }
             }
         } else if let Some(mode) = self.eat_path_mode() {
-            // Bare `<path mode prefix>`: <mode> [PATH|PATHS], search = ALL.
             self.eat_path_or_paths();
             PathPrefix {
                 mode,
@@ -461,8 +445,6 @@ impl Parser {
             return Ok(None);
         };
 
-        // Drop the implicit `WALK ALL`: it constrains nothing, so callers
-        // and the runtime can treat its absence and presence identically.
         if prefix.is_trivial() {
             Ok(None)
         } else {
@@ -480,9 +462,7 @@ impl Parser {
         matched
     }
 
-    /// `ANY` is lexed as `Token::Star` in its canonical uppercase form for
-    /// historical type-wildcard compatibility. Treat lowercase/mixed-case
-    /// `any` as a soft keyword only in path-prefix position.
+    /// Accept lowercase `any` as a soft keyword only in prefix position.
     fn eat_any_path_prefix(&mut self) -> bool {
         if self.eat(&Token::Star) {
             return true;
@@ -687,10 +667,7 @@ impl Parser {
 
     // ===== Queries (comma-join level) =====
 
-    // ISO §16.4 `<path pattern list>` = `<path pattern> ("," <path pattern>)*`.
-    // Each `<path pattern>` may carry its own `<path pattern prefix>`
-    // (§16.6), so the prefix is parsed per comma-operand, not once for the
-    // whole clause.
+    // Prefixes are per comma operand, not per MATCH clause.
     fn query(&mut self) -> Result<PathPattern, String> {
         let mut left = self.path_pattern_operand()?;
         while self.eat(&Token::Comma) {
@@ -700,10 +677,7 @@ impl Parser {
         Ok(left)
     }
 
-    /// One ISO §16.6 `<path pattern>`: an optional `<path pattern prefix>`
-    /// followed by a `<path pattern expression>`. A meaningful prefix wraps
-    /// the expression in `PathPattern::Selected`; the implicit `WALK ALL`
-    /// (which `parse_path_prefix` returns as `None`) leaves it bare.
+    /// Parse one comma operand, wrapping meaningful prefixes in `Selected`.
     fn path_pattern_operand(&mut self) -> Result<PathPattern, String> {
         let prefix = self.parse_path_prefix()?;
         let pattern = self.path_pattern()?;

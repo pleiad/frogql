@@ -153,30 +153,13 @@ impl Typechecker {
         }
     }
 
-    /// ISO §16.6 + runtime gate: unbounded repetition (`*`, `+`, `{n,}`)
-    /// has no finite answer set on a cyclic graph under the default
-    /// WALK/ALL semantics. The runtime can evaluate it in two cases:
-    ///
-    ///  - a *single*-shortest search prefix (`ANY SHORTEST`, `ALL
-    ///    SHORTEST`, `SHORTEST 1`) → BFS shortest-reachability, but only
-    ///    for `*` / `+` (lower bound ≤ 1);
-    ///  - a *restrictive* path mode (`ACYCLIC` / `SIMPLE` / `TRAIL`) →
-    ///    finite enumeration bounded by `|V|` / `|E|`, for any lower
-    ///    bound.
-    ///
-    /// Reject every other unbounded form here with an actionable message
-    /// instead of letting the runtime panic. Bounded repetition `{n,m}`
-    /// is unaffected: it materializes a finite set and needs no prefix.
+    /// Reject unbounded repetition unless its nearest prefix makes it finite.
     fn check_unbounded_repetition(&mut self, q: &Query) {
         for m in &q.matches {
             self.check_unbounded_in(m.pattern(), None);
         }
     }
 
-    /// Walk `p` looking for unbounded repetitions, carrying the prefix of
-    /// the nearest enclosing `Selected` node (`None` at the top, i.e. the
-    /// implicit `WALK ALL`). Each unbounded `Repeat` is validated against
-    /// that prefix's [`PathPrefix::unbounded_support`].
     fn check_unbounded_in(&mut self, p: &PathPattern, prefix: Option<PathPrefix>) {
         match p {
             PathPattern::Selected {
@@ -223,26 +206,11 @@ impl Typechecker {
                     );
                 }
             }
-            // A restrictive mode bounds enumeration by |V| / |E|, so
-            // any lower bound is fine.
             Some(UnboundedSupport::Mode(_)) => {}
         }
     }
 
-    /// ISO §16.6 SR 5–8: a *selective* `<path pattern>` (one whose search
-    /// prefix is other than `ALL` — i.e. `ANY` / `SHORTEST`) must be
-    /// evaluable in isolation (NOTE 233). Its *strict interior* variables
-    /// (everything it exposes except its left/right boundary node
-    /// variables, SR 5) must not be equivalent to an exterior variable or
-    /// to an interior variable of another selective pattern (SR 7).
-    ///
-    /// With the prefix carried per `<path pattern>` ([`PathPattern::Selected`]),
-    /// a selective pattern is exactly such a node. The rule becomes: a
-    /// strict interior variable of a `Selected` node must not occur
-    /// anywhere outside that node — only its boundary (endpoint) variables
-    /// may join. We test this by counting variable occurrences across the
-    /// whole query (`global`) versus inside the node (`local`): a strict
-    /// interior variable `v` is shared iff `global[v] > local[v]`.
+    /// ISO §16.6 SR 5-8: selective patterns may share only boundary vars.
     fn check_selective_isolation(&mut self, q: &Query) {
         let mut global: HashMap<String, usize> = HashMap::new();
         for m in &q.matches {
@@ -258,8 +226,6 @@ impl Typechecker {
             let PathPattern::Selected { prefix, pattern } = s else {
                 continue;
             };
-            // Only *selective* patterns are constrained; a restrictive
-            // mode-only prefix (search == ALL) is not.
             if prefix.search == PathSearch::All {
                 continue;
             }
@@ -486,11 +452,7 @@ impl Typechecker {
                 )
             }
 
-            // A `<path pattern prefix>` (mode / search) filters which paths
-            // survive; it does not change the *types* of the variables the
-            // inner pattern exposes. Type-check the inner and pass its
-            // result through unchanged (over-approximating non-emptiness, as
-            // the prefix can only shrink the row set).
+            // Prefixes filter paths; they do not transform variable types.
             PathPattern::Selected { pattern, .. } => self.check_path_pattern(pattern),
 
             PathPattern::Repeat {
@@ -1062,15 +1024,7 @@ fn is_orderable_per_iso_22_14(t: &SimpleType) -> bool {
     }
 }
 
-/// ISO §16.6 SR 5b/5c: the left/right boundary variables of a selective
-/// path pattern are the variables declared in the first / last `<node
-/// pattern>` that are exposed as *unconditional singletons* and are not
-/// inside a `<path pattern union>` / `<path multiset alternation>`.
-///
-/// We approximate this by collecting node variables at "top depth" — i.e.
-/// not buried under a quantifier (`Repeat`), `Questioned`, union, or join,
-/// all of which would make the variable a group/conditional singleton or
-/// place it inside an alternation — and taking the first and last.
+/// Boundary variables are the first/last top-level node variables.
 fn boundary_node_vars(p: &PathPattern) -> (Option<String>, Option<String>) {
     let mut vars: Vec<String> = Vec::new();
     collect_top_node_vars(p, &mut vars);
@@ -1090,12 +1044,7 @@ fn collect_top_node_vars(p: &PathPattern, out: &mut Vec<String>) {
             collect_top_node_vars(a, out);
             collect_top_node_vars(b, out);
         }
-        // A clause-level WHERE wraps the pattern; it is transparent for the
-        // purpose of finding the endpoint nodes.
         PathPattern::Filter(inner, _) => collect_top_node_vars(inner, out),
-        // Edges contribute no boundary node variable; quantifiers, questioned
-        // primaries, unions and joins bury their nodes below top depth, so
-        // those nodes are not unconditional-singleton boundary variables.
         PathPattern::EdgeRight(_)
         | PathPattern::EdgeLeft(_)
         | PathPattern::EdgeUndirected(_)
@@ -1108,11 +1057,7 @@ fn collect_top_node_vars(p: &PathPattern, out: &mut Vec<String>) {
     }
 }
 
-/// Count how many times each element variable is *declared* (by a node or
-/// edge pattern) across `p`. Recurses through every structural variant,
-/// including into `Selected`, so a variable that occurs both inside and
-/// outside a selective node is counted in both. WHERE-clause references
-/// are ignored (consistent with `freevars`).
+/// Count element variable declarations; WHERE references do not bind.
 fn count_var_occurrences(p: &PathPattern, out: &mut HashMap<String, usize>) {
     let bump = |d: &Option<Descriptor>, out: &mut HashMap<String, usize>| {
         if let Some(v) = d.as_ref().and_then(|d| d.var.clone()) {
@@ -1136,9 +1081,6 @@ fn count_var_occurrences(p: &PathPattern, out: &mut HashMap<String, usize>) {
     }
 }
 
-/// Collect every `Selected` node reachable from `p` (a selective or
-/// restrictive `<path pattern>`), descending through structural variants
-/// so nested selective patterns are also found.
 fn collect_selected<'a>(p: &'a PathPattern, out: &mut Vec<&'a PathPattern>) {
     match p {
         PathPattern::Selected { pattern, .. } => {

@@ -28,33 +28,17 @@ use super::path_select::path_satisfies_mode;
 use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
 use crate::syntax::path_prefix::{PathMode, PathPrefix, UnboundedSupport};
 
-/// How a selected path pattern's prefix licenses *unbounded* repetition
-/// (`Repeat { ub: None }` — i.e. `*`, `+`, `{n,}`). Under the default
-/// WALK/ALL semantics an unbounded repeat over a cyclic graph is
-/// infinite; a prefix can make it finite in two distinct ways, each with
-/// its own evaluation strategy.
+/// Finite evaluation policy for unbounded repetition inside `Selected`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnboundedPolicy {
-    /// No prefix, or one that does not bound the search (e.g. plain WALK):
-    /// unbounded repetition stays infinite and is rejected by the
-    /// typechecker. Reaching the runtime in this state is a bug.
+    /// No finite-making prefix; rejected by the typechecker.
     Forbidden,
-    /// A SHORTEST-family search in WALK mode: evaluate by a length-ordered
-    /// k-shortest search (Dijkstra-like over uniform step lengths). `count`
-    /// and `groups` carry the selection — `groups: false` is `SHORTEST k
-    /// PATHS` (incl. `ANY SHORTEST` = `count 1`), `groups: true` is
-    /// `SHORTEST k GROUPS` (incl. `ALL SHORTEST` = `count 1`).
+    /// WALK + SHORTEST: length-ordered k-shortest search.
     Shortest { count: usize, groups: bool },
-    /// A restrictive mode (`TRAIL` / `SIMPLE` / `ACYCLIC`): enumerate every
-    /// path the mode admits, pruning partial paths that already violate
-    /// it. Finite because such paths cannot repeat a node (≤ `|V|`) or an
-    /// edge (≤ `|E|`). Any subsequent search is then a plain selection.
+    /// TRAIL / SIMPLE / ACYCLIC: finite enumeration with mode pruning.
     Mode(PathMode),
 }
 
-/// Map a selected pattern prefix to its unbounded-repetition policy. Defers the
-/// classification to [`PathPrefix::unbounded_support`] so the runtime and
-/// the typechecker gate agree.
 fn unbounded_policy_for(prefix: Option<PathPrefix>) -> UnboundedPolicy {
     match prefix.and_then(|p| p.unbounded_support()) {
         Some(UnboundedSupport::Shortest { count, groups }) => {
@@ -157,11 +141,7 @@ pub struct Runtime<'g, G: GraphAccess> {
     ///     those `keys` for every body row, so a per-outer-row probe
     ///     is one O(1) hash lookup. The body runs once per Runtime.
     exists_cache: RefCell<HashMap<usize, ExistsCache>>,
-    /// Set while evaluating `PathPattern::Selected`; tells the
-    /// `Repeat { ub: None }` arm how (or whether) it may evaluate
-    /// unbounded repetition. The typechecker
-    /// (`check_unbounded_repetition`) guarantees an unbounded repeat only
-    /// reaches the runtime when this is not `Forbidden`.
+    /// Set only while evaluating `PathPattern::Selected`.
     unbounded_policy: Cell<UnboundedPolicy>,
 }
 
@@ -713,33 +693,18 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     ///   padded with `PathValue::Nothing` for new variables (those then
     ///   project as `Value::Null` via the existing AttrLookup-failure path).
     fn run_match_chain(&self, query: &Query, limit: usize) -> IntermediateResult {
-        // The collapsed fast path joins every clause into one pattern; it
-        // is sound only when no clause is OPTIONAL and none contains a
-        // `Selected` (selective/restrictive) pattern, which must be
-        // evaluated in isolation (§16.6 NOTE 233) and would be erased by a
-        // collapsed Join. When a `Selected` is present we walk the chain so
-        // each `Selected` arm applies its own prefix in place.
+        // Keep `Selected` operands isolated; collapsing would erase their
+        // per-pattern prefix boundary.
         if !query.has_any_optional() && !query.has_any_selected() {
             self.unbounded_policy.set(UnboundedPolicy::Forbidden);
             return self.run_path_pattern(&query.collapsed_pattern(), limit);
         }
 
-        // The unbounded-repetition policy is now set locally by each
-        // `Selected` arm; outside one, an unbounded repeat is an
-        // invariant violation the typechecker has already rejected.
         self.unbounded_policy.set(UnboundedPolicy::Forbidden);
 
         let mut iter = query.matches.iter();
         let first = iter.next().expect("Query::matches must be non-empty");
-        // When the chain has only one match, no subsequent join can
-        // filter rows further — pass `limit` down so the LTJ runtime can
-        // early-terminate inside `run_path_pattern`. Multi-match chains
-        // pass 0 because Simple matches may filter rows out and we'd
-        // lose candidates by truncating the leading binding table. A
-        // selective pattern also forces 0: SHORTEST/ANY must rank the full
-        // candidate set before selecting, so an early LIMIT would drop
-        // survivors (the `Selected` arm already passes 0 to its inner, but
-        // the caller limit must not pre-truncate the selected operand either).
+        // Only a single, non-selected MATCH can safely push LIMIT inward.
         let first_limit = if query.matches.len() == 1 && !first.pattern().has_selected() {
             limit
         } else {
@@ -757,11 +722,6 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     natural_join(&acc, &ir_new, 0)
                 }
                 MatchStatement::Optional { .. } => {
-                    // The bind-pushdown optimization assumes the inner
-                    // pattern is taken whole; a selective pattern has to
-                    // see every candidate first, so a `Selected`-bearing
-                    // OPTIONAL falls back to global eval + left join (the
-                    // selection happens inside `run_path_pattern`).
                     let pushed = if !pattern.has_selected() {
                         self.optional_via_bind_pushdown(&acc, pattern, &bound_vars, &new_vars)
                     } else {
@@ -1141,14 +1101,8 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
             PathPattern::Join(q1, q2) => self.run_join(q1, q2, limit),
             PathPattern::Selected { prefix, pattern } => {
-                // ISO §16.6: a selective/restrictive `<path pattern>` is
-                // evaluated in isolation (NOTE 233). Materialize the inner
-                // pattern's paths under the prefix's unbounded-repetition
-                // policy, then apply the path-mode filter and the search
-                // selection. Save/restore the policy so sibling patterns in
-                // a comma-join keep their own. The selection ranks the full
-                // candidate set, so the inner runs unlimited (0); any outer
-                // LIMIT is enforced by the caller.
+                // Selection ranks the full candidate set, so the inner runs
+                // without LIMIT and the caller limit is applied afterwards.
                 let prev = self.unbounded_policy.get();
                 self.unbounded_policy
                     .set(unbounded_policy_for(Some(*prefix)));
@@ -1981,22 +1935,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         IntermediateResult::new(result)
     }
 
-    /// Unbounded repetition (`*`, `+`, `{n,}`) under a *restrictive* path
-    /// mode (`TRAIL` / `SIMPLE` / `ACYCLIC`) and a non-shortest search.
-    ///
-    /// Where WALK admits infinitely many laps around a cycle, a
-    /// restrictive mode forbids the very repetition that makes the set
-    /// infinite: TRAIL cannot reuse an edge (so length ≤ `|E|`), SIMPLE /
-    /// ACYCLIC cannot reuse a node (length ≤ `|V|`). The enumeration is a
-    /// worklist DFS over the inner pattern's step relation that prunes any
-    /// partial path the mode already rejects — once a path repeats a
-    /// forbidden element, no extension can repair it, so the surviving
-    /// frontier is finite and the search terminates.
-    ///
-    /// Every admitted path of repetition count ≥ `lb` is emitted; a
-    /// non-trivial search prefix (`ANY N`, `SHORTEST N`, ...) is applied
-    /// afterwards in `apply_path_prefix` as an ordinary selection over
-    /// this finite set.
+    /// Enumerate unbounded repetition under a finite restrictive mode.
     fn run_repetition_unbounded_mode(
         &self,
         p: &PathPattern,

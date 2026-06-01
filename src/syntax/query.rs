@@ -104,12 +104,8 @@ impl ReturnItem {
 /// not yet exposed; a single optional pattern is enough for the
 /// formalism described in the OOPSLA paper rule TOpt).
 ///
-/// The ISO §16.6 `<path pattern prefix>` (path mode +/or path search)
-/// is carried *inside* `pattern` as a [`PathPattern::Selected`] node,
-/// scoped to a single `<path pattern>` operand of the `<path pattern
-/// list>` exactly as the standard structures it. A comma-join clause
-/// can therefore prefix each operand independently, e.g.
-/// `MATCH SHORTEST 1 (a)-[:R]->{1,5}(b), (b)-[:R]->(c)`.
+/// ISO §16.6 prefixes live inside `pattern` as `PathPattern::Selected`,
+/// scoped per comma operand.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchStatement {
     Simple { pattern: PathPattern },
@@ -222,10 +218,7 @@ impl Query {
         self.matches.iter().any(|m| m.is_optional())
     }
 
-    /// True when any MATCH clause contains a `<path pattern prefix>`
-    /// (a `PathPattern::Selected` node — a path mode other than WALK, or a
-    /// selective search). Used to keep the chain un-collapsed so the
-    /// runtime evaluates each selective/restrictive pattern in isolation.
+    /// True when any MATCH pattern contains an ISO §16.6 prefix.
     pub fn has_any_selected(&self) -> bool {
         self.matches.iter().any(|m| m.pattern().has_selected())
     }

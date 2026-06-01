@@ -1,7 +1,4 @@
-//! ISO/IEC 39075:2024 §16.6 `<path pattern prefix>` — path modes
-//! (WALK / TRAIL / SIMPLE / ACYCLIC) and path search prefixes
-//! (ALL / ANY / SHORTEST). End-to-end: parser AST shape + runtime
-//! selection over bounded repetition.
+//! ISO/IEC 39075:2024 §16.6 path prefix parser/runtime tests.
 
 use gqlrust::compile_query;
 use gqlrust::compile_query_unchecked;
@@ -13,10 +10,7 @@ use gqlrust::syntax::path_pattern::PathPattern;
 use gqlrust::syntax::path_prefix::{PathMode, PathPrefix, PathSearch};
 use gqlrust::syntax::query::Query;
 
-/// The `<path pattern prefix>` carried by the first `Selected` node in the
-/// first match's pattern (ISO §16.6 attaches the prefix to a `<path
-/// pattern>`, modeled as `PathPattern::Selected`). `None` when the pattern
-/// has no prefix (the implicit `WALK ALL`).
+/// First explicit prefix in the first match pattern.
 fn first_prefix(q: &Query) -> Option<PathPrefix> {
     fn find(p: &PathPattern) -> Option<PathPrefix> {
         match p {
@@ -37,10 +31,7 @@ fn first_prefix(q: &Query) -> Option<PathPrefix> {
 // Fixtures
 // =====================================================================
 
-/// Two routes A → D of different length:
-///   A -> B -> D            (length 2)
-///   A -> C -> E -> D       (length 3)
-/// plus the single edges so every adjacent pair is also reachable.
+/// Two A -> D routes with lengths 2 and 3.
 fn graph_two_routes() -> MemoryGraphStore {
     let json = r#"{
       "nodes": [
@@ -61,11 +52,7 @@ fn graph_two_routes() -> MemoryGraphStore {
     MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-/// Diamond with two equal-shortest A→D routes plus a longer one:
-///   A -> B -> D        (length 2)
-///   A -> C -> D        (length 2)
-///   A -> E -> F -> D   (length 3)
-/// Distinguishes SHORTEST k PATHS from SHORTEST k GROUPS.
+/// Diamond: two A -> D routes of length 2, one of length 3.
 fn graph_diamond() -> MemoryGraphStore {
     let json = r#"{
       "nodes": [
@@ -89,7 +76,7 @@ fn graph_diamond() -> MemoryGraphStore {
     MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-/// Directed triangle X -> Y -> Z -> X (a 3-cycle).
+/// Directed 3-cycle.
 fn graph_triangle() -> MemoryGraphStore {
     let json = r#"{
       "nodes": [
@@ -142,8 +129,6 @@ fn parses_bare_path_mode() {
 
 #[test]
 fn walk_all_is_trivial_and_dropped() {
-    // The implicit `WALK ALL` constrains nothing, so the parser stores no
-    // `Selected` wrapper.
     let q = compile_query_unchecked("MATCH WALK (a)-[]->(b) RETURN a").unwrap();
     assert!(first_prefix(&q).is_none());
     let q2 = compile_query_unchecked("MATCH ALL (a)-[]->(b) RETURN a").unwrap();
@@ -217,10 +202,7 @@ fn zero_count_is_rejected() {
 
 #[test]
 fn leading_prefix_binds_only_the_first_comma_operand() {
-    // ISO §16.6: a `<path pattern prefix>` belongs to a single
-    // `<path pattern>` of the `<path pattern list>`. A leading prefix
-    // therefore decorates ONLY the first comma-operand, never the whole
-    // clause — the structural distinction from the old per-clause model.
+    // Prefixes are scoped per comma operand.
     let q =
         compile_query_unchecked("MATCH SHORTEST 1 (a)-[]->{1,3}(b), (b)-[]->(c) RETURN a").unwrap();
     let PathPattern::Join(left, right) = q.matches[0].pattern() else {
@@ -238,8 +220,7 @@ fn leading_prefix_binds_only_the_first_comma_operand() {
 
 #[test]
 fn prefix_binds_to_its_own_comma_operand() {
-    // The prefix may sit on any operand: here it decorates the SECOND
-    // `<path pattern>` while the first stays bare.
+    // Prefixes may also appear on later comma operands.
     let q =
         compile_query_unchecked("MATCH (a)-[]->(b), SHORTEST 1 (b)-[]->{1,3}(c) RETURN a").unwrap();
     let PathPattern::Join(left, right) = q.matches[0].pattern() else {
@@ -252,13 +233,10 @@ fn prefix_binds_to_its_own_comma_operand() {
     );
 }
 
-// =====================================================================
-// Runtime — path search selection
-// =====================================================================
+// Runtime path search.
 
 #[test]
 fn all_paths_returns_every_route() {
-    // Unprefixed: both the length-2 and length-3 A→D routes appear.
     let g = graph_two_routes();
     let rows = run_projected(
         &g,
@@ -288,8 +266,6 @@ fn raw_runtime_limit_is_honored_after_selected_pattern() {
 
 #[test]
 fn all_shortest_keeps_the_shortest_length_group() {
-    // Only one route has the minimum length, so the shortest group is a
-    // singleton here — same count as SHORTEST 1 but via the GROUP path.
     let g = graph_two_routes();
     let rows = run_projected(
         &g,
@@ -298,14 +274,10 @@ fn all_shortest_keeps_the_shortest_length_group() {
     assert_eq!(rows.len(), 1);
 }
 
-// =====================================================================
-// Runtime — path modes over a cycle
-// =====================================================================
+// Runtime path modes.
 
 #[test]
 fn acyclic_removes_the_cycle() {
-    // X →→→ X in exactly 3 hops is the triangle cycle; ACYCLIC forbids the
-    // repeated node X, so nothing comes back.
     let g = graph_triangle();
     let rows = run_projected(
         &g,
@@ -316,8 +288,6 @@ fn acyclic_removes_the_cycle() {
 
 #[test]
 fn simple_allows_the_closing_cycle() {
-    // SIMPLE permits the single first==last coincidence, so the closed
-    // triangle survives.
     let g = graph_triangle();
     let rows = run_projected(
         &g,
@@ -336,14 +306,10 @@ fn walk_keeps_the_cycle_too() {
     assert_eq!(rows.len(), 1, "the default WALK keeps the cycle");
 }
 
-// =====================================================================
-// Unbounded repetition (`*` / `+`) coupled to SHORTEST via BFS
-// =====================================================================
+// Unbounded repetition with SHORTEST.
 
 #[test]
 fn unbounded_without_prefix_is_rejected() {
-    // `+` over a (possibly cyclic) graph has no finite WALK answer set;
-    // the typechecker must reject it with an actionable message.
     let err = compile_query("MATCH (s)-[]->+(t) RETURN s.name").unwrap_err();
     assert!(err.to_uppercase().contains("SHORTEST"), "got: {err}");
 
@@ -356,7 +322,6 @@ fn unbounded_without_prefix_is_rejected() {
 
 #[test]
 fn lower_bounded_unbounded_is_rejected() {
-    // `{2,}` with SHORTEST is out of scope for the k-shortest search.
     let err = compile_query("MATCH ANY SHORTEST (s)-[]->{2,}(t) RETURN s.name").unwrap_err();
     assert!(
         err.to_lowercase().contains("n >= 2") || err.to_lowercase().contains("unbounded"),
@@ -366,9 +331,6 @@ fn lower_bounded_unbounded_is_rejected() {
 
 #[test]
 fn any_shortest_plus_finds_the_short_route() {
-    // Unbounded `+`: BFS reaches D from A first at length 2 (A→B→D), so
-    // ANY SHORTEST returns exactly that one route — the length-3 A→C→E→D
-    // walk is longer and pruned.
     let g = graph_two_routes();
     let rows = run_projected(
         &g,
@@ -379,7 +341,6 @@ fn any_shortest_plus_finds_the_short_route() {
 
 #[test]
 fn star_includes_zero_length_self_reach() {
-    // `*` admits the length-0 match, so A reaches itself.
     let g = graph_two_routes();
     let rows = run_projected(
         &g,
@@ -390,9 +351,6 @@ fn star_includes_zero_length_self_reach() {
 
 #[test]
 fn shortest_plus_terminates_on_a_cycle() {
-    // The triangle X→Y→Z→X is fully cyclic: under WALK, `+` would loop
-    // forever. BFS bounds the depth at |V| = 3, finds the shortest X→X
-    // closed walk at length 3, and terminates.
     let g = graph_triangle();
     let rows = run_projected(
         &g,
@@ -403,8 +361,6 @@ fn shortest_plus_terminates_on_a_cycle() {
 
 #[test]
 fn shortest_plus_reaches_every_node_once() {
-    // From X, BFS reaches X, Y and Z (X via the 3-cycle). ANY SHORTEST
-    // keeps one path per (first, last) pair, so exactly three targets.
     let g = graph_triangle();
     let rows = run_projected(
         &g,
@@ -413,16 +369,10 @@ fn shortest_plus_reaches_every_node_once() {
     assert_eq!(sorted_names(&rows), vec!["X", "Y", "Z"]);
 }
 
-// =====================================================================
-// Unbounded repetition (`*` / `+` / `{n,}`) under a restrictive mode
-// (ACYCLIC / SIMPLE / TRAIL) — finite enumeration, no SHORTEST needed
-// =====================================================================
+// Unbounded repetition with restrictive modes.
 
 #[test]
 fn acyclic_plus_enumerates_simple_paths_and_terminates() {
-    // ACYCLIC forbids repeating a node, so on the X→Y→Z→X triangle the
-    // closing hop back to X is excluded. From X, `+` yields X→Y and
-    // X→Y→Z only — finite, and it must not hang on the cycle.
     let g = graph_triangle();
     let rows = run_projected(
         &g,
@@ -433,8 +383,6 @@ fn acyclic_plus_enumerates_simple_paths_and_terminates() {
 
 #[test]
 fn simple_plus_allows_the_closing_cycle() {
-    // SIMPLE permits first == last, so the closed triangle X→Y→Z→X
-    // survives in addition to the open prefixes.
     let g = graph_triangle();
     let rows = run_projected(
         &g,
@@ -445,8 +393,6 @@ fn simple_plus_allows_the_closing_cycle() {
 
 #[test]
 fn trail_plus_walks_every_edge_once() {
-    // TRAIL forbids reusing an edge; the triangle's three edges form one
-    // closed trail X→Y→Z→X, so X reaches Y, Z and itself.
     let g = graph_triangle();
     let rows = run_projected(
         &g,
@@ -457,8 +403,6 @@ fn trail_plus_walks_every_edge_once() {
 
 #[test]
 fn acyclic_star_keeps_every_simple_route() {
-    // Unlike SHORTEST, ACYCLIC `*` keeps *all* simple A→D routes:
-    // A→B→D (len 2) and A→C→E→D (len 3).
     let g = graph_two_routes();
     let rows = run_projected(
         &g,
@@ -469,17 +413,11 @@ fn acyclic_star_keeps_every_simple_route() {
 
 #[test]
 fn lower_bounded_unbounded_is_allowed_under_a_mode() {
-    // `{2,}` is infinite under WALK but finite under a restrictive mode,
-    // so the typechecker must accept it (it rejected it under SHORTEST).
     assert!(compile_query("MATCH ACYCLIC (s)-[]->{2,}(t) RETURN s.name").is_ok());
 }
 
 #[test]
 fn counted_shortest_over_unbounded_works_with_a_mode() {
-    // SHORTEST 2 alone is rejected over `+`, but combined with ACYCLIC
-    // the engine enumerates the finite simple-path set first and then
-    // applies the SHORTEST 2 selection. Both A→D routes (len 2 and 3)
-    // are the two shortest, so both survive.
     let g = graph_two_routes();
     let rows = run_projected(
         &g,
@@ -490,8 +428,6 @@ fn counted_shortest_over_unbounded_works_with_a_mode() {
 
 #[test]
 fn unbounded_without_shortest_or_mode_is_rejected() {
-    // Bare WALK `*` has neither a single-shortest search nor a
-    // restrictive mode, so it stays infinite and is rejected.
     let err = compile_query("MATCH WALK (s)-[]->*(t) RETURN s.name").unwrap_err();
     assert!(
         err.to_uppercase().contains("ACYCLIC") || err.to_uppercase().contains("SHORTEST"),
@@ -499,14 +435,10 @@ fn unbounded_without_shortest_or_mode_is_rejected() {
     );
 }
 
-// =====================================================================
-// k-shortest (k >= 2) over unbounded repetition in WALK — length-ordered
-// search with per-pair budgeting; PATHS vs GROUPS
-// =====================================================================
+// k-shortest over unbounded repetition.
 
 #[test]
 fn shortest_2_paths_over_unbounded_keeps_two_routes() {
-    // Two A→D routes (len 2 and 3); SHORTEST 2 PATHS over `+` keeps both.
     let g = graph_two_routes();
     let rows = run_projected(
         &g,
@@ -517,8 +449,6 @@ fn shortest_2_paths_over_unbounded_keeps_two_routes() {
 
 #[test]
 fn shortest_2_paths_picks_the_two_shortest_in_the_diamond() {
-    // A→D: two length-2 routes + one length-3. SHORTEST 2 PATHS keeps the
-    // two shortest (both length 2); the length-3 route is dropped.
     let g = graph_diamond();
     let rows = run_projected(
         &g,
@@ -529,7 +459,6 @@ fn shortest_2_paths_picks_the_two_shortest_in_the_diamond() {
 
 #[test]
 fn shortest_3_paths_includes_the_longer_route() {
-    // With budget 3, the length-3 route joins the two length-2 routes.
     let g = graph_diamond();
     let rows = run_projected(
         &g,
@@ -540,8 +469,6 @@ fn shortest_3_paths_includes_the_longer_route() {
 
 #[test]
 fn shortest_2_groups_keeps_every_path_in_the_two_shortest_lengths() {
-    // GROUPS counts distinct *lengths*: the length-2 group (2 paths) plus
-    // the length-3 group (1 path) = 3 paths, where SHORTEST 2 PATHS kept 2.
     let g = graph_diamond();
     let rows = run_projected(
         &g,
@@ -552,8 +479,6 @@ fn shortest_2_groups_keeps_every_path_in_the_two_shortest_lengths() {
 
 #[test]
 fn all_shortest_is_one_group_over_unbounded() {
-    // ALL SHORTEST = SHORTEST 1 GROUP: both equal-length (2) routes, not
-    // the length-3 one.
     let g = graph_diamond();
     let rows = run_projected(
         &g,
@@ -564,9 +489,6 @@ fn all_shortest_is_one_group_over_unbounded() {
 
 #[test]
 fn shortest_2_terminates_on_a_cycle_with_repeated_laps() {
-    // On the triangle, the two shortest X→X closed walks are one lap
-    // (length 3) and two laps (length 6). SHORTEST 2 finds both and the
-    // length-ordered search terminates once the pair's budget is spent.
     let g = graph_triangle();
     let rows = run_projected(
         &g,
@@ -575,16 +497,10 @@ fn shortest_2_terminates_on_a_cycle_with_repeated_laps() {
     assert_eq!(rows.len(), 2, "one-lap and two-lap closed walks");
 }
 
-// =====================================================================
-// ISO §16.6 SR 5–8 — boundary / interior variables of a selective
-// <path pattern> must be evaluable in isolation: only endpoint
-// (boundary) variables may join other patterns.
-// =====================================================================
+// ISO §16.6 SR 5-8: selective patterns may share only boundary variables.
 
 #[test]
 fn selective_endpoint_variable_may_join_other_clauses() {
-    // `t` is the right boundary of the selective clause, so joining it
-    // with a following non-selective clause is allowed (NOTE 232).
     assert!(
         compile_query("MATCH ANY SHORTEST (s)-[]->{1,3}(t) MATCH (t)-[]->(u) RETURN u.name")
             .is_ok(),
@@ -594,8 +510,6 @@ fn selective_endpoint_variable_may_join_other_clauses() {
 
 #[test]
 fn selective_interior_variable_shared_with_another_clause_is_rejected() {
-    // `m` is a strict interior variable of the selective clause; sharing
-    // it with another clause violates SR 7.
     let err =
         compile_query("MATCH ANY SHORTEST (s)-[]->(m)-[]->(t) MATCH (m)-[]->(x) RETURN x.name")
             .unwrap_err();
@@ -607,23 +521,17 @@ fn selective_interior_variable_shared_with_another_clause_is_rejected() {
 
 #[test]
 fn selective_interior_variable_in_isolation_is_accepted() {
-    // A single selective clause may expose an interior variable; there is
-    // nothing to join it with, so it is fine to RETURN it as a group.
     assert!(compile_query("MATCH ANY SHORTEST (s)-[]->(m)-[]->(t) RETURN s.name, t.name").is_ok());
 }
 
 #[test]
 fn non_selective_clause_may_share_any_variable() {
-    // ALL (and the unprefixed default) is not selective, so interior
-    // variable sharing across clauses is unrestricted.
     assert!(compile_query("MATCH ALL (s)-[]->(m)-[]->(t) MATCH (m)-[]->(x) RETURN x.name").is_ok());
     assert!(compile_query("MATCH (s)-[]->(m)-[]->(t) MATCH (m)-[]->(x) RETURN x.name").is_ok());
 }
 
 #[test]
 fn restrictive_mode_only_clause_is_not_selective() {
-    // ACYCLIC is restrictive but not selective (search is still ALL), so
-    // SR 7 does not constrain its interior-variable sharing.
     assert!(
         compile_query("MATCH ACYCLIC (s)-[]->(m)-[]->(t) MATCH (m)-[]->(x) RETURN x.name").is_ok()
     );

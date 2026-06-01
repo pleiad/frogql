@@ -1,22 +1,7 @@
-//! ISO/IEC 39075:2024 §16.6 path pattern prefix evaluation.
+//! ISO/IEC 39075:2024 §16.6 path prefix evaluation.
 //!
-//! A `<path pattern prefix>` is applied *after* its selected `<path pattern>`
-//! operand has been materialized into [`ResultRow`]s (each carrying its full
-//! [`Path`]). Two independent steps run, in this order:
-//!
-//!  1. **Path mode filter** (§16.7, NOTE 234 — "restrictive path modes are
-//!     enforced as part of the check for consistent path bindings"): drop
-//!     rows whose path repeats an edge (TRAIL) or a node (SIMPLE / ACYCLIC).
-//!
-//!  2. **Path search selection** (§22.4 "Evaluation of a selective path
-//!     pattern"): per `(left boundary node, right boundary node)`
-//!     partition, keep a subset — all paths, N arbitrary paths, the N
-//!     shortest paths, or the paths in the N shortest length groups.
-//!
-//! The runtime materializes whole paths, so both steps are exact and need
-//! no special index support. The cost is that the inner pattern is run
-//! unbounded (no LIMIT push-down) when a prefix is present — selection has
-//! to see every candidate before it can rank them.
+//! A selected pattern is materialized, filtered by path mode, then reduced by
+//! the path search policy per `(left boundary, right boundary)` partition.
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,10 +9,7 @@ use crate::model::value::Id;
 use crate::runtime::result::{IntermediateResult, ResultRow};
 use crate::syntax::path_prefix::{PathMode, PathPrefix, PathSearch};
 
-/// Boundary key of a row: `(first node id, last node id)`. Rows are
-/// partitioned by this key for the search selection. A row whose first or
-/// last element is not a node (should not happen for a well-formed path)
-/// falls back to `None`, which still partitions consistently.
+/// Search partition key: `(first node id, last node id)`.
 type BoundaryKey = (Option<Id>, Option<Id>);
 
 /// Apply a `<path pattern prefix>` to one selected pattern operand's rows.
@@ -36,14 +18,12 @@ pub fn apply_path_prefix(ir: IntermediateResult, prefix: PathPrefix) -> Intermed
         return ir;
     }
 
-    // Step 1: restrictive path mode.
     let mut rows: Vec<ResultRow> = ir
         .rows
         .into_iter()
         .filter(|r| row_satisfies_mode(r, prefix.mode))
         .collect();
 
-    // Step 2: selective path search.
     match prefix.search {
         PathSearch::All => {}
         PathSearch::Any { count } => select_any(&mut rows, count),
@@ -54,17 +34,11 @@ pub fn apply_path_prefix(ir: IntermediateResult, prefix: PathPrefix) -> Intermed
     IntermediateResult::new(rows)
 }
 
-/// A row passes the mode iff every path it carries passes. A selected
-/// `<path pattern>` normally contributes one path, but this stays robust if
-/// an internal representation ever carries several.
 fn row_satisfies_mode(row: &ResultRow, mode: PathMode) -> bool {
     row.paths.iter().all(|p| path_satisfies_mode(p, mode))
 }
 
-/// Whether a single path satisfies a restrictive path mode. Exposed to
-/// the engine so unbounded repetition under TRAIL / SIMPLE / ACYCLIC can
-/// prune partial paths *during* enumeration (which bounds the search to a
-/// finite set) instead of materializing-then-filtering.
+/// Used both after materialization and while pruning unbounded mode search.
 pub(crate) fn path_satisfies_mode(path: &crate::model::value::Path, mode: PathMode) -> bool {
     match mode {
         PathMode::Walk => true,
@@ -81,9 +55,6 @@ pub(crate) fn path_satisfies_mode(path: &crate::model::value::Path, mode: PathMo
                 .filter_map(|pv| pv.id()),
         ),
         PathMode::Simple => {
-            // No repeated nodes, except the first and last node may coincide
-            // (a simple cycle). Collect node ids, then check that the only
-            // permitted coincidence is first == last.
             let node_ids: Vec<Id> = path
                 .0
                 .iter()
