@@ -191,9 +191,10 @@ impl Typechecker {
         match prefix.and_then(|p| p.unbounded_support()) {
             None => self.errors.push(
                 "Unbounded repetition (`*`, `+`, `{n,}`) is only supported under a \
-                 single-shortest path search prefix (`ANY SHORTEST`, `ALL SHORTEST`, \
-                 `SHORTEST 1`) or a restrictive path mode (`ACYCLIC`, `SIMPLE`, \
-                 `TRAIL`). Bounded repetition `{n,m}` works without any prefix."
+                 SHORTEST-family path search prefix (`ANY SHORTEST`, `ALL SHORTEST`, \
+                 `SHORTEST n [PATHS]`, `SHORTEST n GROUPS`) or a restrictive path \
+                 mode (`ACYCLIC`, `SIMPLE`, `TRAIL`). Bounded repetition `{n,m}` \
+                 works without any prefix."
                     .to_string(),
             ),
             Some(UnboundedSupport::Shortest { .. }) => {

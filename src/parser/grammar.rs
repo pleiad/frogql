@@ -464,7 +464,7 @@ impl Parser {
 
     /// Accept lowercase `any` as a soft keyword only in prefix position.
     fn eat_any_path_prefix(&mut self) -> bool {
-        if self.eat(&Token::Star) {
+        if self.eat(&Token::Any) {
             return true;
         }
         self.eat_keyword("ANY")
@@ -640,6 +640,7 @@ impl Parser {
                 | Token::Float
                 | Token::Bool
                 | Token::Str
+                | Token::Any
                 | Token::Star
                 | Token::LBracket
                 | Token::LBrace => {
@@ -1162,6 +1163,7 @@ impl Parser {
             | Token::Float
             | Token::Bool
             | Token::Str
+            | Token::Any
             | Token::Star
             | Token::LBracket
             | Token::LBrace => {
@@ -1188,7 +1190,7 @@ impl Parser {
             Token::Float => Ok(SimpleType::F),
             Token::Bool => Ok(SimpleType::B),
             Token::Str => Ok(SimpleType::S),
-            Token::Star => Ok(SimpleType::Star),
+            Token::Any | Token::Star => Ok(SimpleType::Star),
             Token::LBracket => {
                 let inner = self.simple_type()?;
                 self.expect(&Token::RBracket)?;
@@ -1277,6 +1279,7 @@ impl Parser {
                 | Token::Float
                 | Token::Bool
                 | Token::Str
+                | Token::Any
                 | Token::Star
                 | Token::LBracket
                 | Token::LBrace => {
@@ -1555,7 +1558,7 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Type(SimpleType::S))
             }
-            Token::Star => {
+            Token::Any | Token::Star => {
                 self.advance();
                 Ok(Expr::Type(SimpleType::Star))
             }
@@ -2270,7 +2273,7 @@ impl Parser {
             Token::Float => Ok(SimpleType::F),
             Token::Bool => Ok(SimpleType::B),
             Token::Str => Ok(SimpleType::S),
-            Token::Star => Ok(SimpleType::Star),
+            Token::Any | Token::Star => Ok(SimpleType::Star),
             Token::LBracket => {
                 let inner = self.schema_simple_type()?;
                 self.expect(&Token::RBracket)?;

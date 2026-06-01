@@ -180,6 +180,12 @@ fn parses_any_with_count_and_mode() {
 }
 
 #[test]
+fn star_is_not_an_any_path_prefix() {
+    let err = compile_query_unchecked("MATCH *(a)-[]->(b) RETURN a").unwrap_err();
+    assert!(err.contains("expected path pattern"), "got: {err}");
+}
+
+#[test]
 fn parses_lowercase_any_as_path_prefix_soft_keyword() {
     let q = compile_query_unchecked("MATCH any shortest (a)-[]->{1,3}(b) RETURN a").unwrap();
     assert_eq!(
