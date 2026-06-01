@@ -26,10 +26,12 @@ pub fn elaborate_query(q: Query) -> Query {
         .matches
         .into_iter()
         .map(|m| match m {
-            MatchStatement::Simple { pattern } => MatchStatement::Simple {
+            MatchStatement::Simple { prefix, pattern } => MatchStatement::Simple {
+                prefix,
                 pattern: elaborate_pattern(pattern, &fresh),
             },
-            MatchStatement::Optional { pattern } => MatchStatement::Optional {
+            MatchStatement::Optional { prefix, pattern } => MatchStatement::Optional {
+                prefix,
                 pattern: elaborate_pattern(pattern, &fresh),
             },
         })

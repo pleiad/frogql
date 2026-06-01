@@ -32,7 +32,9 @@ use crate::typing::variable_type::Schema;
 pub fn fold_empty_existentials(q: &mut Query, schema: &Schema) {
     for m in &mut q.matches {
         let pattern = match m {
-            MatchStatement::Simple { pattern } | MatchStatement::Optional { pattern } => pattern,
+            MatchStatement::Simple { pattern, .. } | MatchStatement::Optional { pattern, .. } => {
+                pattern
+            }
         };
         fold_in_pattern(pattern, schema);
     }

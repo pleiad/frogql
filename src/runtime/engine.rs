@@ -22,7 +22,9 @@ use super::assignment::Assignment;
 use super::cmp_values;
 use super::ltj::pattern_extract;
 use super::ltj::triple_index::TripleIndex;
+use super::path_select::apply_path_prefix;
 use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
+use crate::syntax::path_prefix::PathPrefix;
 
 /// Apply value predicates pushed down by the optimizer to raw graph properties.
 /// Missing key → predicate is null → reject.
@@ -623,7 +625,11 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     ///   padded with `PathValue::Nothing` for new variables (those then
     ///   project as `Value::Null` via the existing AttrLookup-failure path).
     fn run_match_chain(&self, query: &Query, limit: usize) -> IntermediateResult {
-        if !query.has_any_optional() {
+        // The collapsed fast path joins every clause into one pattern; it
+        // is sound only when no clause is OPTIONAL and none carries a path
+        // pattern prefix (the prefix is a per-clause selection over that
+        // clause's boundary nodes, which a collapsed Join would erase).
+        if !query.has_any_optional() && !query.has_any_prefix() {
             return self.run_path_pattern(&query.collapsed_pattern(), limit);
         }
 
@@ -633,9 +639,16 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         // filter rows further — pass `limit` down so the LTJ runtime can
         // early-terminate inside `run_path_pattern`. Multi-match chains
         // pass 0 because Simple matches may filter rows out and we'd
-        // lose candidates by truncating the leading binding table.
-        let first_limit = if query.matches.len() == 1 { limit } else { 0 };
+        // lose candidates by truncating the leading binding table. A
+        // prefix also forces 0: SHORTEST/ANY must rank the full candidate
+        // set before selecting, so an early LIMIT would drop survivors.
+        let first_limit = if query.matches.len() == 1 && first.prefix().is_none() {
+            limit
+        } else {
+            0
+        };
         let mut acc = self.run_path_pattern(first.pattern(), first_limit);
+        acc = self.apply_clause_prefix(acc, first.prefix());
         let mut bound_vars: HashSet<String> = first.pattern().freevars();
 
         for m in iter {
@@ -644,14 +657,25 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             acc = match m {
                 MatchStatement::Simple { .. } => {
                     let ir_new = self.run_path_pattern(pattern, 0);
+                    let ir_new = self.apply_clause_prefix(ir_new, m.prefix());
                     natural_join(&acc, &ir_new, 0)
                 }
-                MatchStatement::Optional { .. } => self
-                    .optional_via_bind_pushdown(&acc, pattern, &bound_vars, &new_vars)
-                    .unwrap_or_else(|| {
+                MatchStatement::Optional { .. } => {
+                    // The bind-pushdown optimization assumes the inner
+                    // pattern is taken whole; a selective prefix has to
+                    // see every candidate first, so a prefixed OPTIONAL
+                    // falls back to global eval + select + left join.
+                    let pushed = if m.prefix().is_none() {
+                        self.optional_via_bind_pushdown(&acc, pattern, &bound_vars, &new_vars)
+                    } else {
+                        None
+                    };
+                    pushed.unwrap_or_else(|| {
                         let ir_new = self.run_path_pattern(pattern, 0);
+                        let ir_new = self.apply_clause_prefix(ir_new, m.prefix());
                         left_outer_join(&acc, &ir_new, &bound_vars, &new_vars)
-                    }),
+                    })
+                }
             };
             bound_vars.extend(new_vars);
             if limit > 0 && acc.rows.len() >= limit {
@@ -670,6 +694,20 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
 
         acc
+    }
+
+    /// Apply a clause's optional ISO §16.6 path pattern prefix (path mode
+    /// filter + path search selection) to its materialized rows. A `None`
+    /// prefix — the implicit `WALK ALL` — is a no-op.
+    fn apply_clause_prefix(
+        &self,
+        ir: IntermediateResult,
+        prefix: Option<PathPrefix>,
+    ) -> IntermediateResult {
+        match prefix {
+            Some(p) => apply_path_prefix(ir, p),
+            None => ir,
+        }
     }
 
     /// OPTIONAL MATCH bind-pushdown. The naive path evaluates the inner

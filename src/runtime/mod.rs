@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod dm;
 pub mod engine;
 pub mod ltj;
+pub mod path_select;
 pub mod result;
 
 use crate::model::value::Value;

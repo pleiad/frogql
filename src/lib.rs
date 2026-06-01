@@ -28,10 +28,18 @@ use typing::variable_type::Schema;
 /// `Expr` (WHERE / GROUP BY / RETURN, recursive into nested EXISTS
 /// bodies) and rewrites empty bodies to `false` / `true` literals.
 fn optimize_query(q: Query, schema: &Schema) -> Query {
-    let mut q = if !q.has_any_optional() {
+    // Collapsing the chain into a single Join is sound only when no clause
+    // carries a path pattern prefix: the prefix is a per-clause selection
+    // (mode filter / SHORTEST) over that clause's boundary nodes, which a
+    // collapsed Join would erase. Treat prefixes like OPTIONAL and optimize
+    // each pattern in place, preserving the chain.
+    let mut q = if !q.has_any_optional() && !q.has_any_prefix() {
         let pattern = optimizer::compile(q.collapsed_pattern());
         Query {
-            matches: vec![MatchStatement::Simple { pattern }],
+            matches: vec![MatchStatement::Simple {
+                prefix: None,
+                pattern,
+            }],
             ..q
         }
     } else {
@@ -39,10 +47,12 @@ fn optimize_query(q: Query, schema: &Schema) -> Query {
             .matches
             .into_iter()
             .map(|m| match m {
-                MatchStatement::Simple { pattern } => MatchStatement::Simple {
+                MatchStatement::Simple { prefix, pattern } => MatchStatement::Simple {
+                    prefix,
                     pattern: optimizer::compile(pattern),
                 },
-                MatchStatement::Optional { pattern } => MatchStatement::Optional {
+                MatchStatement::Optional { prefix, pattern } => MatchStatement::Optional {
+                    prefix,
                     pattern: optimizer::compile(pattern),
                 },
             })

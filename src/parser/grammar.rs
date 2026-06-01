@@ -3,6 +3,7 @@ use crate::syntax::descriptor::Descriptor;
 use crate::syntax::dm::{validate_insert_pattern, DmOp, DmStatement, RemoveItem, SetItem};
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
+use crate::syntax::path_prefix::{PathMode, PathPrefix, PathSearch};
 use crate::syntax::query::{
     Aggregator, GeneralSetKind, MatchStatement, NullsOrder, Query, ReturnItem, SetQuantifier,
     SortDir, SortKey, SortSpec,
@@ -150,16 +151,7 @@ impl Parser {
         } else {
             self.eat(&Token::Match);
         }
-        let first_pattern = self.match_clause_body()?;
-        let first_stmt = if first_optional {
-            MatchStatement::Optional {
-                pattern: first_pattern,
-            }
-        } else {
-            MatchStatement::Simple {
-                pattern: first_pattern,
-            }
-        };
+        let first_stmt = self.match_statement(first_optional)?;
         let matches = self.continue_match_chain(vec![first_stmt])?;
         self.finish_query_after_matches(matches)
     }
@@ -174,11 +166,9 @@ impl Parser {
         loop {
             if self.eat(&Token::Optional) {
                 self.expect(&Token::Match)?;
-                let pattern = self.match_clause_body()?;
-                matches.push(MatchStatement::Optional { pattern });
+                matches.push(self.match_statement(true)?);
             } else if self.eat(&Token::Match) {
-                let pattern = self.match_clause_body()?;
-                matches.push(MatchStatement::Simple { pattern });
+                matches.push(self.match_statement(false)?);
             } else {
                 break;
             }
@@ -192,16 +182,7 @@ impl Parser {
     fn parse_match_chain_explicit(&mut self) -> Result<Vec<MatchStatement>, String> {
         let first_optional = self.eat(&Token::Optional);
         self.expect(&Token::Match)?;
-        let first_pattern = self.match_clause_body()?;
-        let first_stmt = if first_optional {
-            MatchStatement::Optional {
-                pattern: first_pattern,
-            }
-        } else {
-            MatchStatement::Simple {
-                pattern: first_pattern,
-            }
-        };
+        let first_stmt = self.match_statement(first_optional)?;
         self.continue_match_chain(vec![first_stmt])
     }
 
@@ -381,6 +362,163 @@ impl Parser {
             pattern = PathPattern::Filter(Box::new(pattern), expr);
         }
         Ok(pattern)
+    }
+
+    /// Parse one MATCH clause's body: an optional `<path pattern prefix>`
+    /// followed by the pattern (and trailing WHERE). The MATCH /
+    /// OPTIONAL MATCH keywords are consumed by the caller, which passes
+    /// the resulting `optional` flag.
+    fn match_statement(&mut self, optional: bool) -> Result<MatchStatement, String> {
+        let prefix = self.parse_path_prefix()?;
+        let pattern = self.match_clause_body()?;
+        Ok(if optional {
+            MatchStatement::Optional { prefix, pattern }
+        } else {
+            MatchStatement::Simple { prefix, pattern }
+        })
+    }
+
+    /// ISO §16.6 `<path pattern prefix>`. Parsed at the very start of a
+    /// MATCH clause's pattern (after the `MATCH` / `OPTIONAL MATCH`
+    /// keyword). Returns `None` when no prefix is present *or* when the
+    /// prefix reduces to the implicit `WALK ALL` (which imposes no
+    /// restriction), so the rest of the pipeline only ever sees
+    /// meaningful prefixes.
+    ///
+    /// Disambiguation: a `<path pattern>` never begins with a name or a
+    /// `*` token — it starts with `(`, an edge token (`-[`, `<-`, `~`,
+    /// `-`, ...), so a leading WALK / TRAIL / SIMPLE / ACYCLIC / ALL /
+    /// ANY / SHORTEST is unambiguously the start of a prefix. Note `ALL`
+    /// lexes to `Token::All` and `ANY` lexes to `Token::Star` (the type
+    /// wildcard); neither can legally open a pattern.
+    fn parse_path_prefix(&mut self) -> Result<Option<PathPrefix>, String> {
+        let prefix = if self.eat(&Token::All) {
+            // ALL [SHORTEST] [<mode>] [PATH|PATHS]
+            if self.eat_keyword("SHORTEST") {
+                let mode = self.eat_path_mode().unwrap_or(PathMode::Walk);
+                self.eat_path_or_paths();
+                // ALL SHORTEST ≡ SHORTEST 1 GROUP (§16.6 SR 2c).
+                PathPrefix {
+                    mode,
+                    search: PathSearch::ShortestGroups { count: 1 },
+                }
+            } else {
+                let mode = self.eat_path_mode().unwrap_or(PathMode::Walk);
+                self.eat_path_or_paths();
+                PathPrefix {
+                    mode,
+                    search: PathSearch::All,
+                }
+            }
+        } else if self.eat(&Token::Star) {
+            // ANY (lexed as `*`): ANY [SHORTEST | <number>] [<mode>] [PATH|PATHS]
+            if self.eat_keyword("SHORTEST") {
+                let mode = self.eat_path_mode().unwrap_or(PathMode::Walk);
+                self.eat_path_or_paths();
+                // ANY SHORTEST ≡ SHORTEST 1 PATH (§16.6 SR 2c).
+                PathPrefix {
+                    mode,
+                    search: PathSearch::ShortestPaths { count: 1 },
+                }
+            } else {
+                let count = self.eat_path_count()?.unwrap_or(1);
+                let mode = self.eat_path_mode().unwrap_or(PathMode::Walk);
+                self.eat_path_or_paths();
+                PathPrefix {
+                    mode,
+                    search: PathSearch::Any { count },
+                }
+            }
+        } else if self.eat_keyword("SHORTEST") {
+            // SHORTEST <number> [<mode>] [PATH|PATHS]    (counted shortest path)
+            // SHORTEST [<number>] [<mode>] {GROUP|GROUPS}(counted shortest group)
+            let count = self.eat_path_count()?;
+            let mode = self.eat_path_mode().unwrap_or(PathMode::Walk);
+            if self.eat_keyword("GROUP") || self.eat_keyword("GROUPS") {
+                PathPrefix {
+                    mode,
+                    search: PathSearch::ShortestGroups {
+                        count: count.unwrap_or(1),
+                    },
+                }
+            } else {
+                let count = count.ok_or_else(|| {
+                    "SHORTEST requires a positive path count (e.g. `SHORTEST 1`) \
+                     or the GROUP / GROUPS keyword"
+                        .to_string()
+                })?;
+                self.eat_path_or_paths();
+                PathPrefix {
+                    mode,
+                    search: PathSearch::ShortestPaths { count },
+                }
+            }
+        } else if let Some(mode) = self.eat_path_mode() {
+            // Bare `<path mode prefix>`: <mode> [PATH|PATHS], search = ALL.
+            self.eat_path_or_paths();
+            PathPrefix {
+                mode,
+                search: PathSearch::All,
+            }
+        } else {
+            return Ok(None);
+        };
+
+        // Drop the implicit `WALK ALL`: it constrains nothing, so callers
+        // and the runtime can treat its absence and presence identically.
+        if prefix.is_trivial() {
+            Ok(None)
+        } else {
+            Ok(Some(prefix))
+        }
+    }
+
+    /// Consume the current token iff it is a `Name` equal (case-insensitive)
+    /// to `kw`. Used for the soft keywords of the path prefix grammar.
+    fn eat_keyword(&mut self, kw: &str) -> bool {
+        let matched = matches!(self.peek(), Token::Name(s) if s.eq_ignore_ascii_case(kw));
+        if matched {
+            self.advance();
+        }
+        matched
+    }
+
+    /// ISO §16.6 `<path mode>` keyword (WALK/TRAIL/SIMPLE/ACYCLIC), consumed
+    /// when present.
+    fn eat_path_mode(&mut self) -> Option<PathMode> {
+        let mode = match self.peek() {
+            Token::Name(s) => match s.to_ascii_uppercase().as_str() {
+                "WALK" => PathMode::Walk,
+                "TRAIL" => PathMode::Trail,
+                "SIMPLE" => PathMode::Simple,
+                "ACYCLIC" => PathMode::Acyclic,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.advance();
+        Some(mode)
+    }
+
+    /// Optional `<path or paths>` (the noise words PATH / PATHS), discarded.
+    fn eat_path_or_paths(&mut self) {
+        let _ = self.eat_keyword("PATH") || self.eat_keyword("PATHS");
+    }
+
+    /// ISO §16.6 `<number of paths>` / `<number of groups>`. When a literal
+    /// is present it must be a positive integer (SR 2b).
+    fn eat_path_count(&mut self) -> Result<Option<usize>, String> {
+        if let Token::Number(n) = *self.peek() {
+            self.advance();
+            if n <= 0 {
+                return Err(format!(
+                    "path search count must be a positive integer, got {n}"
+                ));
+            }
+            Ok(Some(n as usize))
+        } else {
+            Ok(None)
+        }
     }
 
     // return_list = return_item ("," return_item)*
@@ -1228,26 +1366,15 @@ impl Parser {
         } else {
             self.eat(&Token::Match);
         }
-        let first_pattern = self.match_clause_body()?;
-        let first_stmt = if first_optional {
-            MatchStatement::Optional {
-                pattern: first_pattern,
-            }
-        } else {
-            MatchStatement::Simple {
-                pattern: first_pattern,
-            }
-        };
+        let first_stmt = self.match_statement(first_optional)?;
         let mut matches = vec![first_stmt];
 
         loop {
             if self.eat(&Token::Optional) {
                 self.expect(&Token::Match)?;
-                let pattern = self.match_clause_body()?;
-                matches.push(MatchStatement::Optional { pattern });
+                matches.push(self.match_statement(true)?);
             } else if self.eat(&Token::Match) {
-                let pattern = self.match_clause_body()?;
-                matches.push(MatchStatement::Simple { pattern });
+                matches.push(self.match_statement(false)?);
             } else {
                 break;
             }

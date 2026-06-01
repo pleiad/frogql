@@ -29,6 +29,7 @@ fn multi_match_query(patterns: &[&str]) -> Query {
     let matches: Vec<MatchStatement> = patterns
         .iter()
         .map(|s| MatchStatement::Simple {
+            prefix: None,
             pattern: parser::parse(s).expect("parse failed"),
         })
         .collect();

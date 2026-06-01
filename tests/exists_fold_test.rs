@@ -38,7 +38,9 @@ fn account_only_schema() -> Schema {
 fn where_expr_with(schema: &Schema, input: &str) -> Expr {
     let q = gqlrust::compile_query_with(schema, input).expect("compile failed");
     let pat = match &q.matches[0] {
-        MatchStatement::Simple { pattern } | MatchStatement::Optional { pattern } => pattern,
+        MatchStatement::Simple { pattern, .. } | MatchStatement::Optional { pattern, .. } => {
+            pattern
+        }
     };
     match pat {
         PathPattern::Filter(_, e) => e.clone(),
@@ -49,7 +51,9 @@ fn where_expr_with(schema: &Schema, input: &str) -> Expr {
 fn where_expr(input: &str) -> Expr {
     let q = gqlrust::compile_query(input).expect("compile failed");
     let pat = match &q.matches[0] {
-        MatchStatement::Simple { pattern } | MatchStatement::Optional { pattern } => pattern,
+        MatchStatement::Simple { pattern, .. } | MatchStatement::Optional { pattern, .. } => {
+            pattern
+        }
     };
     match pat {
         PathPattern::Filter(_, e) => e.clone(),
@@ -166,7 +170,9 @@ fn nested_inner_exists_folds_outer_stays() {
         other => panic!("expected outer Expr::Exists, got {other:?}"),
     };
     let inner_pat = match &body.matches[0] {
-        MatchStatement::Simple { pattern } | MatchStatement::Optional { pattern } => pattern,
+        MatchStatement::Simple { pattern, .. } | MatchStatement::Optional { pattern, .. } => {
+            pattern
+        }
     };
     let inner_expr = match inner_pat {
         PathPattern::Filter(_, e) => e.clone(),
