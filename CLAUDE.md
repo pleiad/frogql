@@ -24,7 +24,8 @@ cargo test --test parser_test --test runtime_test --test store_runtime_test \
            --test parser_dm_test --test lazy_mut_test --test dm_runtime_test \
            --test dm_persistence_test --test dm_schema_test --test dm_default_test \
            --test dump_test --test dm_set_test --test dm_remove_test \
-           --test dm_label_test --test dm_delete_expr_test --test memory_mut_test
+           --test dm_label_test --test dm_delete_expr_test --test memory_mut_test \
+           --test path_prefix_test
 
 # Single test
 cargo test --test runtime_test test_join_star_any_label -- --exact
@@ -196,14 +197,24 @@ The runtime is generic over `GraphAccess`. Node and edge methods are separate: `
 ### Parser grammar hierarchy
 
 ```
-full_query  = MATCH? query (WHERE expr)? (RETURN items)? (LIMIT INT)?
-query       = path_pattern ("," path_pattern)*     ← Join (lowest precedence)
+full_query   = MATCH? query (WHERE expr)? (RETURN items)? (GROUP BY ...)? (ORDER BY ...)? (LIMIT INT)?
+query        = operand ("," operand)*               ← Join (lowest precedence)
+operand      = path_prefix? path_pattern            ← Selected (ISO §16.6 path-pattern prefix)
 path_pattern = path_term ("|" path_term)*           ← Union
-path_term   = path_factor+                          ← Concat (juxtaposition)
-path_factor = path_primary quantifier?              ← Repeat {n,m}
+path_term    = path_factor+                         ← Concat (juxtaposition)
+path_factor  = path_primary quantifier?             ← Repeat {n,m} / `*` / `+` / `?`
 ```
 
 `MATCH` keyword is optional — bare path patterns like `(x)-[]->(y)` still work. `OPTIONAL MATCH` is supported as a top-level match clause. `is` and `IS` are aliases for the `typed`/`TYPED` type-predicate keyword; `IS NULL` / `IS NOT NULL` are dedicated null tests detected via lookahead before the type-predicate path. The `AS` keyword is ambiguous between type cast (in expressions) and alias (in RETURN); `return_comparison()` excludes `AS` from operators so it's available for aliases.
+
+#### Path-pattern prefixes (ISO §16.6)
+
+A `path_prefix` is parsed per comma operand (`parse_path_prefix` in `path_pattern_operand`), so it scopes to one `<path pattern>` and does not leak across a comma-join or union. A non-trivial prefix wraps its pattern in `PathPattern::Selected { prefix, pattern }`; the trivial `WALK ALL` is dropped (stored as a plain pattern) so the runtime skips the materialize-and-select pass. The prefix carries a `PathMode` (restrictive) and a `PathSearch` (selective), both in `src/syntax/path_prefix.rs`:
+
+- **Path modes** (`WALK` default, `TRAIL`, `SIMPLE`, `ACYCLIC`) constrain which walks count: TRAIL forbids repeated edges, ACYCLIC forbids repeated nodes, SIMPLE forbids repeated nodes except a closing first==last cycle.
+- **Path searches** (`ALL` default, `ANY [N]`, `SHORTEST [N] [PATHS]`, `SHORTEST N GROUPS`) pick a subset per `(first node, last node)` boundary partition. The surface forms `ANY SHORTEST` / `ALL SHORTEST` normalize to `SHORTEST 1 PATHS` / `SHORTEST 1 GROUPS` (ISO §16.6 SR 2c).
+
+`ANY` lexes to its own `Token::Any` (so `ANY <pattern>` is distinct from a `*` type wildcard); in label position `(x:ANY)` it stays an alias for the `*` any-label wildcard (`label_primary` accepts both). `TRAIL/SIMPLE/ACYCLIC/SHORTEST/GROUPS/PATHS/WALK` are soft keywords, matched case-insensitively only in prefix position, so they remain usable as labels and variable names elsewhere. Tests in `tests/path_prefix_test.rs`.
 
 `LIMIT N` populates `Query.limit: Option<u32>`; the runtime combines it with any caller-supplied cap via `min` (smaller wins). `LIMIT 0` short-circuits to an empty binding table per ISO/IEC 39075:2024.
 
@@ -242,7 +253,7 @@ Primary strategy for joins and concatenations of directed/undirected edges. Wors
 **In-loop filters** (`FilterKind`): `NodeLabel`, `NodeProperty`, `NodeAttrCmp` (`=`, `!=`, `<`, `<=`, `>`, `>=`), `NodeInSet` (btree-resolved range). Placed at the VEO level where all dependencies are bound; pushed down by the optimizer from WHERE conjuncts.
 
 **Current limits**:
-1. Repetitions `{n,m}`: unrolled by `optimizer::unroll_repeat` for bounded ranges with no named inner variables and single-edge inner. Other shapes (unbounded `{n,}`, named edge/node vars, range > `MAX_UNROLL = 4`) stay on the hash-join repetition path.
+1. Repetitions `{n,m}`: unrolled by `optimizer::unroll_repeat` for bounded ranges with no named inner variables and single-edge inner. Other bounded shapes (named edge/node vars, range > `MAX_UNROLL = 8`) stay on the hash-join repetition path. Unbounded repetition (`*`/`+`/`{n,}`) is not an LTJ shape; it requires a §16.6 prefix and runs through the dedicated finite searches (`run_repetition_shortest` / `run_repetition_unbounded_mode`, see *Path-pattern prefixes*).
 2. Any-direction edges (without tilde): not modelled as triples.
 3. WHERE: label and pushed value predicates run inside the loop; arbitrary WHERE post-filters. Var-vs-var predicates (`a <> b`) are not pushed into the LTJ filter set yet — they evaluate post-pattern via `PathPattern::Filter`.
 4. TripleIndex not persisted: cached on `Runtime` via `RefCell<Option<Arc<TripleIndex>>>`, built once per Runtime (eagerly at REPL/Connection open via `warm_triple_index()`).
@@ -254,7 +265,25 @@ When LTJ can't decompose, the pairwise hash-join takes over: both sides evaluate
 
 `-[x]->{n,m}` binds `x` to a `Group` of matched edges, not a single edge. `to_group()` wraps each value in a singleton group; `concat_group()` concatenates groups. Nested repetitions produce nested groups: `(-[x]->{1,2}){1,2}` gives `x ↦ [[e1], [e2, e3]]`. The zero-repetition base case fills variables with empty groups.
 
-`engine.rs::run_repetition_range` evaluates `{lb,ub}` in a single pass: the inner pattern runs once, the `first → indices` hash is built once, and every level `1..=ub` grows in a single `rows` buffer reusing the previous level's slice by index. Levels below `lb` get drained at the end via one `Vec::drain`. Replaces an earlier per-length loop that scaled as `O((ub-lb+1) × ub)` with `O(ub)`.
+`engine.rs::run_repetition_range` evaluates bounded `{lb,ub}` in a single pass: the inner pattern runs once, the `first → indices` hash is built once, and every level `1..=ub` grows in a single `rows` buffer reusing the previous level's slice by index. Levels below `lb` get drained at the end via one `Vec::drain`. Replaces an earlier per-length loop that scaled as `O((ub-lb+1) × ub)` with `O(ub)`.
+
+**Unbounded repetition** (`*`, `+`, `{n,}` with no upper bound) is infinite under plain `WALK ALL`, so the typechecker rejects it unless a §16.6 prefix makes it finite (see *Path-pattern prefixes* below). The `Repeat` arm of `run_path_pattern` dispatches on `Runtime::unbounded_policy` (a `Cell` set while evaluating a `Selected` operand): `Shortest { count, groups }` routes to `run_repetition_shortest`, `Mode(mode)` to `run_repetition_unbounded_mode`, and `Forbidden` panics (an invariant the typechecker guarantees, so it is only reachable via `compile_query_unchecked`). **The inner pattern must contribute ≥1 edge per application**: an empty-matching inner (e.g. a bare `(x)` node) under unbounded repetition is a hard typecheck error, since a zero-length lap never advances the length-ordered search and would loop forever (the bounded case stays a warning, since it terminates regardless).
+
+### Path-pattern prefixes (ISO §16.6): modes, search, unbounded repetition
+
+`PathPattern::Selected { prefix, pattern }` is evaluated in `engine.rs::run_path_pattern` and `src/runtime/path_select.rs`. The inner pattern runs with no LIMIT (selection ranks the full candidate set), then `apply_path_prefix` filters by mode and reduces by search, and any caller LIMIT is applied afterward. Selection partitions rows by the `(first node id, last node id)` boundary key and acts per partition:
+
+- **Mode filter** (`path_satisfies_mode`): drops rows whose path repeats an edge (TRAIL) or node (ACYCLIC; SIMPLE allows only a closing first==last).
+- **`ANY N`** (`select_any`): keep up to `N` rows per partition in production order.
+- **`SHORTEST N [PATHS]`** (`select_shortest_paths`): the `N` shortest rows per partition, stable-sorted by edge length (ties broken by production order).
+- **`SHORTEST N GROUPS`** (`select_shortest_groups`): every row whose length is among the `N` shortest distinct lengths in its partition.
+
+For **bounded** patterns, `apply_path_prefix` materializes all rows then selects. For **unbounded** repetition, a dedicated finite search avoids materializing the infinite walk set:
+
+- `run_repetition_shortest` (WALK + SHORTEST) is a length-ordered k-shortest **walk** search: a `BinaryHeap` (min-heap on path length, monotone `seq` tie-break) expands paths in non-decreasing length, with a per-`(first,last)` budget that admits ≤`count` paths (PATHS) or ≤`count` distinct lengths (GROUPS) and prunes the rest. It terminates on cycles because per-pair lengths strictly grow, and pruning is sound by optimal substructure (the prefix of a k-shortest walk to a node is itself among the k-shortest walks to its predecessor — `first` is fixed along a concat chain, so the per-pair budget is the per-node k-shortest-walk budget).
+- `run_repetition_unbounded_mode` (TRAIL / SIMPLE / ACYCLIC) enumerates with a worklist, pruning any partial path that already violates the mode; bounded by `|E|` (TRAIL) or `|V|` (SIMPLE/ACYCLIC). A restrictive mode takes precedence over a co-present search (`SHORTEST 2 TRAIL …*` enumerates TRAIL-valid paths, then `apply_path_prefix` reduces that finite set by `SHORTEST 2`).
+
+**Typechecker gates** (`src/typing/checker.rs`): `check_unbounded_repetition` rejects an unbounded repeat whose nearest enclosing prefix does not license it (`PathPrefix::unbounded_support`), and rejects `SHORTEST` over `{n,}` with `n ≥ 2` (only `*`/`+` are supported; use a restrictive mode for higher lower bounds). `check_selective_isolation` enforces ISO §16.6 SR 5–8: a selective pattern (any non-`ALL` search) may share only its boundary (endpoint) variables with the rest of the query, so it stays evaluable in isolation; sharing an interior variable is an error. A `Selected` wrapper does not change variable types (`check_path_pattern` recurses through it).
 
 ### EXISTS / NOT EXISTS
 
@@ -269,6 +298,12 @@ When LTJ can't decompose, the pairwise hash-join takes over: both sides evaluate
 - *Correlated*: `run_match_chain(body, 0)` once (full body), project every row onto the correlation set (sorted variable names), store as `HashSet<Vec<PathValue>>`. Per outer row, build the probe key from μ and check membership — semi-join for `EXISTS`, anti-join for `NOT EXISTS`. The body runs at most once per `Runtime` regardless of how many outer rows pass through.
 
 The four phases live in commits `4d13327` (parse + typecheck), `163ee30` (fold optimiser), `134890f` (uncorrelated runtime), `d5b4a45` (correlated runtime). Tests in `tests/parser_test.rs`, `tests/typecheck_test.rs`, `tests/exists_fold_test.rs`, `tests/exists_runtime_test.rs`. Formal type rules in `latex/extension/main.tex` (`\textsc{TExists}`, `\textsc{TNotExists}`, plus `\isEmpty(\matchseq) \equiv e \lor \mathsf{empty}(\Gamma')` and the rewrite rules `\textsc{ExistsEmpty}` / `\textsc{NotExistsEmpty}`).
+
+### Aggregates and RETURN arithmetic
+
+`RETURN` items are `ReturnItem::Expr { expr, alias }` or `ReturnItem::Aggregate { agg, alias }`. Aggregates also compose **inside** value expressions via `Expr::Agg(Box<Aggregator>)`, so arithmetic over aggregate results works: `COUNT(DISTINCT x) + COUNT(DISTINCT y) AS total`. The parser recognises an aggregate call in `primary_expr` (so it can be a `Binop` operand); a *bare* top-level aggregate is re-folded back into `ReturnItem::Aggregate` so the existing aggregate-projection and ORDER BY-matching paths stay unchanged. `Expr::contains_agg()` classifies a RETURN expr as reduced-over-group (not a grouping key).
+
+Runtime (`engine.rs::run_aggregated`): an aggregate-bearing RETURN expr is evaluated per group by `fold_aggs` — each `Expr::Agg` node is reduced over the group to an `Expr::Const`, then the residual arithmetic runs against the group's representative row (so non-aggregate leaves like `otherPerson.firstName` resolve to their grouped value). The typechecker types `Expr::Agg` as the reducer's result (`COUNT`→Int, `AVG`→Float, `SUM`→numeric, `MIN`/`MAX`→element type) and exempts aggregate-bearing exprs from the GROUP BY key check. This unblocked LDBC IC3 (`COUNT(DISTINCT messageX) + COUNT(DISTINCT messageY) AS totalCount`). Tests in `tests/count_test.rs`.
 
 ### Null semantics
 
@@ -323,6 +358,7 @@ Passes the runtime relies on (each one-line summary; flags + file refs are the o
 - **LTJ multi-way join + concat** — see *Join strategy* above.
 - **Type-predicate pushdown** (`is T` → descriptor `PropertyType`).
 - **Value-predicate pushdown** (`x.attr <op> literal` for `=`, `!=`, `<`, `<=`, `>`, `>=` → `value_preds` on node descriptor; emitted as `FilterKind::NodeAttrCmp`; nodes only).
+- **Selected-path boundary pushdown** (`pushdown.rs`, ISO §16.6) — into a `Selected` pattern, a mode-only prefix (`PathSearch::All`, e.g. `ACYCLIC`) admits *all* constraints, but a selective prefix (`ANY`/`SHORTEST`) admits **only boundary (endpoint) variable** constraints; interior-node predicates stay as a post-selection `Filter`. Sound because selection partitions per `(source, target)` pair: restricting endpoints before the search equals filtering after, whereas filtering an interior node before would change which paths are shortest. `Constraints::retain_vars` keeps only the boundary vars; `walk_kinds` and `merge_constraints` carry the split.
 - **Index-driven constant folding** — `Eq` predicates that hit a hash index pre-bind the variable and drop it from VEO; empty hit short-circuits to zero rows. `pattern_extract::fold_indexed_constants`.
 - **Range index folding** — `<` / `<=` / `>` / `>=` predicates that hit a btree precompute the matching set and replace `NodeAttrCmp` with `FilterKind::NodeInSet`. `pattern_extract::fold_range_filters`.
 - **Repeat unrolling** (`unroll_repeat.rs`) — `(P){lb, ub}` → `Union(P^lb..P^ub)` for bounded ranges with single-edge inner and empty freevars; inserts anonymous `Node(None)` boundaries and distributes Union over Concat. `MAX_UNROLL = 8` (covers `{1,8}` and tighter). Fixed-length `lb == ub` short-circuits to a single flat concat with no Union envelope. `GQLITE_DISABLE_REPEAT_UNROLL=1`.

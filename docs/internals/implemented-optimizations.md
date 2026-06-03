@@ -440,3 +440,45 @@ reopen + run goes from 1.11 s (auto-only fallback) to 0.086 s (the
 `store/io.rs::save_graph_with_catalog_and_indexes_atomic`,
 `store/lazy.rs` (load on open, pass spec list on save),
 `store/mod.rs`.
+
+## 12. Boundary-predicate pushdown into selected paths (ISO §16.6)
+
+**Before:** the pushdown pass treated `PathPattern::Selected` (a
+path with a §16.6 prefix) as an opaque boundary — it optimized
+inside via `rewrite` but pushed no outer WHERE constraint through it.
+So `MATCH ANY SHORTEST (s)-[]->+(t) WHERE s.name = 'A' AND t.name =
+'D'` ran the shortest search over *all* `(s, t)` pairs and only then
+filtered, even though the endpoint predicates could prune the search.
+
+**After:** `merge_constraints` pushes endpoint constraints into a
+`Selected`. The rule depends on the search policy:
+
+- **Mode-only prefix** (`PathSearch::All`, e.g. `ACYCLIC` / `TRAIL` /
+  `SIMPLE` with no selection): every matching path is kept, so
+  filtering before vs. after is equivalent — push *all* constraints
+  in, interior nodes included.
+- **Selective prefix** (`ANY` / `SHORTEST`): push **only boundary
+  (first/last node) variable** constraints; interior-node predicates
+  stay as a post-selection `Filter`.
+
+**Why the split is sound.** A selective search picks paths per
+`(source, target)` partition. Restricting the endpoints *before* the
+search yields the same per-partition result as filtering *after*
+(partitions are independent). But filtering an *interior* node before
+the search would change which paths exist, hence which are shortest —
+e.g. the shortest `A→D` path might pass through `m ≠ B`, so pushing
+`m.name = 'B'` ahead of the search would return a length-3 path that
+post-filtering correctly drops. Interior predicates must therefore run
+after selection.
+
+**Implementation:** `Constraints` gains `Clone` + `retain_vars(&HashSet)`;
+`boundary_node_vars` returns the first/last top-level node vars;
+`walk_kinds` registers only boundary vars as pushable for a selective
+`Selected`; `merge_constraints` clones the full constraint set for
+mode-only prefixes and `retain_vars(boundary)` for selective ones.
+
+**Files changed:** `optimizer/pushdown.rs` (the `Selected` arms of
+`walk_kinds` / `merge_constraints`, `retain_vars`, `boundary_node_vars`).
+Tests: `selected_shortest_pushes_boundary_value_preds`,
+`selected_shortest_keeps_interior_value_pred_as_filter`,
+`selected_mode_all_pushes_interior_value_preds` (in `pushdown.rs`).
