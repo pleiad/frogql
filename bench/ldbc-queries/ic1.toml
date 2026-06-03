@@ -6,13 +6,12 @@ name = "Transitive friends with a certain name"
 status = "blocked"
 
 blocked_reason = """
-One gap remaining. Re-audited 2026-06-03 (post COLLECT_LIST):
-  - GROUP BY / ORDER BY by RETURN *alias* — the query groups by
-    `friendId, friendLastName, distanceFromPerson, ...` (all RETURN
-    aliases, not binding variables), and ORDER BY references aliases
-    inside an expression (`CAST(friendId AS INTEGER)`). The typechecker
-    only groups by binding variable and rejects the alias with "Variable
-    friendId not found in context". See iso-gql-gaps.md §2.12.
+One gap remaining. Re-audited 2026-06-03 (post COLLECT_LIST / casted alias ordering):
+  - GROUP BY by RETURN *alias* — the query groups by `friendId,
+    friendLastName, distanceFromPerson, ...` (all RETURN aliases, not
+    binding variables). The typechecker only groups by binding variable
+    and rejects the alias with "Variable friendId not found in context".
+    See iso-gql-gaps.md §2.12.
 
 What's now fine:
   - `COLLECT_LIST(...)` — list aggregate landed (2026-06-03); `COLLECT`
@@ -26,7 +25,7 @@ What's now fine:
 """
 
 required_features = [
-    "GROUP BY / ORDER BY by RETURN alias",
+    "GROUP BY by RETURN alias",
 ]
 
 params_file = "interactive_1_param.txt"

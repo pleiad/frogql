@@ -108,3 +108,14 @@ fn ldbc_catalog_keeps_ic10_blocked_until_iso_temporals() {
     assert!(toml.contains("CAST(<return-alias> AS INTEGER)"));
     assert!(!toml.contains("query ="));
 }
+
+#[test]
+fn ldbc_catalog_uses_casted_order_by_where_supported() {
+    for ic in [3, 5, 9, 11] {
+        let path = format!("bench/ldbc-queries/ic{ic}.toml");
+        let toml = std::fs::read_to_string(path).unwrap();
+        assert!(!toml.contains("CAST isn't in the parser"));
+        assert!(toml.contains("ORDER BY"));
+        assert!(toml.contains("CAST("));
+    }
+}

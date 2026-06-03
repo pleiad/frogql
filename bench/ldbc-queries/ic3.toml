@@ -26,7 +26,7 @@ RETURN
     COUNT(DISTINCT messageY) AS yCount,
     COUNT(DISTINCT messageX) + COUNT(DISTINCT messageY) AS totalCount
 GROUP BY otherPerson.id, otherPerson.firstName, otherPerson.lastName
-ORDER BY totalCount DESC, otherPersonId ASC
+ORDER BY totalCount DESC, CAST(otherPersonId AS INTEGER) ASC
 LIMIT 20
 """
 
@@ -39,5 +39,4 @@ return_columns = [
 message-union = "spec uses (message:Message); our LDBC loader doesn't synthesize a :Message superlabel, so we use the :Comment|Post ISO GQL alternation. Same logical query (matches IC2's divergence)."
 edge-casing = "spec uses :KNOWS, :HAS_CREATOR, :IS_LOCATED_IN, :IS_PART_OF (uppercase). Our loader produces :knows, :hasCreator, :isLocatedIn, :isPartOf (filename-stem convention). Loader-level."
 groupby-by-expression = "spec GROUP BY uses the RETURN aliases (otherPersonId, ...). gqlite's typechecker structurally matches GROUP BY exprs against RETURN exprs, so we group by the underlying expressions (otherPerson.id, otherPerson.firstName, otherPerson.lastName). Same grouping."
-no-cast = "spec ORDER BY tie-break is `CAST(otherPersonId AS INTEGER) ASC`. gqlite stores LDBC IDs as native int, so `otherPersonId ASC` sorts identically. CAST isn't in the parser; not needed here."
 agg-arithmetic = "`COUNT(DISTINCT messageX) + COUNT(DISTINCT messageY) AS totalCount` requires arithmetic over aggregate results in the RETURN projection — added to froGQL alongside this IC (aggregate-as-Binop-operand)."

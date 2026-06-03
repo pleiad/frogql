@@ -100,11 +100,11 @@ Estado de expresiones que bloqueaban ICs:
 
 `COLLECT_LIST(x)` (alias `COLLECT` / `ARRAY_AGG`) arma un `Value::List` por grupo. Es un `GeneralSetKind::CollectList` cuyo reducer en `apply_aggregator` envuelve los valores ya recolectados (con eliminación de nulls y `DISTINCT` heredados de `collect_aggregate_values`) en `Value::List`. Tipa como `List(elem)`. Además dropea records all-null, que vienen del lado vacío de un `OPTIONAL MATCH` (`RECORD { a: opt.x }` con `opt` sin match → todos los campos null) y representan "sin fila". Tests en `tests/collect_list_test.rs`.
 
-Necesario para IC1 e IC12, pero **no suficiente**: ambos además agrupan y ordenan por *alias* de RETURN, no por variable de binding (ver 2.12).
+Necesario para IC1 e IC12, pero **no suficiente**: ambos además agrupan por *alias* de RETURN, no por variable de binding (ver 2.12).
 
-#### 2.12 GROUP BY / ORDER BY por alias de RETURN
+#### 2.12 GROUP BY por alias de RETURN
 
-`GROUP BY <binding variable>` ya funciona (agrupa por identidad de nodo/arista). Lo que falta es `GROUP BY <alias>` donde `<alias>` es un nombre de columna de RETURN (`friend.id AS friendId ... GROUP BY friendId`), más alias dentro de expresiones en `ORDER BY` (`ORDER BY CAST(friendId AS INTEGER)`). El typechecker rechaza el alias con "Variable friendId not found in context" porque no es una variable de binding. IC1 e IC12 dependen de esto (sus GROUP BY listan `friendId, friendLastName, distanceFromPerson, ...`, todos aliases). Es resolución de nombres: una pre-pasada de elaboración que sustituye `Expr::Var(alias)` en GROUP BY y dentro de exprs de ORDER BY por la expresión aliaseada del RETURN, con cuidado del shadowing alias-vs-variable. `ORDER BY <alias>` a secas ya lo resuelve `order_by_alias.rs`; `ORDER BY CAST(<alias> AS tipo)` ya está resuelto por `SortKey::ColumnCast`; falta el caso GROUP BY y alias-dentro-de-expr fuera de ese caso especializado.
+`GROUP BY <binding variable>` ya funciona (agrupa por identidad de nodo/arista). Lo que falta es `GROUP BY <alias>` donde `<alias>` es un nombre de columna de RETURN (`friend.id AS friendId ... GROUP BY friendId`). El typechecker rechaza el alias con "Variable friendId not found in context" porque no es una variable de binding. IC1 e IC12 dependen de esto (sus GROUP BY listan `friendId, friendLastName, distanceFromPerson, ...`, todos aliases). Es resolución de nombres: una pre-pasada de elaboración que sustituye `Expr::Var(alias)` en GROUP BY por la expresión aliaseada del RETURN, con cuidado del shadowing alias-vs-variable. `ORDER BY <alias>` a secas ya lo resuelve `order_by_alias.rs`; `ORDER BY <alias>.<campo>` y `ORDER BY CAST(<alias> AS tipo)` ya están resueltos por `SortKey::ColumnField` / `SortKey::ColumnCast`. Falta alias-dentro-de-expr fuera de esos fast-paths especializados.
 
 ### Tier 3: producción, no investigación
 
