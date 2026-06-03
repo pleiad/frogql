@@ -6,25 +6,27 @@ name = "Transitive friends with a certain name"
 status = "blocked"
 
 blocked_reason = """
-One parser gap remaining. Re-audited 2026-06-03 (post named-path cluster):
-  - `COLLECT_LIST(...)` — list-aggregate function unknown. Tested also
-    `collect`, `array_agg` — none recognized. See §2.11.
+One gap remaining. Re-audited 2026-06-03 (post COLLECT_LIST):
+  - GROUP BY / ORDER BY by RETURN *alias* — the query groups by
+    `friendId, friendLastName, distanceFromPerson, ...` (all RETURN
+    aliases, not binding variables), and ORDER BY references aliases
+    inside an expression (`CAST(friendId AS INTEGER)`). The typechecker
+    only groups by binding variable and rejects the alias with "Variable
+    friendId not found in context". See iso-gql-gaps.md §2.12.
 
 What's now fine:
+  - `COLLECT_LIST(...)` — list aggregate landed (2026-06-03); `COLLECT`
+    / `ARRAY_AGG` aliases too. Drops all-null records from empty OPTIONAL.
   - `MATCH path = ...` — named path patterns landed (2026-06-03), with
     `PATH_LENGTH(path)` / `ELEMENTS(path)` / `CARDINALITY(path)` and the
-    non-standard `NODES(path)` translation helper. See iso-gql-gaps.md §2.9.
-  - `RECORD {k: v, ...}` — record constructor landed with the IC7
-    cluster (2026-06-03).
-  - `ANY SHORTEST (...)` — both the shortest-path *prefix* and the
-    named-path form `path = ANY SHORTEST (...)` now work.
+    non-standard `NODES(path)` translation helper. See §2.9.
+  - `RECORD {k: v, ...}` — record constructor landed with the IC7 cluster.
+  - `ANY SHORTEST (...)` — both the prefix and `path = ANY SHORTEST (...)`.
   - `WHERE p <> friend` — bare-node `<>` works since PR #42.
-  - `CAST(friendId AS INTEGER)` — implemented, but a no-op for int IDs;
-    drop it per the IC5/IC6/IC8/IC9/IC11 divergence.
 """
 
 required_features = [
-    "COLLECT_LIST aggregate",
+    "GROUP BY / ORDER BY by RETURN alias",
 ]
 
 params_file = "interactive_1_param.txt"

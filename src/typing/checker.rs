@@ -439,6 +439,8 @@ impl Typechecker {
                     GeneralSetKind::Sum => num,
                     // MIN/MAX preserve the element type.
                     GeneralSetKind::Min | GeneralSetKind::Max => inner,
+                    // COLLECT_LIST gathers the element type into a list.
+                    GeneralSetKind::CollectList => SimpleType::List(Box::new(inner)),
                 }
             }
         }

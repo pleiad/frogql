@@ -554,7 +554,12 @@ impl Parser {
             return None;
         }
         match self.peek() {
-            Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => Some(()),
+            Token::Count
+            | Token::Sum
+            | Token::Avg
+            | Token::Min
+            | Token::Max
+            | Token::CollectList => Some(()),
             _ => None,
         }
     }
@@ -587,6 +592,7 @@ impl Parser {
             Token::Avg => GeneralSetKind::Avg,
             Token::Min => GeneralSetKind::Min,
             Token::Max => GeneralSetKind::Max,
+            Token::CollectList => GeneralSetKind::CollectList,
             _ => unreachable!("peek_aggregate_kind already filtered the keyword"),
         };
         Ok(Aggregator::GeneralSet {

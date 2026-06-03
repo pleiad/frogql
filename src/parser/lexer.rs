@@ -84,6 +84,10 @@ pub enum Token {
     Avg,
     Min,
     Max,
+    /// ISO §20.9 `COLLECT_LIST` (aliases `COLLECT` / `ARRAY_AGG`): the
+    /// list/multiset aggregate. Collects each group's values into a
+    /// `Value::List` instead of reducing to a scalar.
+    CollectList,
     /// ISO §20.7 `<case abbreviation>` — `COALESCE(v1, v2, ...)`.
     /// Soft keyword: only emitted when followed by `(` so that
     /// `coalesce` stays available as a property name.
@@ -598,6 +602,12 @@ impl Lexer {
                         "AVG" | "avg" if self.peek_non_space() == Some('(') => Token::Avg,
                         "MIN" | "min" if self.peek_non_space() == Some('(') => Token::Min,
                         "MAX" | "max" if self.peek_non_space() == Some('(') => Token::Max,
+                        "COLLECT_LIST" | "collect_list" | "COLLECT" | "collect" | "ARRAY_AGG"
+                        | "array_agg"
+                            if self.peek_non_space() == Some('(') =>
+                        {
+                            Token::CollectList
+                        }
                         "COALESCE" | "coalesce" if self.peek_non_space() == Some('(') => {
                             Token::Coalesce
                         }

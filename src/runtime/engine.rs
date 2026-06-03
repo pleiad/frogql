@@ -1082,6 +1082,19 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     GeneralSetKind::Avg => avg_values(&values),
                     GeneralSetKind::Min => min_values(&values),
                     GeneralSetKind::Max => max_values(&values),
+                    // COLLECT_LIST gathers the group's values into a list
+                    // instead of reducing. `collect_aggregate_values`
+                    // already dropped scalar nulls and applied DISTINCT.
+                    // Additionally drop all-null records: those come from
+                    // the empty side of an OPTIONAL MATCH (every projected
+                    // field is null), carry no information, and would
+                    // otherwise pad the list with empty entries.
+                    GeneralSetKind::CollectList => Value::List(
+                        values
+                            .into_iter()
+                            .filter(|v| !is_all_null_record(v))
+                            .collect(),
+                    ),
                 }
             }
         }
@@ -2874,6 +2887,18 @@ fn left_outer_join(
 
 fn null_value() -> Value {
     Value::Null
+}
+
+/// True for a record whose every field is null (and for a literal null).
+/// COLLECT_LIST drops these: they are produced by the empty side of an
+/// OPTIONAL MATCH (`RECORD { a: opt.x, b: opt.y }` with `opt` unmatched →
+/// all fields null) and represent "no row", not a real collected value.
+fn is_all_null_record(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::Record(fields) => !fields.is_empty() && fields.values().all(|f| f.is_null()),
+        _ => false,
+    }
 }
 
 /// Int-preserving when all inputs are Int; promotes to Float on any

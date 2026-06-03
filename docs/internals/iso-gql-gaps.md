@@ -13,7 +13,7 @@ Implementado y cubierto por tests:
 - **Path-pattern prefixes (ISO §16.6)**: path modes `WALK` / `TRAIL` / `SIMPLE` / `ACYCLIC` y path searches `ALL` / `ANY [N]` / `SHORTEST [N] [PATHS]` / `SHORTEST N GROUPS` (con las formas normalizadas `ANY SHORTEST` y `ALL SHORTEST`). Habilitan repetición ilimitada (`*`, `+`) vía búsqueda k-shortest sobre walks o enumeración finita podada por modo. Aislamiento §16.6 SR 5–8 verificado en el typechecker.
 - **Tipos y valores**: `Int`, `Float`, `Str`, `Bool`, `List`, `Record` (anidable), `Null` con lógica trivalente. `Value::Node` y `Value::Edge` como reference values de primera clase.
 - **Predicados existenciales**: `EXISTS { ... }` y `NOT EXISTS { ... }` con correlación, fold a literal cuando el body es trivialmente vacío.
-- **Aggregation (Feature GF10 parcial)**: `COUNT(*)`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`. Null elimination automática y agregados vacíos que producen `null`. Aritmética sobre agregados en la proyección (`COUNT(DISTINCT x) + COUNT(DISTINCT y) AS total`): un agregado puede ser operando de un `Binop`, evaluado por grupo tras el `GROUP BY`.
+- **Aggregation (Feature GF10 parcial)**: `COUNT(*)`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COLLECT_LIST` (alias `COLLECT` / `ARRAY_AGG`). Null elimination automática y agregados vacíos que producen `null`. `COLLECT_LIST` arma un `Value::List` por grupo y dropea records all-null (lado vacío de un OPTIONAL). Aritmética sobre agregados en la proyección (`COUNT(DISTINCT x) + COUNT(DISTINCT y) AS total`): un agregado puede ser operando de un `Binop`, evaluado por grupo tras el `GROUP BY`.
 - **DML (ISO §13)**: `INSERT`, `SET x.prop = expr`, `SET x = { ... }` (clear+set), `SET x:Label`, `REMOVE x.prop`, `REMOVE x:Label`, `[DETACH | NODETACH] DELETE <expr list>`, `RETURN` post-DM. Validación G2000 contra el GRAPH TYPE activo, atomicidad por statement vía overlay.
 - **DDL de catálogo**: `CREATE / USE / DROP / SHOW / VALIDATE GRAPH TYPE`, `CREATE / DROP / SHOW INDEX` (HASH y BTREE).
 - **Storage**: archivo único `.gdb` con páginas de 4KB, catálogo persistido, atomicidad de `.save` vía tmp+rename, dumps `.dump-json` y `.dump-gql`.
@@ -95,9 +95,15 @@ Expresiones de valor ISO que aún no parsean:
 - `EXTRACT(<field> FROM <datetime>)` (`<extract expression>`) y el operador `MOD` (`<modulo>`) — bloquean IC10.
 - List comprehension `[x IN <list> | <expr>]` (`<list value constructor by enumeration>` con filtro/map) — bloquea IC14. Nuevo `Expr::ListComprehension`.
 
-#### 2.11 COLLECT_LIST / multiset (ver también 2.6)
+#### 2.11 COLLECT_LIST / multiset — implementado (2026-06-03)
 
-`COLLECT_LIST(x)` (alias `COLLECT` / `ARRAY_AGG`) arma un `Value::List` por grupo. Encaja en `GeneralSetKind`. Bloquea IC1 e IC12.
+`COLLECT_LIST(x)` (alias `COLLECT` / `ARRAY_AGG`) arma un `Value::List` por grupo. Es un `GeneralSetKind::CollectList` cuyo reducer en `apply_aggregator` envuelve los valores ya recolectados (con eliminación de nulls y `DISTINCT` heredados de `collect_aggregate_values`) en `Value::List`. Tipa como `List(elem)`. Además dropea records all-null, que vienen del lado vacío de un `OPTIONAL MATCH` (`RECORD { a: opt.x }` con `opt` sin match → todos los campos null) y representan "sin fila". Tests en `tests/collect_list_test.rs`.
+
+Necesario para IC1 e IC12, pero **no suficiente**: ambos además agrupan y ordenan por *alias* de RETURN, no por variable de binding (ver 2.12).
+
+#### 2.12 GROUP BY / ORDER BY por alias de RETURN
+
+`GROUP BY <binding variable>` ya funciona (agrupa por identidad de nodo/arista). Lo que falta es `GROUP BY <alias>` donde `<alias>` es un nombre de columna de RETURN (`friend.id AS friendId ... GROUP BY friendId`), más alias dentro de expresiones en `ORDER BY` (`ORDER BY CAST(friendId AS INTEGER)`). El typechecker rechaza el alias con "Variable friendId not found in context" porque no es una variable de binding. IC1 e IC12 dependen de esto (sus GROUP BY listan `friendId, friendLastName, distanceFromPerson, ...`, todos aliases). Es resolución de nombres: una pre-pasada de elaboración que sustituye `Expr::Var(alias)` en GROUP BY y dentro de exprs de ORDER BY por la expresión aliaseada del RETURN, con cuidado del shadowing alias-vs-variable. `ORDER BY <alias>` a secas ya lo resuelve `order_by_alias.rs`; falta el caso GROUP BY y el alias-dentro-de-expr.
 
 ### Tier 3: producción, no investigación
 
@@ -121,9 +127,9 @@ Estado de los 14 IC del benchmark cross-system (`bench/ldbc-queries/ic*.toml`). 
 |----|--------|----------------|
 | IC2, IC3, IC4, IC5, IC6, IC8, IC9, IC11 | implementado | — |
 | **IC7** | **implementado** | — (necesitaba `VALUE`, `RECORD`, `CAST`, `FLOOR`, `/`, `GROUP BY <var>`; todos hechos) |
-| IC1 | blocked | `COLLECT_LIST` (2.11). Named paths + `PATH_LENGTH`/`NODES` ✅ (2.9), `RECORD` ✅, `ANY SHORTEST` ✅ |
+| IC1 | blocked | GROUP BY / ORDER BY por alias (2.12). Named paths + `PATH_LENGTH`/`NODES` ✅ (2.9), `RECORD` ✅, `ANY SHORTEST` ✅, `COLLECT_LIST` ✅ (2.11) |
 | IC10 | blocked | `EXTRACT(... FROM ...)`, `MOD`, `CASE WHEN` (2.10) |
-| IC12 | blocked | `COLLECT_LIST` (2.11); `[:isSubclassOf]->{0,}` ya parsea y el typechecker lo admite bajo un prefijo de modo (`ACYCLIC`/`TRAIL`) — divergencia de traducción, sin código nuevo |
+| IC12 | blocked | GROUP BY / ORDER BY por alias (2.12). `COLLECT_LIST` ✅ (2.11); `[:isSubclassOf]->{0,}` ya parsea y el typechecker lo admite bajo un prefijo de modo (`ACYCLIC`/`TRAIL`) — divergencia de traducción, sin código nuevo |
 | IC13 | blocked | `CASE WHEN` (2.10). Named paths + `PATH_LENGTH` ✅ (2.9) |
 | IC14 | blocked | list comprehension (2.10). Named paths + `NODES` ✅ (2.9), `VALUE` ✅, `*` ✅ |
 
@@ -132,12 +138,13 @@ Estado de los 14 IC del benchmark cross-system (`bench/ldbc-queries/ic*.toml`). 
 Ordenado por leverage (ICs desbloqueados por feature):
 
 1. ~~**Named path patterns + path functions** (2.9)~~ — **hecho (2026-06-03)**. `MATCH path = [ANY|ALL] SHORTEST (...)`, `ELEMENTS`, `PATH_LENGTH`, `CARDINALITY`, más `NODES`/`EDGES` (divergencia). Desbloqueó el prerequisito de **IC1, IC13, IC14**.
-2. **`COLLECT_LIST` / multiset aggregate** (2.11) — desbloquea **IC12** (con la divergencia `{0,}`→prefijo) y cierra **IC1** (su único gap restante). Bajo costo (un `GeneralSetKind` nuevo).
-3. **`CASE WHEN ... END`** (2.10) — cierra **IC13** y parte de **IC10**. `Expr::Case` + typecheck del join de ramas.
-4. **`EXTRACT(part FROM date)` + `MOD`** (2.10) — cierra **IC10**. Arms en `eval_call` / `eval_binop`.
-5. **List comprehension `[x IN list | expr]`** (2.10) — cierra **IC14**. `Expr::ListComprehension` + runtime sobre `Value::List`.
+2. ~~**`COLLECT_LIST` / multiset aggregate** (2.11)~~ — **hecho (2026-06-03)**. `GeneralSetKind::CollectList`, reducer a `Value::List`, drop de records all-null. Era prerequisito de **IC1 e IC12**, pero ninguno cierra sin (3).
+3. **GROUP BY / ORDER BY por alias** (2.12) — cierra **IC1 e IC12** (con la divergencia `{0,}`→prefijo en IC12). Resolución de nombres en una pre-pasada de elaboración.
+4. **`CASE WHEN ... END`** (2.10) — cierra **IC13** y parte de **IC10**. `Expr::Case` + typecheck del join de ramas.
+5. **`EXTRACT(part FROM date)` + `MOD`** (2.10) — cierra **IC10**. Arms en `eval_call` / `eval_binop`.
+6. **List comprehension `[x IN list | expr]`** (2.10) — cierra **IC14**. `Expr::ListComprehension` + runtime sobre `Value::List`.
 
-Con (2)–(5) los 14 IC corren. Named paths (1) ya amortizó la materialización de `Value::Path` que IC1/IC13/IC14 comparten; lo que queda en cada uno es un gap propio (`COLLECT_LIST`, `CASE WHEN`, list comprehension).
+Con (3)–(6) los 14 IC corren. Named paths (1) y `COLLECT_LIST` (2) ya están; el siguiente paso crítico es (3), que IC1 e IC12 comparten.
 
 ## Recomendación
 
