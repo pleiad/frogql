@@ -6,22 +6,23 @@ name = "Expert search"
 status = "blocked"
 
 blocked_reason = """
-Re-audited 2026-05-06. Two real blockers:
+Re-audited 2026-06-03 (post path-prefix + IC7 clusters). One real blocker:
   - `COLLECT_LIST(DISTINCT tag.name)` — list-aggregate not in
     parser. Tested also `collect`, `array_agg`, `ARRAY_AGG` —
-    none recognized.
-  - `[:isSubclassOf]->{0,}` — zero-or-more reflexive transitive
-    closure; runtime panics with `unbounded repeat not supported`.
-    `{0,N}` for some bounded N would work, but the spec form is
-    truly open-ended.
+    none recognized. See iso-gql-gaps.md §2.11.
 
-What's now fine (was wrong in the previous audit):
+What's now fine:
+  - `[:isSubclassOf]->{0,}` — unbounded repetition parses, and the
+    typechecker admits it under a restrictive path-mode prefix. Since
+    `isSubclassOf` is a DAG, wrap the operand as
+    `ACYCLIC (...)-[:isSubclassOf]->{0,}(...)` — a translation
+    divergence, no engine change. (Bare `{0,}` is still rejected by
+    the typechecker as infinite under `WALK ALL`, which is correct.)
   - `COUNT(comment)` — bare-node aggregates work since PR #42.
 """
 
 required_features = [
     "COLLECT_LIST / multiset aggregate (any name)",
-    "{0,} unbounded transitive closure (or {0,N} approximation)",
 ]
 
 params_file = "interactive_12_param.txt"

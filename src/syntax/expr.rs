@@ -10,6 +10,7 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    Div,
     Lt,
     Gt,
     Le,
@@ -34,7 +35,7 @@ impl BinOp {
         // Int/Float operands to f64 in `eval_binop`.
         let num = SimpleType::Union(Box::new(SimpleType::Z), Box::new(SimpleType::F));
         match self {
-            BinOp::Add | BinOp::Sub | BinOp::Mul => (num.clone(), num.clone(), num),
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => (num.clone(), num.clone(), num),
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => (num.clone(), num, SimpleType::B),
             BinOp::Eq | BinOp::Ne => {
                 let m = SimpleType::meet(ty1, ty2);
@@ -59,6 +60,7 @@ impl std::str::FromStr for BinOp {
             "+" => Ok(BinOp::Add),
             "-" => Ok(BinOp::Sub),
             "*" => Ok(BinOp::Mul),
+            "/" => Ok(BinOp::Div),
             "<" => Ok(BinOp::Lt),
             ">" => Ok(BinOp::Gt),
             "<=" => Ok(BinOp::Le),
@@ -81,6 +83,7 @@ impl fmt::Display for BinOp {
             BinOp::Add => write!(f, "+"),
             BinOp::Sub => write!(f, "-"),
             BinOp::Mul => write!(f, "*"),
+            BinOp::Div => write!(f, "/"),
             BinOp::Lt => write!(f, "<"),
             BinOp::Gt => write!(f, ">"),
             BinOp::Le => write!(f, "<="),
@@ -164,6 +167,30 @@ pub enum Expr {
     /// ISO §20.7 `<case abbreviation>` — `COALESCE(v1, ..., vN)`,
     /// N ≥ 2 (parser-enforced). First non-null wins.
     Coalesce(Vec<Expr>),
+    /// A built-in scalar function call resolved by name. Today: `FLOOR`
+    /// (`Call { name: "FLOOR", args: [x] }`) and `CAST`
+    /// (`Call { name: "CAST", args: [x, Expr::Type(target)] }`, the
+    /// target carried as a type argument). A single generic node so new
+    /// ISO numeric/string builtins land without new AST variants.
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
+    /// ISO §17.x `<record constructor>` — `[RECORD] { k: <value expr>, ... }`
+    /// where field values are arbitrary expressions. A fully-constant
+    /// record is folded to `Expr::Const(Value::Record(..))` by the parser;
+    /// this variant carries the dynamic case. Fields keep source order.
+    Record {
+        fields: Vec<(String, Expr)>,
+    },
+    /// ISO §16.x `<value query expression>` — `VALUE { <nested query> }`.
+    /// Runs a correlated subquery whose body has exactly one RETURN item
+    /// plus optional ORDER BY / LIMIT, and projects that item's value for
+    /// the single selected row (or `Null` when the body is empty). Outer
+    /// variables are visible via correlation; inner bindings do not escape.
+    ValueSubquery {
+        body: Box<Query>,
+    },
     /// Right-hand side of `is`/`as` operators — a type, not a value.
     Type(SimpleType),
     /// `EXISTS { <body> }` — Boolean predicate over a subquery body.
@@ -201,13 +228,88 @@ impl Expr {
             Expr::Binop { left, right, .. } => left.contains_agg() || right.contains_agg(),
             Expr::Unop { operand, .. } | Expr::IsNull { operand, .. } => operand.contains_agg(),
             Expr::FieldAccess { base, .. } => base.contains_agg(),
-            Expr::Coalesce(args) => args.iter().any(|a| a.contains_agg()),
+            Expr::Coalesce(args) | Expr::Call { args, .. } => args.iter().any(|a| a.contains_agg()),
+            Expr::Record { fields } => fields.iter().any(|(_, e)| e.contains_agg()),
             Expr::Const(_)
             | Expr::Var(_)
             | Expr::AttrLookup { .. }
             | Expr::Type(_)
+            // A subquery is self-contained: any aggregate inside it is
+            // reduced within the subquery, not over the outer group.
+            | Expr::ValueSubquery { .. }
             | Expr::Exists { .. }
             | Expr::NotExists { .. } => false,
+        }
+    }
+
+    /// True when the expression contains a subquery (EXISTS / NOT EXISTS /
+    /// VALUE). Such an item is evaluated on a group's representative row
+    /// rather than acting as a grouping key, so the grouped-query check
+    /// exempts it just as it exempts aggregates.
+    pub fn contains_subquery(&self) -> bool {
+        match self {
+            Expr::Exists { .. } | Expr::NotExists { .. } | Expr::ValueSubquery { .. } => true,
+            Expr::Binop { left, right, .. } => {
+                left.contains_subquery() || right.contains_subquery()
+            }
+            Expr::Unop { operand, .. } | Expr::IsNull { operand, .. } => {
+                operand.contains_subquery()
+            }
+            Expr::FieldAccess { base, .. } => base.contains_subquery(),
+            Expr::Coalesce(args) | Expr::Call { args, .. } => {
+                args.iter().any(|a| a.contains_subquery())
+            }
+            Expr::Record { fields } => fields.iter().any(|(_, e)| e.contains_subquery()),
+            Expr::Const(_)
+            | Expr::Var(_)
+            | Expr::AttrLookup { .. }
+            | Expr::Type(_)
+            | Expr::Agg(_) => false,
+        }
+    }
+
+    /// Binding variables this expression references in the *outer* scope.
+    /// A subquery contributes only its correlation surface, which from the
+    /// outer side equals the binding variables it mentions — but those are
+    /// resolved inside the subquery, so for the grouped-query
+    /// functional-dependency check we conservatively treat a subquery as
+    /// referencing no outer grouping key (it is exempted via
+    /// `contains_subquery`). Drives `GROUP BY <binding variable>` validation
+    /// (ISO: a non-aggregate projection must depend only on grouping keys).
+    pub fn referenced_vars(&self, acc: &mut std::collections::BTreeSet<String>) {
+        match self {
+            Expr::Var(name) => {
+                acc.insert(name.clone());
+            }
+            Expr::AttrLookup { var, .. } => {
+                acc.insert(var.clone());
+            }
+            Expr::Binop { left, right, .. } => {
+                left.referenced_vars(acc);
+                right.referenced_vars(acc);
+            }
+            Expr::Unop { operand, .. } | Expr::IsNull { operand, .. } => {
+                operand.referenced_vars(acc)
+            }
+            Expr::FieldAccess { base, .. } => base.referenced_vars(acc),
+            Expr::Coalesce(args) | Expr::Call { args, .. } => {
+                for a in args {
+                    a.referenced_vars(acc);
+                }
+            }
+            Expr::Record { fields } => {
+                for (_, e) in fields {
+                    e.referenced_vars(acc);
+                }
+            }
+            // Subqueries are handled via `contains_subquery`; their
+            // internal references are out of scope here.
+            Expr::Const(_)
+            | Expr::Type(_)
+            | Expr::Agg(_)
+            | Expr::Exists { .. }
+            | Expr::NotExists { .. }
+            | Expr::ValueSubquery { .. } => {}
         }
     }
 }
@@ -259,6 +361,22 @@ impl fmt::Display for Expr {
             Expr::Coalesce(args) => {
                 let parts: Vec<String> = args.iter().map(|e| e.to_string()).collect();
                 write!(f, "COALESCE({})", parts.join(", "))
+            }
+            Expr::Call { name, args } => {
+                // CAST renders with its `AS <type>` surface form.
+                if name == "CAST" && args.len() == 2 {
+                    write!(f, "CAST({} AS {})", args[0], args[1])
+                } else {
+                    let parts: Vec<String> = args.iter().map(|e| e.to_string()).collect();
+                    write!(f, "{name}({})", parts.join(", "))
+                }
+            }
+            Expr::Record { fields } => {
+                let parts: Vec<String> = fields.iter().map(|(k, e)| format!("{k}: {e}")).collect();
+                write!(f, "RECORD {{ {} }}", parts.join(", "))
+            }
+            Expr::ValueSubquery { body } => {
+                write!(f, "VALUE {{ {} }}", display_subquery(body))
             }
             Expr::Type(t) => write!(f, "{t}"),
             Expr::Exists { body } => write!(f, "EXISTS {{ {} }}", display_subquery(body)),

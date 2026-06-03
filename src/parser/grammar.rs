@@ -311,11 +311,25 @@ impl Parser {
     /// look them up).
     fn parse_sort_key(&mut self, returns: Option<&[ReturnItem]>) -> Result<SortKey, String> {
         if let (Some(items), Token::Name(name)) = (returns, self.peek().clone()) {
+            let alias_idx = items.iter().position(|it| it.alias() == Some(&name));
             if !matches!(self.peek_at(1), Some(Token::Dot)) {
-                if let Some(idx) = items.iter().position(|it| it.alias() == Some(&name)) {
+                if let Some(idx) = alias_idx {
                     self.advance();
                     return Ok(SortKey::Column(idx));
                 }
+            } else if let Some(col) = alias_idx {
+                // `<alias>.<field>[.<field>...]` — sort by a field path
+                // into a record-valued projected column (e.g. a
+                // `VALUE { ... } AS latestLike` then `latestLike.x`).
+                self.advance(); // alias name
+                let mut path = Vec::new();
+                while self.eat(&Token::Dot) {
+                    match self.advance() {
+                        Token::Name(field) => path.push(field),
+                        t => return Err(format!("expected field name after '.', got {t:?}")),
+                    }
+                }
+                return Ok(SortKey::ColumnField { col, path });
             }
         }
 
@@ -1336,16 +1350,23 @@ impl Parser {
         Ok(left)
     }
 
-    // factor = unary ("*" unary)*  — multiplication binds tighter than +/-.
-    // `*` (Token::Star) is otherwise a type wildcard (`x is *`) and the
-    // `count(*)` argument, but neither reaches value-expression position
-    // via this path, so consuming it here as multiplication is safe.
+    // factor = unary (("*" | "/") unary)*  — multiplicative level binds
+    // tighter than +/-. `*` (Token::Star) is otherwise a type wildcard
+    // (`x is *`) and the `count(*)` argument, but neither reaches
+    // value-expression position via this path, so consuming it here as
+    // multiplication is safe. `/` (Token::Slash) is the ISO <solidus>.
     fn factor(&mut self) -> Result<Expr, String> {
         let mut left = self.unary()?;
-        while self.eat(&Token::Star) {
+        loop {
+            let op = match self.peek() {
+                Token::Star => BinOp::Mul,
+                Token::Slash => BinOp::Div,
+                _ => break,
+            };
+            self.advance();
             let right = self.unary()?;
             left = Expr::Binop {
-                op: BinOp::Mul,
+                op,
                 left: Box::new(left),
                 right: Box::new(right),
             };
@@ -1441,6 +1462,127 @@ impl Parser {
         })
     }
 
+    /// Parse a brace block in expression position, after the optional
+    /// `RECORD` keyword has been consumed (the `{` has NOT). ISO GQL:
+    /// `:` introduces a value field, the `<typed>` element (implicit,
+    /// `::`, `TYPED`) introduces a type field. The token after the first
+    /// field name picks the form:
+    ///   `{k : v, ...}`      → record value (values are expressions)
+    ///   `{k T, ...}`        → record type, implicit
+    ///   `{k :: T, ...}`     → record type, explicit
+    ///   `{k TYPED T, ...}`  → record type, keyword
+    /// A fully-constant value record folds to `Expr::Const(Value::Record)`
+    /// so equality and storage round-trips keep working; otherwise it
+    /// becomes a dynamic `Expr::Record { fields }`.
+    fn parse_brace_record(&mut self) -> Result<Expr, String> {
+        self.expect(&Token::LBrace)?;
+        if self.eat(&Token::RBrace) {
+            return Ok(Expr::Const(
+                Value::Record(std::collections::BTreeMap::new()),
+            ));
+        }
+        let saved = self.pos;
+        let is_value_record = matches!(
+            (self.peek_at(0), self.peek_at(1)),
+            (Some(Token::Name(_)), Some(Token::Colon))
+        );
+        if is_value_record {
+            let mut fields: Vec<(String, Expr)> = Vec::new();
+            loop {
+                let k = match self.advance() {
+                    Token::Name(n) => n,
+                    t => return Err(format!("expected field name, got {t:?}")),
+                };
+                self.expect(&Token::Colon)?;
+                fields.push((k, self.expr()?));
+                if !self.eat(&Token::Comma) {
+                    break;
+                }
+            }
+            self.expect(&Token::RBrace)?;
+            // Const fast-path: a record of only literals folds to a Value
+            // so PartialEq / `in` / storage round-trips keep working.
+            if fields.iter().all(|(_, e)| matches!(e, Expr::Const(_))) {
+                let mut m = std::collections::BTreeMap::new();
+                for (k, e) in fields {
+                    if let Expr::Const(v) = e {
+                        m.insert(k, v);
+                    }
+                }
+                return Ok(Expr::Const(Value::Record(m)));
+            }
+            return Ok(Expr::Record { fields });
+        }
+        self.pos = saved;
+        let mut type_fields: std::collections::BTreeMap<String, SimpleType> =
+            std::collections::BTreeMap::new();
+        loop {
+            let k = match self.advance() {
+                Token::Name(n) => n,
+                t => return Err(format!("expected field name, got {t:?}")),
+            };
+            if matches!(self.peek(), Token::DoubleColon | Token::Typed) {
+                self.advance();
+            }
+            type_fields.insert(k, self.simple_type()?);
+            if !self.eat(&Token::Comma) {
+                break;
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(Expr::Type(SimpleType::Record(type_fields)))
+    }
+
+    /// Parse the body of a `VALUE { ... }` value query expression: a
+    /// match chain (leading MATCH optional, as elsewhere), then a
+    /// mandatory RETURN with **exactly one** item, optional ORDER BY and
+    /// LIMIT. GROUP BY and DISTINCT are rejected — the body projects a
+    /// single value, not a grouped/deduplicated table.
+    fn parse_value_body(&mut self) -> Result<Query, String> {
+        self.expect(&Token::LBrace)?;
+
+        let first_optional = self.eat(&Token::Optional);
+        if first_optional {
+            self.expect(&Token::Match)?;
+        } else {
+            self.eat(&Token::Match);
+        }
+        let first_stmt = self.match_statement(first_optional)?;
+        let matches = self.continue_match_chain(vec![first_stmt])?;
+
+        if self.check(&Token::GroupBy) {
+            return Err("VALUE subquery body cannot contain GROUP BY".into());
+        }
+        if !self.eat(&Token::Return) {
+            return Err("VALUE subquery body requires a RETURN clause".into());
+        }
+        if self.eat(&Token::Distinct) {
+            return Err("VALUE subquery body cannot use DISTINCT".into());
+        }
+        let items = self.return_list()?;
+        if items.len() != 1 {
+            return Err(format!(
+                "VALUE subquery must project exactly one item, got {}",
+                items.len()
+            ));
+        }
+        if self.check(&Token::GroupBy) {
+            return Err("VALUE subquery body cannot contain GROUP BY".into());
+        }
+        let order_by = self.parse_optional_order_by(Some(&items))?;
+        let limit = self.parse_optional_limit()?;
+        self.expect(&Token::RBrace)?;
+
+        Ok(Query {
+            matches,
+            group_by: None,
+            returns: Some(items),
+            distinct: false,
+            order_by,
+            limit,
+        })
+    }
+
     // primary = aggregate_function | constant | list_literal | attr_lookup
     //         | simple_type | "(" expr ")"
     fn primary_expr(&mut self) -> Result<Expr, String> {
@@ -1506,71 +1648,6 @@ impl Parser {
                 } else {
                     Err("non-constant list literal elements are not supported yet".into())
                 }
-            }
-            Token::LBrace => {
-                // ISO GQL: `:` is for values, the `<typed>` element (implicit, `::`,
-                // `TYPED`) is for types. The token after the first field name picks
-                // the form deterministically:
-                //   `{k : v, ...}`      → record value
-                //   `{k T, ...}`        → record type, implicit
-                //   `{k :: T, ...}`     → record type, explicit
-                //   `{k TYPED T, ...}`  → record type, keyword
-                self.advance();
-                if self.eat(&Token::RBrace) {
-                    return Ok(Expr::Const(
-                        Value::Record(std::collections::BTreeMap::new()),
-                    ));
-                }
-                let saved = self.pos;
-                let is_value_record = matches!(
-                    (self.peek_at(0), self.peek_at(1)),
-                    (Some(Token::Name(_)), Some(Token::Colon))
-                );
-                if is_value_record {
-                    let mut value_fields: std::collections::BTreeMap<String, Value> =
-                        std::collections::BTreeMap::new();
-                    loop {
-                        let k = match self.advance() {
-                            Token::Name(n) => n,
-                            t => return Err(format!("expected field name, got {t:?}")),
-                        };
-                        self.expect(&Token::Colon)?;
-                        match self.expr()? {
-                            Expr::Const(val) => {
-                                value_fields.insert(k, val);
-                            }
-                            _ => {
-                                return Err(
-                                    "non-constant record literal values are not supported yet"
-                                        .into(),
-                                )
-                            }
-                        }
-                        if !self.eat(&Token::Comma) {
-                            break;
-                        }
-                    }
-                    self.expect(&Token::RBrace)?;
-                    return Ok(Expr::Const(Value::Record(value_fields)));
-                }
-                self.pos = saved;
-                let mut type_fields: std::collections::BTreeMap<String, SimpleType> =
-                    std::collections::BTreeMap::new();
-                loop {
-                    let k = match self.advance() {
-                        Token::Name(n) => n,
-                        t => return Err(format!("expected field name, got {t:?}")),
-                    };
-                    if matches!(self.peek(), Token::DoubleColon | Token::Typed) {
-                        self.advance();
-                    }
-                    type_fields.insert(k, self.simple_type()?);
-                    if !self.eat(&Token::Comma) {
-                        break;
-                    }
-                }
-                self.expect(&Token::RBrace)?;
-                Ok(Expr::Type(SimpleType::Record(type_fields)))
             }
             Token::True => {
                 self.advance();
@@ -1705,6 +1782,55 @@ impl Parser {
                 self.expect(&Token::RBrace)?;
                 self.expect(&Token::RParen)?;
                 total.ok_or_else(|| "DURATION requires at least one unit field".to_string())
+            }
+            Token::Floor => {
+                // ISO <floor function>: FLOOR(<numeric value expression>).
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let arg = self.expr()?;
+                self.expect(&Token::RParen)?;
+                Ok(Expr::Call {
+                    name: "FLOOR".into(),
+                    args: vec![arg],
+                })
+            }
+            Token::Cast => {
+                // ISO <cast specification>: CAST(<operand> AS <value type>).
+                // Restricted to INTEGER / FLOAT targets (the conversions the
+                // runtime implements); the target rides as a type argument.
+                self.advance();
+                self.expect(&Token::LParen)?;
+                // Parse the operand with the AS-excluding comparison rule so
+                // the `AS <value type>` separator is not swallowed as the
+                // type-assertion operator.
+                let operand = self.return_comparison()?;
+                self.expect(&Token::As)?;
+                let target = self.simple_type()?;
+                if !matches!(target, SimpleType::Z | SimpleType::F) {
+                    return Err(format!(
+                        "CAST target must be INTEGER or FLOAT, got {target}"
+                    ));
+                }
+                self.expect(&Token::RParen)?;
+                Ok(Expr::Call {
+                    name: "CAST".into(),
+                    args: vec![operand, Expr::Type(target)],
+                })
+            }
+            Token::Record => {
+                // `RECORD { ... }` — explicit constructor keyword. Falls
+                // through to the same brace parsing as a bare `{ ... }`.
+                self.advance();
+                self.parse_brace_record()
+            }
+            Token::LBrace => self.parse_brace_record(),
+            Token::Value => {
+                // ISO <value query expression>: VALUE { <nested query> }.
+                self.advance();
+                let body = self.parse_value_body()?;
+                Ok(Expr::ValueSubquery {
+                    body: Box::new(body),
+                })
             }
             _ => Err(format!("expected expression, got {:?}", self.peek())),
         }

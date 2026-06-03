@@ -6,27 +6,27 @@ name = "Transitive friends with a certain name"
 status = "blocked"
 
 blocked_reason = """
-Multiple gqlite parser gaps stack. Re-audited 2026-05-06:
-  - `MATCH path = ANY SHORTEST (...)` — path naming + shortest-path
-    quantifier not in the parser. Without these, no `PATH_LENGTH(path)`,
-    no `NODES(path)`.
+Parser gaps remaining. Re-audited 2026-06-03 (post IC7 cluster):
+  - `MATCH path = ...` — path naming (binding a pattern to a path
+    variable) not in the parser. Without it, no `PATH_LENGTH(path)`,
+    no `NODES(path)`. See iso-gql-gaps.md §2.9.
   - `COLLECT_LIST(...)` — list-aggregate function unknown. Tested also
-    `collect`, `array_agg` — none recognized. No equivalent today.
-  - `RECORD {k: v, ...}` — record literal in expressions not in parser
-    (`RECORD` tokenizes as a variable name, not as a keyword).
+    `collect`, `array_agg` — none recognized. See §2.11.
 
-What's now fine (was wrong in the previous audit):
+What's now fine:
+  - `RECORD {k: v, ...}` — record constructor landed with the IC7
+    cluster (2026-06-03).
+  - `ANY SHORTEST (...)` — the shortest-path *prefix* works; only the
+    named-path form `path = ANY SHORTEST (...)` is still missing.
   - `WHERE p <> friend` — bare-node `<>` works since PR #42.
-  - `CAST(friendId AS INTEGER)` — drop it (no-op since LDBC IDs are
-    int); same divergence we use for IC5/IC6/IC8/IC9/IC11.
+  - `CAST(friendId AS INTEGER)` — implemented, but a no-op for int IDs;
+    drop it per the IC5/IC6/IC8/IC9/IC11 divergence.
 """
 
 required_features = [
     "named path patterns (MATCH path = ...)",
-    "ANY SHORTEST quantifier",
     "PATH_LENGTH / NODES path functions",
     "COLLECT_LIST aggregate",
-    "RECORD literal",
 ]
 
 params_file = "interactive_1_param.txt"

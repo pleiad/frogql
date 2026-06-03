@@ -18,7 +18,7 @@ use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::{MatchStatement, Query};
+use crate::syntax::query::{MatchStatement, Query, ReturnItem, SortKey};
 
 pub fn elaborate_query(q: Query) -> Query {
     let fresh = FreshVars::new(&q);
@@ -34,7 +34,83 @@ pub fn elaborate_query(q: Query) -> Query {
             },
         })
         .collect();
-    Query { matches, ..q }
+    // Elaborate subquery bodies that live inside RETURN items and ORDER BY
+    // keys (VALUE / EXISTS) so their own descriptors' value filters lower.
+    let returns = q.returns.map(|items| {
+        items
+            .into_iter()
+            .map(|it| match it {
+                ReturnItem::Expr { expr, alias } => ReturnItem::Expr {
+                    expr: elaborate_expr(expr),
+                    alias,
+                },
+                other => other,
+            })
+            .collect()
+    });
+    let order_by = q.order_by.map(|specs| {
+        specs
+            .into_iter()
+            .map(|mut s| {
+                if let SortKey::Expr(e) = s.key {
+                    s.key = SortKey::Expr(elaborate_expr(e));
+                }
+                s
+            })
+            .collect()
+    });
+    Query {
+        matches,
+        returns,
+        order_by,
+        ..q
+    }
+}
+
+/// Elaborate an expression, recursing into any subquery body (EXISTS /
+/// NOT EXISTS / VALUE) via `elaborate_query` so the body's own descriptor
+/// value filters are lowered. Identity for subquery-free expressions.
+pub fn elaborate_expr(e: Expr) -> Expr {
+    match e {
+        Expr::Exists { body } => Expr::Exists {
+            body: Box::new(elaborate_query(*body)),
+        },
+        Expr::NotExists { body } => Expr::NotExists {
+            body: Box::new(elaborate_query(*body)),
+        },
+        Expr::ValueSubquery { body } => Expr::ValueSubquery {
+            body: Box::new(elaborate_query(*body)),
+        },
+        Expr::Binop { op, left, right } => Expr::Binop {
+            op,
+            left: Box::new(elaborate_expr(*left)),
+            right: Box::new(elaborate_expr(*right)),
+        },
+        Expr::Unop { op, operand } => Expr::Unop {
+            op,
+            operand: Box::new(elaborate_expr(*operand)),
+        },
+        Expr::IsNull { operand, negated } => Expr::IsNull {
+            operand: Box::new(elaborate_expr(*operand)),
+            negated,
+        },
+        Expr::FieldAccess { base, field } => Expr::FieldAccess {
+            base: Box::new(elaborate_expr(*base)),
+            field,
+        },
+        Expr::Coalesce(args) => Expr::Coalesce(args.into_iter().map(elaborate_expr).collect()),
+        Expr::Call { name, args } => Expr::Call {
+            name,
+            args: args.into_iter().map(elaborate_expr).collect(),
+        },
+        Expr::Record { fields } => Expr::Record {
+            fields: fields
+                .into_iter()
+                .map(|(k, e)| (k, elaborate_expr(e)))
+                .collect(),
+        },
+        other => other,
+    }
 }
 
 pub fn elaborate_pattern(p: PathPattern, fresh: &FreshVars) -> PathPattern {
@@ -64,7 +140,9 @@ pub fn elaborate_pattern(p: PathPattern, fresh: &FreshVars) -> PathPattern {
             Box::new(elaborate_pattern(*p1, fresh)),
             Box::new(elaborate_pattern(*p2, fresh)),
         ),
-        PathPattern::Filter(p, e) => PathPattern::Filter(Box::new(elaborate_pattern(*p, fresh)), e),
+        PathPattern::Filter(p, e) => {
+            PathPattern::Filter(Box::new(elaborate_pattern(*p, fresh)), elaborate_expr(e))
+        }
         PathPattern::Repeat { pattern, lb, ub } => PathPattern::Repeat {
             pattern: Box::new(elaborate_pattern(*pattern, fresh)),
             lb,

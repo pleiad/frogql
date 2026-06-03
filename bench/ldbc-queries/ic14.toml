@@ -7,32 +7,28 @@ name = "Trusted connection paths (v1)"
 status = "blocked"
 
 blocked_reason = """
-Re-audited 2026-05-06. The most-blocked IC of the catalog. Stack of
-gaps that all need parser work:
-  - `MATCH path = ALL SHORTEST (...)` — path naming + ALL SHORTEST
-    quantifier missing.
+Re-audited 2026-06-03 (post IC7 cluster). Remaining parser gaps:
+  - `MATCH path = ALL SHORTEST (...)` — path naming (binding the
+    pattern to `path`) missing. The `ALL SHORTEST` *prefix* already
+    works; only the named-path form is absent. See iso-gql-gaps.md §2.9.
   - `[n IN NODES(path) | n.id]` — list comprehension `[x IN list | f(x)]`
-    not in parser. Also `NODES(path)` would need path naming first.
-  - `VALUE { ... }` — inline subquery returning a scalar; not in parser.
-  - `COUNT(c) * 1.0`, `COUNT(c1) * 0.5` — `*` (multiplication) doesn't
-    tokenize.
+    not in parser, and `NODES(path)` needs path naming first. See §2.10.
 
-What's now fine (was wrong in the previous audit):
+What's now fine:
+  - `VALUE { ... }` — value subquery landed with the IC7 cluster
+    (2026-06-03).
+  - `COUNT(c) * 1.0`, `COUNT(c1) * 0.5` — multiplication `*` parses
+    (the previous audit was wrong); division `/` also lands now.
   - `pe1 <> pe2` — bare-node `<>` works since PR #42.
 
-This query is structurally beyond the current parser surface; needs
-a roadmap rather than incremental tweaks.
+Once named paths + path functions + list comprehension land, this IC
+runs. See the IC roadmap in iso-gql-gaps.md.
 """
 
 required_features = [
     "named path patterns (MATCH path = ...)",
-    "ALL SHORTEST quantifier",
     "PATH_LENGTH / NODES path functions",
     "list comprehension `[x IN list | expr]`",
-    "VALUE { ... } scalar subquery",
-    "IN over list expressions",
-    "bare-node comparison",
-    "multiplication operator `*`",
 ]
 
 params_file = "interactive_14_param.txt"

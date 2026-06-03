@@ -36,6 +36,14 @@ pub enum NullsOrder {
 pub enum SortKey {
     Expr(Expr),
     Column(usize),
+    /// Post-projection sort by a field path into a record-valued
+    /// projected column — `ORDER BY <alias>.<field>` where `<alias>` is a
+    /// RETURN item aliased to a record (e.g. a `VALUE { ... }` subquery).
+    /// `col` indexes the projected row; `path` walks nested record fields.
+    ColumnField {
+        col: usize,
+        path: Vec<String>,
+    },
 }
 
 /// ISO §16.17 `<sort specification>`.
@@ -324,6 +332,7 @@ impl fmt::Display for SortKey {
         match self {
             SortKey::Expr(e) => write!(f, "{e}"),
             SortKey::Column(idx) => write!(f, "#{idx}"),
+            SortKey::ColumnField { col, path } => write!(f, "#{col}.{}", path.join(".")),
         }
     }
 }

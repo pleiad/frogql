@@ -4,33 +4,25 @@
 
 id = 7
 name = "Recent likers of a person's messages"
-status = "blocked"
+status = "implemented"
 
-blocked_reason = """
-Re-audited 2026-05-06. IC7 requires "the LATEST like per liker" — an arg-max per group. The
-canonical Cypher uses `WITH ... ORDER BY ... head(collect(...))` for
-this; ISO GQL has no `WITH` or `collect`, but it does provide a
-`<value query expression>` (`VALUE { MATCH ... ORDER BY ... LIMIT 1 }`)
-that produces the same arg-max with one returned record per liker.
+# IC7 needs "the LATEST like per liker" — an arg-max per group. The
+# canonical Cypher uses `WITH ... ORDER BY ... head(collect(...))`; ISO GQL
+# expresses the same with a `<value query expression>`
+# (`VALUE { MATCH ... ORDER BY ... LIMIT 1 }`) that yields one record per
+# liker. The six primitives this needs (VALUE subquery, RECORD constructor,
+# CAST, FLOOR, division, GROUP BY by binding variable) all landed together.
+#
+# ISO conformance note: GQL `<grouping element> ::= <binding variable
+# reference>`, so the grouping is `GROUP BY liker, person` (the two binding
+# variables the projections depend on), not the RETURN-clause aliases.
 
-Earlier we tried shipping a "simplified" IC7 that dropped the
-arg-max entirely — returning one row per (liker, message, like)
-tuple instead of one row per liker. NotebookLLM (operating as the
-spec authority) flagged this correctly: a single liker who liked
-five messages would appear five times, and `LIMIT 20` then returned
-"the 20 most-recent likes", not "the 20 most-recent likers". That's
-not a simplification; it's a different query. Reverted.
+params_file = "interactive_7_param.txt"
+param_columns = ["personId"]
+param_types = ["int"]
 
-The canonical ISO GQL translation is below. gqlite's parser is
-missing every primitive it needs:
-"""
-
-# The faithful ISO GQL translation, kept here as the target shape so
-# the parser-feature work has a precise destination. Do NOT mark this
-# `query` field for execution — `status = "blocked"` keeps it out of
-# the runner.
 query = """
-MATCH (person:Person {id: $personId})<-[:hasCreator]-(:Comment|Post)<-[:likes]-(liker:Person)
+MATCH (person:Person {id: {personId}})<-[:hasCreator]-(:Comment|Post)<-[:likes]-(liker:Person)
 RETURN
     liker.id AS personId,
     liker.firstName AS personFirstName,
@@ -47,24 +39,12 @@ RETURN
         LIMIT 1
     } AS latestLike,
     NOT EXISTS { MATCH (liker)~[:knows]~(person) } AS isNew
-GROUP BY personId, personFirstName, personLastName, isNew
+GROUP BY liker, person
 ORDER BY latestLike.likeCreationDate DESC, personId ASC
 LIMIT 20
 """
 
-required_features = [
-    "VALUE { ... } scalar/record subquery (ISO GQL <value query expression>)",
-    "RECORD { k: v, ... } literal in expressions",
-    "CAST(... AS INTEGER) / CAST(... AS FLOAT) type conversions",
-    "FLOOR() builtin",
-    "division operator `/`",
-    "GROUP BY referencing RETURN-clause aliases",
-]
-
-params_file = "interactive_7_param.txt"
-param_columns = ["personId"]
-param_types = ["int"]
-
 [divergences]
 message-union = "spec uses (message:Message); we use (:Comment|Post). Loader-level."
 edge-casing = "loader produces lowercase :knows / :hasCreator / :likes. Spec uses uppercase. No semantic difference."
+group-by-binding-var = "ISO §14 groups by binding variable references (liker, person), not RETURN aliases. Projections are functionally determined by the grouped node identities."

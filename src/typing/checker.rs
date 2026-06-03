@@ -114,7 +114,9 @@ impl Typechecker {
         env: &TypeEnvironment,
     ) {
         let has_expr = specs.iter().any(|s| matches!(s.key, SortKey::Expr(_)));
-        let has_column = specs.iter().any(|s| matches!(s.key, SortKey::Column(_)));
+        let has_column = specs
+            .iter()
+            .any(|s| matches!(s.key, SortKey::Column(_) | SortKey::ColumnField { .. }));
         if has_expr && has_column {
             self.errors.push(
                 "ORDER BY mixes RETURN-alias references and free expressions; either \
@@ -140,6 +142,36 @@ impl Typechecker {
                         continue;
                     }
                 },
+                SortKey::ColumnField { col, path } => {
+                    // Type the projected column, then walk the record path.
+                    let mut t = match returns.and_then(|rs| rs.get(*col)) {
+                        Some(ReturnItem::Expr { expr, .. }) => self.check_expr(expr, env),
+                        Some(ReturnItem::Aggregate { .. }) => SimpleType::Star,
+                        None => {
+                            self.errors.push(format!(
+                                "ORDER BY column reference #{col} is out of bounds for the \
+                                 RETURN clause (only {} item(s) projected)",
+                                returns.map(|rs| rs.len()).unwrap_or(0),
+                            ));
+                            continue;
+                        }
+                    };
+                    for field in path {
+                        t = match &t {
+                            SimpleType::Record(fields) => {
+                                fields.get(field).cloned().unwrap_or(SimpleType::Zero)
+                            }
+                            SimpleType::Star | SimpleType::Zero => t.clone(),
+                            _ => {
+                                self.errors.push(format!(
+                                    "ORDER BY field `.{field}` accesses a non-record type {t}"
+                                ));
+                                SimpleType::Zero
+                            }
+                        };
+                    }
+                    t
+                }
             };
             if !is_orderable_per_iso_22_14(&t) {
                 self.errors.push(format!(
@@ -328,24 +360,46 @@ impl Typechecker {
         }
     }
 
-    /// ISO §16.15: every non-aggregate RETURN item must structurally
-    /// match a grouping expression. `Expr::eq` is structural — `x.a + 1`
-    /// in RETURN with `x.a` in GROUP BY is rejected.
+    /// ISO §14.x grouped query: every non-aggregate RETURN item must be
+    /// functionally determined by the grouping keys. Two valid shapes — (a)
+    /// the item structurally equals a grouping key (covers a property /
+    /// expression key like `GROUP BY x.city` + `RETURN x.city`), or (b)
+    /// every binding variable the item references is itself a grouping key
+    /// spelled as a *bare* `<binding variable reference>` (covers grouping
+    /// by node identity, `GROUP BY liker` + `RETURN liker.firstName`).
+    /// Grouping by a *property* (`x.city`) does NOT make all of `x`'s other
+    /// attributes available, so only bare `Expr::Var` keys seed shape (b).
+    /// Aggregate-bearing and subquery-bearing items are exempt (reduced or
+    /// evaluated over the group on its representative row).
     fn check_returns_match_group_by(&mut self, items: &[ReturnItem], group_by: &[Expr]) {
+        let grouped_node_vars: std::collections::BTreeSet<String> = group_by
+            .iter()
+            .filter_map(|g| match g {
+                Expr::Var(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
         for item in items {
             if let ReturnItem::Expr { expr, .. } = item {
-                // An expression carrying an aggregate (`COUNT(x)+COUNT(y)`)
-                // is reduced over the group, not a grouping key — it need
-                // not appear in GROUP BY.
-                if expr.contains_agg() {
+                // Reduced over the group (`COUNT(x)+COUNT(y)`) or evaluated
+                // on the representative row (`VALUE { ... }`, `EXISTS { ... }`)
+                // — neither needs to be a grouping key.
+                if expr.contains_agg() || expr.contains_subquery() {
                     continue;
                 }
-                if !group_by.iter().any(|g| g == expr) {
-                    self.errors.push(format!(
-                        "RETURN item `{expr}` is not in the GROUP BY clause; \
-                         non-aggregate projections must match a grouping key."
-                    ));
+                if group_by.iter().any(|g| g == expr) {
+                    continue;
                 }
+                let mut refs = std::collections::BTreeSet::new();
+                expr.referenced_vars(&mut refs);
+                if !refs.is_empty() && refs.iter().all(|v| grouped_node_vars.contains(v)) {
+                    continue;
+                }
+                self.errors.push(format!(
+                    "RETURN item `{expr}` is not functionally determined by the GROUP BY \
+                     keys; a non-aggregate projection must match a grouping key or depend \
+                     only on grouped binding variables."
+                ));
             }
         }
     }
@@ -661,6 +715,59 @@ impl Typechecker {
                     acc = SimpleType::union(&acc, &t);
                 }
                 acc
+            }
+
+            Expr::Call { name, args } => {
+                // Built-in scalar functions. Inner args are checked for
+                // diagnostics; the result type follows ISO function rules.
+                for a in args {
+                    let _ = self.check_expr(a, env);
+                }
+                match name.as_str() {
+                    // FLOOR(numeric) → Float (the runtime narrows via CAST).
+                    "FLOOR" => SimpleType::F,
+                    // CAST(operand AS <value type>) → the target type, which
+                    // the parser carries as `Expr::Type` in args[1].
+                    "CAST" => match args.get(1) {
+                        Some(Expr::Type(t)) => t.clone(),
+                        _ => {
+                            self.errors
+                                .push("CAST is missing its target type".to_string());
+                            SimpleType::Zero
+                        }
+                    },
+                    other => {
+                        self.errors
+                            .push(format!("unknown built-in function `{other}`"));
+                        SimpleType::Zero
+                    }
+                }
+            }
+
+            Expr::Record { fields } => {
+                // A record constructor types as a closed record over the
+                // field expression types.
+                let mut m = std::collections::BTreeMap::new();
+                for (k, e) in fields {
+                    m.insert(k.clone(), self.check_expr(e, env));
+                }
+                SimpleType::Record(m)
+            }
+
+            Expr::ValueSubquery { body } => {
+                // Type the correlated body under the outer environment,
+                // then type its single RETURN item against the resulting
+                // inner environment — that is the value the subquery yields.
+                let r = self.check_subquery_body(body, env);
+                match body.returns.as_deref().and_then(|items| items.first()) {
+                    Some(ReturnItem::Expr { expr, .. }) => self.check_expr(expr, &r.env),
+                    Some(ReturnItem::Aggregate { agg, .. }) => self.check_aggregator(agg, &r.env),
+                    None => {
+                        self.errors
+                            .push("VALUE subquery has no RETURN item".to_string());
+                        SimpleType::Zero
+                    }
+                }
             }
 
             Expr::Exists { body } | Expr::NotExists { body } => {

@@ -93,6 +93,21 @@ pub enum Token {
     /// integer count of milliseconds, so `date + DURATION({days: N})`
     /// is plain integer arithmetic over epoch-millis values.
     Duration,
+    /// ISO §20.x `<floor function>` — `FLOOR(<numeric>)`. Soft keyword
+    /// (only before `(`) so `floor` stays usable as an identifier.
+    Floor,
+    /// ISO §20.x `<cast specification>` — `CAST(<op> AS <value type>)`.
+    /// Soft keyword (only before `(`). Distinct from the `AS` type
+    /// *assertion* operator: CAST converts the value.
+    Cast,
+    /// ISO §17.x `<record constructor>` — `RECORD { k: <value expr>, ... }`.
+    /// Soft keyword (only before `{`); the `RECORD` keyword is optional
+    /// (a bare `{k: v}` also constructs a record).
+    Record,
+    /// ISO §16.x `<value query expression>` — `VALUE { <nested query> }`.
+    /// Soft keyword (only before `{`) so `value` stays usable as an
+    /// identifier. Runs a correlated subquery and projects one value.
+    Value,
 
     // Symbols
     LParen,      // (
@@ -106,6 +121,7 @@ pub enum Token {
     Comma,       // ,
     Dot,         // .
     Star,        // *
+    Slash,       // /
     Plus,        // +
     Minus,       // -
     Bang,        // !
@@ -333,6 +349,13 @@ impl Lexer {
                 '*' => {
                     self.advance();
                     self.tokens.push(Token::Star);
+                }
+                // `/` is the ISO §24 <solidus> (division). Block comments
+                // `/* ... */` are consumed earlier by `skip_whitespace`, so
+                // a `/` reaching here is always the division operator.
+                '/' => {
+                    self.advance();
+                    self.tokens.push(Token::Slash);
                 }
                 '+' => {
                     self.advance();
@@ -581,6 +604,12 @@ impl Lexer {
                         "DURATION" | "duration" if self.peek_non_space() == Some('(') => {
                             Token::Duration
                         }
+                        "FLOOR" | "floor" if self.peek_non_space() == Some('(') => Token::Floor,
+                        "CAST" | "cast" if self.peek_non_space() == Some('(') => Token::Cast,
+                        // RECORD / VALUE are gated on a following `{` so the
+                        // lowercase forms stay usable as identifiers.
+                        "RECORD" | "record" if self.peek_non_space() == Some('{') => Token::Record,
+                        "VALUE" | "value" if self.peek_non_space() == Some('{') => Token::Value,
                         "int" => Token::Int,
                         "float" => Token::Float,
                         "bool" => Token::Bool,

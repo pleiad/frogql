@@ -96,10 +96,20 @@ fn fold_in_expr(e: &mut Expr, schema: &Schema) {
         Expr::FieldAccess { base, .. } => {
             fold_in_expr(base, schema);
         }
-        Expr::Coalesce(args) => {
+        Expr::Coalesce(args) | Expr::Call { args, .. } => {
             for a in args {
                 fold_in_expr(a, schema);
             }
+        }
+        Expr::Record { fields } => {
+            for (_, ex) in fields {
+                fold_in_expr(ex, schema);
+            }
+        }
+        // A VALUE subquery body may itself contain existentials; recurse
+        // into its WHERE / RETURN exprs by folding the body's query.
+        Expr::ValueSubquery { body } => {
+            fold_empty_existentials(body, schema);
         }
         // An aggregate's inner expr could syntactically contain an
         // existential; recurse so it is folded too.

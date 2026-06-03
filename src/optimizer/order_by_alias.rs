@@ -55,7 +55,7 @@ pub fn optimize(q: &mut Query) {
     let mut rewrites: Vec<Option<(String, String)>> = Vec::with_capacity(specs.len());
     for spec in specs {
         match &spec.key {
-            SortKey::Expr(_) => rewrites.push(None),
+            SortKey::Expr(_) | SortKey::ColumnField { .. } => rewrites.push(None),
             SortKey::Column(idx) => {
                 let Some(ReturnItem::Expr {
                     expr: Expr::AttrLookup { var, attr },

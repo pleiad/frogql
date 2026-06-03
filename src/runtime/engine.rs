@@ -141,6 +141,12 @@ pub struct Runtime<'g, G: GraphAccess> {
     ///     those `keys` for every body row, so a per-outer-row probe
     ///     is one O(1) hash lookup. The body runs once per Runtime.
     exists_cache: RefCell<HashMap<usize, ExistsCache>>,
+    /// Memoization for `VALUE { ... }` value subqueries. Same heap-ptr
+    /// keying and per-execution clearing discipline as `exists_cache`.
+    /// Each body is evaluated once, projected + sorted per correlation
+    /// group, and reduced to one value per group; per outer row the
+    /// predicate is one O(1) hash probe.
+    value_subquery_cache: RefCell<HashMap<usize, ValueSubqueryCache>>,
     /// Set only while evaluating `PathPattern::Selected`.
     unbounded_policy: Cell<UnboundedPolicy>,
 }
@@ -158,12 +164,23 @@ enum ExistsCache {
     },
 }
 
+/// Cached evaluation of a `VALUE { ... }` subquery: the per-correlation
+/// projected value. `keys` are the correlation variable names (sorted);
+/// `map` sends a correlation tuple to the subquery's single projected
+/// value (after the body's ORDER BY + LIMIT 1). Uncorrelated bodies use
+/// an empty `keys` and a single entry under the empty tuple.
+struct ValueSubqueryCache {
+    keys: Vec<String>,
+    map: HashMap<Vec<PathValue>, Value>,
+}
+
 impl<'g, G: GraphAccess> Runtime<'g, G> {
     pub fn new(graph: &'g G) -> Self {
         Self {
             graph,
             triple_index: RefCell::new(None),
             exists_cache: RefCell::new(HashMap::new()),
+            value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
         }
     }
@@ -177,6 +194,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             graph,
             triple_index: RefCell::new(Some(idx)),
             exists_cache: RefCell::new(HashMap::new()),
+            value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
         }
     }
@@ -196,6 +214,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     pub fn invalidate_caches(&self) {
         *self.triple_index.borrow_mut() = None;
         self.exists_cache.borrow_mut().clear();
+        self.value_subquery_cache.borrow_mut().clear();
     }
 
     /// Lazily build (or return) the cached LTJ TripleIndex. Idempotent —
@@ -215,6 +234,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     pub fn run(&self, pattern: &PathPattern) -> IntermediateResult {
         self.exists_cache.borrow_mut().clear();
+        self.value_subquery_cache.borrow_mut().clear();
         // A raw pattern carries no selected-prefix context, so unbounded repetition
         // (if any) has no license here.
         self.unbounded_policy.set(UnboundedPolicy::Forbidden);
@@ -224,6 +244,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// Run with a result limit (0 = unlimited). Stops early once limit is reached.
     pub fn run_with_limit(&self, pattern: &PathPattern, limit: usize) -> IntermediateResult {
         self.exists_cache.borrow_mut().clear();
+        self.value_subquery_cache.borrow_mut().clear();
         self.unbounded_policy.set(UnboundedPolicy::Forbidden);
         self.run_path_pattern(pattern, limit)
     }
@@ -242,6 +263,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         // entry from a prior body would silently satisfy a new EXISTS
         // probe. Scope memoization to one top-level execution.
         self.exists_cache.borrow_mut().clear();
+        self.value_subquery_cache.borrow_mut().clear();
         // ISO §LIMIT: `Some(0)` is "return zero rows", distinct from
         // the runtime's `0 = unbounded`. Honor it before any pattern work.
         if query.limit == Some(0) {
@@ -252,10 +274,11 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
         let limit = combine_limits(query.limit, limit);
         let has_order = query.order_by.is_some();
-        let has_column_sort_key = query
-            .order_by
-            .as_ref()
-            .is_some_and(|specs| specs.iter().any(|s| matches!(s.key, SortKey::Column(_))));
+        let has_column_sort_key = query.order_by.as_ref().is_some_and(|specs| {
+            specs
+                .iter()
+                .any(|s| matches!(s.key, SortKey::Column(_) | SortKey::ColumnField { .. }))
+        });
 
         // BTree-LTJ "real": drive the primary sort variable from the
         // btree in key order, calling the LTJ once per `(value, ids)`
@@ -301,7 +324,11 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         };
 
         let has_aggs = return_items.iter().any(|i| i.is_aggregate());
-        let needs_full_input = has_aggs || query.distinct || has_order;
+        // An explicit GROUP BY with no aggregate still groups: it collapses
+        // each partition to one representative row (dedup-by-key). Route it
+        // through `run_aggregated` so the grouping happens.
+        let needs_grouping = has_aggs || query.group_by.is_some();
+        let needs_full_input = needs_grouping || query.distinct || has_order;
         let input_limit = if needs_full_input { 0 } else { limit };
 
         let (mut ir, used_real) = match real_rows {
@@ -309,7 +336,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             None => (self.run_match_chain(query, input_limit), false),
         };
 
-        let pre_projection_sort = !has_aggs && !has_column_sort_key && !used_real;
+        let pre_projection_sort = !needs_grouping && !has_column_sort_key && !used_real;
         if pre_projection_sort {
             if let Some(specs) = &query.order_by {
                 // DISTINCT post-projection means sort sees more rows than
@@ -319,7 +346,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
         }
 
-        let mut projected = if has_aggs {
+        let mut projected = if needs_grouping {
             let p = self.run_aggregated(return_items, query.group_by.as_deref(), &ir.rows);
             if query.distinct {
                 dedup_preserving_order(p)
@@ -410,7 +437,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         // evaluate them against the binding-table assignment; any
         // `SortKey::Column` would have to land on the post-projection
         // path, which is incompatible with cohort-driven top-k.
-        if specs.iter().any(|s| matches!(s.key, SortKey::Column(_))) {
+        if specs
+            .iter()
+            .any(|s| matches!(s.key, SortKey::Column(_) | SortKey::ColumnField { .. }))
+        {
             return None;
         }
         let primary = &specs[0];
@@ -671,7 +701,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                             ExprResult::Success(Value::Null) | ExprResult::Failure(_) => None,
                             ExprResult::Success(v) => Some(v),
                         },
-                        SortKey::Column(_) => unreachable!(
+                        SortKey::Column(_) | SortKey::ColumnField { .. } => unreachable!(
                             "Column sort key reached pre-projection path — caller must \
                              route to sort_projected_rows"
                         ),
@@ -2309,6 +2339,24 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
             Expr::Type(_) => ExprResult::Failure("bare type in expression".into()),
 
+            Expr::Call { name, args } => self.eval_call(mu, name, args),
+
+            Expr::Record { fields } => {
+                // Construct a record value; a field that fails evaluates to
+                // Null (3VL), consistent with the rest of the engine.
+                let mut m = std::collections::BTreeMap::new();
+                for (k, e) in fields {
+                    let v = match self.run_expr(mu, e) {
+                        ExprResult::Success(v) => v,
+                        ExprResult::Failure(_) => Value::Null,
+                    };
+                    m.insert(k.clone(), v);
+                }
+                ExprResult::Success(Value::Record(m))
+            }
+
+            Expr::ValueSubquery { body } => self.eval_value_subquery(mu, body),
+
             Expr::Exists { body } => self.eval_exists(mu, body, /*negated=*/ false),
             Expr::NotExists { body } => self.eval_exists(mu, body, /*negated=*/ true),
 
@@ -2338,6 +2386,130 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// table and the projection live in the cache, so the body
     /// runs at most once per Runtime regardless of how many outer
     /// rows are evaluated.
+    /// Built-in scalar function evaluation. `FLOOR` returns a float;
+    /// `CAST(x AS INTEGER|FLOAT)` converts the value (distinct from the
+    /// `AS` type-assertion operator, which only checks). A failing or
+    /// non-numeric argument surfaces as `Failure` (Null under 3VL).
+    fn eval_call(&self, mu: &Assignment, name: &str, args: &[Expr]) -> ExprResult {
+        match name {
+            "FLOOR" => {
+                let v = match self.run_expr(mu, &args[0]) {
+                    ExprResult::Success(v) => v,
+                    e @ ExprResult::Failure(_) => return e,
+                };
+                match v {
+                    Value::Int(n) => ExprResult::Success(Value::Float(n as f64)),
+                    Value::Float(x) => ExprResult::Success(Value::Float(x.floor())),
+                    _ => ExprResult::Failure("FLOOR requires a numeric argument".into()),
+                }
+            }
+            "CAST" => {
+                let v = match self.run_expr(mu, &args[0]) {
+                    ExprResult::Success(v) => v,
+                    e @ ExprResult::Failure(_) => return e,
+                };
+                let target = match args.get(1) {
+                    Some(Expr::Type(t)) => t,
+                    _ => return ExprResult::Failure("CAST missing target type".into()),
+                };
+                match (target, &v) {
+                    (SimpleType::Z, Value::Int(n)) => ExprResult::Success(Value::Int(*n)),
+                    (SimpleType::Z, Value::Float(x)) => ExprResult::Success(Value::Int(*x as i64)),
+                    (SimpleType::Z, Value::Str(s)) => match s.trim().parse::<i64>() {
+                        Ok(n) => ExprResult::Success(Value::Int(n)),
+                        Err(_) => ExprResult::Failure(format!("cannot cast '{s}' to INTEGER")),
+                    },
+                    (SimpleType::F, Value::Int(n)) => ExprResult::Success(Value::Float(*n as f64)),
+                    (SimpleType::F, Value::Float(x)) => ExprResult::Success(Value::Float(*x)),
+                    (SimpleType::F, Value::Str(s)) => match s.trim().parse::<f64>() {
+                        Ok(x) => ExprResult::Success(Value::Float(x)),
+                        Err(_) => ExprResult::Failure(format!("cannot cast '{s}' to FLOAT")),
+                    },
+                    (_, Value::Null) => ExprResult::Success(Value::Null),
+                    _ => ExprResult::Failure(format!("cannot cast {v} to {target}")),
+                }
+            }
+            other => ExprResult::Failure(format!("unknown built-in function `{other}`")),
+        }
+    }
+
+    /// Evaluate a `VALUE { ... }` value subquery for the outer row `mu`.
+    /// The body runs once per Runtime (cached by heap ptr): its rows are
+    /// grouped by the correlation key, each group is projected through the
+    /// body's single RETURN item, sorted by the body's ORDER BY, and the
+    /// first row's value (LIMIT 1) is kept. Per outer row the result is a
+    /// single hash probe; an absent correlation key yields Null.
+    fn eval_value_subquery(&self, mu: &Assignment, body: &Query) -> ExprResult {
+        let body_ptr = body as *const Query as usize;
+
+        let need_build = !self.value_subquery_cache.borrow().contains_key(&body_ptr);
+        if need_build {
+            // Correlation = body free vars also bound in the outer row.
+            let body_vars = query_freevars(body);
+            let outer_keys = mu.keys();
+            let mut keys: Vec<String> = body_vars
+                .iter()
+                .filter(|v| outer_keys.contains(*v))
+                .cloned()
+                .collect();
+            keys.sort();
+
+            // Run the full body match chain (uncorrelated), then bucket
+            // rows by their correlation tuple.
+            let ir = self.run_match_chain(body, /*limit=*/ 0);
+            let mut groups: HashMap<Vec<PathValue>, Vec<ResultRow>> = HashMap::new();
+            for row in ir.rows {
+                let mut key: Vec<PathValue> = Vec::with_capacity(keys.len());
+                let mut complete = true;
+                for v in &keys {
+                    match row.assignment.get(v) {
+                        Some(pv) => key.push(pv.clone()),
+                        None => {
+                            complete = false;
+                            break;
+                        }
+                    }
+                }
+                if complete {
+                    groups.entry(key).or_default().push(row);
+                }
+            }
+
+            // Per group: project the single RETURN item, apply ORDER BY,
+            // take the first row (LIMIT 1), keep its projected value.
+            let items = body.returns.as_deref().unwrap_or(&[]);
+            let mut map: HashMap<Vec<PathValue>, Value> = HashMap::with_capacity(groups.len());
+            for (key, rows) in groups {
+                let mut projected = self.run_row_by_row(items, &rows, /*distinct=*/ false);
+                if let Some(specs) = &body.order_by {
+                    sort_projected_rows(&mut projected, specs, /*limit=*/ 1);
+                }
+                let value = projected
+                    .first()
+                    .and_then(|cols| cols.first())
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                map.insert(key, value);
+            }
+
+            self.value_subquery_cache
+                .borrow_mut()
+                .insert(body_ptr, ValueSubqueryCache { keys, map });
+        }
+
+        let cache = self.value_subquery_cache.borrow();
+        let entry = cache.get(&body_ptr).expect("populated above");
+        let mut probe: Vec<PathValue> = Vec::with_capacity(entry.keys.len());
+        for v in &entry.keys {
+            match mu.get(v) {
+                Some(pv) => probe.push(pv.clone()),
+                // Correlation var unbound in this outer row → no match.
+                None => return ExprResult::Success(Value::Null),
+            }
+        }
+        ExprResult::Success(entry.map.get(&probe).cloned().unwrap_or(Value::Null))
+    }
+
     fn eval_exists(&self, mu: &Assignment, body: &Query, negated: bool) -> ExprResult {
         let body_vars = query_freevars(body);
         let outer_keys = mu.keys();
@@ -2471,6 +2643,18 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     ExprResult::Success(Value::Float(a * b))
                 }
                 _ => ExprResult::Failure("* requires numeric operands".into()),
+            },
+            // ISO <solidus>. Int/Int truncates; mixed/Float widen to f64.
+            // Division by zero yields Failure, surfaced as Null under 3VL.
+            BinOp::Div => match as_num_pair(lv, rv) {
+                Some((Value::Int(_), Value::Int(0))) => {
+                    ExprResult::Failure("division by zero".into())
+                }
+                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Int(a / b)),
+                Some((Value::Float(a), Value::Float(b))) => {
+                    ExprResult::Success(Value::Float(a / b))
+                }
+                _ => ExprResult::Failure("/ requires numeric operands".into()),
             },
             BinOp::Gt => match as_num_pair(lv, rv) {
                 Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a > b)),
@@ -2799,6 +2983,11 @@ fn eq_value(a: &Value, b: &Value) -> bool {
                 && x.iter()
                     .all(|(k, vx)| y.get(k).is_some_and(|vy| eq_value(vx, vy)))
         }
+        // Reference values compare by id (mirrors `hash_value`). Required
+        // so GROUP BY a node/edge binding variable groups by identity.
+        (Value::Node(x), Value::Node(y)) => x == y,
+        (Value::Edge(x), Value::Edge(y)) => x == y,
+        (Value::Null, Value::Null) => true,
         _ => false,
     }
 }
@@ -2857,6 +3046,19 @@ fn sort_projected_rows(rows: &mut Vec<Vec<Value>>, specs: &[SortSpec], limit: us
                         Some(Value::Null) | None => None,
                         Some(v) => Some(v.clone()),
                     },
+                    SortKey::ColumnField { col, path } => {
+                        let mut cur = projected.get(*col);
+                        for field in path {
+                            cur = match cur {
+                                Some(Value::Record(m)) => m.get(field),
+                                _ => None,
+                            };
+                        }
+                        match cur {
+                            Some(Value::Null) | None => None,
+                            Some(v) => Some(v.clone()),
+                        }
+                    }
                     SortKey::Expr(_) => unreachable!(
                         "Expr sort key reached post-projection path — typechecker \
                          should have rejected mixed Expr/Column"
