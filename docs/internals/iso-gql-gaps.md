@@ -61,7 +61,7 @@ Cubierto por los path-pattern prefixes: `SHORTEST [N] [PATHS]`, `SHORTEST N GROU
 
 #### 2.5 Funciones built-in
 
-Existe `Expr::Call { name, args }` con dispatch en `engine.rs::eval_call`; hoy resuelve `FLOOR` y `CAST` (más `COALESCE`/`DURATION` por Token dedicado). Faltan `size(list)`, `length(path)`, `head`, `tail`, `nodes(p)`, `edges(p)`, `type(edge)`, `labels(node)`, `PATH_LENGTH(path)`, `EXTRACT(<part> FROM <date>)` y el operador `MOD`. Agregar cada uno es un arm nuevo en `eval_call` + `check_expr` (las path-functions necesitan antes named paths, ver 2.9).
+Existe `Expr::Call { name, args }` con dispatch en `engine.rs::eval_call`; hoy resuelve `FLOOR` y `CAST` (más `COALESCE`/`DURATION` por Token dedicado). `MOD(a,b)` vive como expresión numérica (`BinOp::Mod`). Faltan `size(list)`, `length(path)`, `head`, `tail`, `nodes(p)`, `edges(p)`, `type(edge)`, `labels(node)` y `PATH_LENGTH(path)`. Agregar cada función escalar es un arm nuevo en `eval_call` + `check_expr` (las path-functions necesitan antes named paths, ver 2.9).
 
 #### 2.6 COLLECT y STDDEV (Feature GF10 completa)
 
@@ -79,12 +79,13 @@ El lexer no admite escapes (`'don\'t'` no parsea, `''` se lee como string vacío
 
 `MATCH path = (a)-[:k]->(b)` no parsea: el binding de un patrón a una variable-camino no está en la gramática. Sin él no hay objeto `path` al que aplicar `PATH_LENGTH(path)` / `NODES(path)` / `EDGES(path)`. La búsqueda `ANY SHORTEST` / `ALL SHORTEST` ya funciona como **prefijo** (`MATCH ANY SHORTEST (a)-[:k]->+(b)`); lo que falta es la forma con nombre `MATCH path = ANY SHORTEST (...)` y un `Value::Path` proyectable. Toca el parser (`path = ...`), el AST (variable-camino), un `PathValue`/`Value::Path` materializable, y las path-functions en `eval_call`. Es el mayor bloqueador cruzado: habilita IC1, IC13 e IC14.
 
-#### 2.10 CASE WHEN, EXTRACT, MOD, list comprehension
+#### 2.10 CASE WHEN, MOD, list comprehension, temporales
 
-Expresiones de valor ISO que aún no parsean:
+Estado de expresiones que bloqueaban ICs:
 
-- `CASE WHEN <cond> THEN <e> ELSE <e> END` (`<case expression>`) — bloquea IC10, IC13. Nuevo `Expr::Case`.
-- `EXTRACT(<field> FROM <datetime>)` (`<extract expression>`) y el operador `MOD` (`<modulo>`) — bloquean IC10.
+- `CASE WHEN <cond> THEN <e> ELSE <e> END` (`<case expression>`) — implementado.
+- `MOD(a,b)` (`<modulus expression>`) — implementado con la forma funcional ISO; no se acepta `a MOD b`.
+- IC10 sigue necesitando expresar una ventana de cumpleaños por mes/día. La forma `EXTRACT(MONTH|DAY FROM ...)` no es ISO GQL en ISO/IEC 39075:2024, por lo que no se implementa como superficie del lenguaje. Falta soporte temporal ISO real o una traducción ISO-conformante equivalente.
 - List comprehension `[x IN <list> | <expr>]` (`<list value constructor by enumeration>` con filtro/map) — bloquea IC14. Nuevo `Expr::ListComprehension`.
 
 #### 2.11 COLLECT_LIST / multiset (ver también 2.6)
@@ -114,9 +115,9 @@ Estado de los 14 IC del benchmark cross-system (`bench/ldbc-queries/ic*.toml`). 
 | IC2, IC3, IC4, IC5, IC6, IC8, IC9, IC11 | implementado | — |
 | **IC7** | **implementado** (este cierre) | — (necesitaba `VALUE`, `RECORD`, `CAST`, `FLOOR`, `/`, `GROUP BY <var>`; todos hechos) |
 | IC1 | blocked | named paths + `PATH_LENGTH`/`NODES` (2.9); `COLLECT_LIST` (2.11). `RECORD` ✅, `ANY SHORTEST` prefijo ✅ |
-| IC10 | blocked | `EXTRACT(... FROM ...)`, `MOD`, `CASE WHEN` (2.10) |
+| IC10 | blocked | temporal ISO para predicado de cumpleaños por mes/día (2.10). `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ✅ |
 | IC12 | blocked | `COLLECT_LIST` (2.11); `[:isSubclassOf]->{0,}` ya parsea y el typechecker lo admite bajo un prefijo de modo (`ACYCLIC`/`TRAIL`) — divergencia de traducción, sin código nuevo |
-| IC13 | blocked | named paths + `PATH_LENGTH` (2.9); `CASE WHEN` (2.10) |
+| IC13 | blocked | named paths + `PATH_LENGTH` (2.9); `CASE WHEN` ✅ |
 | IC14 | blocked | named paths + `PATH_LENGTH`/`NODES` (2.9); list comprehension (2.10). `VALUE` ✅, `*` (multiplicación) ✅ |
 
 ### Roadmap para los 14 IC completos
@@ -125,15 +126,14 @@ Ordenado por leverage (ICs desbloqueados por feature):
 
 1. **Named path patterns + path functions** (2.9) — `MATCH path = [ANY|ALL] SHORTEST (...)`, `PATH_LENGTH`, `NODES`, `EDGES`. Desbloquea **IC1, IC13, IC14** (3). El search ya existe como prefijo; falta el binding nombrado y `Value::Path`. Mayor superficie, mayor retorno.
 2. **`COLLECT_LIST` / multiset aggregate** (2.11) — desbloquea **IC12** (con la divergencia `{0,}`→prefijo) y es uno de los dos gaps de IC1. Bajo costo (un `GeneralSetKind` nuevo).
-3. **`CASE WHEN ... END`** (2.10) — desbloquea parte de **IC10, IC13** (2). `Expr::Case` + typecheck del join de ramas.
-4. **`EXTRACT(part FROM date)` + `MOD`** (2.10) — cierra **IC10**. Arms en `eval_call` / `eval_binop`.
-5. **List comprehension `[x IN list | expr]`** (2.10) — cierra **IC14**. `Expr::ListComprehension` + runtime sobre `Value::List`.
+3. **Temporales ISO para la ventana de cumpleaños de IC10** (2.10) — cierra **IC10**. No usar `EXTRACT(...)` como atajo: no es sintaxis ISO GQL.
+4. **List comprehension `[x IN list | expr]`** (2.10) — cierra **IC14**. `Expr::ListComprehension` + runtime sobre `Value::List`.
 
-Con (1)–(5) los 14 IC corren. La ruta crítica es (1): IC1/IC13/IC14 dependen de named paths; conviene atacarla primero porque amortiza la materialización de `Value::Path` que las tres comparten.
+Con (1)–(4) los 14 IC corren. La ruta crítica es (1): IC1/IC13/IC14 dependen de named paths; conviene atacarla primero porque amortiza la materialización de `Value::Path` que las tres comparten.
 
 ## Recomendación
 
-Si el objetivo es cerrar los 14 LDBC IC, seguir el *Roadmap para los 14 IC completos* de arriba: named paths (2.9) primero, luego `COLLECT_LIST`, `CASE WHEN`, `EXTRACT`/`MOD` y list comprehension.
+Si el objetivo es cerrar los 14 LDBC IC, seguir el *Roadmap para los 14 IC completos* de arriba: named paths (2.9) primero, luego `COLLECT_LIST`, temporales ISO para IC10 y list comprehension.
 
 Si el orden es por valor para queries de usuario en general:
 

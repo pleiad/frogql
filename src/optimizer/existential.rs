@@ -118,6 +118,18 @@ fn fold_in_expr(e: &mut Expr, schema: &Schema) {
                 fold_in_expr(expr, schema);
             }
         }
+        Expr::Case {
+            branches,
+            else_expr,
+        } => {
+            for (cond, value) in branches {
+                fold_in_expr(cond, schema);
+                fold_in_expr(value, schema);
+            }
+            if let Some(value) = else_expr {
+                fold_in_expr(value, schema);
+            }
+        }
         Expr::Const(_) | Expr::Var(_) | Expr::AttrLookup { .. } | Expr::Type(_) => {}
     }
 

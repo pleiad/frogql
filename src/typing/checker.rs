@@ -114,9 +114,12 @@ impl Typechecker {
         env: &TypeEnvironment,
     ) {
         let has_expr = specs.iter().any(|s| matches!(s.key, SortKey::Expr(_)));
-        let has_column = specs
-            .iter()
-            .any(|s| matches!(s.key, SortKey::Column(_) | SortKey::ColumnField { .. }));
+        let has_column = specs.iter().any(|s| {
+            matches!(
+                s.key,
+                SortKey::Column(_) | SortKey::ColumnCast { .. } | SortKey::ColumnField { .. }
+            )
+        });
         if has_expr && has_column {
             self.errors.push(
                 "ORDER BY mixes RETURN-alias references and free expressions; either \
@@ -142,6 +145,17 @@ impl Typechecker {
                         continue;
                     }
                 },
+                SortKey::ColumnCast { col, ty } => {
+                    if returns.and_then(|rs| rs.get(*col)).is_none() {
+                        self.errors.push(format!(
+                            "ORDER BY column reference #{col} is out of bounds for the \
+                             RETURN clause (only {} item(s) projected)",
+                            returns.map(|rs| rs.len()).unwrap_or(0),
+                        ));
+                        continue;
+                    }
+                    ty.clone()
+                }
                 SortKey::ColumnField { col, path } => {
                     // Type the projected column, then walk the record path.
                     let mut t = match returns.and_then(|rs| rs.get(*col)) {
@@ -742,6 +756,29 @@ impl Typechecker {
                         SimpleType::Zero
                     }
                 }
+            }
+
+            Expr::Case {
+                branches,
+                else_expr,
+            } => {
+                let mut acc = SimpleType::Zero;
+                for (cond, value) in branches {
+                    let cond_t = self.check_expr(cond, env);
+                    if SimpleType::meet(&cond_t, &SimpleType::B) == SimpleType::Zero {
+                        self.warnings
+                            .push(format!("CASE WHEN condition has non-bool type {cond_t}"));
+                    }
+                    let value_t = self.check_expr(value, env);
+                    acc = SimpleType::union(&acc, &value_t);
+                }
+                if let Some(value) = else_expr {
+                    let else_t = self.check_expr(value, env);
+                    acc = SimpleType::union(&acc, &else_t);
+                } else {
+                    acc = SimpleType::union(&acc, &SimpleType::Zero);
+                }
+                acc
             }
 
             Expr::Record { fields } => {

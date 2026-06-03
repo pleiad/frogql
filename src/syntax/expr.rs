@@ -11,6 +11,7 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    Mod,
     Lt,
     Gt,
     Le,
@@ -36,6 +37,7 @@ impl BinOp {
         let num = SimpleType::Union(Box::new(SimpleType::Z), Box::new(SimpleType::F));
         match self {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => (num.clone(), num.clone(), num),
+            BinOp::Mod => (SimpleType::Z, SimpleType::Z, SimpleType::Z),
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => (num.clone(), num, SimpleType::B),
             BinOp::Eq | BinOp::Ne => {
                 let m = SimpleType::meet(ty1, ty2);
@@ -61,6 +63,7 @@ impl std::str::FromStr for BinOp {
             "-" => Ok(BinOp::Sub),
             "*" => Ok(BinOp::Mul),
             "/" => Ok(BinOp::Div),
+            "MOD" | "mod" => Ok(BinOp::Mod),
             "<" => Ok(BinOp::Lt),
             ">" => Ok(BinOp::Gt),
             "<=" => Ok(BinOp::Le),
@@ -84,6 +87,7 @@ impl fmt::Display for BinOp {
             BinOp::Sub => write!(f, "-"),
             BinOp::Mul => write!(f, "*"),
             BinOp::Div => write!(f, "/"),
+            BinOp::Mod => write!(f, "MOD"),
             BinOp::Lt => write!(f, "<"),
             BinOp::Gt => write!(f, ">"),
             BinOp::Le => write!(f, "<="),
@@ -191,6 +195,10 @@ pub enum Expr {
     ValueSubquery {
         body: Box<Query>,
     },
+    Case {
+        branches: Vec<(Expr, Expr)>,
+        else_expr: Option<Box<Expr>>,
+    },
     /// Right-hand side of `is`/`as` operators — a type, not a value.
     Type(SimpleType),
     /// `EXISTS { <body> }` — Boolean predicate over a subquery body.
@@ -229,6 +237,15 @@ impl Expr {
             Expr::Unop { operand, .. } | Expr::IsNull { operand, .. } => operand.contains_agg(),
             Expr::FieldAccess { base, .. } => base.contains_agg(),
             Expr::Coalesce(args) | Expr::Call { args, .. } => args.iter().any(|a| a.contains_agg()),
+            Expr::Case {
+                branches,
+                else_expr,
+            } => {
+                branches
+                    .iter()
+                    .any(|(cond, value)| cond.contains_agg() || value.contains_agg())
+                    || else_expr.as_deref().is_some_and(Expr::contains_agg)
+            }
             Expr::Record { fields } => fields.iter().any(|(_, e)| e.contains_agg()),
             Expr::Const(_)
             | Expr::Var(_)
@@ -258,6 +275,15 @@ impl Expr {
             Expr::FieldAccess { base, .. } => base.contains_subquery(),
             Expr::Coalesce(args) | Expr::Call { args, .. } => {
                 args.iter().any(|a| a.contains_subquery())
+            }
+            Expr::Case {
+                branches,
+                else_expr,
+            } => {
+                branches
+                    .iter()
+                    .any(|(cond, value)| cond.contains_subquery() || value.contains_subquery())
+                    || else_expr.as_deref().is_some_and(Expr::contains_subquery)
             }
             Expr::Record { fields } => fields.iter().any(|(_, e)| e.contains_subquery()),
             Expr::Const(_)
@@ -295,6 +321,18 @@ impl Expr {
             Expr::Coalesce(args) | Expr::Call { args, .. } => {
                 for a in args {
                     a.referenced_vars(acc);
+                }
+            }
+            Expr::Case {
+                branches,
+                else_expr,
+            } => {
+                for (cond, value) in branches {
+                    cond.referenced_vars(acc);
+                    value.referenced_vars(acc);
+                }
+                if let Some(value) = else_expr {
+                    value.referenced_vars(acc);
                 }
             }
             Expr::Record { fields } => {
@@ -349,6 +387,9 @@ impl fmt::Display for Expr {
             Expr::Var(name) => write!(f, "{name}"),
             Expr::AttrLookup { var, attr } => write!(f, "{var}.{attr}"),
             Expr::FieldAccess { base, field } => write!(f, "{base}.{field}"),
+            Expr::Binop { op, left, right } if *op == BinOp::Mod => {
+                write!(f, "MOD({left}, {right})")
+            }
             Expr::Binop { op, left, right } => write!(f, "({left} {op} {right})"),
             Expr::Unop { op, operand } => write!(f, "{op} {operand}"),
             Expr::IsNull { operand, negated } => {
@@ -377,6 +418,19 @@ impl fmt::Display for Expr {
             }
             Expr::ValueSubquery { body } => {
                 write!(f, "VALUE {{ {} }}", display_subquery(body))
+            }
+            Expr::Case {
+                branches,
+                else_expr,
+            } => {
+                write!(f, "CASE")?;
+                for (cond, value) in branches {
+                    write!(f, " WHEN {cond} THEN {value}")?;
+                }
+                if let Some(value) = else_expr {
+                    write!(f, " ELSE {value}")?;
+                }
+                write!(f, " END")
             }
             Expr::Type(t) => write!(f, "{t}"),
             Expr::Exists { body } => write!(f, "EXISTS {{ {} }}", display_subquery(body)),

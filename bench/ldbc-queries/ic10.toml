@@ -6,43 +6,30 @@ name = "Friend recommendation"
 status = "blocked"
 
 blocked_reason = """
-Re-audited 2026-05-06. Three parser gaps remain:
-  - `EXTRACT(MONTH FROM foaf.birthday)` — `EXTRACT(... FROM ...)`
-    syntax not in parser.
-  - `$month MOD 12` — `MOD` operator not in parser.
-  - `CASE WHEN ... THEN ... ELSE ... END` — `CASE` expression not
-    in parser. Used inside `SUM(CASE WHEN ... THEN 1 ELSE -1 END)`,
-    so removing it isn't trivial — would need to rewrite with two
-    separate COUNTs joined by `-`.
+Re-audited 2026-06-03 after the ISO expression support pass.
 
-What's now fine (was wrong in the previous audit):
-  - `WHERE person <> foaf` — bare-node `<>` works since PR #42.
+What is now fine:
+  - searched `CASE WHEN ... THEN ... ELSE ... END`
+  - ISO functional `MOD(a, b)`
+  - `CAST(<return-alias> AS INTEGER)` in ORDER BY
+
+Remaining blocker:
+  - IC10 needs month/day predicates over `Person.birthday`. The previous
+    benchmark sketch used `EXTRACT(MONTH|DAY FROM epochMillis)`, but
+    `EXTRACT` is not ISO GQL in ISO/IEC 39075:2024. Keep IC10 blocked
+    until froGQL has ISO temporal values/functions or another
+    ISO-conformant way to express the birthday window.
+
+The Cypher-style `WITH`/`collect`/`size`/list-comprehension shape can be
+flattened with `OPTIONAL MATCH` + `SUM(CASE ...)`, but the temporal
+predicate still needs a standards-compliant representation.
 """
 
 required_features = [
-    "EXTRACT(date-part FROM date)",
-    "MOD operator",
-    "CASE WHEN ... END expression",
+    "ISO temporal values/functions for LDBC birthday predicates",
+    "ISO-conformant month/day component access or equivalent temporal predicate",
 ]
 
 params_file = "interactive_10_param.txt"
 param_columns = ["personId", "month"]
-query = """
-MATCH (person:Person {id: $personId})~[:knows]~{2}(foaf:Person)-[:isLocatedIn]->(city:City)
-WHERE person <> foaf AND NOT EXISTS { MATCH (person)~[:knows]~(foaf) }
-  AND (
-    (EXTRACT(MONTH FROM foaf.birthday) = $month AND EXTRACT(DAY FROM foaf.birthday) >= 21) OR 
-    (EXTRACT(MONTH FROM foaf.birthday) = ($month MOD 12) + 1 AND EXTRACT(DAY FROM foaf.birthday) < 22)
-  )
-OPTIONAL MATCH (foaf)<-[:hasCreator]-(post:Post)-[:hasTag]->(tag:Tag)
-RETURN 
-    foaf.id AS personId,
-    foaf.firstName AS personFirstName,
-    foaf.lastName AS personLastName,
-    SUM(CASE WHEN EXISTS { MATCH (person)-[:hasInterest]->(tag) } THEN 1 ELSE -1 END) AS commonInterestScore,
-    foaf.gender AS personGender,
-    city.name AS personCityName
-GROUP BY personId, personFirstName, personLastName, personGender, personCityName
-ORDER BY commonInterestScore DESC, CAST(personId AS INTEGER) ASC
-LIMIT 10
-"""
+param_types = ["int", "int"]

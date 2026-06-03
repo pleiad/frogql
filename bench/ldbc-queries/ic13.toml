@@ -6,20 +6,18 @@ name = "Single shortest path"
 status = "blocked"
 
 blocked_reason = """
-Re-audited 2026-05-06:
-  - `MATCH path = ANY SHORTEST (...)` — neither path naming
-    (`MATCH path = ...`) nor the `ANY SHORTEST` quantifier are in
-    the parser. Without these, `PATH_LENGTH(path)` has no path to
-    refer to.
-  - `CASE WHEN ... END` — also missing (used here for the IS NULL
-    branch: return -1 if unreachable).
+Re-audited 2026-06-03 after ISO §16.6 path prefix support:
+  - `ANY SHORTEST (...)` is now supported for unnamed path patterns.
+  - IC13 still writes `MATCH path = ANY SHORTEST (...)` and returns
+    `PATH_LENGTH(path)`. froGQL does not yet bind named path values, so
+    there is no `path` value for `PATH_LENGTH` to inspect.
+Note: `CASE WHEN ... END` is now supported, but IC13 still cannot run
+until named path patterns and path functions are implemented.
 """
 
 required_features = [
     "named path patterns (MATCH path = ...)",
-    "ANY SHORTEST quantifier",
     "PATH_LENGTH path function",
-    "CASE WHEN ... END expression",
 ]
 
 params_file = "interactive_13_param.txt"

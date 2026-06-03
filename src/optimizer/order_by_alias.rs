@@ -55,7 +55,7 @@ pub fn optimize(q: &mut Query) {
     let mut rewrites: Vec<Option<(String, String)>> = Vec::with_capacity(specs.len());
     for spec in specs {
         match &spec.key {
-            SortKey::Expr(_) | SortKey::ColumnField { .. } => rewrites.push(None),
+            SortKey::Expr(_) | SortKey::ColumnCast { .. } | SortKey::ColumnField { .. } => return,
             SortKey::Column(idx) => {
                 let Some(ReturnItem::Expr {
                     expr: Expr::AttrLookup { var, attr },
@@ -109,6 +109,17 @@ mod tests {
     fn alias_to_aggregate_stays_column() {
         let key = first_sort_key("MATCH (n) RETURN COUNT(n) AS c GROUP BY n.x ORDER BY c DESC");
         assert!(matches!(key, SortKey::Column(_)));
+    }
+
+    #[test]
+    fn alias_rewrite_aborts_when_mixed_with_casted_alias() {
+        let q = compile_query_unchecked(
+            "MATCH (n) RETURN n.x AS x, n.id AS id ORDER BY x ASC, CAST(id AS INTEGER) ASC",
+        )
+        .unwrap();
+        let specs = q.order_by.unwrap();
+        assert!(matches!(specs[0].key, SortKey::Column(_)));
+        assert!(matches!(specs[1].key, SortKey::ColumnCast { .. }));
     }
 
     #[test]
