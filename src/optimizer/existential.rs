@@ -68,7 +68,8 @@ fn fold_in_pattern(p: &mut PathPattern, schema: &Schema) {
         }
         PathPattern::Repeat { pattern, .. }
         | PathPattern::Questioned(pattern)
-        | PathPattern::Selected { pattern, .. } => {
+        | PathPattern::Selected { pattern, .. }
+        | PathPattern::Named { pattern, .. } => {
             fold_in_pattern(pattern, schema);
         }
         PathPattern::Node(_)

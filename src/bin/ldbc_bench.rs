@@ -66,6 +66,7 @@ fn shape_of_value(v: &Value) -> &'static str {
         Value::Record(_) => "r",
         Value::Node(_) => "N",
         Value::Edge(_) => "E",
+        Value::Path(_) => "P",
     }
 }
 

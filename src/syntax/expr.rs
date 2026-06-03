@@ -371,6 +371,7 @@ impl Expr {
             }
             (Value::Node(_), SimpleType::Node) => true,
             (Value::Edge(_), SimpleType::Edge) => true,
+            (Value::Path(_), SimpleType::Path) => true,
             (_, SimpleType::Star) => true,
             (_, SimpleType::Union(a, b)) => {
                 Expr::value_is_type(val, a) || Expr::value_is_type(val, b)

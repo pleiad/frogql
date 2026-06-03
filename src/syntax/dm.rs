@@ -123,5 +123,8 @@ pub fn validate_insert_pattern(p: &PathPattern) -> Result<(), String> {
              ALL/ANY/SHORTEST) (§16.5)"
                 .into(),
         ),
+        PathPattern::Named { .. } => {
+            Err("INSERT patterns cannot bind a path variable (`p = ...`) (§16.5)".into())
+        }
     }
 }

@@ -155,6 +155,10 @@ pub fn elaborate_pattern(p: PathPattern, fresh: &FreshVars) -> PathPattern {
             prefix,
             pattern: Box::new(elaborate_pattern(*pattern, fresh)),
         },
+        PathPattern::Named { var, pattern } => PathPattern::Named {
+            var,
+            pattern: Box::new(elaborate_pattern(*pattern, fresh)),
+        },
     }
 }
 
@@ -262,6 +266,10 @@ fn visit(p: &PathPattern, set: &mut std::collections::HashSet<String>) {
             visit(p2, set);
         }
         PathPattern::Filter(p, _) => visit(p, set),
+        PathPattern::Named { var, pattern } => {
+            set.insert(var.clone());
+            visit(pattern, set);
+        }
         PathPattern::Repeat { pattern, .. }
         | PathPattern::Questioned(pattern)
         | PathPattern::Selected { pattern, .. } => visit(pattern, set),

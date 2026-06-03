@@ -7,12 +7,13 @@ Este documento lista lo que falta en froGQL respecto al estándar ISO/IEC 39075:
 Implementado y cubierto por tests:
 
 - **Parser y query language**: `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN` (con `DISTINCT` y alias `AS`), `ORDER BY ... ASC|DESC NULLS FIRST|LAST`, `LIMIT`, `GROUP BY`, comma-join.
-- **Expresiones de valor (cierre IC7)**: división `/` (ISO `<solidus>`), `FLOOR(<numeric>)`, `CAST(<op> AS INTEGER|FLOAT)` (conversión de valor, distinta de la aserción de tipo `AS`), constructor de record `RECORD { k: <expr>, ... }` con valores-expresión (`RECORD` opcional, fast-path constante), y la subconsulta de valor `VALUE { MATCH ... RETURN <1 item> ORDER BY ... LIMIT 1 }` (correlacionada, arg-max por grupo). `FLOOR`/`CAST`/`RECORD`/`VALUE` son soft keywords (solo antes de `(`/`{`). `GROUP BY <binding variable>` agrupa por identidad de nodo/arista con chequeo de dependencia funcional ISO §14; `ORDER BY <alias>.<campo>` resuelve campos de columnas proyectadas tipo record (`SortKey::ColumnField`). Estas seis primitivas desbloquearon **IC7** (`bench/ldbc-queries/ic7.toml`, `tests/ic7_test.rs`).
+- **Expresiones de valor (cierre IC7 + expresiones ISO)**: división `/` (ISO `<solidus>`), `FLOOR(<numeric>)`, `CAST(<op> AS INTEGER|FLOAT)` (conversión de valor, distinta de la aserción de tipo `AS`), constructor de record `RECORD { k: <expr>, ... }` con valores-expresión (`RECORD` opcional, fast-path constante), subconsulta de valor `VALUE { MATCH ... RETURN <1 item> ORDER BY ... LIMIT 1 }`, `CASE WHEN ... THEN ... ELSE ... END`, y `MOD(a,b)` funcional. `FLOOR`/`CAST`/`RECORD`/`VALUE` son soft keywords (solo antes de `(`/`{`). `GROUP BY <binding variable>` agrupa por identidad de nodo/arista con chequeo de dependencia funcional ISO §14; `ORDER BY <alias>.<campo>` y `ORDER BY CAST(<alias> AS tipo)` resuelven columnas proyectadas (`SortKey::ColumnField` / `SortKey::ColumnCast`).
 - **Path patterns**: concat, union (`|`), filter (`WHERE`), repetición `{n,m}`, optional (`?`), aristas dirigidas, reversas y no dirigidas, labels conjuntivas (`A & B`), disyuntivas (`A | B`) y negadas (`!A`).
+- **Named paths y path functions (§16.6 + §20.16)**: declaración `MATCH path = (...)` (binding de un operando a una variable-camino, fuera del prefijo §16.6), `Value::Path` proyectable, y las funciones `ELEMENTS` / `PATH_LENGTH` / `CARDINALITY` (conformes) más `NODES` / `EDGES` (divergencia de traducción). El typechecker liga la variable-camino y valida que el argumento de cada función tipe como camino.
 - **Path-pattern prefixes (ISO §16.6)**: path modes `WALK` / `TRAIL` / `SIMPLE` / `ACYCLIC` y path searches `ALL` / `ANY [N]` / `SHORTEST [N] [PATHS]` / `SHORTEST N GROUPS` (con las formas normalizadas `ANY SHORTEST` y `ALL SHORTEST`). Habilitan repetición ilimitada (`*`, `+`) vía búsqueda k-shortest sobre walks o enumeración finita podada por modo. Aislamiento §16.6 SR 5–8 verificado en el typechecker.
 - **Tipos y valores**: `Int`, `Float`, `Str`, `Bool`, `List`, `Record` (anidable), `Null` con lógica trivalente. `Value::Node` y `Value::Edge` como reference values de primera clase.
 - **Predicados existenciales**: `EXISTS { ... }` y `NOT EXISTS { ... }` con correlación, fold a literal cuando el body es trivialmente vacío.
-- **Aggregation (Feature GF10 parcial)**: `COUNT(*)`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`. Null elimination automática y agregados vacíos que producen `null`. Aritmética sobre agregados en la proyección (`COUNT(DISTINCT x) + COUNT(DISTINCT y) AS total`): un agregado puede ser operando de un `Binop`, evaluado por grupo tras el `GROUP BY`.
+- **Aggregation (Feature GF10 parcial)**: `COUNT(*)`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COLLECT_LIST` (alias `COLLECT` / `ARRAY_AGG`). Null elimination automática y agregados vacíos que producen `null`. `COLLECT_LIST` arma un `Value::List` por grupo y dropea records all-null (lado vacío de un OPTIONAL). Aritmética sobre agregados en la proyección (`COUNT(DISTINCT x) + COUNT(DISTINCT y) AS total`): un agregado puede ser operando de un `Binop`, evaluado por grupo tras el `GROUP BY`.
 - **DML (ISO §13)**: `INSERT`, `SET x.prop = expr`, `SET x = { ... }` (clear+set), `SET x:Label`, `REMOVE x.prop`, `REMOVE x:Label`, `[DETACH | NODETACH] DELETE <expr list>`, `RETURN` post-DM. Validación G2000 contra el GRAPH TYPE activo, atomicidad por statement vía overlay.
 - **DDL de catálogo**: `CREATE / USE / DROP / SHOW / VALIDATE GRAPH TYPE`, `CREATE / DROP / SHOW INDEX` (HASH y BTREE).
 - **Storage**: archivo único `.gdb` con páginas de 4KB, catálogo persistido, atomicidad de `.save` vía tmp+rename, dumps `.dump-json` y `.dump-gql`.
@@ -57,15 +58,15 @@ Natural ahora que `List` es tipo de primera clase y que tenemos `WITH`-equivalen
 
 #### 2.4 Shortest path — implementado (ISO §16.6)
 
-Cubierto por los path-pattern prefixes: `SHORTEST [N] [PATHS]`, `SHORTEST N GROUPS`, `ANY SHORTEST`, `ALL SHORTEST`, más los modos `TRAIL` / `SIMPLE` / `ACYCLIC` que hacen finita la repetición ilimitada. El runtime usa una búsqueda k-shortest sobre walks (`run_repetition_shortest`, heap ordenado por longitud con presupuesto por par `(origen,destino)`) o enumeración podada por modo (`run_repetition_unbounded_mode`); no decompone a triples LTJ. Ver `src/runtime/path_select.rs` y la sección *Path-pattern prefixes* del CLAUDE.md de la crate. Pendiente de §16.6: las funciones nombradas estilo Cypher `shortestPath()` / `allShortestPaths()` (la sintaxis de prefijo ISO cubre los mismos casos).
+Cubierto por los path-pattern prefixes: `SHORTEST [N] [PATHS]`, `SHORTEST N GROUPS`, `ANY SHORTEST`, `ALL SHORTEST`, más los modos `TRAIL` / `SIMPLE` / `ACYCLIC` que hacen finita la repetición ilimitada. El runtime usa una búsqueda k-shortest sobre walks (`run_repetition_shortest`, heap ordenado por longitud con presupuesto por par `(origen,destino)`) o enumeración podada por modo (`run_repetition_unbounded_mode`); no decompone a triples LTJ. Ver `src/runtime/path_select.rs` y la sección *Path-pattern prefixes* del CLAUDE.md de la crate.
 
 #### 2.5 Funciones built-in
 
-Existe `Expr::Call { name, args }` con dispatch en `engine.rs::eval_call`; hoy resuelve `FLOOR` y `CAST` (más `COALESCE`/`DURATION` por Token dedicado). `MOD(a,b)` vive como expresión numérica (`BinOp::Mod`). Faltan `size(list)`, `length(path)`, `head`, `tail`, `nodes(p)`, `edges(p)`, `type(edge)`, `labels(node)` y `PATH_LENGTH(path)`. Agregar cada función escalar es un arm nuevo en `eval_call` + `check_expr` (las path-functions necesitan antes named paths, ver 2.9).
+Existe `Expr::Call { name, args }` con dispatch en `engine.rs::eval_call`; hoy resuelve `FLOOR` y `CAST` (más `COALESCE`/`DURATION` por Token dedicado), `MOD(a,b)` como expresión numérica (`BinOp::Mod`), y las path-functions `ELEMENTS` / `PATH_LENGTH` / `CARDINALITY` / `NODES` / `EDGES` (ver 2.9). Faltan `size(list)`, `head`, `tail`, `type(edge)` y `labels(node)`. Para IC10 también falta soporte temporal ISO real para expresar la ventana de cumpleaños; no usar `EXTRACT(MONTH|DAY FROM ...)` como atajo porque no es sintaxis GQL ISO en ISO/IEC 39075:2024.
 
 #### 2.6 COLLECT y STDDEV (Feature GF10 completa)
 
-Las agregaciones que faltan respecto a la lista del estándar. `COLLECT_LIST(x)` arma un `Value::List` por grupo; `STDDEV` y `STDDEV_POP` son aritméticas. Encajan en la misma infraestructura `GeneralSetKind` que `SUM`/`AVG`.
+`COLLECT_LIST(x)` ya está implementado. Faltan `STDDEV` y `STDDEV_POP`, que son aritméticas y encajan en la misma infraestructura `GeneralSetKind` que `SUM`/`AVG`.
 
 #### 2.7 Multi-DML chains en un solo statement
 
@@ -73,11 +74,18 @@ ISO §13.1 permite `MATCH α INSERT β SET γ MATCH δ DELETE ε` como una sola 
 
 #### 2.8 String escapes en literales
 
-El lexer no admite escapes (`'don\'t'` no parsea, `''` se lee como string vacío). Bloquea `.dump-gql` para nodos cuyas propiedades string contengan `'`. Fix conceptualmente trivial; toca `Lexer::tokenize` y la simétrica en `format_gql_value`.
+El lexer no admite escapes (`'don't'` no parsea, `''` se lee como string vacío). Bloquea `.dump-gql` para nodos cuyas propiedades string contengan `'`. Fix conceptualmente trivial; toca `Lexer::tokenize` y la simétrica en `format_gql_value`.
 
-#### 2.9 Named path patterns y path functions
+#### 2.9 Named path patterns y path functions — implementado (2026-06-03)
 
-`MATCH path = (a)-[:k]->(b)` no parsea: el binding de un patrón a una variable-camino no está en la gramática. Sin él no hay objeto `path` al que aplicar `PATH_LENGTH(path)` / `NODES(path)` / `EDGES(path)`. La búsqueda `ANY SHORTEST` / `ALL SHORTEST` ya funciona como **prefijo** (`MATCH ANY SHORTEST (a)-[:k]->+(b)`); lo que falta es la forma con nombre `MATCH path = ANY SHORTEST (...)` y un `Value::Path` proyectable. Toca el parser (`path = ...`), el AST (variable-camino), un `PathValue`/`Value::Path` materializable, y las path-functions en `eval_call`. Es el mayor bloqueador cruzado: habilita IC1, IC13 e IC14.
+`MATCH path = (a)-[:k]->(b)` liga el patrón completo a una variable-camino. La declaración ISO `<path variable declaration> ::= <binding variable> =` se parsea por operando de comma-join, fuera del prefijo §16.6 (`Named { var, Selected { prefix, pattern } }`), y materializa un `Value::Path` proyectable. Las path-functions de §20.16 operan sobre él:
+
+- `ELEMENTS(path)` — lista de todos los elementos (nodos y aristas) en orden de match (conforme ISO).
+- `PATH_LENGTH(path)` — número de aristas (conforme ISO).
+- `CARDINALITY(path)` — número total de elementos, nodos más aristas (conforme ISO).
+- `NODES(path)` / `EDGES(path)` — proyecciones nodo-solo / arista-solo. **No** son ISO (§20.16 no las define); se ofrecen como **divergencia de traducción** para los queries LDBC que las usan. Anótalas como divergencia en los toml afectados.
+
+Implementación: variantes `PathPattern::Named`, `PathValue::Path`, `Value::Path`, `SimpleType::Path`, `VariableType::Path` (terminal en el retículo: solo se encuentra consigo misma, nunca refina contra schema, nunca vacía un entorno). El typechecker liga la variable-camino en el `TypeEnvironment` y exige que el argumento de cada path-function tipe como `Path` (un argumento demostrablemente no-camino es error de tipo). El runtime captura la secuencia ya construida en `ResultRow.paths` (no recomputa). Tests en `tests/named_path_test.rs`.
 
 #### 2.10 CASE WHEN, MOD, list comprehension, temporales
 
@@ -88,9 +96,15 @@ Estado de expresiones que bloqueaban ICs:
 - IC10 sigue necesitando expresar una ventana de cumpleaños por mes/día. La forma `EXTRACT(MONTH|DAY FROM ...)` no es ISO GQL en ISO/IEC 39075:2024, por lo que no se implementa como superficie del lenguaje. Falta soporte temporal ISO real o una traducción ISO-conformante equivalente.
 - List comprehension `[x IN <list> | <expr>]` (`<list value constructor by enumeration>` con filtro/map) — bloquea IC14. Nuevo `Expr::ListComprehension`.
 
-#### 2.11 COLLECT_LIST / multiset (ver también 2.6)
+#### 2.11 COLLECT_LIST / multiset — implementado (2026-06-03)
 
-`COLLECT_LIST(x)` (alias `COLLECT` / `ARRAY_AGG`) arma un `Value::List` por grupo. Encaja en `GeneralSetKind`. Bloquea IC1 e IC12.
+`COLLECT_LIST(x)` (alias `COLLECT` / `ARRAY_AGG`) arma un `Value::List` por grupo. Es un `GeneralSetKind::CollectList` cuyo reducer en `apply_aggregator` envuelve los valores ya recolectados (con eliminación de nulls y `DISTINCT` heredados de `collect_aggregate_values`) en `Value::List`. Tipa como `List(elem)`. Además dropea records all-null, que vienen del lado vacío de un `OPTIONAL MATCH` (`RECORD { a: opt.x }` con `opt` sin match → todos los campos null) y representan "sin fila". Tests en `tests/collect_list_test.rs`.
+
+Necesario para IC1 e IC12, pero **no suficiente**: ambos además agrupan y ordenan por *alias* de RETURN, no por variable de binding (ver 2.12).
+
+#### 2.12 GROUP BY / ORDER BY por alias de RETURN
+
+`GROUP BY <binding variable>` ya funciona (agrupa por identidad de nodo/arista). Lo que falta es `GROUP BY <alias>` donde `<alias>` es un nombre de columna de RETURN (`friend.id AS friendId ... GROUP BY friendId`), más alias dentro de expresiones en `ORDER BY` (`ORDER BY CAST(friendId AS INTEGER)`). El typechecker rechaza el alias con "Variable friendId not found in context" porque no es una variable de binding. IC1 e IC12 dependen de esto (sus GROUP BY listan `friendId, friendLastName, distanceFromPerson, ...`, todos aliases). Es resolución de nombres: una pre-pasada de elaboración que sustituye `Expr::Var(alias)` en GROUP BY y dentro de exprs de ORDER BY por la expresión aliaseada del RETURN, con cuidado del shadowing alias-vs-variable. `ORDER BY <alias>` a secas ya lo resuelve `order_by_alias.rs`; `ORDER BY CAST(<alias> AS tipo)` ya está resuelto por `SortKey::ColumnCast`; falta el caso GROUP BY y alias-dentro-de-expr fuera de ese caso especializado.
 
 ### Tier 3: producción, no investigación
 
@@ -112,34 +126,33 @@ Estado de los 14 IC del benchmark cross-system (`bench/ldbc-queries/ic*.toml`). 
 
 | IC | Estado | Gaps restantes |
 |----|--------|----------------|
-| IC2, IC3, IC4, IC5, IC6, IC8, IC9, IC11 | implementado | — |
-| **IC7** | **implementado** (este cierre) | — (necesitaba `VALUE`, `RECORD`, `CAST`, `FLOOR`, `/`, `GROUP BY <var>`; todos hechos) |
-| IC1 | blocked | named paths + `PATH_LENGTH`/`NODES` (2.9); `COLLECT_LIST` (2.11). `RECORD` ✅, `ANY SHORTEST` prefijo ✅ |
+| IC2, IC3, IC4, IC5, IC6, IC7, IC8, IC9, IC11, IC13 | implementado | — |
+| IC1 | blocked | GROUP BY por alias (2.12). Named paths + `PATH_LENGTH`/`NODES` ✅ (2.9), `RECORD` ✅, `ANY SHORTEST` ✅, `COLLECT_LIST` ✅ (2.11) |
 | IC10 | blocked | temporal ISO para predicado de cumpleaños por mes/día (2.10). `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ✅ |
-| IC12 | blocked | `COLLECT_LIST` (2.11); `[:isSubclassOf]->{0,}` ya parsea y el typechecker lo admite bajo un prefijo de modo (`ACYCLIC`/`TRAIL`) — divergencia de traducción, sin código nuevo |
-| IC13 | blocked | named paths + `PATH_LENGTH` (2.9); `CASE WHEN` ✅ |
-| IC14 | blocked | named paths + `PATH_LENGTH`/`NODES` (2.9); list comprehension (2.10). `VALUE` ✅, `*` (multiplicación) ✅ |
+| IC12 | blocked | GROUP BY por alias (2.12). `COLLECT_LIST` ✅ (2.11); `[:isSubclassOf]->{0,}` ya parsea y el typechecker lo admite bajo un prefijo de modo (`ACYCLIC`/`TRAIL`) — divergencia de traducción, sin código nuevo |
+| IC14 | blocked | list comprehension (2.10). Named paths + `NODES` ✅ (2.9), `VALUE` ✅, `*` ✅ |
 
 ### Roadmap para los 14 IC completos
 
 Ordenado por leverage (ICs desbloqueados por feature):
 
-1. **Named path patterns + path functions** (2.9) — `MATCH path = [ANY|ALL] SHORTEST (...)`, `PATH_LENGTH`, `NODES`, `EDGES`. Desbloquea **IC1, IC13, IC14** (3). El search ya existe como prefijo; falta el binding nombrado y `Value::Path`. Mayor superficie, mayor retorno.
-2. **`COLLECT_LIST` / multiset aggregate** (2.11) — desbloquea **IC12** (con la divergencia `{0,}`→prefijo) y es uno de los dos gaps de IC1. Bajo costo (un `GeneralSetKind` nuevo).
-3. **Temporales ISO para la ventana de cumpleaños de IC10** (2.10) — cierra **IC10**. No usar `EXTRACT(...)` como atajo: no es sintaxis ISO GQL.
-4. **List comprehension `[x IN list | expr]`** (2.10) — cierra **IC14**. `Expr::ListComprehension` + runtime sobre `Value::List`.
+1. ~~**Named path patterns + path functions** (2.9)~~ — **hecho (2026-06-03)**. `MATCH path = [ANY|ALL] SHORTEST (...)`, `ELEMENTS`, `PATH_LENGTH`, `CARDINALITY`, más `NODES`/`EDGES` (divergencia). Desbloqueó el prerequisito de **IC1, IC13, IC14**.
+2. ~~**`COLLECT_LIST` / multiset aggregate** (2.11)~~ — **hecho (2026-06-03)**. `GeneralSetKind::CollectList`, reducer a `Value::List`, drop de records all-null. Era prerequisito de **IC1 e IC12**, pero ninguno cierra sin (3).
+3. **GROUP BY por alias** (2.12) — cierra **IC1 e IC12** (con la divergencia `{0,}`→prefijo en IC12). Resolución de nombres en una pre-pasada de elaboración.
+4. **Temporales ISO para la ventana de cumpleaños de IC10** (2.10) — cierra **IC10**. No usar `EXTRACT(...)` como atajo: no es sintaxis ISO GQL.
+5. **List comprehension `[x IN list | expr]`** (2.10) — cierra **IC14**. `Expr::ListComprehension` + runtime sobre `Value::List`.
 
-Con (1)–(4) los 14 IC corren. La ruta crítica es (1): IC1/IC13/IC14 dependen de named paths; conviene atacarla primero porque amortiza la materialización de `Value::Path` que las tres comparten.
+Con (3)–(5) los 14 IC corren. Named paths (1), `COLLECT_LIST` (2), `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ya están; el siguiente paso crítico es (3), que IC1 e IC12 comparten.
 
 ## Recomendación
 
-Si el objetivo es cerrar los 14 LDBC IC, seguir el *Roadmap para los 14 IC completos* de arriba: named paths (2.9) primero, luego `COLLECT_LIST`, temporales ISO para IC10 y list comprehension.
+Si el objetivo es cerrar los 14 LDBC IC, seguir el *Roadmap para los 14 IC completos* de arriba: `GROUP BY` por alias, temporales ISO para IC10 y list comprehension.
 
 Si el orden es por valor para queries de usuario en general:
 
 1. **WITH / NEXT** (Tier 2.1). Sin esto no hay pipeline declarativo y todas las queries con agregación filtrada se vuelven imposibles. Mayor lever pendiente, mayor superficie de cambio (AST, typechecker, runtime).
-2. **Named paths + path functions** (2.9) y **resto de funciones built-in** (2.5). La infraestructura `Expr::Call` ya existe (`FLOOR`/`CAST`); agregar funciones es incremental. Named paths es el bloqueador cruzado de tres IC.
+2. **Resto de funciones built-in** (2.5). La infraestructura `Expr::Call` ya existe (`FLOOR`/`CAST`, las path-functions); agregar funciones es incremental.
 3. **OFFSET y multi-DML chains** (Tier 2.2 + 2.7). Cierre de huecos sintácticos pequeños que la gente espera.
 4. **Multi-DML + WAL** sólo si el caso de uso pasa de research a producción.
 
-Lo que **no** priorizar todavía: transacciones reales (irrelevante para investigación de semántica), MVCC (lo mismo). Shortest path ya está implementado vía los prefijos §16.6 (Tier 2.4); división, `FLOOR`, `CAST`, `RECORD`, `VALUE` y `GROUP BY <var>` cerraron en el cierre de IC7.
+Lo que **no** priorizar todavía: transacciones reales (irrelevante para investigación de semántica), MVCC (lo mismo). Shortest path ya está implementado vía los prefijos §16.6 (Tier 2.4); división, `FLOOR`, `CAST`, `RECORD`, `VALUE`, `GROUP BY <var>`, named paths, path functions, `COLLECT_LIST`, `CASE` y `MOD` ya están implementados.

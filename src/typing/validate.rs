@@ -257,9 +257,9 @@ fn value_to_simple_type(v: &Value) -> SimpleType {
                 .collect();
             SimpleType::Record(m)
         }
-        // Reference values are runtime-only; validation only sees
-        // stored property values, never these.
-        Value::Node(_) | Value::Edge(_) => SimpleType::Star,
+        // Reference values and paths are runtime-only; validation only
+        // sees stored property values, never these.
+        Value::Node(_) | Value::Edge(_) | Value::Path(_) => SimpleType::Star,
     }
 }
 

@@ -1091,6 +1091,19 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     GeneralSetKind::Avg => avg_values(&values),
                     GeneralSetKind::Min => min_values(&values),
                     GeneralSetKind::Max => max_values(&values),
+                    // COLLECT_LIST gathers the group's values into a list
+                    // instead of reducing. `collect_aggregate_values`
+                    // already dropped scalar nulls and applied DISTINCT.
+                    // Additionally drop all-null records: those come from
+                    // the empty side of an OPTIONAL MATCH (every projected
+                    // field is null), carry no information, and would
+                    // otherwise pad the list with empty entries.
+                    GeneralSetKind::CollectList => Value::List(
+                        values
+                            .into_iter()
+                            .filter(|v| !is_all_null_record(v))
+                            .collect(),
+                    ),
                 }
             }
         }
@@ -1214,6 +1227,18 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     selected.rows.truncate(limit);
                 }
                 selected
+            }
+            PathPattern::Named { var, pattern } => {
+                // Evaluate the operand, then bind its matched path (the
+                // single path each row carries — a Named operand never
+                // contains a top-level Join, so `paths` has one entry) to
+                // the path variable as a materialized `PathValue::Path`.
+                let mut ir = self.run_path_pattern(pattern, limit);
+                for row in &mut ir.rows {
+                    let elems = row.path().0.clone();
+                    row.assignment.extend(var.clone(), PathValue::Path(elems));
+                }
+                ir
             }
         }
     }
@@ -2198,6 +2223,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
             Value::Node(_) => SimpleType::Node,
             Value::Edge(_) => SimpleType::Edge,
+            Value::Path(_) => SimpleType::Path,
         }
     }
 
@@ -2429,6 +2455,46 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     _ => return ExprResult::Failure("CAST missing target type".into()),
                 };
                 cast_value_to_type(&v, target)
+            }
+            // ISO §20.16 path functions (plus the non-standard NODES/EDGES
+            // translation helpers). All take one PATH argument; a
+            // non-path argument fails (→ Null under 3VL).
+            "ELEMENTS" | "NODES" | "EDGES" | "PATH_LENGTH" | "CARDINALITY" => {
+                let v = match self.run_expr(mu, &args[0]) {
+                    ExprResult::Success(v) => v,
+                    e @ ExprResult::Failure(_) => return e,
+                };
+                let items = match &v {
+                    Value::Path(items) => items,
+                    Value::Null => return ExprResult::Success(Value::Null),
+                    _ => return ExprResult::Failure(format!("{name} requires a PATH argument")),
+                };
+                match name {
+                    // ELEMENTS: every node and edge in match order.
+                    "ELEMENTS" => ExprResult::Success(Value::List(items.clone())),
+                    // NODES / EDGES: the node-only / edge-only projections.
+                    "NODES" => ExprResult::Success(Value::List(
+                        items
+                            .iter()
+                            .filter(|x| matches!(x, Value::Node(_)))
+                            .cloned()
+                            .collect(),
+                    )),
+                    "EDGES" => ExprResult::Success(Value::List(
+                        items
+                            .iter()
+                            .filter(|x| matches!(x, Value::Edge(_)))
+                            .cloned()
+                            .collect(),
+                    )),
+                    // PATH_LENGTH: number of edges (relationships).
+                    "PATH_LENGTH" => ExprResult::Success(Value::Int(
+                        items.iter().filter(|x| matches!(x, Value::Edge(_))).count() as i64,
+                    )),
+                    // CARDINALITY: total element count (nodes + edges).
+                    "CARDINALITY" => ExprResult::Success(Value::Int(items.len() as i64)),
+                    _ => unreachable!("guarded by the outer match arm"),
+                }
             }
             other => ExprResult::Failure(format!("unknown built-in function `{other}`")),
         }
@@ -2834,6 +2900,18 @@ fn null_value() -> Value {
     Value::Null
 }
 
+/// True for a record whose every field is null (and for a literal null).
+/// COLLECT_LIST drops these: they are produced by the empty side of an
+/// OPTIONAL MATCH (`RECORD { a: opt.x, b: opt.y }` with `opt` unmatched →
+/// all fields null) and represent "no row", not a real collected value.
+fn is_all_null_record(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::Record(fields) => !fields.is_empty() && fields.values().all(|f| f.is_null()),
+        _ => false,
+    }
+}
+
 /// Int-preserving when all inputs are Int; promotes to Float on any
 /// Float input. Non-numeric skipped (gradual tolerance). Empty → null.
 fn sum_values(values: &[Value]) -> Value {
@@ -2882,6 +2960,9 @@ fn path_value_to_value(pv: &PathValue) -> Value {
         PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => Value::Edge(*id),
         PathValue::Nothing => Value::Null,
         PathValue::Group(items) => Value::List(items.iter().map(path_value_to_value).collect()),
+        // A named path projects to `Value::Path` (alternating node/edge
+        // reference values), keeping it distinct from a repetition group.
+        PathValue::Path(items) => Value::Path(items.iter().map(path_value_to_value).collect()),
     }
 }
 
@@ -2977,6 +3058,12 @@ fn hash_value<H: Hasher>(v: &Value, state: &mut H) {
             }
         }
         Value::Node(id) | Value::Edge(id) => id.hash(state),
+        Value::Path(items) => {
+            items.len().hash(state);
+            for item in items {
+                hash_value(item, state);
+            }
+        }
     }
 }
 
@@ -2998,6 +3085,9 @@ fn eq_value(a: &Value, b: &Value) -> bool {
         // so GROUP BY a node/edge binding variable groups by identity.
         (Value::Node(x), Value::Node(y)) => x == y,
         (Value::Edge(x), Value::Edge(y)) => x == y,
+        (Value::Path(x), Value::Path(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| eq_value(a, b))
+        }
         (Value::Null, Value::Null) => true,
         _ => false,
     }
@@ -3125,7 +3215,8 @@ fn pattern_has_edge(p: &PathPattern) -> bool {
         PathPattern::Filter(p, _)
         | PathPattern::Repeat { pattern: p, .. }
         | PathPattern::Questioned(p)
-        | PathPattern::Selected { pattern: p, .. } => pattern_has_edge(p),
+        | PathPattern::Selected { pattern: p, .. }
+        | PathPattern::Named { pattern: p, .. } => pattern_has_edge(p),
         PathPattern::Node(_) => false,
     }
 }

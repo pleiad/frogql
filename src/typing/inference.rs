@@ -70,10 +70,10 @@ fn value_to_simple_type(v: &Value) -> SimpleType {
             SimpleType::Record(m)
         }
         // Schema inference walks stored property values; reference
-        // values are runtime-only and never reach this path. Mapping
-        // them to Star keeps the function total without affecting
+        // values and paths are runtime-only and never reach this path.
+        // Mapping them to Star keeps the function total without affecting
         // any inferred property type.
-        Value::Node(_) | Value::Edge(_) => SimpleType::Star,
+        Value::Node(_) | Value::Edge(_) | Value::Path(_) => SimpleType::Star,
     }
 }
 

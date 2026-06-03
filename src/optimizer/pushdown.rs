@@ -350,6 +350,12 @@ fn merge_constraints(p: PathPattern, c: &Constraints) -> PathPattern {
                 pattern: Box::new(merge_constraints(*pattern, &selected_constraints)),
             }
         }
+        // The path-variable wrapper is transparent to constraint
+        // pushdown: merge into the inner pattern and re-wrap.
+        PathPattern::Named { var, pattern } => PathPattern::Named {
+            var,
+            pattern: Box::new(merge_constraints(*pattern, c)),
+        },
     }
 }
 
@@ -371,7 +377,9 @@ fn collect_top_node_vars(p: &PathPattern, out: &mut Vec<String>) {
             collect_top_node_vars(a, out);
             collect_top_node_vars(b, out);
         }
-        PathPattern::Filter(inner, _) | PathPattern::Questioned(inner) => {
+        PathPattern::Filter(inner, _)
+        | PathPattern::Questioned(inner)
+        | PathPattern::Named { pattern: inner, .. } => {
             collect_top_node_vars(inner, out);
         }
         PathPattern::EdgeRight(_)

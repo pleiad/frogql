@@ -20,6 +20,13 @@ pub enum Value {
     Record(std::collections::BTreeMap<String, Value>),
     Node(Id),
     Edge(Id),
+    /// ISO §4.4 PATH value — a materialized path bound to a path
+    /// variable (`MATCH p = (a)-[:k]->(b)`). The sequence alternates
+    /// node and edge reference values in match order
+    /// (`[Node, Edge, Node, ...]`); the path functions of §20.16
+    /// (`ELEMENTS`/`PATH_LENGTH`/`CARDINALITY`) read it. Never a
+    /// property value: a path cannot be stored on a node or edge.
+    Path(Vec<Value>),
 }
 
 impl Value {
@@ -52,6 +59,10 @@ impl fmt::Display for Value {
             }
             Value::Node(id) => write!(f, "n{id}"),
             Value::Edge(id) => write!(f, "e{id}"),
+            Value::Path(items) => {
+                let parts: Vec<String> = items.iter().map(|v| format!("{v}")).collect();
+                write!(f, "<{}>", parts.join(", "))
+            }
         }
     }
 }
@@ -69,6 +80,11 @@ pub enum PathValue {
     /// Repetition grouping produced by `{n,m}` quantifiers. NOT a user-facing list;
     /// user lists live in `Value::List` once phase-1 list-values land.
     Group(Vec<PathValue>),
+    /// A materialized named path (`MATCH p = ...`) bound in the
+    /// assignment. The sequence alternates node and edge values in match
+    /// order, exactly as it appears in the row's `Path`. Distinct from
+    /// `Group`: a path projects to `Value::Path`, a group to `Value::List`.
+    Path(Vec<PathValue>),
 }
 
 impl PathValue {
@@ -78,7 +94,7 @@ impl PathValue {
             PathValue::Node(id)
             | PathValue::EdgeDirectional(id)
             | PathValue::EdgeUndirectional(id) => Some(*id),
-            PathValue::Nothing | PathValue::Group(_) => None,
+            PathValue::Nothing | PathValue::Group(_) | PathValue::Path(_) => None,
         }
     }
 
@@ -104,6 +120,10 @@ impl fmt::Display for PathValue {
             PathValue::Group(l) => {
                 let items: Vec<String> = l.iter().map(|x| x.to_string()).collect();
                 write!(f, "[{}]", items.join(", "))
+            }
+            PathValue::Path(l) => {
+                let items: Vec<String> = l.iter().map(|x| x.to_string()).collect();
+                write!(f, "<{}>", items.join(", "))
             }
         }
     }

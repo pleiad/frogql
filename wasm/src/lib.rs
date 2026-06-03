@@ -279,6 +279,10 @@ fn value_to_json(store: &MemoryGraphStore, v: &Value) -> Json {
         }
         Value::Node(id) => node_ref_json(store, *id),
         Value::Edge(id) => edge_ref_json(store, *id),
+        // A named path projects to a JSON array of its element objects.
+        Value::Path(items) => {
+            Json::Array(items.iter().map(|it| value_to_json(store, it)).collect())
+        }
     }
 }
 
@@ -317,7 +321,7 @@ fn pathvalue_to_json(store: &MemoryGraphStore, pv: &PathValue) -> Json {
             edge_ref_json(store, *id)
         }
         PathValue::Nothing => Json::Null,
-        PathValue::Group(items) => Json::Array(
+        PathValue::Group(items) | PathValue::Path(items) => Json::Array(
             items
                 .iter()
                 .map(|it| pathvalue_to_json(store, it))

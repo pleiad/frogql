@@ -379,12 +379,13 @@ fn value_to_prop(v: &Value, st: &mut StringTable, pager: &mut Pager) -> io::Resu
             }
             PropValue::Record(out)
         }
-        // Node/Edge are runtime-only reference values (§4.4.4). They
-        // can appear in projections (`RETURN n`) and predicates
+        // Node/Edge/Path are runtime-only values (§4.4.4 reference
+        // values and the §4.4 path value). They can appear in
+        // projections (`RETURN n`, `RETURN p`) and predicates
         // (`WHERE n <> m`) but are never written back to disk as
-        // property data — `Value::Node` inside a list literal would be
-        // a programming error in the runtime, not user input.
-        Value::Node(_) | Value::Edge(_) => {
+        // property data — one inside a list literal would be a
+        // programming error in the runtime, not user input.
+        Value::Node(_) | Value::Edge(_) | Value::Path(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "node / edge reference values cannot be stored as properties",

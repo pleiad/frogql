@@ -3,27 +3,18 @@
 
 id = 13
 name = "Single shortest path"
-status = "blocked"
+status = "implemented"
 
-blocked_reason = """
-Re-audited 2026-06-03 after ISO §16.6 path prefix support:
-  - `ANY SHORTEST (...)` is now supported for unnamed path patterns.
-  - IC13 still writes `MATCH path = ANY SHORTEST (...)` and returns
-    `PATH_LENGTH(path)`. froGQL does not yet bind named path values, so
-    there is no `path` value for `PATH_LENGTH` to inspect.
-Note: `CASE WHEN ... END` is now supported, but IC13 still cannot run
-until named path patterns and path functions are implemented.
-"""
-
-required_features = [
-    "named path patterns (MATCH path = ...)",
-    "PATH_LENGTH path function",
-]
+# Re-audited 2026-06-03 after merging named paths/path functions from main
+# with ISO expression support from this branch. `MATCH path = ANY SHORTEST (...)`,
+# `PATH_LENGTH(path)`, and `CASE WHEN ... END` are all supported now.
 
 params_file = "interactive_13_param.txt"
 param_columns = ["person1Id", "person2Id"]
+param_types = ["int", "int"]
+
 query = """
-MATCH path = ANY SHORTEST (p1:Person {id: $person1Id})~[:knows]~*(p2:Person {id: $person2Id})
-RETURN 
+MATCH path = ANY SHORTEST (p1:Person {id: {person1Id}})~[:knows]~*(p2:Person {id: {person2Id}})
+RETURN
     CASE WHEN PATH_LENGTH(path) IS NULL THEN -1 ELSE PATH_LENGTH(path) END AS shortestPathLength
 """

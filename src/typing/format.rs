@@ -67,6 +67,7 @@ pub fn format_variable(vt: &VariableType) -> String {
         VariableType::Union(a, b) => format!("({}) | ({})", format_variable(a), format_variable(b)),
         VariableType::Group(t) => format!("group<{}>", format_variable(t)),
         VariableType::Null => "Null".to_string(),
+        VariableType::Path => "PATH".to_string(),
         VariableType::Zero => "⊥".to_string(),
     }
 }
@@ -170,6 +171,7 @@ fn format_simple_type(t: &SimpleType) -> String {
         SimpleType::Record(fields) => format!("{{{}}}", format_field_map(fields)),
         SimpleType::Node => "NODE".to_string(),
         SimpleType::Edge => "EDGE".to_string(),
+        SimpleType::Path => "PATH".to_string(),
     }
 }
 

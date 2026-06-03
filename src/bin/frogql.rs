@@ -627,6 +627,13 @@ fn format_pathvalue_rich(store: &LazyGraphStore, pv: &PathValue) -> String {
                 .collect();
             format!("[{}]", parts.join(", "))
         }
+        PathValue::Path(items) => {
+            let parts: Vec<String> = items
+                .iter()
+                .map(|v| format_pathvalue_rich(store, v))
+                .collect();
+            format!("<{}>", parts.join(", "))
+        }
     }
 }
 
@@ -740,6 +747,7 @@ impl NodeType {
                 gqlrust::model::value::Value::Record(_) => "record",
                 gqlrust::model::value::Value::Node(_) => "node",
                 gqlrust::model::value::Value::Edge(_) => "edge",
+                gqlrust::model::value::Value::Path(_) => "path",
             };
             props.insert(k.clone(), t);
         }
@@ -808,6 +816,7 @@ fn print_schema(store: &LazyGraphStore) {
                 gqlrust::model::value::Value::Record(_) => "record",
                 gqlrust::model::value::Value::Node(_) => "node",
                 gqlrust::model::value::Value::Edge(_) => "edge",
+                gqlrust::model::value::Value::Path(_) => "path",
             };
             props.insert(k.clone(), t);
         }
@@ -901,6 +910,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
                 gqlrust::model::value::Value::Record(_) => "record",
                 gqlrust::model::value::Value::Node(_) => "node",
                 gqlrust::model::value::Value::Edge(_) => "edge",
+                gqlrust::model::value::Value::Path(_) => "path",
             };
             prop_types.insert(k.clone(), t);
         }
@@ -977,6 +987,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
                 gqlrust::model::value::Value::Record(_) => "record",
                 gqlrust::model::value::Value::Node(_) => "node",
                 gqlrust::model::value::Value::Edge(_) => "edge",
+                gqlrust::model::value::Value::Path(_) => "path",
             };
             prop_types.insert(k.clone(), t);
         }
@@ -1330,6 +1341,7 @@ fn color_variable(vt: &VariableType) -> String {
         }
         VariableType::Group(t) => format!("group<{}>", color_variable(t)),
         VariableType::Null => "Null".to_string(),
+        VariableType::Path => format!("{C_GREEN}PATH{C_RESET}"),
         VariableType::Zero => "⊥".to_string(),
     }
 }
@@ -1438,6 +1450,7 @@ fn color_simple_type(t: &SimpleType) -> String {
         SimpleType::Record(fields) => format!("{{{}}}", color_field_map(fields)),
         SimpleType::Node => format!("{C_GREEN}NODE{C_RESET}"),
         SimpleType::Edge => format!("{C_GREEN}EDGE{C_RESET}"),
+        SimpleType::Path => format!("{C_GREEN}PATH{C_RESET}"),
     }
 }
 

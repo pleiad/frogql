@@ -72,6 +72,10 @@ pub enum GeneralSetKind {
     Avg,
     Min,
     Max,
+    /// ISO §20.9 list/multiset aggregate (`COLLECT_LIST`, aliases
+    /// `COLLECT` / `ARRAY_AGG`). Collects the group's values into a
+    /// `Value::List` instead of reducing to a scalar.
+    CollectList,
 }
 
 /// ISO §20.9 `<aggregate function>`. `COUNT(*)` is a separate variant
@@ -254,6 +258,7 @@ impl fmt::Display for GeneralSetKind {
             GeneralSetKind::Avg => "AVG",
             GeneralSetKind::Min => "MIN",
             GeneralSetKind::Max => "MAX",
+            GeneralSetKind::CollectList => "COLLECT_LIST",
         };
         f.write_str(s)
     }

@@ -31,6 +31,16 @@ pub enum PathPattern {
         prefix: PathPrefix,
         pattern: Box<PathPattern>,
     },
+    /// ISO `<path variable declaration>` — `p = <path pattern>`. Binds the
+    /// whole operand's matched path to the variable `var`, materialized as
+    /// a `Value::Path` for the §20.16 path functions. Wraps one comma
+    /// operand, outside any `Selected` prefix
+    /// (`Named { var, Selected { prefix, pattern } }`). Transparent to the
+    /// pattern's own variable types; it only adds the path binding.
+    Named {
+        var: String,
+        pattern: Box<PathPattern>,
+    },
 }
 
 impl PathPattern {
@@ -56,6 +66,11 @@ impl PathPattern {
             PathPattern::Repeat { pattern, .. } => pattern.freevars(),
             PathPattern::Questioned(p) => p.freevars(),
             PathPattern::Selected { pattern, .. } => pattern.freevars(),
+            // The path variable is not a node/edge pattern variable: it
+            // never unifies across a join. Expose only the inner element
+            // variables here; the path binding lives in the environment
+            // (typecheck) and the assignment (runtime).
+            PathPattern::Named { pattern, .. } => pattern.freevars(),
         }
     }
 
@@ -73,7 +88,8 @@ impl PathPattern {
             }
             PathPattern::Filter(p, _)
             | PathPattern::Questioned(p)
-            | PathPattern::Repeat { pattern: p, .. } => p.has_selected(),
+            | PathPattern::Repeat { pattern: p, .. }
+            | PathPattern::Named { pattern: p, .. } => p.has_selected(),
         }
     }
 
@@ -112,7 +128,9 @@ impl PathPattern {
                 b.collect_unbounded_lbs(out);
             }
             PathPattern::Filter(p, _) | PathPattern::Questioned(p) => p.collect_unbounded_lbs(out),
-            PathPattern::Selected { pattern, .. } => pattern.collect_unbounded_lbs(out),
+            PathPattern::Selected { pattern, .. } | PathPattern::Named { pattern, .. } => {
+                pattern.collect_unbounded_lbs(out)
+            }
             PathPattern::Repeat { pattern, lb, ub } => {
                 if ub.is_none() {
                     out.push(*lb);
@@ -156,6 +174,7 @@ impl fmt::Display for PathPattern {
             PathPattern::Questioned(p) => write!(f, "({p})?"),
             PathPattern::Join(p1, p2) => write!(f, "{p1}, {p2}"),
             PathPattern::Selected { prefix, pattern } => write!(f, "{prefix} {pattern}"),
+            PathPattern::Named { var, pattern } => write!(f, "{var} = {pattern}"),
         }
     }
 }

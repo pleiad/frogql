@@ -682,6 +682,11 @@ fn value_to_json(store: &LazyGraphStore, v: &Value) -> JsonValue {
         }
         Value::Node(id) => node_to_json(store, *id),
         Value::Edge(id) => edge_to_json(store, *id),
+        // A named path projects to a JSON array of its element objects
+        // (nodes and edges in match order).
+        Value::Path(items) => {
+            JsonValue::Array(items.iter().map(|v| value_to_json(store, v)).collect())
+        }
     }
 }
 
@@ -752,7 +757,7 @@ fn pathvalue_to_json(store: &LazyGraphStore, pv: &PathValue) -> JsonValue {
             edge_to_json(store, *id)
         }
         PathValue::Nothing => JsonValue::Null,
-        PathValue::Group(items) => JsonValue::Array(
+        PathValue::Group(items) | PathValue::Path(items) => JsonValue::Array(
             items
                 .iter()
                 .map(|it| pathvalue_to_json(store, it))

@@ -648,6 +648,16 @@ fn value_to_py<'py>(py: Python<'py>, store: &LazyGraphStore, v: &Value) -> PyRes
             d.set_item("props", props)?;
             d.into_py(py)
         }
+        // A named path projects to a list of its element dicts (nodes and
+        // edges in match order), the same `{kind, id, labels, props}`
+        // shape used everywhere else.
+        Value::Path(items) => {
+            let lst = PyList::empty_bound(py);
+            for it in items {
+                lst.append(value_to_py(py, store, it)?)?;
+            }
+            lst.into_py(py)
+        }
     })
 }
 
@@ -722,7 +732,7 @@ fn pathvalue_to_py<'py>(
             d.into_py(py)
         }
         PathValue::Nothing => py.None(),
-        PathValue::Group(items) => {
+        PathValue::Group(items) | PathValue::Path(items) => {
             let lst = PyList::empty_bound(py);
             for it in items {
                 lst.append(pathvalue_to_py(py, store, it)?)?;
