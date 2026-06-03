@@ -58,6 +58,19 @@ fn case_when_compiles_inside_aggregate() {
 }
 
 #[test]
+fn mod_result_keeps_dividend_sign() {
+    let rows = projected(
+        "MATCH (p:Person)
+         RETURN MOD(-5, 3) AS a, MOD(5, -3) AS b, MOD(-5, -3) AS c
+         LIMIT 1",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![Value::Int(-2), Value::Int(2), Value::Int(-2)]]
+    );
+}
+
+#[test]
 fn casted_return_alias_can_order_projected_rows() {
     let rows = projected(
         "MATCH (p:Person)

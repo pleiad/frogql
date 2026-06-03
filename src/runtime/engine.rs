@@ -2730,7 +2730,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 (Value::Int(_), Value::Int(0)) => {
                     ExprResult::Failure("MOD divisor must not be zero".into())
                 }
-                (Value::Int(a), Value::Int(b)) => ExprResult::Success(Value::Int(a.rem_euclid(*b))),
+                (Value::Int(a), Value::Int(b)) => match a.checked_rem(*b) {
+                    Some(r) => ExprResult::Success(Value::Int(r)),
+                    None => ExprResult::Failure("MOD result out of range".into()),
+                },
                 _ => ExprResult::Failure("MOD requires integer operands".into()),
             },
             BinOp::Gt => match as_num_pair(lv, rv) {
