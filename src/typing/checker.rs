@@ -225,6 +225,12 @@ impl Typechecker {
     fn check_returns_match_group_by(&mut self, items: &[ReturnItem], group_by: &[Expr]) {
         for item in items {
             if let ReturnItem::Expr { expr, .. } = item {
+                // An expression carrying an aggregate (`COUNT(x)+COUNT(y)`)
+                // is reduced over the group, not a grouping key — it need
+                // not appear in GROUP BY.
+                if expr.contains_agg() {
+                    continue;
+                }
                 if !group_by.iter().any(|g| g == expr) {
                     self.errors.push(format!(
                         "RETURN item `{expr}` is not in the GROUP BY clause; \
@@ -243,12 +249,31 @@ impl Typechecker {
                 ReturnItem::Expr { expr, .. } => {
                     let _ = self.check_expr(expr, env);
                 }
-                ReturnItem::Aggregate { agg, .. } => match agg {
-                    Aggregator::CountStar => {}
-                    Aggregator::GeneralSet { expr, .. } => {
-                        let _ = self.check_expr(expr, env);
-                    }
-                },
+                ReturnItem::Aggregate { agg, .. } => {
+                    let _ = self.check_aggregator(agg, env);
+                }
+            }
+        }
+    }
+
+    /// Type an aggregate function (ISO §20.9 GR 7). The inner expr is
+    /// checked for diagnostics; the returned type is the reducer's
+    /// result type so it composes inside arithmetic.
+    fn check_aggregator(&mut self, agg: &Aggregator, env: &TypeEnvironment) -> SimpleType {
+        use crate::syntax::query::GeneralSetKind;
+        let num = SimpleType::union(&SimpleType::Z, &SimpleType::F);
+        match agg {
+            // COUNT(*) is a cardinality — always Int, no inner expr.
+            Aggregator::CountStar => SimpleType::Z,
+            Aggregator::GeneralSet { kind, expr, .. } => {
+                let inner = self.check_expr(expr, env);
+                match kind {
+                    GeneralSetKind::Count => SimpleType::Z,
+                    GeneralSetKind::Avg => SimpleType::F,
+                    GeneralSetKind::Sum => num,
+                    // MIN/MAX preserve the element type.
+                    GeneralSetKind::Min | GeneralSetKind::Max => inner,
+                }
             }
         }
     }
@@ -525,6 +550,12 @@ impl Typechecker {
                 let _ = self.check_subquery_body(body, env);
                 SimpleType::B
             }
+
+            // ISO §20.9: an aggregate as a value-expression operand
+            // (`COUNT(x) + COUNT(y)`). Type-check the inner expr for
+            // diagnostics, then return the aggregate's result type so the
+            // surrounding arithmetic typechecks.
+            Expr::Agg(agg) => self.check_aggregator(agg, env),
         }
     }
 

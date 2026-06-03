@@ -126,3 +126,85 @@ fn test_lexer_float_vs_attr_lookup() {
         _ => panic!("expected projected"),
     }
 }
+
+// ===== Multiplication (`*`) and DURATION desugaring =====
+
+#[test]
+fn test_int_multiplication() {
+    let g = graph_with_floats();
+    // stock 10 * 3 = 30 → only A.
+    let res = run(
+        &g,
+        "MATCH (x: Product) WHERE x.stock * 3 = 30 RETURN x.name",
+    );
+    match res {
+        QueryResult::Projected(rows) => {
+            assert_eq!(rows, vec![vec![Value::Str("A".into())]]);
+        }
+        _ => panic!("expected projected"),
+    }
+}
+
+#[test]
+fn test_mixed_multiplication_widens_to_float() {
+    let g = graph_with_floats();
+    // price 12.5 * 2 = 25.0 (int operand widens) → only B.
+    let res = run(
+        &g,
+        "MATCH (x: Product) WHERE x.price * 2 = 25.0 RETURN x.name",
+    );
+    match res {
+        QueryResult::Projected(rows) => {
+            assert_eq!(rows, vec![vec![Value::Str("B".into())]]);
+        }
+        _ => panic!("expected projected"),
+    }
+}
+
+#[test]
+fn test_multiplication_binds_tighter_than_plus() {
+    let g = graph_with_floats();
+    // 1 + 1 * 2 = 3 (not 4) — `*` binds first; A has stock 10, so
+    // stock + 1 * 2 = 12 matches only A.
+    let res = run(
+        &g,
+        "MATCH (x: Product) WHERE x.stock + 1 * 2 = 12 RETURN x.name",
+    );
+    match res {
+        QueryResult::Projected(rows) => {
+            assert_eq!(rows, vec![vec![Value::Str("A".into())]]);
+        }
+        _ => panic!("expected projected"),
+    }
+}
+
+#[test]
+fn test_duration_desugars_to_milliseconds() {
+    let g = graph_with_floats();
+    // DURATION({days: 1}) == 86_400_000 holds for every row → all 3.
+    let res = run(
+        &g,
+        "MATCH (x: Product) WHERE DURATION({days: 1}) = 86400000 RETURN x.name",
+    );
+    match res {
+        QueryResult::Projected(rows) => assert_eq!(rows.len(), 3),
+        _ => panic!("expected projected"),
+    }
+}
+
+#[test]
+fn test_duration_multi_unit_and_arithmetic() {
+    let g = graph_with_floats();
+    // 0 + DURATION({days: 1, hours: 1}) = 86_400_000 + 3_600_000 = 90_000_000.
+    let res = run(
+        &g,
+        "MATCH (x: Product) WHERE x.stock + DURATION({days: 1, hours: 1}) = 90000000 RETURN x.name",
+    );
+    match res {
+        QueryResult::Projected(rows) => {
+            // stock 0 (C) + 90_000_000 = 90_000_000 → only C.
+            assert_eq!(rows, vec![vec![Value::Str("C".into())]]);
+        }
+        _ => panic!("expected projected"),
+    }
+}

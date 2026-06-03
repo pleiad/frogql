@@ -1,0 +1,24 @@
+-- GQL translation of bench/ldbc-queries/ic2.toml for Grafeo
+-- (GrafeoDB/grafeo from PyPI, GQL-native).
+--
+-- Source-of-truth: bench/ldbc-queries/ic2.toml. This mirrors the
+-- toml's shape — same columns, same logical query — for fair
+-- cross-system comparison.
+--
+-- Grafeo-specific divergences from the toml (see DIVERGENCES.md):
+--   - Parameters use `$name` (Grafeo) vs the toml's `{name}` (gqlite).
+--   - Grafeo's parser rejects `(message:Comment|Post)` pattern label
+--     alternation, so the union is a WHERE predicate:
+--     `(message:Comment OR message:Post)`. Same logical query.
+--   - knows stored forward-only; `~[:knows]~` matches either direction.
+MATCH (:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(message)
+WHERE (message:Comment OR message:Post) AND message.creationDate <= $maxDate
+RETURN
+    friend.id AS personId,
+    friend.firstName AS personFirstName,
+    friend.lastName AS personLastName,
+    message.id AS postOrCommentId,
+    COALESCE(message.content, message.imageFile) AS postOrCommentContent,
+    message.creationDate AS postOrCommentCreationDate
+ORDER BY postOrCommentCreationDate DESC, postOrCommentId ASC
+LIMIT 20

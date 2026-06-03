@@ -3,36 +3,27 @@
 
 id = 4
 name = "New topics"
-status = "blocked"
-
-blocked_reason = """
-Re-audited 2026-05-06. Most of the query parses (NOT EXISTS works,
-ORDER BY works, COUNT over bare nodes works post-PR-#42). What
-remains:
-  - `$startDate + DURATION({days: $durationDays})` — `DURATION`
-    literal not in parser.
-  - Inlining as `$startDate + $durationDays * 86400000` doesn't help
-    because `*` (multiplication) doesn't tokenize either. Need
-    substitution-time pre-computation of the millis offset (turn the
-    second WHERE bound into a precomputed integer).
-"""
-
-required_features = [
-    "DURATION literal (or substitution-time pre-computation)",
-    "multiplication operator `*`",
-]
+status = "implemented"
 
 params_file = "interactive_4_param.txt"
-param_columns = ["personId", "startDate", "endDate"]
+param_columns = ["personId", "startDate", "durationDays"]
+param_types = ["int", "int", "int"]
+
 query = """
-MATCH (person:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(post:Post)-[:hasTag]->(tag:Tag)
-WHERE post.creationDate >= $startDate AND post.creationDate < $startDate + DURATION({days: $durationDays})
+MATCH (person:Person {id: {personId}})~[:knows]~(friend:Person)<-[:hasCreator]-(post:Post)-[:hasTag]->(tag:Tag)
+WHERE post.creationDate >= {startDate} AND post.creationDate < {startDate} + DURATION({days: {durationDays}})
   AND NOT EXISTS {
       MATCH (friend)<-[:hasCreator]-(post2:Post)-[:hasTag]->(tag)
-      WHERE post2.creationDate < $startDate
+      WHERE post2.creationDate < {startDate}
   }
 RETURN tag.name AS tagName, COUNT(post) AS postCount
-GROUP BY tagName
+GROUP BY tag.name
 ORDER BY postCount DESC, tagName ASC
 LIMIT 10
 """
+
+return_columns = ["tagName", "postCount"]
+
+[divergences]
+duration = "spec uses `$startDate + DURATION({days: $durationDays})`; gqlite stores creationDate as int epoch-millis and `DURATION({days: N})` desugars to `N * 86400000` ms, so the bound is plain int arithmetic. Unblocked once `DURATION` + `*` landed."
+group-by-expr = "spec/Cypher group by the RETURN alias (`GROUP BY tagName`); gqlite's typechecker groups by the projected expression (`GROUP BY tag.name`). ORDER BY still uses the alias `tagName`. Same grouping."

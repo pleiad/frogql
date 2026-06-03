@@ -1,0 +1,19 @@
+-- GQL translation of bench/ldbc-queries/ic5.toml for Grafeo.
+-- Divergences (see DIVERGENCES.md): $-params; the toml's two MATCH
+-- clauses are merged into one comma-joined MATCH (Grafeo 0.5.34
+-- rejects a second top-level MATCH); the filter WHERE moves AFTER the
+-- OPTIONAL MATCH (Grafeo rejects a WHERE between MATCH and OPTIONAL
+-- MATCH) — semantically identical, since it constrains the
+-- mandatory-bound `person`/`hm` and the optional `post` is independent;
+-- knows forward-only.
+MATCH (person:Person {id: $personId})~[:knows]~{1,2}(otherPerson:Person),
+      (otherPerson)<-[hm:hasMember]-(forum:Forum)
+OPTIONAL MATCH (otherPerson)<-[:hasCreator]-(post:Post)<-[:containerOf]-(forum)
+WHERE person <> otherPerson AND hm.joinDate > $minDate
+RETURN
+    forum.title AS forumName,
+    forum.id AS forumId,
+    COUNT(post) AS postCount
+GROUP BY forum.title, forum.id
+ORDER BY postCount DESC, forumId ASC
+LIMIT 20

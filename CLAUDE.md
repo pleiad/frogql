@@ -44,6 +44,13 @@ cargo build --release
 cd python && source <your-venv>/bin/activate && pip install maturin && maturin develop --release
 # For wheels to ship to other machines:
 cd python && maturin build --release   # output in target/wheels/
+
+# Browser WASM bindings (frogql-wasm)
+rustup target add wasm32-unknown-unknown            # one-time
+cargo test -p frogql-wasm                           # host tests of the engine core (query_json/dm_json)
+cargo build -p frogql-wasm --target wasm32-unknown-unknown
+# Generate the publishable npm package (web target); release-wasm.yml runs the same:
+cargo install wasm-pack && wasm-pack build wasm --target web --out-dir pkg
 ```
 
 ### Pre-commit checklist for Rust changes (non-negotiable)
@@ -339,6 +346,25 @@ GraphAccess trait methods: `lookup_node_eq(label, prop, value) -> Option<Vec<Id>
 Diagnostic env vars: `GQLITE_DEBUG_INDEXES=1` (auto-built indexes + pinned variables), `GQLITE_DISABLE_INDEX_FOLD=1` (LTJ pre-pass off, A/B), `GQLITE_DISABLE_AUTO_INDEXES=1` (skip the auto-build at open), `GQLITE_TRACE_OPEN=1` (per-phase open timings).
 
 LDBC IC2 on `bench/data/ldbc-sf0.1.gdb` (15 params × 3 iters, lazy backend, `--limit 20`): 2417 ms (no indexes) → 1377 ms (auto hash+btree) → **8.7 ms** (TripleIndex cached + warmed at open, 276× total). Reference: GraphQLite (SQLite + Cypher) measures 32.8 ms median on the same query.
+
+## Benchmarks
+
+Two benches, deliberately split (full operational doc in `bench/cross-system/README.md`):
+
+- **Internal bench** (`internal_bench` bin, `bench/INTERNAL_BENCHMARK.md`) — gqlite's own components in isolation (typechecker on/off, lazy/disk backend, RSS). Engine diagnostics, not cross-engine comparisons.
+- **External / cross-system bench** (`bench/cross-system/`) — gqlite vs other graph databases on LDBC SNB Interactive Complex (IC) query latency. The headline numbers.
+
+### Cross-system harness (`bench/cross-system/`)
+
+`run_all.sh` orchestrates **systems on the outer loop, ICs on the inner**: per system, set up once (load full LDBC SF0.1 into its native format), run each requested IC, then exit (per-system memory reclaimed at process exit). Output lands in `results/<timestamp>/` — per-(system,IC) CSV (`query;backend;params;row;iter;result_count;elapsed_ns`), `comparison.txt`, `setup_times.txt`, `run_info.txt`.
+
+- **IC source-of-truth** is `bench/ldbc-queries/ic<n>.toml` — the canonical GQL the gqlite path runs directly via `ldbc_bench`. Each external system translates it to its own dialect file (`<system>/ic<n>.cypher` or `.gql`); per-system deviations live in `<system>/DIVERGENCES.md`. Only ICs with `status = "implemented"` run (currently IC2,5,6,8,9,11).
+- **Row-equivalence oracle**: every runner sha256-hashes its iter-0 result and emits a `ROW … hash=<hex>` stderr line. `_lib/row_hash.py` **must byte-mirror** the `canonicalize_*` functions in `src/bin/ldbc_bench.rs` so all runners produce identical hashes for the same logical rows; `compare_results.py` cross-checks them. A mismatch is a real per-system translation bug, not noise — with ORDER BY in every toml the iter-0 result is deterministic, so byte-equal blobs ⇒ byte-equal results. This is what makes a cross-system latency comparison legitimate.
+- **Measurement caveat** (quote it when quoting numbers): gqlite is benched through its Rust binary (`ldbc_bench`, no Python in the path); external systems through their Python wheels (~1–2 ms FFI per call). Each is measured via its primary user-facing interface, not normalized — latency is indicative, the row-equivalence check is the apples-to-apples part.
+
+**Adding a system**: create `bench/cross-system/<sys>/` with `setup.py` (load the full LDBC SF0.1, IC-agnostic — counts must match gqlite's 327 588 nodes / 1 477 965 edges), `run.py` (emit the CSV schema + the ROW hash via `_lib/row_hash.py`), `requirements.txt`, `ic<n>.{cypher,gql}` translations, `README.md`, `DIVERGENCES.md`; then register it in `run_all.sh` (`ALL_SYSTEMS`, `SETUP_CMD`, `SETUP_MARKER`, `RUNNER`, `REBUILD_FLAG`) and add the `backend`→system mapping in `compare_results.py`'s `_normalize`. `kuzu/` is the closest template for an embedded Python engine; `grafeo/` is the GQL-native one (and shows the dialect carve-outs: no second top-level `MATCH`, no `(:A|B)` pattern alternation, `GROUP BY` by property-expression not alias, sub-labels via `type=` filter).
+
+Run + chart: `bench_setup` (downloads LDBC SF0.1) → `install_python_deps.sh` → `bench/cross-system/run_all.sh --only gqlite,<sys> --ics 2,5,6,8,9,11` → `python bench/cross-system/plot_results.py` (median-per-IC grouped bars, PNG + SVG). A separate synthetic micro-bench (same-data, same-query, result-verified latency on a generated social graph) lives in `bench/grafeo-vs-frogql/`. `bench/data/` and `results/` are gitignored.
 
 ## Conventions
 

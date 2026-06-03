@@ -38,6 +38,7 @@ focus going forward.
 | gqlite (lazy backend) | [`gqlite/`](gqlite/) | ✅ implemented |
 | GraphQLite — colliery-io/graphqlite (Cypher, SQLite-backed) | [`graphqlite/`](graphqlite/) | ✅ implemented; see [`graphqlite/DIVERGENCES.md`](graphqlite/DIVERGENCES.md) for the int64 RETURN-projection bug surfaced by the row-equivalence oracle |
 | Kuzu — kuzudb (vectorized columnar engine, CIDR 2023; pinned to v0.11.3 since [upstream archived 2025-10-10](https://github.com/kuzudb/kuzu)) | [`kuzu/`](kuzu/) | ✅ implemented; see [`kuzu/DIVERGENCES.md`](kuzu/DIVERGENCES.md) for the archival-status framing and the `label()`-predicate query-shape divergence (Kuzu's optimizer doesn't push `label()` through multi-hop joins → IC8 ~14s/iter, an honest finding) |
+| Grafeo — GrafeoDB/grafeo (GQL-native, vectorized/SIMD; pinned to v0.5.34) | [`grafeo/`](grafeo/) | ✅ implemented — all six ICs (2,5,6,8,9,11) row-equivalence verified byte-identical to gqlite; see [`grafeo/README.md`](grafeo/README.md) for the dialect map and [`grafeo/DIVERGENCES.md`](grafeo/DIVERGENCES.md) (multi-MATCH fold, WHERE/OPTIONAL ordering, label-alternation → WHERE, Company/Country via `type`) |
 | GraphLite — GraphLite-AI/GraphLite (ISO GQL, Sled-backed) | — | not yet integrated |
 | GQLite — webbery/gqlite (custom DSL, dead since April 2023) | — | not yet integrated |
 

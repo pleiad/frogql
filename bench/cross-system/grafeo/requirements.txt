@@ -1,0 +1,5 @@
+# Grafeo cross-system bench runner deps.
+# grafeo is GQL-native; import_df (bulk loader) needs pandas.
+grafeo==0.5.34
+pandas>=2.0
+psutil>=5.9

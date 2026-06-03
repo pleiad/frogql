@@ -106,13 +106,14 @@ START_EPOCH=$(date +%s)
     # (e.g. a fresh `pip install` resolving an unpinned transitive).
     echo "graphqlite_ver:   $(python -c 'import importlib.metadata as m; print(m.version("graphqlite"))' 2>/dev/null || echo missing)"
     echo "kuzu_ver:         $(python -c 'import importlib.metadata as m; print(m.version("kuzu"))' 2>/dev/null || echo missing)"
+    echo "grafeo_ver:       $(python -c 'import importlib.metadata as m; print(m.version("grafeo"))' 2>/dev/null || echo missing)"
     echo "psutil_ver:       $(python -c 'import importlib.metadata as m; print(m.version("psutil"))' 2>/dev/null || echo missing)"
     echo "ldbc_dataset:     SF0.1"
 } > "$OUT_DIR/run_info.txt"
 
 # Systems registered here. Order is per-system bench order; doesn't
 # affect comparison since compare_results.py sorts independently.
-ALL_SYSTEMS=(gqlite graphqlite kuzu)
+ALL_SYSTEMS=(gqlite graphqlite kuzu grafeo)
 
 if [[ -n "$ONLY" ]]; then
     IFS=',' read -ra SYSTEMS <<<"$ONLY"
@@ -189,11 +190,13 @@ ABLATION_MODES=(baseline no-fold)
 declare -A SETUP_CMD=(
     [graphqlite]="python $SCRIPT_DIR/graphqlite/setup.py"
     [kuzu]="python $SCRIPT_DIR/kuzu/setup.py"
+    [grafeo]="python $SCRIPT_DIR/grafeo/setup.py"
 )
 
 declare -A REBUILD_FLAG=(
     [graphqlite]="--force"
     [kuzu]="--force"
+    [grafeo]="--force"
 )
 
 # Per-system DB-existence checks. Setup is skipped if the marker
@@ -204,6 +207,7 @@ declare -A SETUP_MARKER=(
     [gqlite]="$REPO_ROOT/bench/data/ldbc-sf0.1.gdb"
     [graphqlite]="$REPO_ROOT/bench/data/cross-system/graphqlite/ldbc-sf01.db"
     [kuzu]="$REPO_ROOT/bench/data/cross-system/kuzu/ldbc-sf01.db"
+    [grafeo]="$REPO_ROOT/bench/data/cross-system/grafeo/ldbc-sf01.grafeo"
 )
 
 # Per-system runner commands (path is per-system; dispatch is per-runner).
@@ -212,6 +216,7 @@ declare -A RUNNER=(
     [gqlite]="bash $SCRIPT_DIR/gqlite/run.sh"
     [graphqlite]="python $SCRIPT_DIR/graphqlite/run.py"
     [kuzu]="python $SCRIPT_DIR/kuzu/run.py"
+    [grafeo]="python $SCRIPT_DIR/grafeo/run.py"
 )
 
 SETUP_TIMES_FILE="$OUT_DIR/setup_times.txt"

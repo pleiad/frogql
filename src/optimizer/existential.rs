@@ -97,6 +97,13 @@ fn fold_in_expr(e: &mut Expr, schema: &Schema) {
                 fold_in_expr(a, schema);
             }
         }
+        // An aggregate's inner expr could syntactically contain an
+        // existential; recurse so it is folded too.
+        Expr::Agg(agg) => {
+            if let crate::syntax::query::Aggregator::GeneralSet { expr, .. } = agg.as_mut() {
+                fold_in_expr(expr, schema);
+            }
+        }
         Expr::Const(_) | Expr::Var(_) | Expr::AttrLookup { .. } | Expr::Type(_) => {}
     }
 

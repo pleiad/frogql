@@ -392,15 +392,20 @@ impl Parser {
         Ok(items)
     }
 
-    // return_item = aggregate_function alias? | expr alias?
+    // return_item = expr alias?
+    //
+    // Aggregates are parsed as part of the expression grammar (see
+    // `primary_expr`), so `COUNT(x) + COUNT(y)` lands here as a
+    // `Binop` over two `Expr::Agg` operands. A *bare* top-level
+    // aggregate is re-folded into `ReturnItem::Aggregate` so the
+    // existing aggregate-projection and ORDER BY-matching paths stay
+    // unchanged.
     fn return_item(&mut self) -> Result<ReturnItem, String> {
-        if self.peek_aggregate_kind().is_some() {
-            let agg = self.aggregate_function()?;
-            let alias = self.maybe_alias();
-            return Ok(ReturnItem::Aggregate { agg, alias });
-        }
         let expr = self.return_expr()?;
         let alias = self.maybe_alias();
+        if let Expr::Agg(agg) = expr {
+            return Ok(ReturnItem::Aggregate { agg: *agg, alias });
+        }
         Ok(ReturnItem::Expr { expr, alias })
     }
 
@@ -1165,13 +1170,37 @@ impl Parser {
         Ok(left)
     }
 
-    // term = unary ("+" unary)*
+    // term = factor ("+" factor)*
+    // term = factor (("+" | "-") factor)*  — additive level.
     fn term(&mut self) -> Result<Expr, String> {
+        let mut left = self.factor()?;
+        loop {
+            let op = match self.peek() {
+                Token::Plus => BinOp::Add,
+                Token::Minus => BinOp::Sub,
+                _ => break,
+            };
+            self.advance();
+            let right = self.factor()?;
+            left = Expr::Binop {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    // factor = unary ("*" unary)*  — multiplication binds tighter than +/-.
+    // `*` (Token::Star) is otherwise a type wildcard (`x is *`) and the
+    // `count(*)` argument, but neither reaches value-expression position
+    // via this path, so consuming it here as multiplication is safe.
+    fn factor(&mut self) -> Result<Expr, String> {
         let mut left = self.unary()?;
-        while self.eat(&Token::Plus) {
+        while self.eat(&Token::Star) {
             let right = self.unary()?;
             left = Expr::Binop {
-                op: BinOp::Add,
+                op: BinOp::Mul,
                 left: Box::new(left),
                 right: Box::new(right),
             };
@@ -1278,8 +1307,17 @@ impl Parser {
         })
     }
 
-    // primary = constant | list_literal | attr_lookup | simple_type | "(" expr ")"
+    // primary = aggregate_function | constant | list_literal | attr_lookup
+    //         | simple_type | "(" expr ")"
     fn primary_expr(&mut self) -> Result<Expr, String> {
+        // An aggregate call (`COUNT(...)`, `SUM(...)`, ...) is a primary so
+        // it can be an operand of arithmetic: `COUNT(x) + COUNT(y)`. A bare
+        // top-level aggregate in RETURN is re-folded into a
+        // `ReturnItem::Aggregate` by `return_item` for backward compat.
+        if self.peek_aggregate_kind().is_some() {
+            let agg = self.aggregate_function()?;
+            return Ok(Expr::Agg(Box::new(agg)));
+        }
         match self.peek().clone() {
             Token::Number(n) => {
                 self.advance();
@@ -1481,6 +1519,58 @@ impl Parser {
                     return Err("COALESCE requires at least two arguments per ISO §20.7".into());
                 }
                 Ok(Expr::Coalesce(args))
+            }
+            Token::Duration => {
+                // `DURATION({unit: expr, ...})` desugars to an integer
+                // count of milliseconds: `Σ expr_i * ms_per_unit_i`. The
+                // operands stay symbolic (e.g. `$durationDays`), so the
+                // whole thing is plain int arithmetic the runtime already
+                // evaluates. Only unambiguous calendar-free units are
+                // supported (years/months have no fixed ms length).
+                self.advance();
+                self.expect(&Token::LParen)?;
+                self.expect(&Token::LBrace)?;
+                let mut total: Option<Expr> = None;
+                loop {
+                    let unit = match self.advance() {
+                        Token::Name(n) => n,
+                        t => return Err(format!("expected duration unit name, got {t:?}")),
+                    };
+                    let ms: i64 = match unit.to_ascii_lowercase().as_str() {
+                        "weeks" | "week" => 604_800_000,
+                        "days" | "day" => 86_400_000,
+                        "hours" | "hour" => 3_600_000,
+                        "minutes" | "minute" => 60_000,
+                        "seconds" | "second" => 1_000,
+                        "milliseconds" | "millisecond" | "millis" => 1,
+                        other => {
+                            return Err(format!(
+                                "unsupported DURATION unit '{other}' (use weeks/days/hours/minutes/seconds/milliseconds)"
+                            ))
+                        }
+                    };
+                    self.expect(&Token::Colon)?;
+                    let amount = self.expr()?;
+                    let term = Expr::Binop {
+                        op: BinOp::Mul,
+                        left: Box::new(amount),
+                        right: Box::new(Expr::Const(Value::Int(ms))),
+                    };
+                    total = Some(match total {
+                        None => term,
+                        Some(acc) => Expr::Binop {
+                            op: BinOp::Add,
+                            left: Box::new(acc),
+                            right: Box::new(term),
+                        },
+                    });
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&Token::RBrace)?;
+                self.expect(&Token::RParen)?;
+                total.ok_or_else(|| "DURATION requires at least one unit field".to_string())
             }
             _ => Err(format!("expected expression, got {:?}", self.peek())),
         }

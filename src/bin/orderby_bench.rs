@@ -1,4 +1,5 @@
-//! ORDER BY benchmark — pdqsort vs top-k heap vs btree-driven bucket sort.
+//! ORDER BY benchmark — pdqsort vs driftsort (stable merge) vs top-k heap
+//! vs btree-driven bucket sort.
 //!
 //! Builds a synthetic graph of `n` `:User` nodes with a unique `id`
 //! property, varies `n`, distribution of `id`, and `LIMIT k`, and
@@ -59,7 +60,7 @@ fn main() {
             let memory_idx: Arc<TripleIndex> = Runtime::new(&g).warm_triple_index();
 
             for (k_label, q) in &queries {
-                for impl_name in ["pdqsort", "topk"] {
+                for impl_name in ["pdqsort", "driftsort", "topk"] {
                     let med = bench_median(iters, || {
                         std::env::set_var("GQLITE_ORDERBY_FORCE", impl_name);
                         let rt = Runtime::with_triple_index(&g, memory_idx.clone());
@@ -83,7 +84,13 @@ fn main() {
                 // single-node queries by design (see bitácora 10 §13).
                 // We still run it through the force path so the bench
                 // reports the fallback cost (it routes to pdqsort).
-                for impl_name in ["pdqsort", "topk", "btree-ltj", "btree-ltj-real"] {
+                for impl_name in [
+                    "pdqsort",
+                    "driftsort",
+                    "topk",
+                    "btree-ltj",
+                    "btree-ltj-real",
+                ] {
                     let med = bench_median(iters, || {
                         std::env::set_var("GQLITE_ORDERBY_FORCE", impl_name);
                         let rt = Runtime::with_triple_index(&store, lazy_idx.clone());
@@ -105,7 +112,7 @@ fn main() {
             let memory_idx_j: Arc<TripleIndex> = Runtime::new(&gj).warm_triple_index();
 
             for (k_label, q) in &join_queries {
-                for impl_name in ["pdqsort", "topk"] {
+                for impl_name in ["pdqsort", "driftsort", "topk"] {
                     let med = bench_median(iters, || {
                         std::env::set_var("GQLITE_ORDERBY_FORCE", impl_name);
                         let rt = Runtime::with_triple_index(&gj, memory_idx_j.clone());
@@ -125,7 +132,13 @@ fn main() {
             let lazy_idx_j: Arc<TripleIndex> = Runtime::new(&store_j).warm_triple_index();
 
             for (k_label, q) in &join_queries {
-                for impl_name in ["pdqsort", "topk", "btree-ltj", "btree-ltj-real"] {
+                for impl_name in [
+                    "pdqsort",
+                    "driftsort",
+                    "topk",
+                    "btree-ltj",
+                    "btree-ltj-real",
+                ] {
                     let med = bench_median(iters, || {
                         std::env::set_var("GQLITE_ORDERBY_FORCE", impl_name);
                         let rt = Runtime::with_triple_index(&store_j, lazy_idx_j.clone());

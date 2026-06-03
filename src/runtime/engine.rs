@@ -197,7 +197,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         // nothing for queries that can't use it. Force off with
         // `GQLITE_ORDERBY_FORCE=pdqsort` or `topk`.
         let force = std::env::var("GQLITE_ORDERBY_FORCE").ok();
-        let force_off = matches!(force.as_deref(), Some("pdqsort") | Some("topk"));
+        let force_off = matches!(
+            force.as_deref(),
+            Some("pdqsort") | Some("topk") | Some("driftsort")
+        );
         let real_rows = if has_order && !force_off {
             self.try_btree_ltj_real(query, limit)
         } else {
@@ -290,7 +293,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         limit: usize,
     ) {
         let force = std::env::var("GQLITE_ORDERBY_FORCE").ok();
-        let try_btree = !matches!(force.as_deref(), Some("pdqsort") | Some("topk"));
+        let try_btree = !matches!(
+            force.as_deref(),
+            Some("pdqsort") | Some("topk") | Some("driftsort")
+        );
         if try_btree && self.try_btree_sort(rows, specs, matches, limit) {
             return;
         }
@@ -876,6 +882,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             let row_vals: Vec<Value> = items
                 .iter()
                 .map(|item| match item {
+                    // An expression carrying aggregates (`COUNT(x)+COUNT(y)`)
+                    // is reduced over the group; a plain key expression is
+                    // evaluated on the group's representative row.
+                    ReturnItem::Expr { expr, .. } if expr.contains_agg() => {
+                        self.eval_grouped_expr(expr, row_idxs, rows)
+                    }
                     ReturnItem::Expr { expr, .. } => {
                         let mu = match row_idxs.first() {
                             Some(&i) => &rows[i].assignment,
@@ -892,6 +904,56 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             out.push(row_vals);
         }
         out
+    }
+
+    /// Evaluate a RETURN expression that contains aggregates, per group.
+    /// Each `Expr::Agg` node is reduced over the group's rows and folded
+    /// to a constant; the residual (now aggregate-free) expression is
+    /// evaluated against the group's representative row, so non-aggregate
+    /// leaves (`otherPerson.firstName`) resolve to their grouped value.
+    fn eval_grouped_expr(&self, expr: &Expr, row_idxs: &[usize], rows: &[ResultRow]) -> Value {
+        let folded = self.fold_aggs(expr, row_idxs, rows);
+        let empty = Assignment::new();
+        let mu = match row_idxs.first() {
+            Some(&i) => &rows[i].assignment,
+            None => &empty,
+        };
+        match self.run_expr(mu, &folded) {
+            ExprResult::Success(v) => v,
+            ExprResult::Failure(_) => Value::Null,
+        }
+    }
+
+    /// Replace every `Expr::Agg` in the tree with `Expr::Const(reduced)`,
+    /// leaving all other nodes structurally intact. The result is an
+    /// aggregate-free expression `run_expr` can evaluate directly.
+    fn fold_aggs(&self, expr: &Expr, row_idxs: &[usize], rows: &[ResultRow]) -> Expr {
+        match expr {
+            Expr::Agg(agg) => Expr::Const(self.apply_aggregator(agg, row_idxs, rows)),
+            Expr::Binop { op, left, right } => Expr::Binop {
+                op: *op,
+                left: Box::new(self.fold_aggs(left, row_idxs, rows)),
+                right: Box::new(self.fold_aggs(right, row_idxs, rows)),
+            },
+            Expr::Unop { op, operand } => Expr::Unop {
+                op: op.clone(),
+                operand: Box::new(self.fold_aggs(operand, row_idxs, rows)),
+            },
+            Expr::FieldAccess { base, field } => Expr::FieldAccess {
+                base: Box::new(self.fold_aggs(base, row_idxs, rows)),
+                field: field.clone(),
+            },
+            Expr::IsNull { operand, negated } => Expr::IsNull {
+                operand: Box::new(self.fold_aggs(operand, row_idxs, rows)),
+                negated: *negated,
+            },
+            Expr::Coalesce(args) => Expr::Coalesce(
+                args.iter()
+                    .map(|a| self.fold_aggs(a, row_idxs, rows))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
     }
 
     fn apply_aggregator(&self, agg: &Aggregator, row_idxs: &[usize], rows: &[ResultRow]) -> Value {
@@ -1915,6 +1977,15 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
             Expr::Exists { body } => self.eval_exists(mu, body, /*negated=*/ false),
             Expr::NotExists { body } => self.eval_exists(mu, body, /*negated=*/ true),
+
+            // An aggregate has no meaning against a single binding; it is
+            // reduced over a group in `run_aggregated`, which folds every
+            // `Agg` node to a constant before calling `run_expr`. Reaching
+            // here means an aggregate appeared outside an aggregated
+            // projection (e.g. in a WHERE) — treat as null (3VL).
+            Expr::Agg(_) => {
+                ExprResult::Failure("aggregate not valid outside a RETURN projection".into())
+            }
         }
     }
 
@@ -2059,6 +2130,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     ExprResult::Success(Value::Float(a - b))
                 }
                 _ => ExprResult::Failure("- requires numeric operands".into()),
+            },
+            BinOp::Mul => match as_num_pair(lv, rv) {
+                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Int(a * b)),
+                Some((Value::Float(a), Value::Float(b))) => {
+                    ExprResult::Success(Value::Float(a * b))
+                }
+                _ => ExprResult::Failure("* requires numeric operands".into()),
             },
             BinOp::Gt => match as_num_pair(lv, rv) {
                 Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a > b)),
@@ -2737,13 +2815,22 @@ fn btree_bucket_output(
 /// Sort a decorated `[(keys, payload)]` buffer in-place. Routes to one
 /// of three implementations:
 ///
-/// - `pdqsort` — Rust's `sort_unstable_by`, O(n log n). Always safe.
+/// - `pdqsort` — Rust's `sort_unstable_by`, O(n log n), in place. The
+///   default for the full-sort path. (Since Rust 1.81 the unstable sort
+///   is `ipnsort`; the name is kept for the env flag and history.)
 /// - `topk` — bounded max-heap of size k, O(n log k). Used when the
 ///   query carries a usable `LIMIT k` and `k < n / 2`. The heap holds
 ///   the k entries that come earliest in output order; entries that
 ///   exceed the running max are dropped on sight.
+/// - `driftsort` — Rust's stable `sort_by` (driftsort since 1.81: an
+///   adaptive merge sort with the Powersort merge policy). Does fewer
+///   comparisons than pdqsort and runs near O(n) on pre-sorted input,
+///   at the cost of O(n) scratch. Benchmark-only via the force flag;
+///   never auto-selected, since GQL leaves peer order
+///   implementation-dependent (§16.17 GR 1k/US006) so stability buys
+///   nothing the default path needs.
 ///
-/// Override the heuristic with `GQLITE_ORDERBY_FORCE=pdqsort|topk` —
+/// Override the heuristic with `GQLITE_ORDERBY_FORCE=pdqsort|topk|driftsort` —
 /// useful for benchmarking the worst case of each algorithm in
 /// isolation. Force=topk silently degrades to pdqsort when `limit == 0`
 /// or `limit >= n` (no top-k to extract).
@@ -2757,12 +2844,14 @@ fn sort_decorated<T>(
     let topk_applies = limit > 0 && limit < n;
     let use_topk = match force.as_deref() {
         Some("topk") => topk_applies,
-        Some("pdqsort") => false,
+        Some("pdqsort") | Some("driftsort") => false,
         _ => topk_applies && limit * 2 < n,
     };
     if use_topk {
         let owned = std::mem::take(decorated);
         *decorated = select_topk_decorated(owned, specs, limit);
+    } else if matches!(force.as_deref(), Some("driftsort")) {
+        decorated.sort_by(|(a, _), (b, _)| compare_sort_keys(a, b, specs));
     } else {
         decorated.sort_unstable_by(|(a, _), (b, _)| compare_sort_keys(a, b, specs));
     }

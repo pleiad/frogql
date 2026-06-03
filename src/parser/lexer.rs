@@ -87,6 +87,11 @@ pub enum Token {
     /// Soft keyword: only emitted when followed by `(` so that
     /// `coalesce` stays available as a property name.
     Coalesce,
+    /// ISO §20 `<duration value function>` — `DURATION({days: N, ...})`.
+    /// Soft keyword (only before `(`). Desugars at parse time into an
+    /// integer count of milliseconds, so `date + DURATION({days: N})`
+    /// is plain integer arithmetic over epoch-millis values.
+    Duration,
 
     // Symbols
     LParen,      // (
@@ -571,6 +576,9 @@ impl Lexer {
                         "MAX" | "max" if self.peek_non_space() == Some('(') => Token::Max,
                         "COALESCE" | "coalesce" if self.peek_non_space() == Some('(') => {
                             Token::Coalesce
+                        }
+                        "DURATION" | "duration" if self.peek_non_space() == Some('(') => {
+                            Token::Duration
                         }
                         "int" => Token::Int,
                         "float" => Token::Float,

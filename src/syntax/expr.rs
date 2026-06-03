@@ -1,6 +1,6 @@
 use std::fmt;
 
-use super::query::Query;
+use super::query::{Aggregator, Query};
 use crate::model::value::Value;
 use crate::typing::simple_type::SimpleType;
 
@@ -9,6 +9,7 @@ use crate::typing::simple_type::SimpleType;
 pub enum BinOp {
     Add,
     Sub,
+    Mul,
     Lt,
     Gt,
     Le,
@@ -33,7 +34,7 @@ impl BinOp {
         // Int/Float operands to f64 in `eval_binop`.
         let num = SimpleType::Union(Box::new(SimpleType::Z), Box::new(SimpleType::F));
         match self {
-            BinOp::Add | BinOp::Sub => (num.clone(), num.clone(), num),
+            BinOp::Add | BinOp::Sub | BinOp::Mul => (num.clone(), num.clone(), num),
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => (num.clone(), num, SimpleType::B),
             BinOp::Eq | BinOp::Ne => {
                 let m = SimpleType::meet(ty1, ty2);
@@ -57,6 +58,7 @@ impl std::str::FromStr for BinOp {
         match s {
             "+" => Ok(BinOp::Add),
             "-" => Ok(BinOp::Sub),
+            "*" => Ok(BinOp::Mul),
             "<" => Ok(BinOp::Lt),
             ">" => Ok(BinOp::Gt),
             "<=" => Ok(BinOp::Le),
@@ -78,6 +80,7 @@ impl fmt::Display for BinOp {
         match self {
             BinOp::Add => write!(f, "+"),
             BinOp::Sub => write!(f, "-"),
+            BinOp::Mul => write!(f, "*"),
             BinOp::Lt => write!(f, "<"),
             BinOp::Gt => write!(f, ">"),
             BinOp::Le => write!(f, "<="),
@@ -177,6 +180,36 @@ pub enum Expr {
     NotExists {
         body: Box<Query>,
     },
+    /// ISO §20.9 `<aggregate function>` appearing inside a value
+    /// expression — e.g. `COUNT(x) + COUNT(y)` in a RETURN item. A bare
+    /// aggregate in RETURN is still carried as `ReturnItem::Aggregate`;
+    /// this variant exists so an aggregate can be an *operand* of a
+    /// `Binop`/`Unop`. The runtime reduces each `Agg` over its group
+    /// before evaluating the surrounding arithmetic (see
+    /// `Runtime::run_aggregated`).
+    Agg(Box<Aggregator>),
+}
+
+impl Expr {
+    /// True when the expression tree contains an aggregate function
+    /// anywhere. Drives the grouping/aggregation path: a RETURN item
+    /// whose expr contains an aggregate is projected per-group, not used
+    /// as a grouping key.
+    pub fn contains_agg(&self) -> bool {
+        match self {
+            Expr::Agg(_) => true,
+            Expr::Binop { left, right, .. } => left.contains_agg() || right.contains_agg(),
+            Expr::Unop { operand, .. } | Expr::IsNull { operand, .. } => operand.contains_agg(),
+            Expr::FieldAccess { base, .. } => base.contains_agg(),
+            Expr::Coalesce(args) => args.iter().any(|a| a.contains_agg()),
+            Expr::Const(_)
+            | Expr::Var(_)
+            | Expr::AttrLookup { .. }
+            | Expr::Type(_)
+            | Expr::Exists { .. }
+            | Expr::NotExists { .. } => false,
+        }
+    }
 }
 
 impl Expr {
@@ -230,6 +263,7 @@ impl fmt::Display for Expr {
             Expr::Type(t) => write!(f, "{t}"),
             Expr::Exists { body } => write!(f, "EXISTS {{ {} }}", display_subquery(body)),
             Expr::NotExists { body } => write!(f, "NOT EXISTS {{ {} }}", display_subquery(body)),
+            Expr::Agg(agg) => write!(f, "{agg}"),
         }
     }
 }

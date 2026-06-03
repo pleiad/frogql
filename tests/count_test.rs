@@ -805,3 +805,115 @@ fn test_groupby_canonical_with_order_by_and_limit() {
     assert!(rs.len() <= 10);
     assert!(!rs.is_empty());
 }
+
+// =======================================================================
+// Aggregate arithmetic in RETURN (ISO §20.9): an aggregate as an operand
+// of a Binop, e.g. `COUNT(x) + COUNT(y) AS total`. The runtime reduces
+// each aggregate over the group, then applies the arithmetic. This is
+// what unblocks LDBC IC3's `xCount + yCount AS totalCount`.
+// =======================================================================
+
+/// Fixture: two of three users carry a "nickname"; ages 30/25/40.
+fn graph_users_with_nicknames() -> MemoryGraphStore {
+    let json = r#"{
+      "nodes": [
+        {"id": "u1", "labels": ["User"], "props": {"name": "Alice", "city": "Boston", "age": 30, "nickname": "Al"}},
+        {"id": "u2", "labels": ["User"], "props": {"name": "Bob", "city": "Boston", "age": 25, "nickname": "Bo"}},
+        {"id": "u3", "labels": ["User"], "props": {"name": "Carol", "city": "Seattle", "age": 40}}
+      ],
+      "edges": []
+    }"#;
+    MemoryGraphStore::from_json_str(json).unwrap()
+}
+
+#[test]
+fn test_agg_plus_agg_pure() {
+    // COUNT(*) = 3, COUNT(x.nickname) = 2 (one user has no nickname,
+    // null-eliminated). Sum = 5.
+    let g = graph_users_with_nicknames();
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN COUNT(*) + COUNT(x.nickname)"),
+        vec![vec![Value::Int(5)]]
+    );
+}
+
+#[test]
+fn test_agg_minus_agg_pure() {
+    // COUNT(*) - COUNT(x.nickname) = 3 - 2 = 1 (the users without a
+    // nickname).
+    let g = graph_users_with_nicknames();
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN COUNT(*) - COUNT(x.nickname)"),
+        vec![vec![Value::Int(1)]]
+    );
+}
+
+#[test]
+fn test_agg_times_constant() {
+    // Mixed agg/constant arithmetic: COUNT(*) * 2 = 6.
+    let g = graph_users_with_nicknames();
+    assert_eq!(
+        run(&g, "MATCH (x: User) RETURN COUNT(*) * 2"),
+        vec![vec![Value::Int(6)]]
+    );
+}
+
+#[test]
+fn test_agg_plus_agg_with_alias_and_keys() {
+    // The IC3 shape: GROUP BY a key, project both component counts and
+    // their sum, and verify total == a + b row by row.
+    //   Boston: COUNT(*)=2, COUNT(age)=2 → total 4
+    //   Seattle: COUNT(*)=1, COUNT(age)=1 → total 2
+    let g = graph_users_with_nicknames();
+    let rs = run(
+        &g,
+        "MATCH (x: User) \
+         RETURN x.city AS city, COUNT(*) AS c, COUNT(x.age) AS a, \
+                COUNT(*) + COUNT(x.age) AS total \
+         GROUP BY x.city \
+         ORDER BY city ASC",
+    );
+    assert_eq!(
+        rs,
+        vec![
+            vec![
+                Value::Str("Boston".into()),
+                Value::Int(2),
+                Value::Int(2),
+                Value::Int(4),
+            ],
+            vec![
+                Value::Str("Seattle".into()),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(2),
+            ],
+        ]
+    );
+    // Row-by-row invariant: total == c + a.
+    for row in &rs {
+        if let (Value::Int(c), Value::Int(a), Value::Int(total)) = (&row[1], &row[2], &row[3]) {
+            assert_eq!(*total, *c + *a, "total must equal c + a per group");
+        } else {
+            panic!("unexpected non-int aggregate columns: {row:?}");
+        }
+    }
+}
+
+#[test]
+fn test_agg_distinct_plus_agg_distinct() {
+    // COUNT(DISTINCT ...) operands compose the same way (the exact form
+    // LDBC IC3 uses: COUNT(DISTINCT messageX) + COUNT(DISTINCT messageY)).
+    // Two distinct cities, two distinct ages within Boston's collapsed
+    // group when grouped globally: keep it simple with one global group.
+    let g = graph_users_with_nicknames();
+    // DISTINCT cities = {Boston, Seattle} = 2; DISTINCT nickname = {Al, Bo} = 2.
+    assert_eq!(
+        run(
+            &g,
+            "MATCH (x: User) \
+             RETURN COUNT(DISTINCT x.city) + COUNT(DISTINCT x.nickname) AS total"
+        ),
+        vec![vec![Value::Int(4)]]
+    );
+}

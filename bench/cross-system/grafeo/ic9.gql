@@ -1,0 +1,16 @@
+-- GQL translation of bench/ldbc-queries/ic9.toml for Grafeo.
+-- Divergences (see DIVERGENCES.md): $-params; (message:Comment|Post)
+-- -> bound var + WHERE label predicate; knows forward-only.
+MATCH (person:Person {id: $personId})~[:knows]~{1,2}(otherPerson:Person)<-[:hasCreator]-(message)
+WHERE person <> otherPerson
+  AND (message:Comment OR message:Post)
+  AND message.creationDate < $maxDate
+RETURN
+    otherPerson.id AS personId,
+    otherPerson.firstName AS personFirstName,
+    otherPerson.lastName AS personLastName,
+    message.id AS commentOrPostId,
+    COALESCE(message.content, message.imageFile) AS commentOrPostContent,
+    message.creationDate AS commentOrPostCreationDate
+ORDER BY commentOrPostCreationDate DESC, commentOrPostId ASC
+LIMIT 20

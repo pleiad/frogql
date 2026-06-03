@@ -94,8 +94,15 @@ impl ReturnItem {
         }
     }
 
+    /// True when this item is reduced over a group: either a bare
+    /// aggregate (`ReturnItem::Aggregate`) or an expression carrying an
+    /// aggregate somewhere in its tree (`COUNT(x) + COUNT(y)`). Such
+    /// items are projected per-group, not used as grouping keys.
     pub fn is_aggregate(&self) -> bool {
-        matches!(self, ReturnItem::Aggregate { .. })
+        match self {
+            ReturnItem::Aggregate { .. } => true,
+            ReturnItem::Expr { expr, .. } => expr.contains_agg(),
+        }
     }
 }
 

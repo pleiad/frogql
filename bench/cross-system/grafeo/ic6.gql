@@ -1,0 +1,15 @@
+-- GQL translation of bench/ldbc-queries/ic6.toml for Grafeo.
+-- Divergences (see DIVERGENCES.md): $-params; the toml's two MATCH
+-- clauses are merged into one comma-joined MATCH (Grafeo 0.5.34
+-- rejects a second top-level MATCH). ORDER BY uses the RETURN alias
+-- `tagName` (otherTag is out of scope after aggregation).
+MATCH (person:Person {id: $personId})~[:knows]~{1,2}(otherPerson:Person),
+      (otherPerson)<-[:hasCreator]-(post:Post)-[:hasTag]->(tag:Tag {name: $tagName}),
+      (post)-[:hasTag]->(otherTag:Tag)
+WHERE person <> otherPerson AND otherTag <> tag
+RETURN
+    otherTag.name AS tagName,
+    COUNT(post) AS postCount
+GROUP BY otherTag.name
+ORDER BY postCount DESC, tagName ASC
+LIMIT 10

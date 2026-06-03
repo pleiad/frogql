@@ -364,6 +364,8 @@ def main() -> int:
                     return "graphqlite"
                 if s == "kuzu-cypher":
                     return "kuzu"
+                if s == "grafeo-gql":
+                    return "grafeo"
                 return s
 
             queries_h = sorted({q for (q, _) in by_cell_h})
