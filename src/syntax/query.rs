@@ -2,6 +2,7 @@ use std::fmt;
 
 use super::expr::Expr;
 use super::path_pattern::PathPattern;
+use crate::typing::simple_type::SimpleType;
 
 /// ISO 39075 §20.9 `<set quantifier>`. ALL is implicit when omitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +37,12 @@ pub enum NullsOrder {
 pub enum SortKey {
     Expr(Expr),
     Column(usize),
+    /// Post-projection sort by a RETURN alias with a CAST applied:
+    /// `ORDER BY CAST(<alias> AS <type>)`.
+    ColumnCast {
+        col: usize,
+        ty: SimpleType,
+    },
     /// Post-projection sort by a field path into a record-valued
     /// projected column — `ORDER BY <alias>.<field>` where `<alias>` is a
     /// RETURN item aliased to a record (e.g. a `VALUE { ... }` subquery).
@@ -337,6 +344,7 @@ impl fmt::Display for SortKey {
         match self {
             SortKey::Expr(e) => write!(f, "{e}"),
             SortKey::Column(idx) => write!(f, "#{idx}"),
+            SortKey::ColumnCast { col, ty } => write!(f, "CAST(#{col} AS {ty})"),
             SortKey::ColumnField { col, path } => write!(f, "#{col}.{}", path.join(".")),
         }
     }

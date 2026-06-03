@@ -3,27 +3,18 @@
 
 id = 13
 name = "Single shortest path"
-status = "blocked"
+status = "implemented"
 
-blocked_reason = """
-One expression gap remaining. Re-audited 2026-06-03 (post named-path cluster):
-  - `CASE WHEN ... END` — missing (used here for the IS NULL branch:
-    return -1 if unreachable). See iso-gql-gaps.md §2.10.
-
-What's now fine:
-  - `MATCH path = ANY SHORTEST (...)` — named path patterns landed
-    (2026-06-03); both the `ANY SHORTEST` prefix and the named-path
-    binding work, and `PATH_LENGTH(path)` resolves. See §2.9.
-"""
-
-required_features = [
-    "CASE WHEN ... END expression",
-]
+# Re-audited 2026-06-03 after merging named paths/path functions from main
+# with ISO expression support from this branch. `MATCH path = ANY SHORTEST (...)`,
+# `PATH_LENGTH(path)`, and `CASE WHEN ... END` are all supported now.
 
 params_file = "interactive_13_param.txt"
 param_columns = ["person1Id", "person2Id"]
+param_types = ["int", "int"]
+
 query = """
-MATCH path = ANY SHORTEST (p1:Person {id: $person1Id})~[:knows]~*(p2:Person {id: $person2Id})
-RETURN 
+MATCH path = ANY SHORTEST (p1:Person {id: {person1Id}})~[:knows]~*(p2:Person {id: {person2Id}})
+RETURN
     CASE WHEN PATH_LENGTH(path) IS NULL THEN -1 ELSE PATH_LENGTH(path) END AS shortestPathLength
 """

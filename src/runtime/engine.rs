@@ -275,9 +275,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         let limit = combine_limits(query.limit, limit);
         let has_order = query.order_by.is_some();
         let has_column_sort_key = query.order_by.as_ref().is_some_and(|specs| {
-            specs
-                .iter()
-                .any(|s| matches!(s.key, SortKey::Column(_) | SortKey::ColumnField { .. }))
+            specs.iter().any(|s| {
+                matches!(
+                    s.key,
+                    SortKey::Column(_) | SortKey::ColumnCast { .. } | SortKey::ColumnField { .. }
+                )
+            })
         });
 
         // BTree-LTJ "real": drive the primary sort variable from the
@@ -437,10 +440,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         // evaluate them against the binding-table assignment; any
         // `SortKey::Column` would have to land on the post-projection
         // path, which is incompatible with cohort-driven top-k.
-        if specs
-            .iter()
-            .any(|s| matches!(s.key, SortKey::Column(_) | SortKey::ColumnField { .. }))
-        {
+        if specs.iter().any(|s| {
+            matches!(
+                s.key,
+                SortKey::Column(_) | SortKey::ColumnCast { .. } | SortKey::ColumnField { .. }
+            )
+        }) {
             return None;
         }
         let primary = &specs[0];
@@ -701,10 +706,14 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                             ExprResult::Success(Value::Null) | ExprResult::Failure(_) => None,
                             ExprResult::Success(v) => Some(v),
                         },
-                        SortKey::Column(_) | SortKey::ColumnField { .. } => unreachable!(
-                            "Column sort key reached pre-projection path — caller must \
-                             route to sort_projected_rows"
-                        ),
+                        SortKey::Column(_)
+                        | SortKey::ColumnCast { .. }
+                        | SortKey::ColumnField { .. } => {
+                            unreachable!(
+                                "Column sort key reached pre-projection path — caller must \
+                                 route to sort_projected_rows"
+                            )
+                        }
                     })
                     .collect();
                 (keys, row)
@@ -2363,6 +2372,28 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 ExprResult::Success(Value::Null)
             }
 
+            Expr::Case {
+                branches,
+                else_expr,
+            } => {
+                for (cond, value) in branches {
+                    match self.run_expr(mu, cond) {
+                        ExprResult::Success(Value::Bool(true)) => return self.run_expr(mu, value),
+                        ExprResult::Success(Value::Bool(false) | Value::Null)
+                        | ExprResult::Failure(_) => continue,
+                        ExprResult::Success(other) => {
+                            return ExprResult::Failure(format!(
+                                "CASE WHEN condition must be bool, got {other}"
+                            ))
+                        }
+                    }
+                }
+                match else_expr {
+                    Some(value) => self.run_expr(mu, value),
+                    None => ExprResult::Success(Value::Null),
+                }
+            }
+
             Expr::Type(_) => ExprResult::Failure("bare type in expression".into()),
 
             Expr::Call { name, args } => self.eval_call(mu, name, args),
@@ -2397,21 +2428,6 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
     }
 
-    /// Runtime evaluation of `EXISTS L` (negated=false) and
-    /// `NOT EXISTS L` (negated=true). Two regimes:
-    ///
-    /// **Uncorrelated** — the body shares no variable with the outer
-    /// assignment. The body's truth value is row-independent, so a
-    /// single inner run with `limit=1` decides it. Cached as a bool.
-    ///
-    /// **Correlated** — the body references variables already bound
-    /// outside. Evaluated as a semi/anti-join: the body runs once
-    /// (no limit), every row is projected onto the correlation
-    /// variables and stored in a `HashSet`, and per outer row the
-    /// predicate becomes a single O(1) hash probe. Both the row
-    /// table and the projection live in the cache, so the body
-    /// runs at most once per Runtime regardless of how many outer
-    /// rows are evaluated.
     /// Built-in scalar function evaluation. `FLOOR` returns a float;
     /// `CAST(x AS INTEGER|FLOAT)` converts the value (distinct from the
     /// `AS` type-assertion operator, which only checks). A failing or
@@ -2438,22 +2454,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     Some(Expr::Type(t)) => t,
                     _ => return ExprResult::Failure("CAST missing target type".into()),
                 };
-                match (target, &v) {
-                    (SimpleType::Z, Value::Int(n)) => ExprResult::Success(Value::Int(*n)),
-                    (SimpleType::Z, Value::Float(x)) => ExprResult::Success(Value::Int(*x as i64)),
-                    (SimpleType::Z, Value::Str(s)) => match s.trim().parse::<i64>() {
-                        Ok(n) => ExprResult::Success(Value::Int(n)),
-                        Err(_) => ExprResult::Failure(format!("cannot cast '{s}' to INTEGER")),
-                    },
-                    (SimpleType::F, Value::Int(n)) => ExprResult::Success(Value::Float(*n as f64)),
-                    (SimpleType::F, Value::Float(x)) => ExprResult::Success(Value::Float(*x)),
-                    (SimpleType::F, Value::Str(s)) => match s.trim().parse::<f64>() {
-                        Ok(x) => ExprResult::Success(Value::Float(x)),
-                        Err(_) => ExprResult::Failure(format!("cannot cast '{s}' to FLOAT")),
-                    },
-                    (_, Value::Null) => ExprResult::Success(Value::Null),
-                    _ => ExprResult::Failure(format!("cannot cast {v} to {target}")),
-                }
+                cast_value_to_type(&v, target)
             }
             // ISO §20.16 path functions (plus the non-standard NODES/EDGES
             // translation helpers). All take one PATH argument; a
@@ -2576,6 +2577,9 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         ExprResult::Success(entry.map.get(&probe).cloned().unwrap_or(Value::Null))
     }
 
+    /// Runtime evaluation of `EXISTS L` and `NOT EXISTS L`. Uncorrelated
+    /// bodies cache one bool; correlated bodies cache a semi/anti-join
+    /// table keyed by the shared variables.
     fn eval_exists(&self, mu: &Assignment, body: &Query, negated: bool) -> ExprResult {
         let body_vars = query_freevars(body);
         let outer_keys = mu.keys();
@@ -2721,6 +2725,16 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     ExprResult::Success(Value::Float(a / b))
                 }
                 _ => ExprResult::Failure("/ requires numeric operands".into()),
+            },
+            BinOp::Mod => match (lv, rv) {
+                (Value::Int(_), Value::Int(0)) => {
+                    ExprResult::Failure("MOD divisor must not be zero".into())
+                }
+                (Value::Int(a), Value::Int(b)) => match a.checked_rem(*b) {
+                    Some(r) => ExprResult::Success(Value::Int(r)),
+                    None => ExprResult::Failure("MOD result out of range".into()),
+                },
+                _ => ExprResult::Failure("MOD requires integer operands".into()),
             },
             BinOp::Gt => match as_num_pair(lv, rv) {
                 Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a > b)),
@@ -3122,9 +3136,28 @@ impl GroupKey {
     }
 }
 
+fn cast_value_to_type(v: &Value, target: &SimpleType) -> ExprResult {
+    match (target, v) {
+        (SimpleType::Z, Value::Int(n)) => ExprResult::Success(Value::Int(*n)),
+        (SimpleType::Z, Value::Float(x)) => ExprResult::Success(Value::Int(*x as i64)),
+        (SimpleType::Z, Value::Str(s)) => match s.trim().parse::<i64>() {
+            Ok(n) => ExprResult::Success(Value::Int(n)),
+            Err(_) => ExprResult::Failure(format!("cannot cast '{s}' to INTEGER")),
+        },
+        (SimpleType::F, Value::Int(n)) => ExprResult::Success(Value::Float(*n as f64)),
+        (SimpleType::F, Value::Float(x)) => ExprResult::Success(Value::Float(*x)),
+        (SimpleType::F, Value::Str(s)) => match s.trim().parse::<f64>() {
+            Ok(x) => ExprResult::Success(Value::Float(x)),
+            Err(_) => ExprResult::Failure(format!("cannot cast '{s}' to FLOAT")),
+        },
+        (_, Value::Null) => ExprResult::Success(Value::Null),
+        _ => ExprResult::Failure(format!("cannot cast {v} to {target}")),
+    }
+}
+
 /// Post-projection sort over already-projected rows. Caller
-/// guarantees every spec is a `SortKey::Column` (typechecker rejects
-/// the mixed case). `limit > 0` enables the top-k heap path.
+/// guarantees every spec is a projected-column sort key (typechecker
+/// rejects the mixed case). `limit > 0` enables the top-k heap path.
 fn sort_projected_rows(rows: &mut Vec<Vec<Value>>, specs: &[SortSpec], limit: usize) {
     let mut decorated: Vec<(Vec<Option<Value>>, Vec<Value>)> = std::mem::take(rows)
         .into_iter()
@@ -3135,6 +3168,13 @@ fn sort_projected_rows(rows: &mut Vec<Vec<Value>>, specs: &[SortSpec], limit: us
                     SortKey::Column(idx) => match projected.get(*idx) {
                         Some(Value::Null) | None => None,
                         Some(v) => Some(v.clone()),
+                    },
+                    SortKey::ColumnCast { col, ty } => match projected.get(*col) {
+                        Some(Value::Null) | None => None,
+                        Some(v) => match cast_value_to_type(v, ty) {
+                            ExprResult::Success(Value::Null) | ExprResult::Failure(_) => None,
+                            ExprResult::Success(v) => Some(v),
+                        },
                     },
                     SortKey::ColumnField { col, path } => {
                         let mut cur = projected.get(*col);

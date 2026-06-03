@@ -6,12 +6,12 @@ name = "Expert search"
 status = "blocked"
 
 blocked_reason = """
-Re-audited 2026-06-03 (post COLLECT_LIST). One real blocker:
-  - GROUP BY / ORDER BY by RETURN *alias* — the query groups by
-    `friendId, friendFirstName, friendLastName` (RETURN aliases, not
-    binding variables) and orders by the alias `replyCount`. The
-    typechecker only groups by binding variable and rejects the alias
-    with "Variable friendId not found in context". See §2.12.
+Re-audited 2026-06-03 (post COLLECT_LIST / casted alias ordering). One real blocker:
+  - GROUP BY by RETURN *alias* — the query groups by `friendId,
+    friendFirstName, friendLastName` (RETURN aliases, not binding
+    variables). The typechecker only groups by binding variable and
+    rejects the alias with "Variable friendId not found in context".
+    See §2.12.
 
 What's now fine:
   - `COLLECT_LIST(DISTINCT tag.name)` — list aggregate landed
@@ -26,7 +26,7 @@ What's now fine:
 """
 
 required_features = [
-    "GROUP BY / ORDER BY by RETURN alias",
+    "GROUP BY by RETURN alias",
 ]
 
 params_file = "interactive_12_param.txt"

@@ -131,6 +131,31 @@ impl Parser {
         }
     }
 
+    fn check_name_keyword(&self, kw: &str) -> bool {
+        matches!(self.peek(), Token::Name(s) if s.eq_ignore_ascii_case(kw))
+    }
+
+    fn peek_name_keyword(&self, offset: usize, kw: &str) -> bool {
+        matches!(self.peek_at(offset), Some(Token::Name(s)) if s.eq_ignore_ascii_case(kw))
+    }
+
+    fn eat_name_keyword(&mut self, kw: &str) -> bool {
+        if self.check_name_keyword(kw) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_name_keyword(&mut self, kw: &str) -> Result<(), String> {
+        if self.eat_name_keyword(kw) {
+            Ok(())
+        } else {
+            Err(format!("expected {kw}, got {:?}", self.peek()))
+        }
+    }
+
     // ISO §14.3-14.4 + §14.9 + §14.11 + §16.17.
     //
     //   full_query   = match_clause+ legacy_group_by?
@@ -352,6 +377,9 @@ impl Parser {
 
         let expr = self.expr()?;
         if let Some(items) = returns {
+            if let Some((col, ty)) = self.casted_alias_sort_key(&expr, items) {
+                return Ok(SortKey::ColumnCast { col, ty });
+            }
             if items.iter().any(|it| it.is_aggregate()) {
                 for (idx, item) in items.iter().enumerate() {
                     if let ReturnItem::Expr { expr: ret_expr, .. } = item {
@@ -363,6 +391,29 @@ impl Parser {
             }
         }
         Ok(SortKey::Expr(expr))
+    }
+
+    fn casted_alias_sort_key(
+        &self,
+        expr: &Expr,
+        returns: &[ReturnItem],
+    ) -> Option<(usize, SimpleType)> {
+        let Expr::Call { name, args } = expr else {
+            return None;
+        };
+        if name != "CAST" || args.len() != 2 {
+            return None;
+        }
+        let Expr::Var(alias) = &args[0] else {
+            return None;
+        };
+        let Expr::Type(ty) = &args[1] else {
+            return None;
+        };
+        returns
+            .iter()
+            .position(|it| it.alias() == Some(alias.as_str()))
+            .map(|col| (col, ty.clone()))
     }
 
     /// One match clause: pattern + optional WHERE wrapped in `Filter`.
@@ -1360,7 +1411,6 @@ impl Parser {
         Ok(left)
     }
 
-    // term = factor ("+" factor)*
     // term = factor (("+" | "-") factor)*  — additive level.
     fn term(&mut self) -> Result<Expr, String> {
         let mut left = self.factor()?;
@@ -1712,6 +1762,17 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Type(SimpleType::Star))
             }
+            Token::Name(name)
+                if name.eq_ignore_ascii_case("CASE") && self.peek_name_keyword(1, "WHEN") =>
+            {
+                self.case_expr()
+            }
+            Token::Name(name)
+                if name.eq_ignore_ascii_case("MOD")
+                    && matches!(self.peek_at(1), Some(Token::LParen)) =>
+            {
+                self.mod_expr()
+            }
             Token::Name(name) => {
                 self.advance();
                 // ISO §20.16 path functions (`ELEMENTS`/`PATH_LENGTH`/
@@ -1882,6 +1943,44 @@ impl Parser {
             }
             _ => Err(format!("expected expression, got {:?}", self.peek())),
         }
+    }
+
+    fn case_expr(&mut self) -> Result<Expr, String> {
+        self.expect_name_keyword("CASE")?;
+        let mut branches = Vec::new();
+        while self.eat_name_keyword("WHEN") {
+            let cond = self.expr()?;
+            self.expect_name_keyword("THEN")?;
+            let value = self.expr()?;
+            branches.push((cond, value));
+        }
+        if branches.is_empty() {
+            return Err("CASE requires at least one WHEN branch".into());
+        }
+        let else_expr = if self.eat_name_keyword("ELSE") {
+            Some(Box::new(self.expr()?))
+        } else {
+            None
+        };
+        self.expect_name_keyword("END")?;
+        Ok(Expr::Case {
+            branches,
+            else_expr,
+        })
+    }
+
+    fn mod_expr(&mut self) -> Result<Expr, String> {
+        self.expect_name_keyword("MOD")?;
+        self.expect(&Token::LParen)?;
+        let left = self.expr()?;
+        self.expect(&Token::Comma)?;
+        let right = self.expr()?;
+        self.expect(&Token::RParen)?;
+        Ok(Expr::Binop {
+            op: BinOp::Mod,
+            left: Box::new(left),
+            right: Box::new(right),
+        })
     }
 
     // ===== Top-level statement: query or DDL =====
