@@ -87,6 +87,12 @@ fn rewrite(p: PathPattern) -> PathPattern {
             lb,
             ub,
         },
+        // A selective/restrictive pattern is an isolation barrier: optimize
+        // its inner expression independently, but keep the prefix wrapper.
+        PathPattern::Selected { prefix, pattern } => PathPattern::Selected {
+            prefix,
+            pattern: Box::new(rewrite(*pattern)),
+        },
         leaf => leaf,
     }
 }
@@ -142,6 +148,10 @@ fn distribute_union_over_concat(p: PathPattern) -> PathPattern {
             pattern: Box::new(distribute_union_over_concat(*pattern)),
             lb,
             ub,
+        },
+        PathPattern::Selected { prefix, pattern } => PathPattern::Selected {
+            prefix,
+            pattern: Box::new(distribute_union_over_concat(*pattern)),
         },
         leaf => leaf,
     }

@@ -110,6 +110,9 @@ impl ReturnItem {
 /// `Optional` is `OPTIONAL MATCH` (Feature GQ21 nested-block form is
 /// not yet exposed; a single optional pattern is enough for the
 /// formalism described in the OOPSLA paper rule TOpt).
+///
+/// ISO §16.6 prefixes live inside `pattern` as `PathPattern::Selected`,
+/// scoped per comma operand.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchStatement {
     Simple { pattern: PathPattern },
@@ -221,6 +224,11 @@ impl Query {
     pub fn has_any_optional(&self) -> bool {
         self.matches.iter().any(|m| m.is_optional())
     }
+
+    /// True when any MATCH pattern contains an ISO §16.6 prefix.
+    pub fn has_any_selected(&self) -> bool {
+        self.matches.iter().any(|m| m.pattern().has_selected())
+    }
 }
 
 impl fmt::Display for GeneralSetKind {
@@ -282,10 +290,11 @@ impl fmt::Display for Query {
                 f.write_str(" ")?;
             }
             first = false;
-            match m {
-                MatchStatement::Simple { pattern } => write!(f, "MATCH {pattern}")?,
-                MatchStatement::Optional { pattern } => write!(f, "OPTIONAL MATCH {pattern}")?,
-            }
+            let (kw, pattern) = match m {
+                MatchStatement::Simple { pattern } => ("MATCH", pattern),
+                MatchStatement::Optional { pattern } => ("OPTIONAL MATCH", pattern),
+            };
+            write!(f, "{kw} {pattern}")?;
         }
         if let Some(gb) = &self.group_by {
             let exprs: Vec<String> = gb.iter().map(|e| e.to_string()).collect();

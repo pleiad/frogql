@@ -1,5 +1,6 @@
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -22,7 +23,68 @@ use super::assignment::Assignment;
 use super::cmp_values;
 use super::ltj::pattern_extract;
 use super::ltj::triple_index::TripleIndex;
+use super::path_select::apply_path_prefix;
+use super::path_select::path_satisfies_mode;
 use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
+use crate::syntax::path_prefix::{PathMode, PathPrefix, UnboundedSupport};
+
+/// Finite evaluation policy for unbounded repetition inside `Selected`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnboundedPolicy {
+    /// No finite-making prefix; rejected by the typechecker.
+    Forbidden,
+    /// WALK + SHORTEST: length-ordered k-shortest search.
+    Shortest { count: usize, groups: bool },
+    /// TRAIL / SIMPLE / ACYCLIC: finite enumeration with mode pruning.
+    Mode(PathMode),
+}
+
+fn unbounded_policy_for(prefix: Option<PathPrefix>) -> UnboundedPolicy {
+    match prefix.and_then(|p| p.unbounded_support()) {
+        Some(UnboundedSupport::Shortest { count, groups }) => {
+            UnboundedPolicy::Shortest { count, groups }
+        }
+        Some(UnboundedSupport::Mode(m)) => UnboundedPolicy::Mode(m),
+        None => UnboundedPolicy::Forbidden,
+    }
+}
+
+/// Number of edges in a path = its length for shortest-path ranking.
+fn path_edge_len(path: &Path) -> usize {
+    path.0.iter().filter(|pv| pv.is_edge()).count()
+}
+
+/// Min-heap entry for the k-shortest repetition search. `BinaryHeap` is a
+/// max-heap, so `Ord` is reversed to pop the *shortest* path first; the
+/// monotone `seq` tie-breaks equal lengths deterministically.
+struct ShortestEntry {
+    len: usize,
+    seq: usize,
+    reps: usize,
+    row: ResultRow,
+}
+
+impl PartialEq for ShortestEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.len == other.len && self.seq == other.seq
+    }
+}
+impl Eq for ShortestEntry {}
+impl PartialOrd for ShortestEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for ShortestEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reversed: a smaller length compares as "greater" so the max-heap
+        // yields it first; tie-break on the smaller seq.
+        other
+            .len
+            .cmp(&self.len)
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
+}
 
 /// Apply value predicates pushed down by the optimizer to raw graph properties.
 /// Missing key → predicate is null → reject.
@@ -79,6 +141,8 @@ pub struct Runtime<'g, G: GraphAccess> {
     ///     those `keys` for every body row, so a per-outer-row probe
     ///     is one O(1) hash lookup. The body runs once per Runtime.
     exists_cache: RefCell<HashMap<usize, ExistsCache>>,
+    /// Set only while evaluating `PathPattern::Selected`.
+    unbounded_policy: Cell<UnboundedPolicy>,
 }
 
 /// Cached evaluation result for an existential predicate.
@@ -100,6 +164,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             graph,
             triple_index: RefCell::new(None),
             exists_cache: RefCell::new(HashMap::new()),
+            unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
         }
     }
 
@@ -112,6 +177,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             graph,
             triple_index: RefCell::new(Some(idx)),
             exists_cache: RefCell::new(HashMap::new()),
+            unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
         }
     }
 
@@ -149,12 +215,16 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
     pub fn run(&self, pattern: &PathPattern) -> IntermediateResult {
         self.exists_cache.borrow_mut().clear();
+        // A raw pattern carries no selected-prefix context, so unbounded repetition
+        // (if any) has no license here.
+        self.unbounded_policy.set(UnboundedPolicy::Forbidden);
         self.run_path_pattern(pattern, 0)
     }
 
     /// Run with a result limit (0 = unlimited). Stops early once limit is reached.
     pub fn run_with_limit(&self, pattern: &PathPattern, limit: usize) -> IntermediateResult {
         self.exists_cache.borrow_mut().clear();
+        self.unbounded_policy.set(UnboundedPolicy::Forbidden);
         self.run_path_pattern(pattern, limit)
     }
 
@@ -629,18 +699,23 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     ///   padded with `PathValue::Nothing` for new variables (those then
     ///   project as `Value::Null` via the existing AttrLookup-failure path).
     fn run_match_chain(&self, query: &Query, limit: usize) -> IntermediateResult {
-        if !query.has_any_optional() {
+        // Keep `Selected` operands isolated; collapsing would erase their
+        // per-pattern prefix boundary.
+        if !query.has_any_optional() && !query.has_any_selected() {
+            self.unbounded_policy.set(UnboundedPolicy::Forbidden);
             return self.run_path_pattern(&query.collapsed_pattern(), limit);
         }
 
+        self.unbounded_policy.set(UnboundedPolicy::Forbidden);
+
         let mut iter = query.matches.iter();
         let first = iter.next().expect("Query::matches must be non-empty");
-        // When the chain has only one match, no subsequent join can
-        // filter rows further — pass `limit` down so the LTJ runtime can
-        // early-terminate inside `run_path_pattern`. Multi-match chains
-        // pass 0 because Simple matches may filter rows out and we'd
-        // lose candidates by truncating the leading binding table.
-        let first_limit = if query.matches.len() == 1 { limit } else { 0 };
+        // Only a single, non-selected MATCH can safely push LIMIT inward.
+        let first_limit = if query.matches.len() == 1 && !first.pattern().has_selected() {
+            limit
+        } else {
+            0
+        };
         let mut acc = self.run_path_pattern(first.pattern(), first_limit);
         let mut bound_vars: HashSet<String> = first.pattern().freevars();
 
@@ -652,12 +727,17 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     let ir_new = self.run_path_pattern(pattern, 0);
                     natural_join(&acc, &ir_new, 0)
                 }
-                MatchStatement::Optional { .. } => self
-                    .optional_via_bind_pushdown(&acc, pattern, &bound_vars, &new_vars)
-                    .unwrap_or_else(|| {
+                MatchStatement::Optional { .. } => {
+                    let pushed = if !pattern.has_selected() {
+                        self.optional_via_bind_pushdown(&acc, pattern, &bound_vars, &new_vars)
+                    } else {
+                        None
+                    };
+                    pushed.unwrap_or_else(|| {
                         let ir_new = self.run_path_pattern(pattern, 0);
                         left_outer_join(&acc, &ir_new, &bound_vars, &new_vars)
-                    }),
+                    })
+                }
             };
             bound_vars.extend(new_vars);
             if limit > 0 && acc.rows.len() >= limit {
@@ -1051,10 +1131,26 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 }
                 IntermediateResult::new(rows)
             }
-            PathPattern::Repeat { pattern, lb, ub } => {
-                let ub = ub.expect("unbounded repeat not supported");
-                self.run_repetition_range(pattern, *lb, ub, limit)
-            }
+            PathPattern::Repeat { pattern, lb, ub } => match ub {
+                Some(ub) => self.run_repetition_range(pattern, *lb, *ub, limit),
+                None => match self.unbounded_policy.get() {
+                    // Length-ordered k-shortest search.
+                    UnboundedPolicy::Shortest { count, groups } => {
+                        self.run_repetition_shortest(pattern, *lb, count, groups, limit)
+                    }
+                    // Finite enumeration of paths the mode admits.
+                    UnboundedPolicy::Mode(mode) => {
+                        self.run_repetition_unbounded_mode(pattern, *lb, mode, limit)
+                    }
+                    // Infinite under WALK/ALL; the typechecker
+                    // (`check_unbounded_repetition`) rejects this, so
+                    // reaching here is an invariant violation.
+                    UnboundedPolicy::Forbidden => panic!(
+                        "unbounded repetition reached the runtime without a finite-making \
+                         prefix; this must be rejected by check_unbounded_repetition"
+                    ),
+                },
+            },
             PathPattern::Questioned(inner) => {
                 let ir_empty = self.run_path_pattern(&PathPattern::Node(None), limit);
                 let remaining = if limit > 0 {
@@ -1066,6 +1162,20 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 ir_empty.union(ir_inner)
             }
             PathPattern::Join(q1, q2) => self.run_join(q1, q2, limit),
+            PathPattern::Selected { prefix, pattern } => {
+                // Selection ranks the full candidate set, so the inner runs
+                // without LIMIT and the caller limit is applied afterwards.
+                let prev = self.unbounded_policy.get();
+                self.unbounded_policy
+                    .set(unbounded_policy_for(Some(*prefix)));
+                let ir = self.run_path_pattern(pattern, 0);
+                self.unbounded_policy.set(prev);
+                let mut selected = apply_path_prefix(ir, *prefix);
+                if limit > 0 && selected.rows.len() > limit {
+                    selected.rows.truncate(limit);
+                }
+                selected
+            }
         }
     }
 
@@ -1735,6 +1845,230 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             rows.truncate(limit);
         }
         IntermediateResult::new(rows)
+    }
+
+    /// Unbounded repetition (`*` → `lb == 0`, `+` → `lb == 1`) under a
+    /// SHORTEST-family search in WALK mode: the `count` shortest paths
+    /// (`groups == false`) or the paths in the `count` shortest length
+    /// groups (`groups == true`) per boundary pair `(first, last)`.
+    ///
+    /// **Why it terminates on cycles.** Under WALK an unbounded repeat is
+    /// infinite (every extra lap is another match), but the k-shortest
+    /// answer is finite: a length-ordered search admits at most `count`
+    /// paths (or length groups) per boundary pair and then prunes, and on
+    /// a cycle the per-pair lengths strictly grow so every reachable pair
+    /// fills its quota in finitely many steps.
+    ///
+    /// **Why pruning is sound (optimal substructure).** If a path π to
+    /// boundary pair `(s, u)` has a length among `u`'s `count` shortest,
+    /// then its prefix π′ to the predecessor pair `(s, t)` also has a
+    /// length among `t`'s `count` shortest: otherwise there would be ≥
+    /// `count` strictly shorter prefixes to `t`, each extending to a
+    /// strictly shorter path to `u`, contradicting π's rank. So a path
+    /// whose pair is already full can never be the prefix of a wanted
+    /// path and is dropped without expansion — for both PATHS (admit ≤
+    /// `count` paths) and GROUPS (admit ≤ `count` distinct lengths). A
+    /// min-heap on length feeds paths in non-decreasing order, so this
+    /// per-pair budgeting is exact.
+    ///
+    /// `lb <= 1` is guaranteed by the caller (the typechecker routes
+    /// `{n,}` with `n >= 2` to a restrictive mode instead).
+    fn run_repetition_shortest(
+        &self,
+        p: &PathPattern,
+        lb: usize,
+        count: usize,
+        groups: bool,
+        limit: usize,
+    ) -> IntermediateResult {
+        // Admit `pair` at `len` against the per-pair budget, recording it.
+        // Returns whether the path is wanted (and so worth expanding).
+        fn admit(
+            groups: bool,
+            count: usize,
+            taken: &mut HashMap<(Id, Id), usize>,
+            lens: &mut HashMap<(Id, Id), Vec<usize>>,
+            pair: (Id, Id),
+            len: usize,
+        ) -> bool {
+            if groups {
+                let v = lens.entry(pair).or_default();
+                if v.contains(&len) {
+                    return true; // another path in an already-counted group
+                }
+                if v.len() < count {
+                    v.push(len);
+                    return true; // a new (still within budget) length group
+                }
+                false
+            } else {
+                let c = taken.entry(pair).or_insert(0);
+                if *c < count {
+                    *c += 1;
+                    return true;
+                }
+                false
+            }
+        }
+
+        // `*` admits the length-0 match: one row per node (a == b), the
+        // shortest possible path for every self pair.
+        let mut result: Vec<ResultRow> = if lb == 0 {
+            self.run_repetition_pattern(p, 0).rows
+        } else {
+            Vec::new()
+        };
+
+        let grouped = self.run_path_pattern(p, 0).to_group();
+        if grouped.rows.is_empty() {
+            if limit > 0 && result.len() > limit {
+                result.truncate(limit);
+            }
+            return IntermediateResult::new(result);
+        }
+
+        let mut grouped_by_first: HashMap<Id, Vec<usize>> = HashMap::new();
+        for (i, r) in grouped.rows.iter().enumerate() {
+            if let Some(first) = r.path().first_node_id() {
+                grouped_by_first.entry(first).or_default().push(i);
+            }
+        }
+
+        let mut taken: HashMap<(Id, Id), usize> = HashMap::new();
+        let mut lens: HashMap<(Id, Id), Vec<usize>> = HashMap::new();
+
+        // The length-0 self matches occupy each self pair's first budget
+        // slot, so a 1-lap cycle back to the start competes for what
+        // remains (and is dropped under `count == 1`).
+        if lb == 0 {
+            for r in &result {
+                if let Some(n) = r.path().first_node_id() {
+                    admit(groups, count, &mut taken, &mut lens, (n, n), 0);
+                }
+            }
+        }
+
+        // Seed the heap with the single inner-pattern applications.
+        let mut heap: BinaryHeap<ShortestEntry> = BinaryHeap::new();
+        let mut seq = 0usize;
+        for r in &grouped.rows {
+            heap.push(ShortestEntry {
+                len: path_edge_len(r.path()),
+                seq,
+                reps: 1,
+                row: r.clone(),
+            });
+            seq += 1;
+        }
+
+        while let Some(entry) = heap.pop() {
+            if limit > 0 && result.len() >= limit {
+                break;
+            }
+            let (Some(f), Some(l)) = (
+                entry.row.path().first_node_id(),
+                entry.row.path().last_node_id(),
+            ) else {
+                continue;
+            };
+            if !admit(groups, count, &mut taken, &mut lens, (f, l), entry.len) {
+                continue;
+            }
+            if entry.reps >= lb {
+                result.push(entry.row.clone());
+            }
+            if let Some(idxs) = grouped_by_first.get(&l) {
+                for &idx in idxs {
+                    let new_row = entry.row.concat_group(&grouped.rows[idx]);
+                    heap.push(ShortestEntry {
+                        len: path_edge_len(new_row.path()),
+                        seq,
+                        reps: entry.reps + 1,
+                        row: new_row,
+                    });
+                    seq += 1;
+                }
+            }
+        }
+
+        if limit > 0 && result.len() > limit {
+            result.truncate(limit);
+        }
+        IntermediateResult::new(result)
+    }
+
+    /// Enumerate unbounded repetition under a finite restrictive mode.
+    fn run_repetition_unbounded_mode(
+        &self,
+        p: &PathPattern,
+        lb: usize,
+        mode: PathMode,
+        limit: usize,
+    ) -> IntermediateResult {
+        // `*` admits the length-0 match (a lone node), which trivially
+        // satisfies every mode.
+        let mut result: Vec<ResultRow> = if lb == 0 {
+            self.run_repetition_pattern(p, 0).rows
+        } else {
+            Vec::new()
+        };
+
+        let grouped = self.run_path_pattern(p, 0).to_group();
+        if grouped.rows.is_empty() {
+            if limit > 0 && result.len() > limit {
+                result.truncate(limit);
+            }
+            return IntermediateResult::new(result);
+        }
+
+        let mut grouped_by_first: HashMap<Id, Vec<usize>> = HashMap::new();
+        for (i, r) in grouped.rows.iter().enumerate() {
+            if let Some(first) = r.path().first_node_id() {
+                grouped_by_first.entry(first).or_default().push(i);
+            }
+        }
+
+        // Worklist of (partial path, repetition count). Seeded with the
+        // mode-satisfying single applications (level 1).
+        let mut worklist: Vec<(ResultRow, usize)> = Vec::new();
+        for r in &grouped.rows {
+            if path_satisfies_mode(r.path(), mode) {
+                if lb <= 1 {
+                    result.push(r.clone());
+                }
+                worklist.push((r.clone(), 1));
+            }
+        }
+
+        while let Some((row, reps)) = worklist.pop() {
+            if limit > 0 && result.len() >= limit {
+                break;
+            }
+            let Some(last) = row.path().last_node_id() else {
+                continue;
+            };
+            let Some(idxs) = grouped_by_first.get(&last) else {
+                continue;
+            };
+            for &idx in idxs {
+                let new_row = row.concat_group(&grouped.rows[idx]);
+                // Pruning on the *whole* extended path is what guarantees
+                // termination: a path that already repeats a node/edge is
+                // dropped and never extended further.
+                if path_satisfies_mode(new_row.path(), mode) {
+                    let new_reps = reps + 1;
+                    if new_reps >= lb {
+                        result.push(new_row.clone());
+                    }
+                    worklist.push((new_row, new_reps));
+                }
+            }
+        }
+
+        if limit > 0 && result.len() > limit {
+            result.truncate(limit);
+        }
+        IntermediateResult::new(result)
     }
 
     // --- Helpers ---
@@ -2551,7 +2885,8 @@ fn pattern_has_edge(p: &PathPattern) -> bool {
         }
         PathPattern::Filter(p, _)
         | PathPattern::Repeat { pattern: p, .. }
-        | PathPattern::Questioned(p) => pattern_has_edge(p),
+        | PathPattern::Questioned(p)
+        | PathPattern::Selected { pattern: p, .. } => pattern_has_edge(p),
         PathPattern::Node(_) => false,
     }
 }

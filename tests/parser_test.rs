@@ -781,7 +781,7 @@ fn test_multi_match_per_clause_where() {
     .unwrap();
     assert_eq!(q.matches.len(), 2);
     for m in &q.matches {
-        let MatchStatement::Simple { pattern } = m else {
+        let MatchStatement::Simple { pattern, .. } = m else {
             panic!("expected Simple match");
         };
         assert!(matches!(pattern, PathPattern::Filter(_, _)));
@@ -1073,7 +1073,8 @@ fn test_parse_exists_with_inner_match_keyword_and_where() {
     assert!(matches!(
         body.matches[0],
         MatchStatement::Simple {
-            pattern: PathPattern::Filter(_, _)
+            pattern: PathPattern::Filter(_, _),
+            ..
         }
     ));
 }

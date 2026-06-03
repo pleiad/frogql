@@ -27,6 +27,7 @@ pub enum Token {
     Return,
     Distinct,
     All,
+    Any,
     /// ISO-39075 §16.x — `LIMIT <integer>` after RETURN. Produces
     /// `Query.limit = Some(N)`; the runtime caps row emission to N.
     Limit,
@@ -593,7 +594,7 @@ impl Lexer {
                         "FLOAT" => Token::Float,
                         "BOOL" | "BOOLEAN" => Token::Bool,
                         "STRING" => Token::Str,
-                        "ANY" => Token::Star,
+                        "ANY" => Token::Any,
                         "LIST" => Token::List,
                         // DDL keywords. Uppercase-only for the same
                         // backward-compat reason: `type` and `default` are

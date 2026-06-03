@@ -73,6 +73,10 @@ pub fn elaborate_pattern(p: PathPattern, fresh: &FreshVars) -> PathPattern {
         PathPattern::Questioned(p) => {
             PathPattern::Questioned(Box::new(elaborate_pattern(*p, fresh)))
         }
+        PathPattern::Selected { prefix, pattern } => PathPattern::Selected {
+            prefix,
+            pattern: Box::new(elaborate_pattern(*pattern, fresh)),
+        },
     }
 }
 
@@ -180,9 +184,9 @@ fn visit(p: &PathPattern, set: &mut std::collections::HashSet<String>) {
             visit(p2, set);
         }
         PathPattern::Filter(p, _) => visit(p, set),
-        PathPattern::Repeat { pattern, .. } | PathPattern::Questioned(pattern) => {
-            visit(pattern, set)
-        }
+        PathPattern::Repeat { pattern, .. }
+        | PathPattern::Questioned(pattern)
+        | PathPattern::Selected { pattern, .. } => visit(pattern, set),
     }
 }
 

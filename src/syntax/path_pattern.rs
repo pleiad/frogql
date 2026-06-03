@@ -3,6 +3,7 @@ use std::fmt;
 
 use super::descriptor::Descriptor;
 use super::expr::Expr;
+use super::path_prefix::PathPrefix;
 
 /// Path patterns — the core of GQL queries.
 #[derive(Debug, Clone, PartialEq)]
@@ -25,6 +26,11 @@ pub enum PathPattern {
     /// Semantics: cross-product of paths, keeping only rows where assignments unify.
     /// Result paths are paired (p1 × p2), assignment is mu1 ∪ mu2.
     Join(Box<PathPattern>, Box<PathPattern>),
+    /// ISO §16.6 prefix scoped to one `<path pattern>` operand.
+    Selected {
+        prefix: PathPrefix,
+        pattern: Box<PathPattern>,
+    },
 }
 
 impl PathPattern {
@@ -49,6 +55,25 @@ impl PathPattern {
             PathPattern::Filter(p, _) => p.freevars(),
             PathPattern::Repeat { pattern, .. } => pattern.freevars(),
             PathPattern::Questioned(p) => p.freevars(),
+            PathPattern::Selected { pattern, .. } => pattern.freevars(),
+        }
+    }
+
+    /// Whether this pattern contains a prefixed operand.
+    pub fn has_selected(&self) -> bool {
+        match self {
+            PathPattern::Selected { .. } => true,
+            PathPattern::Node(_)
+            | PathPattern::EdgeRight(_)
+            | PathPattern::EdgeLeft(_)
+            | PathPattern::EdgeUndirected(_)
+            | PathPattern::EdgeAnyDirection(_) => false,
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                a.has_selected() || b.has_selected()
+            }
+            PathPattern::Filter(p, _)
+            | PathPattern::Questioned(p)
+            | PathPattern::Repeat { pattern: p, .. } => p.has_selected(),
         }
     }
 
@@ -61,6 +86,39 @@ impl PathPattern {
             | PathPattern::EdgeUndirected(d)
             | PathPattern::EdgeAnyDirection(d) => d.as_ref(),
             _ => None,
+        }
+    }
+
+    /// Collect the lower bounds of every *unbounded* repetition (`ub ==
+    /// None`, i.e. `*`, `+`, `{n,}`) anywhere in this pattern. An empty
+    /// result means the pattern is fully bounded. The typechecker uses
+    /// this to gate unbounded repetition behind a SHORTEST-family search
+    /// prefix or a restrictive path mode.
+    pub fn unbounded_repeat_lbs(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        self.collect_unbounded_lbs(&mut out);
+        out
+    }
+
+    fn collect_unbounded_lbs(&self, out: &mut Vec<usize>) {
+        match self {
+            PathPattern::Node(_)
+            | PathPattern::EdgeRight(_)
+            | PathPattern::EdgeLeft(_)
+            | PathPattern::EdgeUndirected(_)
+            | PathPattern::EdgeAnyDirection(_) => {}
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                a.collect_unbounded_lbs(out);
+                b.collect_unbounded_lbs(out);
+            }
+            PathPattern::Filter(p, _) | PathPattern::Questioned(p) => p.collect_unbounded_lbs(out),
+            PathPattern::Selected { pattern, .. } => pattern.collect_unbounded_lbs(out),
+            PathPattern::Repeat { pattern, lb, ub } => {
+                if ub.is_none() {
+                    out.push(*lb);
+                }
+                pattern.collect_unbounded_lbs(out);
+            }
         }
     }
 }
@@ -97,6 +155,7 @@ impl fmt::Display for PathPattern {
             }
             PathPattern::Questioned(p) => write!(f, "({p})?"),
             PathPattern::Join(p1, p2) => write!(f, "{p1}, {p2}"),
+            PathPattern::Selected { prefix, pattern } => write!(f, "{prefix} {pattern}"),
         }
     }
 }

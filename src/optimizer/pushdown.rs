@@ -19,12 +19,13 @@
 //! because neither side is guaranteed to hold. Value pushdown is restricted to
 //! node descriptors today; edges fall through to the residual WHERE.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
+use crate::syntax::path_prefix::PathSearch;
 use crate::typing::simple_type::SimpleType;
 
 /// A pushable type constraint: `var.attr is type`.
@@ -44,7 +45,7 @@ struct ValuePred {
     value: Value,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Constraints {
     types: HashMap<String, Vec<(String, SimpleType)>>,
     values: HashMap<String, Vec<(String, BinOp, Value)>>,
@@ -53,6 +54,23 @@ struct Constraints {
 impl Constraints {
     fn is_empty(&self) -> bool {
         self.types.is_empty() && self.values.is_empty()
+    }
+
+    fn retain_vars(&self, vars: &HashSet<String>) -> Self {
+        Self {
+            types: self
+                .types
+                .iter()
+                .filter(|(var, _)| vars.contains(*var))
+                .map(|(var, constraints)| (var.clone(), constraints.clone()))
+                .collect(),
+            values: self
+                .values
+                .iter()
+                .filter(|(var, _)| vars.contains(*var))
+                .map(|(var, constraints)| (var.clone(), constraints.clone()))
+                .collect(),
+        }
     }
 }
 
@@ -123,6 +141,12 @@ fn rewrite(p: PathPattern) -> PathPattern {
         PathPattern::Join(p1, p2) => {
             PathPattern::Join(Box::new(rewrite(*p1)), Box::new(rewrite(*p2)))
         }
+        // Prefix boundary: optimize inside; outer constraints are handled by
+        // `merge_constraints`, where selective prefixes admit endpoint-only pushdown.
+        PathPattern::Selected { prefix, pattern } => PathPattern::Selected {
+            prefix,
+            pattern: Box::new(rewrite(*pattern)),
+        },
         // Leaf patterns — no rewriting needed
         other => other,
     }
@@ -265,6 +289,15 @@ fn walk_kinds(p: &PathPattern, acc: &mut HashMap<String, VarKind>) {
         }
         PathPattern::Filter(inner, _) | PathPattern::Questioned(inner) => walk_kinds(inner, acc),
         PathPattern::Repeat { pattern, .. } => walk_kinds(pattern, acc),
+        PathPattern::Selected { prefix, pattern } => {
+            if prefix.search == PathSearch::All {
+                walk_kinds(pattern, acc);
+            } else {
+                for var in boundary_node_vars(pattern).into_iter().flatten() {
+                    acc.insert(var, VarKind::Node);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -304,6 +337,51 @@ fn merge_constraints(p: PathPattern, c: &Constraints) -> PathPattern {
             Box::new(merge_constraints(*p1, c)),
             Box::new(merge_constraints(*p2, c)),
         ),
+        PathPattern::Selected { prefix, pattern } => {
+            let selected_constraints = if prefix.search == PathSearch::All {
+                c.clone()
+            } else {
+                let boundary: HashSet<String> =
+                    boundary_node_vars(&pattern).into_iter().flatten().collect();
+                c.retain_vars(&boundary)
+            };
+            PathPattern::Selected {
+                prefix,
+                pattern: Box::new(merge_constraints(*pattern, &selected_constraints)),
+            }
+        }
+    }
+}
+
+/// First and last top-level node variables of a path pattern.
+fn boundary_node_vars(p: &PathPattern) -> [Option<String>; 2] {
+    let mut vars = Vec::new();
+    collect_top_node_vars(p, &mut vars);
+    [vars.first().cloned(), vars.last().cloned()]
+}
+
+fn collect_top_node_vars(p: &PathPattern, out: &mut Vec<String>) {
+    match p {
+        PathPattern::Node(desc) => {
+            if let Some(var) = desc.as_ref().and_then(|d| d.var.clone()) {
+                out.push(var);
+            }
+        }
+        PathPattern::Concat(a, b) => {
+            collect_top_node_vars(a, out);
+            collect_top_node_vars(b, out);
+        }
+        PathPattern::Filter(inner, _) | PathPattern::Questioned(inner) => {
+            collect_top_node_vars(inner, out);
+        }
+        PathPattern::EdgeRight(_)
+        | PathPattern::EdgeLeft(_)
+        | PathPattern::EdgeUndirected(_)
+        | PathPattern::EdgeAnyDirection(_)
+        | PathPattern::Repeat { .. }
+        | PathPattern::Union(_, _)
+        | PathPattern::Join(_, _)
+        | PathPattern::Selected { .. } => {}
     }
 }
 
@@ -455,7 +533,21 @@ mod tests {
                 first_node_value_preds(inner, var)
             }
             PathPattern::Repeat { pattern, .. } => first_node_value_preds(pattern, var),
+            PathPattern::Selected { pattern, .. } => first_node_value_preds(pattern, var),
             _ => vec![],
+        }
+    }
+
+    fn has_filter(p: &PathPattern) -> bool {
+        match p {
+            PathPattern::Filter(_, _) => true,
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                has_filter(a) || has_filter(b)
+            }
+            PathPattern::Questioned(inner)
+            | PathPattern::Repeat { pattern: inner, .. }
+            | PathPattern::Selected { pattern: inner, .. } => has_filter(inner),
+            _ => false,
         }
     }
 
@@ -504,5 +596,45 @@ mod tests {
         let preds = first_node_value_preds(&optimized, "x");
         assert_eq!(preds.len(), 1);
         assert_eq!(preds[0].1, BinOp::Eq);
+    }
+
+    #[test]
+    fn selected_shortest_pushes_boundary_value_preds() {
+        let q = crate::compile_query_unchecked(
+            "MATCH ANY SHORTEST (s)-[]->+(t) \
+             WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
+        )
+        .unwrap();
+        let p = q.matches[0].pattern();
+
+        assert_eq!(first_node_value_preds(p, "s").len(), 1);
+        assert_eq!(first_node_value_preds(p, "t").len(), 1);
+        assert!(!has_filter(p), "boundary predicates should be fully pushed");
+    }
+
+    #[test]
+    fn selected_shortest_keeps_interior_value_pred_as_filter() {
+        let q = crate::compile_query_unchecked(
+            "MATCH ANY SHORTEST (s)-[]->(m)-[]->(t) \
+             WHERE m.name = 'B' RETURN s.name",
+        )
+        .unwrap();
+        let p = q.matches[0].pattern();
+
+        assert!(first_node_value_preds(p, "m").is_empty());
+        assert!(has_filter(p), "interior predicate must stay post-selection");
+    }
+
+    #[test]
+    fn selected_mode_all_pushes_interior_value_preds() {
+        let q = crate::compile_query_unchecked(
+            "MATCH ACYCLIC (s)-[]->(m)-[]->(t) \
+             WHERE m.name = 'B' RETURN s.name",
+        )
+        .unwrap();
+        let p = q.matches[0].pattern();
+
+        assert_eq!(first_node_value_preds(p, "m").len(), 1);
+        assert!(!has_filter(p), "mode-only prefixes do not select a subset");
     }
 }
