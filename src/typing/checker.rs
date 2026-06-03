@@ -456,17 +456,29 @@ impl Typechecker {
             // Prefixes filter paths; they do not transform variable types.
             PathPattern::Selected { pattern, .. } => self.check_path_pattern(pattern),
 
-            PathPattern::Repeat {
-                pattern,
-                lb,
-                ub: _ub,
-            } => {
+            PathPattern::Repeat { pattern, lb, ub } => {
                 let r = self.check_path_pattern(pattern);
                 let raw_lb = *lb as u64;
 
                 let effective_lb = if !r.path.is_empty() {
                     raw_lb.min(3)
+                } else if ub.is_none() {
+                    // An empty-matching inner under *unbounded* repetition is
+                    // non-terminating at runtime (every extra lap adds zero
+                    // length, so a SHORTEST-GROUPS / TRAIL search never fills
+                    // its budget). This must be a hard error, not a warning:
+                    // the runtime's finite-evaluation path relies on each
+                    // application contributing at least one edge.
+                    self.errors.push(
+                        "Unbounded repetition (`*`, `+`, `{n,}`) requires an inner pattern \
+                         of length > 0; an inner that can match the empty path makes the \
+                         repetition non-terminating."
+                            .to_string(),
+                    );
+                    raw_lb
                 } else {
+                    // Bounded repetition with an empty-matching inner is
+                    // degenerate but terminates, so it stays a warning.
                     self.warnings
                         .push("Repeat expression must have length > 0".to_string());
                     raw_lb

@@ -542,3 +542,65 @@ fn restrictive_mode_only_clause_is_not_selective() {
         compile_query("MATCH ACYCLIC (s)-[]->(m)-[]->(t) MATCH (m)-[]->(x) RETURN x.name").is_ok()
     );
 }
+
+// =====================================================================
+// Regression: zero-length inner under unbounded repetition
+//
+// An inner pattern that can match the empty path (e.g. a bare node)
+// makes unbounded repetition non-terminating: a SHORTEST-GROUPS / TRAIL
+// search keeps appending zero-length laps and never fills its budget.
+// The typechecker must reject it as a hard error (not a warning), since
+// the runtime's finite-evaluation path assumes each lap adds an edge.
+// =====================================================================
+
+#[test]
+fn zero_length_inner_under_unbounded_is_rejected() {
+    for q in [
+        "MATCH ALL SHORTEST (x)* RETURN x",
+        "MATCH ALL SHORTEST (x)+ RETURN x",
+        "MATCH ANY SHORTEST (x)* RETURN x",
+        "MATCH SHORTEST 2 GROUPS (x)* RETURN x",
+        "MATCH TRAIL (x)* RETURN x",
+        "MATCH SIMPLE (x)+ RETURN x",
+        "MATCH ACYCLIC (x){1,} RETURN x",
+    ] {
+        assert!(
+            compile_query(q).is_err(),
+            "zero-length inner under unbounded repetition must be rejected: {q}"
+        );
+    }
+}
+
+#[test]
+fn edge_inner_under_unbounded_is_accepted() {
+    // A genuine edge inner contributes length >= 1 per lap, so unbounded
+    // repetition is well-defined and must still compile.
+    assert!(compile_query("MATCH ALL SHORTEST (a)-[]->*(b) RETURN a.name").is_ok());
+    assert!(compile_query("MATCH TRAIL (a)-[]->+(b) RETURN a.name").is_ok());
+}
+
+#[test]
+fn bounded_zero_length_inner_still_compiles() {
+    // Bounded repetition with an empty-matching inner is degenerate but
+    // terminates, so it stays a warning (compiles successfully).
+    assert!(compile_query("MATCH (x){1,3} RETURN x").is_ok());
+    assert!(compile_query("MATCH (x)? RETURN x").is_ok());
+}
+
+// =====================================================================
+// Regression: `ANY` as a label wildcard. `ANY` lexes to its own token
+// for the §16.6 path-search prefix, but in label position it remains an
+// alias for the `*` "any label" wildcard (worked before path prefixes).
+// =====================================================================
+
+#[test]
+fn any_is_a_label_wildcard() {
+    assert!(
+        compile_query("MATCH (x:ANY) RETURN x").is_ok(),
+        "(x:ANY) must parse as the any-label wildcard"
+    );
+    // Equivalent to the `*` spelling.
+    assert!(compile_query("MATCH (x:*) RETURN x").is_ok());
+    // And `ANY` as a search prefix still works in the same query family.
+    assert!(compile_query("MATCH ANY SHORTEST (s)-[]->(t) RETURN s.name").is_ok());
+}

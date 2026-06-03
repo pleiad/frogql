@@ -1084,7 +1084,11 @@ impl Parser {
                 self.advance();
                 Ok(LabelType::Label(name))
             }
-            Token::Star => {
+            // `ANY` is an alias for the `*` label wildcard. It lexes to a
+            // distinct token (so the §16.6 path-prefix grammar can tell
+            // `ANY <pattern>` from a `*` type wildcard), but in label
+            // position it means the same "any label" as `*`.
+            Token::Star | Token::Any => {
                 self.advance();
                 Ok(LabelType::Star)
             }
