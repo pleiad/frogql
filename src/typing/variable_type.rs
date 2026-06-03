@@ -26,6 +26,11 @@ pub enum VariableType {
     /// appears in only one branch of a `TypeEnvironment` join, per the rule
     /// `Γ₁ ⊔ Γ₂` for keys present on a single side.
     Null,
+    /// A path variable (`MATCH p = ...`). Terminal: it does not carry a
+    /// descriptor, never refines against the schema, and is never shared
+    /// across operands, so it stays inert under every lattice operation.
+    /// Lifts to `SimpleType::Path`.
+    Path,
     Zero,
 }
 
@@ -71,6 +76,8 @@ impl VariableType {
             }
             VariableType::Group(t) => SimpleType::Group(Box::new(t.get_attribute(attr))),
             VariableType::Null => SimpleType::Zero,
+            // A path has no attributes — `path.attr` is undefined.
+            VariableType::Path => SimpleType::Zero,
             VariableType::Zero => SimpleType::Zero,
         }
     }
@@ -173,6 +180,10 @@ impl VariableType {
             (_, VariableType::Union(_, _)) => VariableType::meet(b, a),
             (VariableType::Null, VariableType::Null) => VariableType::Null,
             (VariableType::Null, _) | (_, VariableType::Null) => VariableType::Zero,
+            // Path only meets itself. A path variable is unique to its
+            // operand and never shared across a comma-join/concat, so this
+            // arm is reached only by a degenerate `p = ..., p = ...`.
+            (VariableType::Path, VariableType::Path) => VariableType::Path,
             (VariableType::Zero, _) | (_, VariableType::Zero) => VariableType::Zero,
             _ => VariableType::Zero,
         }
@@ -228,6 +239,7 @@ impl VariableType {
         match (t1, t2) {
             (VariableType::Zero, _) => true,
             (VariableType::Null, VariableType::Null) => true,
+            (VariableType::Path, VariableType::Path) => true,
             (VariableType::Node(a), VariableType::Node(b)) => DescriptorType::is_subtype(a, b),
             (
                 VariableType::EdgeDirectional {
@@ -316,6 +328,7 @@ impl VariableType {
                 VariableType::Group(Box::new(VariableType::refine(schema, t)))
             }
             VariableType::Null => VariableType::Null,
+            VariableType::Path => VariableType::Path,
             VariableType::Zero => VariableType::Zero,
         }
     }
@@ -333,6 +346,8 @@ impl VariableType {
             VariableType::Union(t1, t2) => t1.is_empty() && t2.is_empty(),
             VariableType::Group(t) => t.is_empty(),
             VariableType::Null => false,
+            // A path binding is always inhabited; it never empties an env.
+            VariableType::Path => false,
         }
     }
 }
@@ -350,6 +365,7 @@ impl fmt::Display for VariableType {
             VariableType::Union(t1, t2) => write!(f, "{t1} + {t2}"),
             VariableType::Group(t) => write!(f, "group<{t}>"),
             VariableType::Null => write!(f, "Null"),
+            VariableType::Path => write!(f, "path"),
             VariableType::Zero => write!(f, "⊥"),
         }
     }

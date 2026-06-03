@@ -217,6 +217,7 @@ mod canon {
             }
             VariableType::Group(inner) => VariableType::Group(Box::new(variable(inner))),
             VariableType::Null => VariableType::Null,
+            VariableType::Path => VariableType::Path,
             VariableType::Zero => VariableType::Zero,
         }
     }

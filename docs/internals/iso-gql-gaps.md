@@ -9,6 +9,7 @@ Implementado y cubierto por tests:
 - **Parser y query language**: `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN` (con `DISTINCT` y alias `AS`), `ORDER BY ... ASC|DESC NULLS FIRST|LAST`, `LIMIT`, `GROUP BY`, comma-join.
 - **Expresiones de valor (cierre IC7)**: división `/` (ISO `<solidus>`), `FLOOR(<numeric>)`, `CAST(<op> AS INTEGER|FLOAT)` (conversión de valor, distinta de la aserción de tipo `AS`), constructor de record `RECORD { k: <expr>, ... }` con valores-expresión (`RECORD` opcional, fast-path constante), y la subconsulta de valor `VALUE { MATCH ... RETURN <1 item> ORDER BY ... LIMIT 1 }` (correlacionada, arg-max por grupo). `FLOOR`/`CAST`/`RECORD`/`VALUE` son soft keywords (solo antes de `(`/`{`). `GROUP BY <binding variable>` agrupa por identidad de nodo/arista con chequeo de dependencia funcional ISO §14; `ORDER BY <alias>.<campo>` resuelve campos de columnas proyectadas tipo record (`SortKey::ColumnField`). Estas seis primitivas desbloquearon **IC7** (`bench/ldbc-queries/ic7.toml`, `tests/ic7_test.rs`).
 - **Path patterns**: concat, union (`|`), filter (`WHERE`), repetición `{n,m}`, optional (`?`), aristas dirigidas, reversas y no dirigidas, labels conjuntivas (`A & B`), disyuntivas (`A | B`) y negadas (`!A`).
+- **Named paths y path functions (§16.6 + §20.16)**: declaración `MATCH path = (...)` (binding de un operando a una variable-camino, fuera del prefijo §16.6), `Value::Path` proyectable, y las funciones `ELEMENTS` / `PATH_LENGTH` / `CARDINALITY` (conformes) más `NODES` / `EDGES` (divergencia de traducción). El typechecker liga la variable-camino y valida que el argumento de cada función tipe como camino.
 - **Path-pattern prefixes (ISO §16.6)**: path modes `WALK` / `TRAIL` / `SIMPLE` / `ACYCLIC` y path searches `ALL` / `ANY [N]` / `SHORTEST [N] [PATHS]` / `SHORTEST N GROUPS` (con las formas normalizadas `ANY SHORTEST` y `ALL SHORTEST`). Habilitan repetición ilimitada (`*`, `+`) vía búsqueda k-shortest sobre walks o enumeración finita podada por modo. Aislamiento §16.6 SR 5–8 verificado en el typechecker.
 - **Tipos y valores**: `Int`, `Float`, `Str`, `Bool`, `List`, `Record` (anidable), `Null` con lógica trivalente. `Value::Node` y `Value::Edge` como reference values de primera clase.
 - **Predicados existenciales**: `EXISTS { ... }` y `NOT EXISTS { ... }` con correlación, fold a literal cuando el body es trivialmente vacío.
@@ -61,7 +62,7 @@ Cubierto por los path-pattern prefixes: `SHORTEST [N] [PATHS]`, `SHORTEST N GROU
 
 #### 2.5 Funciones built-in
 
-Existe `Expr::Call { name, args }` con dispatch en `engine.rs::eval_call`; hoy resuelve `FLOOR` y `CAST` (más `COALESCE`/`DURATION` por Token dedicado). Faltan `size(list)`, `length(path)`, `head`, `tail`, `nodes(p)`, `edges(p)`, `type(edge)`, `labels(node)`, `PATH_LENGTH(path)`, `EXTRACT(<part> FROM <date>)` y el operador `MOD`. Agregar cada uno es un arm nuevo en `eval_call` + `check_expr` (las path-functions necesitan antes named paths, ver 2.9).
+Existe `Expr::Call { name, args }` con dispatch en `engine.rs::eval_call`; hoy resuelve `FLOOR` y `CAST` (más `COALESCE`/`DURATION` por Token dedicado) y las path-functions `ELEMENTS` / `PATH_LENGTH` / `CARDINALITY` / `NODES` / `EDGES` (ver 2.9). Faltan `size(list)`, `head`, `tail`, `type(edge)`, `labels(node)`, `EXTRACT(<part> FROM <date>)` y el operador `MOD`. Agregar cada uno es un arm nuevo en `eval_call` + `check_expr`.
 
 #### 2.6 COLLECT y STDDEV (Feature GF10 completa)
 
@@ -75,9 +76,16 @@ ISO §13.1 permite `MATCH α INSERT β SET γ MATCH δ DELETE ε` como una sola 
 
 El lexer no admite escapes (`'don\'t'` no parsea, `''` se lee como string vacío). Bloquea `.dump-gql` para nodos cuyas propiedades string contengan `'`. Fix conceptualmente trivial; toca `Lexer::tokenize` y la simétrica en `format_gql_value`.
 
-#### 2.9 Named path patterns y path functions
+#### 2.9 Named path patterns y path functions — implementado (2026-06-03)
 
-`MATCH path = (a)-[:k]->(b)` no parsea: el binding de un patrón a una variable-camino no está en la gramática. Sin él no hay objeto `path` al que aplicar `PATH_LENGTH(path)` / `NODES(path)` / `EDGES(path)`. La búsqueda `ANY SHORTEST` / `ALL SHORTEST` ya funciona como **prefijo** (`MATCH ANY SHORTEST (a)-[:k]->+(b)`); lo que falta es la forma con nombre `MATCH path = ANY SHORTEST (...)` y un `Value::Path` proyectable. Toca el parser (`path = ...`), el AST (variable-camino), un `PathValue`/`Value::Path` materializable, y las path-functions en `eval_call`. Es el mayor bloqueador cruzado: habilita IC1, IC13 e IC14.
+`MATCH path = (a)-[:k]->(b)` liga el patrón completo a una variable-camino. La declaración ISO `<path variable declaration> ::= <binding variable> =` se parsea por operando de comma-join, fuera del prefijo §16.6 (`Named { var, Selected { prefix, pattern } }`), y materializa un `Value::Path` proyectable. Las path-functions de §20.16 operan sobre él:
+
+- `ELEMENTS(path)` — lista de todos los elementos (nodos y aristas) en orden de match (conforme ISO).
+- `PATH_LENGTH(path)` — número de aristas (conforme ISO).
+- `CARDINALITY(path)` — número total de elementos, nodos más aristas (conforme ISO).
+- `NODES(path)` / `EDGES(path)` — proyecciones nodo-solo / arista-solo. **No** son ISO (§20.16 no las define); se ofrecen como **divergencia de traducción** para los queries LDBC que las usan. Anótalas como divergencia en los toml afectados.
+
+Implementación: variantes `PathPattern::Named`, `PathValue::Path`, `Value::Path`, `SimpleType::Path`, `VariableType::Path` (terminal en el retículo: solo se encuentra consigo misma, nunca refina contra schema, nunca vacía un entorno). El typechecker liga la variable-camino en el `TypeEnvironment` y exige que el argumento de cada path-function tipe como `Path` (un argumento demostrablemente no-camino es error de tipo). El runtime captura la secuencia ya construida en `ResultRow.paths` (no recomputa). Tests en `tests/named_path_test.rs`. Desbloqueó el prerequisito cruzado de IC1, IC13 e IC14 (cada uno con un gap adicional propio: `COLLECT_LIST`, `CASE WHEN`, list comprehension).
 
 #### 2.10 CASE WHEN, EXTRACT, MOD, list comprehension
 
@@ -112,33 +120,33 @@ Estado de los 14 IC del benchmark cross-system (`bench/ldbc-queries/ic*.toml`). 
 | IC | Estado | Gaps restantes |
 |----|--------|----------------|
 | IC2, IC3, IC4, IC5, IC6, IC8, IC9, IC11 | implementado | — |
-| **IC7** | **implementado** (este cierre) | — (necesitaba `VALUE`, `RECORD`, `CAST`, `FLOOR`, `/`, `GROUP BY <var>`; todos hechos) |
-| IC1 | blocked | named paths + `PATH_LENGTH`/`NODES` (2.9); `COLLECT_LIST` (2.11). `RECORD` ✅, `ANY SHORTEST` prefijo ✅ |
+| **IC7** | **implementado** | — (necesitaba `VALUE`, `RECORD`, `CAST`, `FLOOR`, `/`, `GROUP BY <var>`; todos hechos) |
+| IC1 | blocked | `COLLECT_LIST` (2.11). Named paths + `PATH_LENGTH`/`NODES` ✅ (2.9), `RECORD` ✅, `ANY SHORTEST` ✅ |
 | IC10 | blocked | `EXTRACT(... FROM ...)`, `MOD`, `CASE WHEN` (2.10) |
 | IC12 | blocked | `COLLECT_LIST` (2.11); `[:isSubclassOf]->{0,}` ya parsea y el typechecker lo admite bajo un prefijo de modo (`ACYCLIC`/`TRAIL`) — divergencia de traducción, sin código nuevo |
-| IC13 | blocked | named paths + `PATH_LENGTH` (2.9); `CASE WHEN` (2.10) |
-| IC14 | blocked | named paths + `PATH_LENGTH`/`NODES` (2.9); list comprehension (2.10). `VALUE` ✅, `*` (multiplicación) ✅ |
+| IC13 | blocked | `CASE WHEN` (2.10). Named paths + `PATH_LENGTH` ✅ (2.9) |
+| IC14 | blocked | list comprehension (2.10). Named paths + `NODES` ✅ (2.9), `VALUE` ✅, `*` ✅ |
 
 ### Roadmap para los 14 IC completos
 
 Ordenado por leverage (ICs desbloqueados por feature):
 
-1. **Named path patterns + path functions** (2.9) — `MATCH path = [ANY|ALL] SHORTEST (...)`, `PATH_LENGTH`, `NODES`, `EDGES`. Desbloquea **IC1, IC13, IC14** (3). El search ya existe como prefijo; falta el binding nombrado y `Value::Path`. Mayor superficie, mayor retorno.
-2. **`COLLECT_LIST` / multiset aggregate** (2.11) — desbloquea **IC12** (con la divergencia `{0,}`→prefijo) y es uno de los dos gaps de IC1. Bajo costo (un `GeneralSetKind` nuevo).
-3. **`CASE WHEN ... END`** (2.10) — desbloquea parte de **IC10, IC13** (2). `Expr::Case` + typecheck del join de ramas.
+1. ~~**Named path patterns + path functions** (2.9)~~ — **hecho (2026-06-03)**. `MATCH path = [ANY|ALL] SHORTEST (...)`, `ELEMENTS`, `PATH_LENGTH`, `CARDINALITY`, más `NODES`/`EDGES` (divergencia). Desbloqueó el prerequisito de **IC1, IC13, IC14**.
+2. **`COLLECT_LIST` / multiset aggregate** (2.11) — desbloquea **IC12** (con la divergencia `{0,}`→prefijo) y cierra **IC1** (su único gap restante). Bajo costo (un `GeneralSetKind` nuevo).
+3. **`CASE WHEN ... END`** (2.10) — cierra **IC13** y parte de **IC10**. `Expr::Case` + typecheck del join de ramas.
 4. **`EXTRACT(part FROM date)` + `MOD`** (2.10) — cierra **IC10**. Arms en `eval_call` / `eval_binop`.
 5. **List comprehension `[x IN list | expr]`** (2.10) — cierra **IC14**. `Expr::ListComprehension` + runtime sobre `Value::List`.
 
-Con (1)–(5) los 14 IC corren. La ruta crítica es (1): IC1/IC13/IC14 dependen de named paths; conviene atacarla primero porque amortiza la materialización de `Value::Path` que las tres comparten.
+Con (2)–(5) los 14 IC corren. Named paths (1) ya amortizó la materialización de `Value::Path` que IC1/IC13/IC14 comparten; lo que queda en cada uno es un gap propio (`COLLECT_LIST`, `CASE WHEN`, list comprehension).
 
 ## Recomendación
 
-Si el objetivo es cerrar los 14 LDBC IC, seguir el *Roadmap para los 14 IC completos* de arriba: named paths (2.9) primero, luego `COLLECT_LIST`, `CASE WHEN`, `EXTRACT`/`MOD` y list comprehension.
+Si el objetivo es cerrar los 14 LDBC IC, seguir el *Roadmap para los 14 IC completos* de arriba: named paths (2.9) ya está hecho, así que el siguiente paso es `COLLECT_LIST`, luego `CASE WHEN`, `EXTRACT`/`MOD` y list comprehension.
 
 Si el orden es por valor para queries de usuario en general:
 
 1. **WITH / NEXT** (Tier 2.1). Sin esto no hay pipeline declarativo y todas las queries con agregación filtrada se vuelven imposibles. Mayor lever pendiente, mayor superficie de cambio (AST, typechecker, runtime).
-2. **Named paths + path functions** (2.9) y **resto de funciones built-in** (2.5). La infraestructura `Expr::Call` ya existe (`FLOOR`/`CAST`); agregar funciones es incremental. Named paths es el bloqueador cruzado de tres IC.
+2. **Resto de funciones built-in** (2.5). La infraestructura `Expr::Call` ya existe (`FLOOR`/`CAST`, las path-functions); agregar funciones es incremental.
 3. **OFFSET y multi-DML chains** (Tier 2.2 + 2.7). Cierre de huecos sintácticos pequeños que la gente espera.
 4. **Multi-DML + WAL** sólo si el caso de uso pasa de research a producción.
 

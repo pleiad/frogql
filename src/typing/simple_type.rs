@@ -35,6 +35,12 @@ pub enum SimpleType {
     /// ISO §4.4.4 reference value type for edges. Same identity-based
     /// equality and the same non-orderable restriction as `Node`.
     Edge,
+    /// ISO §4.4 PATH value type — the static type of a named path
+    /// variable (`MATCH p = ...`) and the argument type of the §20.16
+    /// path functions. Terminal in the lattice: it only meets/subtypes
+    /// itself, never carries structure, and never appears in a persisted
+    /// schema (a path cannot be a property value).
+    Path,
 }
 
 impl SimpleType {
@@ -147,6 +153,7 @@ impl fmt::Display for SimpleType {
             }
             SimpleType::Node => write!(f, "node"),
             SimpleType::Edge => write!(f, "edge"),
+            SimpleType::Path => write!(f, "path"),
         }
     }
 }

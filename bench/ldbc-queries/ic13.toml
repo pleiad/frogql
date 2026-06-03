@@ -6,19 +6,17 @@ name = "Single shortest path"
 status = "blocked"
 
 blocked_reason = """
-Re-audited 2026-05-06:
-  - `MATCH path = ANY SHORTEST (...)` — neither path naming
-    (`MATCH path = ...`) nor the `ANY SHORTEST` quantifier are in
-    the parser. Without these, `PATH_LENGTH(path)` has no path to
-    refer to.
-  - `CASE WHEN ... END` — also missing (used here for the IS NULL
-    branch: return -1 if unreachable).
+One expression gap remaining. Re-audited 2026-06-03 (post named-path cluster):
+  - `CASE WHEN ... END` — missing (used here for the IS NULL branch:
+    return -1 if unreachable). See iso-gql-gaps.md §2.10.
+
+What's now fine:
+  - `MATCH path = ANY SHORTEST (...)` — named path patterns landed
+    (2026-06-03); both the `ANY SHORTEST` prefix and the named-path
+    binding work, and `PATH_LENGTH(path)` resolves. See §2.9.
 """
 
 required_features = [
-    "named path patterns (MATCH path = ...)",
-    "ANY SHORTEST quantifier",
-    "PATH_LENGTH path function",
     "CASE WHEN ... END expression",
 ]
 

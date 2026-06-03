@@ -107,10 +107,10 @@ fn value_to_json(v: &Value) -> Json {
             }
             Json::Object(m)
         }
-        // Reference values are runtime-only — `node_props` / `edge_props`
-        // never produce them in the import/export pipeline. Surface as
-        // `null` to keep the dump valid JSON.
-        Value::Node(_) | Value::Edge(_) => Json::Null,
+        // Reference values and paths are runtime-only — `node_props` /
+        // `edge_props` never produce them in the import/export pipeline.
+        // Surface as `null` to keep the dump valid JSON.
+        Value::Node(_) | Value::Edge(_) | Value::Path(_) => Json::Null,
     }
 }
 
@@ -299,6 +299,6 @@ fn format_gql_value(v: &Value) -> Result<String, String> {
             }
             format!("{{{}}}", parts.join(", "))
         }
-        Value::Node(_) | Value::Edge(_) => String::new(),
+        Value::Node(_) | Value::Edge(_) | Value::Path(_) => String::new(),
     })
 }

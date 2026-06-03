@@ -211,6 +211,9 @@ impl Typechecker {
             PathPattern::Filter(inner, _) | PathPattern::Questioned(inner) => {
                 self.check_unbounded_in(inner, prefix)
             }
+            // The path-variable wrapper is transparent: keep walking with
+            // the same prefix (it sits outside any `Selected` prefix).
+            PathPattern::Named { pattern, .. } => self.check_unbounded_in(pattern, prefix),
             PathPattern::Node(_)
             | PathPattern::EdgeRight(_)
             | PathPattern::EdgeLeft(_)
@@ -535,6 +538,17 @@ impl Typechecker {
             // Prefixes filter paths; they do not transform variable types.
             PathPattern::Selected { pattern, .. } => self.check_path_pattern(pattern),
 
+            // A path-variable declaration is transparent to the pattern's
+            // own typing: check the inner operand, then add a single inert
+            // `Path` binding for `var` to the environment. The PathType is
+            // unchanged (the path's shape is the operand's shape).
+            PathPattern::Named { var, pattern } => {
+                let r = self.check_path_pattern(pattern);
+                let mut env = r.env;
+                env.set(var, VariableType::Path);
+                TypecheckResult::new(r.path, env)
+            }
+
             PathPattern::Repeat { pattern, lb, ub } => {
                 let r = self.check_path_pattern(pattern);
                 let raw_lb = *lb as u64;
@@ -719,10 +733,10 @@ impl Typechecker {
 
             Expr::Call { name, args } => {
                 // Built-in scalar functions. Inner args are checked for
-                // diagnostics; the result type follows ISO function rules.
-                for a in args {
-                    let _ = self.check_expr(a, env);
-                }
+                // diagnostics (and reused below); the result type follows
+                // ISO function rules.
+                let arg_types: Vec<SimpleType> =
+                    args.iter().map(|a| self.check_expr(a, env)).collect();
                 match name.as_str() {
                     // FLOOR(numeric) → Float (the runtime narrows via CAST).
                     "FLOOR" => SimpleType::F,
@@ -736,6 +750,33 @@ impl Typechecker {
                             SimpleType::Zero
                         }
                     },
+                    // ISO §20.16 path functions (plus the non-standard
+                    // NODES/EDGES translation helpers). The single argument
+                    // must be a PATH; a provably non-path argument (e.g. a
+                    // node variable) is a hard type error. `Star` is
+                    // tolerated, matching the gradual rule elsewhere.
+                    "ELEMENTS" | "NODES" | "EDGES" | "PATH_LENGTH" | "CARDINALITY" => {
+                        match arg_types.first() {
+                            Some(arg_t)
+                                if SimpleType::meet(arg_t, &SimpleType::Path).is_empty() =>
+                            {
+                                self.errors
+                                    .push(format!("{name} expects a PATH argument, got {arg_t}"));
+                            }
+                            None => self
+                                .errors
+                                .push(format!("{name} expects one PATH argument, got none")),
+                            _ => {}
+                        }
+                        match name.as_str() {
+                            // PATH_LENGTH (edge count) / CARDINALITY (element
+                            // count) are integers.
+                            "PATH_LENGTH" | "CARDINALITY" => SimpleType::Z,
+                            // ELEMENTS / NODES / EDGES are lists of node/edge
+                            // reference values.
+                            _ => SimpleType::List(Box::new(SimpleType::Star)),
+                        }
+                    }
                     other => {
                         self.errors
                             .push(format!("unknown built-in function `{other}`"));
@@ -992,6 +1033,7 @@ fn simple_type_of_value(v: &Value) -> SimpleType {
         Value::Record(_) => SimpleType::Star,
         Value::Node(_) => SimpleType::Node,
         Value::Edge(_) => SimpleType::Edge,
+        Value::Path(_) => SimpleType::Path,
     }
 }
 
@@ -1011,6 +1053,7 @@ fn variable_type_to_simple_type(t: &VariableType) -> SimpleType {
             &variable_type_to_simple_type(b),
         ),
         VariableType::Null => SimpleType::Star,
+        VariableType::Path => SimpleType::Path,
         VariableType::Zero => SimpleType::Zero,
         // Repetition-grouping is not projectable as a single value;
         // typing it as Star defers the runtime check (`Expr::Var` on
@@ -1152,6 +1195,7 @@ fn short_var_type(t: &VariableType) -> String {
         VariableType::Union(a, b) => format!("{} or {}", short_var_type(a), short_var_type(b)),
         VariableType::Group(inner) => format!("group<{}>", short_var_type(inner)),
         VariableType::Null => "Null".to_string(),
+        VariableType::Path => "path".to_string(),
         VariableType::Zero => "⊥".to_string(),
     }
 }
@@ -1171,7 +1215,8 @@ fn is_orderable_per_iso_22_14(t: &SimpleType) -> bool {
         | SimpleType::Record(_)
         | SimpleType::Group(_)
         | SimpleType::Node
-        | SimpleType::Edge => false,
+        | SimpleType::Edge
+        | SimpleType::Path => false,
     }
 }
 
@@ -1195,7 +1240,9 @@ fn collect_top_node_vars(p: &PathPattern, out: &mut Vec<String>) {
             collect_top_node_vars(a, out);
             collect_top_node_vars(b, out);
         }
-        PathPattern::Filter(inner, _) => collect_top_node_vars(inner, out),
+        PathPattern::Filter(inner, _) | PathPattern::Named { pattern: inner, .. } => {
+            collect_top_node_vars(inner, out)
+        }
         PathPattern::EdgeRight(_)
         | PathPattern::EdgeLeft(_)
         | PathPattern::EdgeUndirected(_)
@@ -1228,7 +1275,8 @@ fn count_var_occurrences(p: &PathPattern, out: &mut HashMap<String, usize>) {
         PathPattern::Filter(inner, _)
         | PathPattern::Questioned(inner)
         | PathPattern::Repeat { pattern: inner, .. }
-        | PathPattern::Selected { pattern: inner, .. } => count_var_occurrences(inner, out),
+        | PathPattern::Selected { pattern: inner, .. }
+        | PathPattern::Named { pattern: inner, .. } => count_var_occurrences(inner, out),
     }
 }
 
@@ -1244,7 +1292,8 @@ fn collect_selected<'a>(p: &'a PathPattern, out: &mut Vec<&'a PathPattern>) {
         }
         PathPattern::Filter(inner, _)
         | PathPattern::Questioned(inner)
-        | PathPattern::Repeat { pattern: inner, .. } => collect_selected(inner, out),
+        | PathPattern::Repeat { pattern: inner, .. }
+        | PathPattern::Named { pattern: inner, .. } => collect_selected(inner, out),
         PathPattern::Node(_)
         | PathPattern::EdgeRight(_)
         | PathPattern::EdgeLeft(_)

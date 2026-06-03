@@ -697,13 +697,38 @@ impl Parser {
         Ok(left)
     }
 
-    /// Parse one comma operand, wrapping meaningful prefixes in `Selected`.
+    /// Parse one comma operand, wrapping meaningful prefixes in `Selected`
+    /// and an optional `<path variable declaration>` in `Named`.
     fn path_pattern_operand(&mut self) -> Result<PathPattern, String> {
+        // ISO `<path variable declaration> ::= <binding variable> =`.
+        // A bare `Name =` at the start of an operand can only be a path
+        // variable binding: a comparison `=` never begins an operand, and
+        // the prefix/pattern grammar that follows never starts with `Name =`.
+        let path_var = if matches!(self.peek(), Token::Name(_))
+            && matches!(self.peek_at(1), Some(Token::Eq))
+        {
+            let name = match self.advance() {
+                Token::Name(n) => n,
+                _ => unreachable!("guarded by peek above"),
+            };
+            self.advance(); // consume '='
+            Some(name)
+        } else {
+            None
+        };
+
         let prefix = self.parse_path_prefix()?;
         let pattern = self.path_pattern()?;
-        Ok(match prefix {
+        let pattern = match prefix {
             Some(prefix) => PathPattern::Selected {
                 prefix,
+                pattern: Box::new(pattern),
+            },
+            None => pattern,
+        };
+        Ok(match path_var {
+            Some(var) => PathPattern::Named {
+                var,
                 pattern: Box::new(pattern),
             },
             None => pattern,
@@ -1683,6 +1708,23 @@ impl Parser {
             }
             Token::Name(name) => {
                 self.advance();
+                // ISO §20.16 path functions (`ELEMENTS`/`PATH_LENGTH`/
+                // `CARDINALITY`, plus the non-standard `NODES`/`EDGES`
+                // translation helpers) are soft keywords: only a call form
+                // `NAME(<expr>)` is special. A bare `NAME` stays a variable
+                // reference, so these names remain usable as variables and
+                // labels everywhere else.
+                if matches!(self.peek(), Token::LParen) {
+                    if let Some(canon) = path_function_name(&name) {
+                        self.advance(); // consume '('
+                        let arg = self.expr()?;
+                        self.expect(&Token::RParen)?;
+                        return Ok(Expr::Call {
+                            name: canon,
+                            args: vec![arg],
+                        });
+                    }
+                }
                 // First dot: variable-to-property. Subsequent dots: field access
                 // on the previous value (for nested records).
                 if self.eat(&Token::Dot) {
@@ -2531,6 +2573,20 @@ impl Parser {
             )),
         }
     }
+}
+
+/// Recognize a §20.16 path function name (case-insensitive) and return
+/// its canonical upper-case form for `Expr::Call`. `ELEMENTS` /
+/// `PATH_LENGTH` / `CARDINALITY` are ISO; `NODES` / `EDGES` are the
+/// non-standard translation helpers (documented as a divergence). Returns
+/// `None` for any other name so it stays a plain variable reference.
+fn path_function_name(name: &str) -> Option<String> {
+    let upper = name.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "ELEMENTS" | "NODES" | "EDGES" | "PATH_LENGTH" | "CARDINALITY"
+    )
+    .then_some(upper)
 }
 
 /// Direction of an edge in the schema body. Distinct from the runtime
