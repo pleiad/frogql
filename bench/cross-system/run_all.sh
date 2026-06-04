@@ -13,10 +13,16 @@
 #
 # Usage:
 #   bench/cross-system/run_all.sh \
-#       [--ics 2,3,11]                # default: 2
+#       [--ics 2,3,11]                # default: all implemented (1,2,3,4,5,
+#                                     #   6,7,8,9,11,12,13; IC10/IC14 blocked)
 #       [--iters N]                   # default: 10 measured iters per param row
 #       [--warmup N]                  # default: 2
 #       [--only gqlite,kuzu]          # subset of systems
+#       [--mem-limit-gb G]            # default: 10. Hard per-(system,IC) RSS
+#                                     #   cap. A runner whose process-group RSS
+#                                     #   crosses this is SIGKILLed and recorded
+#                                     #   as a memory_error (not a silent gap).
+#       [--sample-ms MS]              # default: 50. memrun RSS sampling period.
 #       [--rebuild-setup]             # force per-system setup re-run
 #                                     # (default: skip setup if DB exists)
 #       [--ablate]                    # run gqlite in 2 modes: baseline
@@ -39,10 +45,14 @@
 #   setup_times.txt         metadata: per-system setup wall time
 #   <system>.<icN>.csv      per (system, IC): per-iter latency rows
 #   cross_system.csv        all per-iter rows concatenated
+#   memory.csv              per (system, IC): peak RSS, status (ok /
+#                           memory_error / runner_error), wall time
+#   <system>.<icN>.mem.txt  per (system, IC) raw memrun key=value summary
 #   comparison.txt          compare_results.py output (per-IC tables)
-#   <system>.<icN>.stderr.log  per (system, IC) runner stderr
-#   skipped.log             any system+IC pair that couldn't run
-#   run_info.txt            timestamp, host, gqlite commit, etc.
+#   <system>.<icN>.stderr.log  per (system, IC) runner stderr (incl. memrun)
+#   skipped.log             any system+IC pair that couldn't run (incl.
+#                           [MEMLIMIT] rows for cap kills)
+#   run_info.txt            timestamp, host, gqlite commit, mem cap, etc.
 #
 # Prereq: ./target/release/bench_setup has been run so the LDBC SF0.1
 # CSVs are present under bench/data/ldbc-sf0.1/, and gqlite's own
@@ -56,12 +66,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RESULTS_ROOT="$SCRIPT_DIR/results"
 
-ICS_ARG="2,5,6,8,9,11"   # default: every IC currently flipped to status="implemented" in bench/ldbc-queries/. Keep this in sync as ICs come online.
+ICS_ARG="1,2,3,4,5,6,7,8,9,11,12,13"   # default: every IC currently flipped to status="implemented" in bench/ldbc-queries/ (IC10 + IC14 stay blocked). Keep this in sync as ICs come online.
 ITERS=10
 WARMUP=2
 ONLY=""
 REBUILD=0
 ABLATE=0
+MEM_LIMIT_GB=10          # hard per-(system,IC) RSS cap; exceeding it kills the
+                         # runner and records a memory_error. See _lib/memrun.py.
+SAMPLE_MS=50             # memrun sampling interval (ms).
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --ic|--ics)         ICS_ARG="$2"; shift 2 ;;
@@ -70,6 +83,8 @@ while [[ $# -gt 0 ]]; do
         --only)             ONLY="$2"; shift 2 ;;
         --rebuild-setup)    REBUILD=1; shift ;;
         --ablate)           ABLATE=1; shift ;;
+        --mem-limit-gb)     MEM_LIMIT_GB="$2"; shift 2 ;;
+        --sample-ms)        SAMPLE_MS="$2"; shift 2 ;;
         -h|--help)
             awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
             exit 0 ;;
@@ -94,6 +109,8 @@ START_EPOCH=$(date +%s)
     echo "warmup:           $WARMUP"
     echo "rebuild_setup:    $REBUILD"
     echo "ablate:           $ABLATE"
+    echo "mem_limit_gb:     $MEM_LIMIT_GB"
+    echo "sample_ms:        $SAMPLE_MS"
     echo "host:             $(hostname 2>/dev/null || echo unknown)"
     echo "uname:            $(uname -a 2>/dev/null || echo unknown)"
     echo "gqlite_branch:    $(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
@@ -122,12 +139,21 @@ else
 fi
 
 cd "$REPO_ROOT"
+
+# Every runner invocation is wrapped in this monitor: it samples the
+# runner's process-group RSS from /proc, records the peak, and SIGKILLs
+# the group if it crosses the cap (recorded as a memory_error). Pure
+# stdlib — no psutil needed. See _lib/memrun.py.
+MEMRUN=(python "$SCRIPT_DIR/_lib/memrun.py"
+        --limit-gb "$MEM_LIMIT_GB" --interval "$(awk "BEGIN{print $SAMPLE_MS/1000}")")
+
 echo "=== Cross-system bench — $TIMESTAMP ==="
-echo "  results: $OUT_DIR"
-echo "  ics:     ${IC_LIST[*]}"
-echo "  iters:   $ITERS"
-echo "  warmup:  $WARMUP"
-echo "  systems: ${SYSTEMS[*]}"
+echo "  results:   $OUT_DIR"
+echo "  ics:       ${IC_LIST[*]}"
+echo "  iters:     $ITERS"
+echo "  warmup:    $WARMUP"
+echo "  systems:   ${SYSTEMS[*]}"
+echo "  mem cap:   ${MEM_LIMIT_GB} GiB/runner (sample every ${SAMPLE_MS} ms)"
 [[ $REBUILD -eq 1 ]] && echo "  setup:   --rebuild-setup (force fresh per-system load)"
 [[ $ABLATE -eq 1 ]] && echo "  ablate:  --ablate (gqlite: baseline + lazy-no-fold)"
 echo ""
@@ -326,11 +352,20 @@ for sys in "${SYSTEMS[@]}"; do
                 extra_args="${ABLATION_ARGS[$mode]}"
                 out_csv="$OUT_DIR/${sys}-${mode}.ic${ic}.csv"
                 stderr_log="$OUT_DIR/${sys}-${mode}.ic${ic}.stderr.log"
+                mem_out="$OUT_DIR/${sys}-${mode}.ic${ic}.mem.txt"
                 echo "    [ablation: $label] env: ${env_setup:-(none)} args: ${extra_args:-(none)}"
-                if ! eval "$env_setup $runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP $extra_args" \
+                # env_setup goes BEFORE memrun so the child (the actual
+                # runner) inherits the GQLITE_DISABLE_* var across exec.
+                if ! eval "$env_setup ${MEMRUN[*]} --peak-out $mem_out --label ${sys}-${mode}-ic${ic} -- $runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP $extra_args" \
                         2>"$stderr_log"; then
-                    echo "[FAIL] $sys $mode ic$ic runner returned non-zero" \
-                        | tee -a "$OUT_DIR/skipped.log"
+                    mem_status=$(awk -F= '/^status=/{print $2}' "$mem_out" 2>/dev/null)
+                    if [[ "$mem_status" == "memory_error" ]]; then
+                        echo "[MEMLIMIT] $sys $mode ic$ic exceeded ${MEM_LIMIT_GB} GiB — runner killed" \
+                            | tee -a "$OUT_DIR/skipped.log"
+                    else
+                        echo "[FAIL] $sys $mode ic$ic runner returned non-zero" \
+                            | tee -a "$OUT_DIR/skipped.log"
+                    fi
                     continue
                 fi
                 # Rewrite column 2 (`backend`) on every data row from
@@ -345,10 +380,17 @@ for sys in "${SYSTEMS[@]}"; do
         else
             out_csv="$OUT_DIR/${sys}.ic${ic}.csv"
             stderr_log="$OUT_DIR/${sys}.ic${ic}.stderr.log"
-            if ! eval "$runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP" \
+            mem_out="$OUT_DIR/${sys}.ic${ic}.mem.txt"
+            if ! eval "${MEMRUN[*]} --peak-out $mem_out --label ${sys}-ic${ic} -- $runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP" \
                     2>"$stderr_log"; then
-                echo "[FAIL] $sys ic$ic runner returned non-zero" \
-                    | tee -a "$OUT_DIR/skipped.log"
+                mem_status=$(awk -F= '/^status=/{print $2}' "$mem_out" 2>/dev/null)
+                if [[ "$mem_status" == "memory_error" ]]; then
+                    echo "[MEMLIMIT] $sys ic$ic exceeded ${MEM_LIMIT_GB} GiB — runner killed" \
+                        | tee -a "$OUT_DIR/skipped.log"
+                else
+                    echo "[FAIL] $sys ic$ic runner returned non-zero" \
+                        | tee -a "$OUT_DIR/skipped.log"
+                fi
             fi
         fi
     done
@@ -365,8 +407,8 @@ produced=0
 for csv in "$OUT_DIR"/*.csv; do
     [[ -f "$csv" ]] || continue
     base="$(basename "$csv")"
-    # Skip the unified file itself if a previous run left one.
-    [[ "$base" == "cross_system.csv" ]] && continue
+    # Skip aggregate files (not per-(sys,ic) latency CSVs).
+    [[ "$base" == "cross_system.csv" || "$base" == "memory.csv" ]] && continue
     produced=$((produced + 1))
     if [[ $header_written -eq 0 ]]; then
         head -n 1 "$csv" > "$unified"
@@ -390,6 +432,48 @@ echo "  unified: $unified ($(wc -l <"$unified") lines, $produced per-(sys,ic) CS
 echo ""
 echo "--- Setup times ---"
 column -t "$SETUP_TIMES_FILE" 2>/dev/null || cat "$SETUP_TIMES_FILE"
+
+# ---- Memory summary -------------------------------------------------
+#
+# Each runner ran under _lib/memrun.py, which dropped a `key=value`
+# `<sys>[...].ic<n>.mem.txt` with the peak process-group RSS, status,
+# and wall time. Fold those into one machine-readable memory.csv plus
+# a human table. The `status` column flags any (system, IC) that the
+# cap killed (`memory_error`) so a runaway query is visible, not just
+# silently absent from the latency CSV.
+
+MEMORY_CSV="$OUT_DIR/memory.csv"
+echo "system_ic;status;peak_rss_mib;limit_mib;wall_seconds;exit_code" > "$MEMORY_CSV"
+shopt -s nullglob
+for memf in "$OUT_DIR"/*.mem.txt; do
+    # Reload key=value pairs from this runner's summary.
+    unset label status peak_rss_mib limit_mib elapsed_s exit_code
+    # shellcheck disable=SC1090
+    while IFS='=' read -r k v; do
+        case "$k" in
+            label) label="$v" ;;
+            status) status="$v" ;;
+            peak_rss_mib) peak_rss_mib="$v" ;;
+            limit_mib) limit_mib="$v" ;;
+            elapsed_s) elapsed_s="$v" ;;
+            exit_code) exit_code="$v" ;;
+        esac
+    done < "$memf"
+    base="$(basename "$memf" .mem.txt)"
+    echo "${base};${status:-?};${peak_rss_mib:-?};${limit_mib:-?};${elapsed_s:-?};${exit_code:-?}" \
+        >> "$MEMORY_CSV"
+done
+shopt -u nullglob
+
+echo ""
+echo "--- Memory (peak RSS per system+IC; cap ${MEM_LIMIT_GB} GiB) ---"
+# Pretty table; the leading 'cat' keeps the header. memory_error rows
+# are the headline — a query the cap had to kill.
+column -t -s';' "$MEMORY_CSV" 2>/dev/null || cat "$MEMORY_CSV"
+if grep -q ';memory_error;' "$MEMORY_CSV"; then
+    echo ""
+    echo "  !! memory_error rows above hit the ${MEM_LIMIT_GB} GiB cap and were killed."
+fi
 
 # ---- Comparison -----------------------------------------------------
 
