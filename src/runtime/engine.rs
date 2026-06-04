@@ -155,6 +155,13 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// comprehension element (a `Value`, which `Assignment` cannot hold)
     /// resolves correctly. Pushed/popped per element during evaluation.
     comprehension_scope: RefCell<Vec<(String, Value)>>,
+    /// Outer bindings made visible inside a *parameter-correlated* subquery
+    /// body — outer variables referenced in the body's WHERE/RETURN but not
+    /// bound by the body's own pattern. `Expr::Var` / `Expr::AttrLookup`
+    /// fall back to this (a stack, innermost last) when the local
+    /// `Assignment` does not bind the name. Set per outer row while the
+    /// correlated body runs.
+    correlation_scope: RefCell<Vec<Assignment>>,
 }
 
 /// Cached evaluation result for an existential predicate.
@@ -189,6 +196,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
             comprehension_scope: RefCell::new(Vec::new()),
+            correlation_scope: RefCell::new(Vec::new()),
         }
     }
 
@@ -204,6 +212,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
             comprehension_scope: RefCell::new(Vec::new()),
+            correlation_scope: RefCell::new(Vec::new()),
         }
     }
 
@@ -2246,6 +2255,36 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             .map(|(_, v)| v.clone())
     }
 
+    /// Resolve a name against the correlated-subquery scope stack
+    /// (innermost last). Used as a fallback when the local `Assignment`
+    /// does not bind a variable referenced inside a parameter-correlated
+    /// subquery body.
+    fn correlation_lookup(&self, name: &str) -> Option<PathValue> {
+        self.correlation_scope
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|a| a.get(name).cloned())
+    }
+
+    /// Property/edge attribute read on a `PathValue` (the shared body of
+    /// `AttrLookup` over a binding-table or correlated binding).
+    fn attr_of_pathvalue(&self, pv: &PathValue, var: &str, attr: &str) -> ExprResult {
+        let id = match pv.id() {
+            Some(id) => id,
+            None => return ExprResult::Failure(format!("variable '{var}' has no id")),
+        };
+        let props = if pv.is_node() {
+            self.graph.node_props(id)
+        } else {
+            self.graph.edge_props(id)
+        };
+        match props.get(attr) {
+            Some(v) => ExprResult::Success(v.clone()),
+            None => ExprResult::Failure(format!("attribute '{attr}' not found")),
+        }
+    }
+
     /// Attribute access on a comprehension element `Value`: graph element
     /// props for Node/Edge references, field access for a record. A missing
     /// attribute is null (3VL), consistent with `AttrLookup` on `mu`.
@@ -2287,7 +2326,10 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 }
                 match mu.get(name) {
                     Some(pv) => ExprResult::Success(path_value_to_value(pv)),
-                    None => ExprResult::Failure(format!("variable '{name}' not bound")),
+                    None => match self.correlation_lookup(name) {
+                        Some(pv) => ExprResult::Success(path_value_to_value(&pv)),
+                        None => ExprResult::Failure(format!("variable '{name}' not bound")),
+                    },
                 }
             }
 
@@ -2298,22 +2340,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 if let Some(v) = self.comprehension_lookup(var) {
                     return self.attr_of_value(&v, attr);
                 }
-                let pv = match mu.get(var) {
-                    Some(pv) => pv,
-                    None => return ExprResult::Failure(format!("variable '{var}' not bound")),
-                };
-                let id = match pv.id() {
-                    Some(id) => id,
-                    None => return ExprResult::Failure(format!("variable '{var}' has no id")),
-                };
-                let props = if pv.is_node() {
-                    self.graph.node_props(id)
-                } else {
-                    self.graph.edge_props(id)
-                };
-                match props.get(attr) {
-                    Some(v) => ExprResult::Success(v.clone()),
-                    None => ExprResult::Failure(format!("attribute '{attr}' not found")),
+                match mu.get(var) {
+                    Some(pv) => self.attr_of_pathvalue(pv, var, attr),
+                    None => match self.correlation_lookup(var) {
+                        Some(pv) => self.attr_of_pathvalue(&pv, var, attr),
+                        None => ExprResult::Failure(format!("variable '{var}' not bound")),
+                    },
                 }
             }
 
@@ -2610,6 +2642,17 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     fn eval_value_subquery(&self, mu: &Assignment, body: &Query) -> ExprResult {
         let body_ptr = body as *const Query as usize;
 
+        // Parameter correlation: outer vars referenced in the body but not
+        // bound by its pattern. When present (and no shared pattern-variable
+        // correlation to fold via the cache), evaluate per outer row with
+        // those parameters bound as an ambient correlated scope.
+        let outer_keys = mu.keys();
+        let shared_empty = query_freevars(body).iter().all(|v| !outer_keys.contains(v));
+        let params = param_correlation(body, &outer_keys);
+        if !params.is_empty() && shared_empty {
+            return self.eval_value_subquery_param_correlated(mu, body, &params);
+        }
+
         let need_build = !self.value_subquery_cache.borrow().contains_key(&body_ptr);
         if need_build {
             // Correlation = body free vars also bound in the outer row.
@@ -2678,6 +2721,49 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         ExprResult::Success(entry.map.get(&probe).cloned().unwrap_or(Value::Null))
     }
 
+    /// Per-outer-row evaluation of a parameter-correlated `VALUE { ... }`
+    /// body: bind the correlated parameters as an ambient scope, run the
+    /// body, project its single RETURN item (aggregating when the item is
+    /// aggregate-bearing or a GROUP BY is present), apply ORDER BY + LIMIT 1,
+    /// and keep the scalar. Not cached — depends on the outer row.
+    fn eval_value_subquery_param_correlated(
+        &self,
+        mu: &Assignment,
+        body: &Query,
+        params: &[String],
+    ) -> ExprResult {
+        let mut amb = Assignment::new();
+        for v in params {
+            if let Some(pv) = mu.get(v) {
+                amb.extend(v.clone(), pv.clone());
+            }
+        }
+        self.correlation_scope.borrow_mut().push(amb);
+        let ir = self.run_match_chain(body, /*limit=*/ 0);
+        self.correlation_scope.borrow_mut().pop();
+
+        let items = body.returns.as_deref().unwrap_or(&[]);
+        let needs_grouping = body.group_by.is_some()
+            || items.iter().any(|it| match it {
+                ReturnItem::Aggregate { .. } => true,
+                ReturnItem::Expr { expr, .. } => expr.contains_agg(),
+            });
+        let mut projected = if needs_grouping {
+            self.run_aggregated(items, body.group_by.as_deref(), &ir.rows)
+        } else {
+            self.run_row_by_row(items, &ir.rows, /*distinct=*/ false)
+        };
+        if let Some(specs) = &body.order_by {
+            sort_projected_rows(&mut projected, specs, /*limit=*/ 1);
+        }
+        let value = projected
+            .first()
+            .and_then(|cols| cols.first())
+            .cloned()
+            .unwrap_or(Value::Null);
+        ExprResult::Success(value)
+    }
+
     /// Runtime evaluation of `EXISTS L` and `NOT EXISTS L`. Uncorrelated
     /// bodies cache one bool; correlated bodies cache a semi/anti-join
     /// table keyed by the shared variables.
@@ -2693,10 +2779,45 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
 
         let body_ptr = body as *const Query as usize;
 
+        // Parameter correlation: outer variables the body references in its
+        // WHERE/RETURN but does not bind in its own pattern. When present
+        // (and there is no shared pattern-variable correlation to fold via
+        // the cached semi-join), evaluate per outer row with those
+        // parameters bound as an ambient correlated scope.
+        let params = param_correlation(body, &outer_keys);
+        if !params.is_empty() && correlation.is_empty() {
+            return self.eval_exists_param_correlated(mu, body, &params, negated);
+        }
+
         if correlation.is_empty() {
             return self.eval_exists_uncorrelated(body, body_ptr, negated);
         }
         self.eval_exists_correlated(mu, body, body_ptr, &correlation, negated)
+    }
+
+    /// Per-outer-row evaluation of a parameter-correlated EXISTS body: bind
+    /// the correlated parameters as an ambient scope, run the body once
+    /// (limit 1), and report non-emptiness. Not cached — the result depends
+    /// on the outer row's parameter values.
+    fn eval_exists_param_correlated(
+        &self,
+        mu: &Assignment,
+        body: &Query,
+        params: &[String],
+        negated: bool,
+    ) -> ExprResult {
+        let mut amb = Assignment::new();
+        for v in params {
+            if let Some(pv) = mu.get(v) {
+                amb.extend(v.clone(), pv.clone());
+            }
+        }
+        self.correlation_scope.borrow_mut().push(amb);
+        let ir = self.run_match_chain(body, 1);
+        self.correlation_scope.borrow_mut().pop();
+        let nonempty = !ir.rows.is_empty();
+        let truth = if negated { !nonempty } else { nonempty };
+        ExprResult::Success(Value::Bool(truth))
     }
 
     fn eval_exists_uncorrelated(&self, body: &Query, body_ptr: usize, negated: bool) -> ExprResult {
@@ -2894,6 +3015,68 @@ fn query_freevars(q: &Query) -> HashSet<String> {
         acc.extend(m.pattern().freevars());
     }
     acc
+}
+
+/// Variables *referenced* (not declared) anywhere in a query's
+/// expressions: the predicates of `Filter` patterns plus RETURN / GROUP BY
+/// / ORDER BY exprs. `Expr::referenced_vars` does not descend into nested
+/// subqueries (those handle their own correlation), so a returned name is
+/// either bound locally or correlated from an enclosing scope.
+fn query_referenced_expr_vars(q: &Query) -> HashSet<String> {
+    fn walk_pattern(p: &PathPattern, acc: &mut std::collections::BTreeSet<String>) {
+        match p {
+            PathPattern::Filter(inner, expr) => {
+                expr.referenced_vars(acc);
+                walk_pattern(inner, acc);
+            }
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                walk_pattern(a, acc);
+                walk_pattern(b, acc);
+            }
+            PathPattern::Repeat { pattern, .. }
+            | PathPattern::Questioned(pattern)
+            | PathPattern::Selected { pattern, .. }
+            | PathPattern::Named { pattern, .. } => walk_pattern(pattern, acc),
+            _ => {}
+        }
+    }
+    let mut acc = std::collections::BTreeSet::new();
+    for m in &q.matches {
+        walk_pattern(m.pattern(), &mut acc);
+    }
+    if let Some(items) = &q.returns {
+        for it in items {
+            if let ReturnItem::Expr { expr, .. } = it {
+                expr.referenced_vars(&mut acc);
+            }
+        }
+    }
+    if let Some(gb) = &q.group_by {
+        for e in gb {
+            e.referenced_vars(&mut acc);
+        }
+    }
+    if let Some(ob) = &q.order_by {
+        for spec in ob {
+            if let crate::syntax::query::SortKey::Expr(e) = &spec.key {
+                e.referenced_vars(&mut acc);
+            }
+        }
+    }
+    acc.into_iter().collect()
+}
+
+/// Outer variables a subquery body references in its expressions but does
+/// *not* bind in its own pattern — true correlated parameters. The runtime
+/// must make these available (as an ambient binding) while the body runs.
+fn param_correlation(body: &Query, outer_keys: &HashSet<String>) -> Vec<String> {
+    let declared = query_freevars(body);
+    let mut params: Vec<String> = query_referenced_expr_vars(body)
+        .into_iter()
+        .filter(|v| !declared.contains(v) && outer_keys.contains(v))
+        .collect();
+    params.sort();
+    params
 }
 
 /// (variables that appear on both sides). When no key is shared, the result
