@@ -4,36 +4,30 @@
 
 id = 14
 name = "Trusted connection paths (v1)"
-status = "blocked"
+status = "implemented"
 
-blocked_reason = """
-One parser gap remaining. Re-audited 2026-06-03 (post named-path cluster):
-  - `[n IN NODES(path) | n.id]` — list comprehension `[x IN list | f(x)]`
-    not in parser. See §2.10.
-
-What's now fine:
-  - `MATCH path = ALL SHORTEST (...)` — named path patterns landed
-    (2026-06-03); both the `ALL SHORTEST` prefix and the named-path
-    binding work, and `NODES(path)` resolves (non-standard helper). See §2.9.
-  - `VALUE { ... }` — value subquery landed with the IC7 cluster
-    (2026-06-03).
-  - `COUNT(c) * 1.0`, `COUNT(c1) * 0.5` — multiplication `*` parses
-    (the previous audit was wrong); division `/` also lands now.
-  - `pe1 <> pe2` — bare-node `<>` works since PR #42.
-
-Once list comprehension lands, this IC runs. See the IC roadmap in
-iso-gql-gaps.md.
-"""
-
-required_features = [
-    "list comprehension `[x IN list | expr]`",
-]
+# Re-audited 2026-06-04. All gaps cleared:
+#   - `[n IN NODES(path) | n.id]` — list comprehension landed (§2.10).
+#   - Correlated WHERE inside the VALUE subqueries (`pe1 IN NODES(path)`
+#     references the outer `path`) — parameter-correlated subquery bodies
+#     landed in typecheck + runtime (§2.13).
+#   - `MATCH path = ALL SHORTEST (...)`, `NODES(path)`, `VALUE { ... }`,
+#     `COUNT(c) * 1.0`, `pe1 <> pe2` — all already supported.
+#
+# Translation divergence vs the Cypher source: an explicit `GROUP BY path`
+# is added. The query weighs each shortest path independently (one row per
+# path); the SUM aggregates the per-person-pair interaction scores within a
+# path. The Cypher form groups per path implicitly via its structure; ISO
+# GQL needs the grouping element spelled out, and `path` (the named-path
+# binding) is the grouping key. `NODES(path)` is itself a non-ISO
+# translation helper (see §2.9).
 
 params_file = "interactive_14_param.txt"
 param_columns = ["person1Id", "person2Id"]
+param_types = ["int", "int"]
 query = """
 MATCH path = ALL SHORTEST (p1:Person {id: $person1Id})~[:knows]~*(p2:Person {id: $person2Id})
-RETURN 
+RETURN
     [n IN NODES(path) | n.id] AS personIdsInPath,
     SUM(
         VALUE {
@@ -51,5 +45,6 @@ RETURN
             RETURN COUNT(c1) * 0.5
         }
     ) AS pathWeight
+GROUP BY path
 ORDER BY pathWeight DESC
 """
