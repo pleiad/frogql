@@ -94,7 +94,7 @@ Estado de expresiones que bloqueaban ICs:
 - `CASE WHEN <cond> THEN <e> ELSE <e> END` (`<case expression>`) — implementado.
 - `MOD(a,b)` (`<modulus expression>`) — implementado con la forma funcional ISO; no se acepta `a MOD b`.
 - IC10 sigue necesitando expresar una ventana de cumpleaños por mes/día. La forma `EXTRACT(MONTH|DAY FROM ...)` no es ISO GQL en ISO/IEC 39075:2024, por lo que no se implementa como superficie del lenguaje. Falta soporte temporal ISO real o una traducción ISO-conformante equivalente.
-- List comprehension `[x IN <list> | <expr>]` (`<list value constructor by enumeration>` con filtro/map) — bloquea IC14. Nuevo `Expr::ListComprehension`.
+- List comprehension `[x IN <source> [WHERE <f>] | <body>]` (`<list value constructor by enumeration>` con filtro/map) — **implementado (2026-06-04)**. Nuevo `Expr::ListComprehension { var, source, filter, body }`. El parser la desambigua de un literal de lista por el separador `|` (con rewind). `var` se liga localmente a cada elemento del `source` (un `Value::List`): el typechecker la tipa como `List(Star)` vía un *scope stack* (`comprehension_scope` en `Typechecker`), y el runtime usa un scope análogo (`comprehension_scope` en `Runtime`, `RefCell<Vec<(String, Value)>>`) porque `Assignment` solo guarda `PathValue` y no puede contener elementos escalares; `Var`/`AttrLookup` consultan ese scope antes que la fila de binding. Source nula/vacía → lista vacía; un elemento que falla mapea a `Null` (3VL). Tests en `tests/list_comprehension_test.rs`.
 
 #### 2.11 COLLECT_LIST / multiset — implementado (2026-06-03)
 
@@ -109,6 +109,16 @@ Era prerequisito de IC1 e IC12; ambos además agrupaban por *alias* de RETURN, y
 Implementación: una pre-pasada de **resolución de nombres en elaboración** (`src/elaborate/mod.rs::resolve_group_key`). Para cada clave de GROUP BY que es un `Expr::Var(name)` bare: si `name` es variable de binding del patrón se deja (gana la variable — shadowing); si es alias de un `RETURN <expr> AS name` se sustituye por la expresión aliaseada (ya elaborada); si no es ninguno se deja para que el typechecker reporte "Variable not found". Va en elaboración (no en el optimizer) porque la resolución la necesitan tanto el typechecker como el runtime de agrupamiento. Tras la sustitución, el chequeo de dependencia funcional pasa por igualdad estructural y el runtime evalúa la expresión real contra las filas. Nota de eficiencia: la clave se evalúa una vez por fila y la proyección una vez por grupo (igual que la forma deletreada); el "compute-once" real requeriría `LET` (2.1). Tests en `tests/group_by_alias_test.rs`.
 
 Pendiente menor: alias **dentro** de una expresión en GROUP BY (`GROUP BY CAST(friendId AS INTEGER)`) — solo se resuelve el alias bare. Para ORDER BY, `<alias>` a secas lo resuelve `order_by_alias.rs`, y `<alias>.<campo>` / `CAST(<alias> AS tipo)` ya están vía `SortKey::ColumnField` / `SortKey::ColumnCast`.
+
+#### 2.13 Gaps restantes de IC14 (descubiertos 2026-06-04)
+
+Tras implementar la list comprehension (2.10) — que era el blocker anotado —, IC14 reveló **dos gaps adicionales** que el audit previo no había detectado. Ninguno es de la comprehension (que funciona: `[n IN NODES(path) | n.id]` typechequea y corre):
+
+1. **Typecheck de WHERE correlacionado dentro de cuerpos de subquery.** Una expresión WHERE en el cuerpo de un `EXISTS { ... }` / `VALUE { ... }` que referencia una variable **externa** falla con "Variable X not found in context". Es una limitación **general** del typechecker (no específica de `path` ni de la comprehension): `MATCH (a) RETURN VALUE { MATCH (x) WHERE x.id = a.id RETURN COUNT(x) }` también falla. `check_subquery_body` clona el entorno externo para la cadena MATCH del cuerpo, pero el WHERE del cuerpo se chequea contra el entorno interno del patrón, que no incluye las variables correlacionadas. IC14 lo dispara con `WHERE pe1 IN NODES(path) AND pe2 IN NODES(path)` dentro de dos `VALUE { ... }`. (El runtime de correlación sí funciona; el hueco es solo de tipado.)
+
+2. **RETURN que mezcla agregado y no-agregado sin GROUP BY.** IC14 proyecta `personIdsInPath` (la comprehension, no-agg) y `pathWeight` (`SUM(...)`, agg) sin GROUP BY. El typechecker exige GROUP BY explícito para un RETURN mixto; IC14 quiere una agrupación implícita (una fila por camino). Falta decidir la semántica de agrupación implícita o reescribir el query.
+
+Hasta cerrar (1) y (2), IC14 queda bloqueado pese a tener la list comprehension, los named paths, `VALUE` y `*`.
 
 ### Tier 3: producción, no investigación
 
@@ -132,7 +142,7 @@ Estado de los 14 IC del benchmark cross-system (`bench/ldbc-queries/ic*.toml`). 
 |----|--------|----------------|
 | IC1, IC2, IC3, IC4, IC5, IC6, IC7, IC8, IC9, IC11, IC12, IC13 | implementado | — |
 | IC10 | blocked | temporal ISO para predicado de cumpleaños por mes/día (2.10). `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ✅ |
-| IC14 | blocked | list comprehension (2.10). Named paths + `NODES` ✅ (2.9), `VALUE` ✅, `*` ✅ |
+| IC14 | blocked | dos gaps (ver 2.13). List comprehension ✅ (2.10), named paths + `NODES` ✅ (2.9), `VALUE` ✅, `*` ✅ |
 
 ### Roadmap para los 14 IC completos
 
@@ -141,14 +151,15 @@ Ordenado por leverage (ICs desbloqueados por feature):
 1. ~~**Named path patterns + path functions** (2.9)~~ — **hecho (2026-06-03)**. `MATCH path = [ANY|ALL] SHORTEST (...)`, `ELEMENTS`, `PATH_LENGTH`, `CARDINALITY`, más `NODES`/`EDGES` (divergencia). Desbloqueó el prerequisito de **IC1, IC13, IC14**.
 2. ~~**`COLLECT_LIST` / multiset aggregate** (2.11)~~ — **hecho (2026-06-03)**. `GeneralSetKind::CollectList`, reducer a `Value::List`, drop de records all-null. Era prerequisito de **IC1 e IC12**, pero ninguno cierra sin (3).
 3. ~~**GROUP BY por alias** (2.12)~~ — **hecho (2026-06-04)**. Resolución de nombres en una pre-pasada de elaboración (`resolve_group_key`). Cerró **IC1 e IC12** (este último con la divergencia de traducción `{0,}`→prefijo `ACYCLIC` ya aplicada en su toml, sin código nuevo).
-4. **Temporales ISO para la ventana de cumpleaños de IC10** (2.10) — cierra **IC10**. No usar `EXTRACT(...)` como atajo: no es sintaxis ISO GQL.
-5. **List comprehension `[x IN list | expr]`** (2.10) — cierra **IC14**. `Expr::ListComprehension` + runtime sobre `Value::List`.
+4. ~~**List comprehension `[x IN list | expr]`** (2.10)~~ — **hecho (2026-06-04)**. `Expr::ListComprehension` + scope local en typechecker y runtime. Era prerequisito de **IC14**, pero **no suficiente** (ver 2.13).
+5. **Temporales ISO para la ventana de cumpleaños de IC10** (2.10) — cierra **IC10**. No usar `EXTRACT(...)` como atajo: no es sintaxis ISO GQL.
+6. **Correlación de WHERE en cuerpos de subquery + RETURN agg/no-agg mixto** (2.13) — cierra **IC14**.
 
-Quedan **IC10** (temporales ISO) e **IC14** (list comprehension). Named paths (1), `COLLECT_LIST` (2), GROUP BY por alias (3), `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ya están.
+Quedan **IC10** (temporales ISO) e **IC14** (los dos gaps de 2.13). Named paths (1), `COLLECT_LIST` (2), GROUP BY por alias (3), list comprehension (4), `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ya están.
 
 ## Recomendación
 
-Si el objetivo es cerrar los 14 LDBC IC, seguir el *Roadmap para los 14 IC completos* de arriba: `GROUP BY` por alias, temporales ISO para IC10 y list comprehension.
+Si el objetivo es cerrar los 14 LDBC IC, quedan dos: **IC10** (temporales ISO) e **IC14** (WHERE correlacionado en cuerpos de subquery + RETURN agg/no-agg mixto, 2.13). GROUP BY por alias, list comprehension, named paths, `COLLECT_LIST`, `CASE`, `MOD` y `ORDER BY CAST(alias)` ya están.
 
 Si el orden es por valor para queries de usuario en general:
 

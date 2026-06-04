@@ -153,6 +153,27 @@ pub fn elaborate_expr(e: Expr) -> Expr {
                 .map(|(k, e)| (k, elaborate_expr(e)))
                 .collect(),
         },
+        Expr::Case {
+            branches,
+            else_expr,
+        } => Expr::Case {
+            branches: branches
+                .into_iter()
+                .map(|(c, v)| (elaborate_expr(c), elaborate_expr(v)))
+                .collect(),
+            else_expr: else_expr.map(|e| Box::new(elaborate_expr(*e))),
+        },
+        Expr::ListComprehension {
+            var,
+            source,
+            filter,
+            body,
+        } => Expr::ListComprehension {
+            var,
+            source: Box::new(elaborate_expr(*source)),
+            filter: filter.map(|f| Box::new(elaborate_expr(*f))),
+            body: Box::new(elaborate_expr(*body)),
+        },
         other => other,
     }
 }

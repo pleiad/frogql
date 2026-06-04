@@ -131,6 +131,18 @@ fn fold_in_expr(e: &mut Expr, schema: &Schema) {
                 fold_in_expr(value, schema);
             }
         }
+        Expr::ListComprehension {
+            source,
+            filter,
+            body,
+            ..
+        } => {
+            fold_in_expr(source, schema);
+            if let Some(f) = filter {
+                fold_in_expr(f, schema);
+            }
+            fold_in_expr(body, schema);
+        }
         Expr::Const(_) | Expr::Var(_) | Expr::AttrLookup { .. } | Expr::Type(_) => {}
     }
 

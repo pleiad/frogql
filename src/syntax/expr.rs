@@ -199,6 +199,17 @@ pub enum Expr {
         branches: Vec<(Expr, Expr)>,
         else_expr: Option<Box<Expr>>,
     },
+    /// ISO §16.x `<list value constructor by enumeration>` with a
+    /// filter/map — `[<var> IN <source> [WHERE <filter>] | <body>]`. Binds
+    /// `var` to each element of the `source` list, keeps elements for which
+    /// `filter` holds (when present), and collects `body` evaluated per
+    /// element into a new list. `var` is scoped to `filter`/`body` only.
+    ListComprehension {
+        var: String,
+        source: Box<Expr>,
+        filter: Option<Box<Expr>>,
+        body: Box<Expr>,
+    },
     /// Right-hand side of `is`/`as` operators — a type, not a value.
     Type(SimpleType),
     /// `EXISTS { <body> }` — Boolean predicate over a subquery body.
@@ -247,6 +258,16 @@ impl Expr {
                     || else_expr.as_deref().is_some_and(Expr::contains_agg)
             }
             Expr::Record { fields } => fields.iter().any(|(_, e)| e.contains_agg()),
+            Expr::ListComprehension {
+                source,
+                filter,
+                body,
+                ..
+            } => {
+                source.contains_agg()
+                    || filter.as_deref().is_some_and(Expr::contains_agg)
+                    || body.contains_agg()
+            }
             Expr::Const(_)
             | Expr::Var(_)
             | Expr::AttrLookup { .. }
@@ -286,6 +307,16 @@ impl Expr {
                     || else_expr.as_deref().is_some_and(Expr::contains_subquery)
             }
             Expr::Record { fields } => fields.iter().any(|(_, e)| e.contains_subquery()),
+            Expr::ListComprehension {
+                source,
+                filter,
+                body,
+                ..
+            } => {
+                source.contains_subquery()
+                    || filter.as_deref().is_some_and(Expr::contains_subquery)
+                    || body.contains_subquery()
+            }
             Expr::Const(_)
             | Expr::Var(_)
             | Expr::AttrLookup { .. }
@@ -339,6 +370,23 @@ impl Expr {
                 for (_, e) in fields {
                     e.referenced_vars(acc);
                 }
+            }
+            Expr::ListComprehension {
+                var,
+                source,
+                filter,
+                body,
+            } => {
+                // `source` is evaluated in the outer scope; `filter`/`body`
+                // see `var` locally, so its references don't escape.
+                source.referenced_vars(acc);
+                let mut inner = std::collections::BTreeSet::new();
+                if let Some(f) = filter {
+                    f.referenced_vars(&mut inner);
+                }
+                body.referenced_vars(&mut inner);
+                inner.remove(var);
+                acc.extend(inner);
             }
             // Subqueries are handled via `contains_subquery`; their
             // internal references are out of scope here.
@@ -433,6 +481,15 @@ impl fmt::Display for Expr {
                 }
                 write!(f, " END")
             }
+            Expr::ListComprehension {
+                var,
+                source,
+                filter,
+                body,
+            } => match filter {
+                Some(cond) => write!(f, "[{var} IN {source} WHERE {cond} | {body}]"),
+                None => write!(f, "[{var} IN {source} | {body}]"),
+            },
             Expr::Type(t) => write!(f, "{t}"),
             Expr::Exists { body } => write!(f, "EXISTS {{ {} }}", display_subquery(body)),
             Expr::NotExists { body } => write!(f, "NOT EXISTS {{ {} }}", display_subquery(body)),
