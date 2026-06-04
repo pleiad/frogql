@@ -6,8 +6,9 @@
 # box down).
 #
 # This is the "run it on a separate Linux server" entry point. It:
-#   1. verifies / builds the gqlite release binaries (ldbc_bench,
-#      bench_setup);
+#   1. verifies / builds the gqlite release binaries (frogql,
+#      ldbc_bench, bench_setup — bench_setup shells out to frogql to
+#      import the CSVs into the .gdb);
 #   2. downloads + builds the LDBC SF0.1 dataset (bench_setup) if the
 #      .gdb / CSVs are missing — Linux only, no Windows UAC issue;
 #   3. installs the Python deps for the external engines if asked;
@@ -112,8 +113,8 @@ fi
 
 # --- gqlite release binaries -----------------------------------------
 log "Building gqlite release binaries"
-cargo build --release --bin ldbc_bench --bin bench_setup
-echo "  ldbc_bench + bench_setup built."
+cargo build --release --bin frogql --bin ldbc_bench --bin bench_setup
+echo "  frogql + ldbc_bench + bench_setup built."
 
 # --- LDBC dataset ----------------------------------------------------
 if [[ $REBUILD_DATA -eq 1 || ! -f "$GDB" || ! -d "$CSV_DIR" ]]; then
