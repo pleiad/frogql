@@ -3,30 +3,14 @@
 
 id = 1
 name = "Transitive friends with a certain name"
-status = "blocked"
+status = "implemented"
 
-blocked_reason = """
-One gap remaining. Re-audited 2026-06-03 (post COLLECT_LIST / casted alias ordering):
-  - GROUP BY by RETURN *alias* — the query groups by `friendId,
-    friendLastName, distanceFromPerson, ...` (all RETURN aliases, not
-    binding variables). The typechecker only groups by binding variable
-    and rejects the alias with "Variable friendId not found in context".
-    See iso-gql-gaps.md §2.12.
-
-What's now fine:
-  - `COLLECT_LIST(...)` — list aggregate landed (2026-06-03); `COLLECT`
-    / `ARRAY_AGG` aliases too. Drops all-null records from empty OPTIONAL.
-  - `MATCH path = ...` — named path patterns landed (2026-06-03), with
-    `PATH_LENGTH(path)` / `ELEMENTS(path)` / `CARDINALITY(path)` and the
-    non-standard `NODES(path)` translation helper. See §2.9.
-  - `RECORD {k: v, ...}` — record constructor landed with the IC7 cluster.
-  - `ANY SHORTEST (...)` — both the prefix and `path = ANY SHORTEST (...)`.
-  - `WHERE p <> friend` — bare-node `<>` works since PR #42.
-"""
-
-required_features = [
-    "GROUP BY by RETURN alias",
-]
+# Re-audited 2026-06-04. The last gap — GROUP BY by RETURN alias
+# (`GROUP BY friendId, friendLastName, distanceFromPerson, ...`) — is
+# resolved: elaboration lowers a grouping key that names a RETURN alias to
+# the aliased expression (see iso-gql-gaps.md §2.12). Together with the
+# earlier landings (COLLECT_LIST, named paths + PATH_LENGTH, RECORD,
+# ANY SHORTEST, casted alias ordering) the query now compiles and runs.
 
 params_file = "interactive_1_param.txt"
 param_columns = ["personId", "firstName"]

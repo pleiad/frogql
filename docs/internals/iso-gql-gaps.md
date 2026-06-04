@@ -100,11 +100,15 @@ Estado de expresiones que bloqueaban ICs:
 
 `COLLECT_LIST(x)` (alias `COLLECT` / `ARRAY_AGG`) arma un `Value::List` por grupo. Es un `GeneralSetKind::CollectList` cuyo reducer en `apply_aggregator` envuelve los valores ya recolectados (con eliminación de nulls y `DISTINCT` heredados de `collect_aggregate_values`) en `Value::List`. Tipa como `List(elem)`. Además dropea records all-null, que vienen del lado vacío de un `OPTIONAL MATCH` (`RECORD { a: opt.x }` con `opt` sin match → todos los campos null) y representan "sin fila". Tests en `tests/collect_list_test.rs`.
 
-Necesario para IC1 e IC12, pero **no suficiente**: ambos además agrupan por *alias* de RETURN, no por variable de binding (ver 2.12).
+Era prerequisito de IC1 e IC12; ambos además agrupaban por *alias* de RETURN, ya resuelto (ver 2.12).
 
-#### 2.12 GROUP BY por alias de RETURN
+#### 2.12 GROUP BY por alias de RETURN — implementado (2026-06-04)
 
-`GROUP BY <binding variable>` ya funciona (agrupa por identidad de nodo/arista). Lo que falta es `GROUP BY <alias>` donde `<alias>` es un nombre de columna de RETURN (`friend.id AS friendId ... GROUP BY friendId`). El typechecker rechaza el alias con "Variable friendId not found in context" porque no es una variable de binding. IC1 e IC12 dependen de esto (sus GROUP BY listan `friendId, friendLastName, distanceFromPerson, ...`, todos aliases). Es resolución de nombres: una pre-pasada de elaboración que sustituye `Expr::Var(alias)` en GROUP BY por la expresión aliaseada del RETURN, con cuidado del shadowing alias-vs-variable. `ORDER BY <alias>` a secas ya lo resuelve `order_by_alias.rs`; `ORDER BY <alias>.<campo>` y `ORDER BY CAST(<alias> AS tipo)` ya están resueltos por `SortKey::ColumnField` / `SortKey::ColumnCast`. Falta alias-dentro-de-expr fuera de esos fast-paths especializados.
+`GROUP BY <binding variable>` agrupa por identidad de nodo/arista (única forma estricta ISO: `<grouping element> ::= <binding variable reference>`). froGQL ya admitía además agrupar por una expresión deletreada (`GROUP BY n.city`) como desviación documentada. Ahora cierra la conveniencia estilo Cypher/SQL `GROUP BY <alias>` donde `<alias>` es un nombre de columna de RETURN (`friend.id AS friendId ... GROUP BY friendId`).
+
+Implementación: una pre-pasada de **resolución de nombres en elaboración** (`src/elaborate/mod.rs::resolve_group_key`). Para cada clave de GROUP BY que es un `Expr::Var(name)` bare: si `name` es variable de binding del patrón se deja (gana la variable — shadowing); si es alias de un `RETURN <expr> AS name` se sustituye por la expresión aliaseada (ya elaborada); si no es ninguno se deja para que el typechecker reporte "Variable not found". Va en elaboración (no en el optimizer) porque la resolución la necesitan tanto el typechecker como el runtime de agrupamiento. Tras la sustitución, el chequeo de dependencia funcional pasa por igualdad estructural y el runtime evalúa la expresión real contra las filas. Nota de eficiencia: la clave se evalúa una vez por fila y la proyección una vez por grupo (igual que la forma deletreada); el "compute-once" real requeriría `LET` (2.1). Tests en `tests/group_by_alias_test.rs`.
+
+Pendiente menor: alias **dentro** de una expresión en GROUP BY (`GROUP BY CAST(friendId AS INTEGER)`) — solo se resuelve el alias bare. Para ORDER BY, `<alias>` a secas lo resuelve `order_by_alias.rs`, y `<alias>.<campo>` / `CAST(<alias> AS tipo)` ya están vía `SortKey::ColumnField` / `SortKey::ColumnCast`.
 
 ### Tier 3: producción, no investigación
 
@@ -126,10 +130,9 @@ Estado de los 14 IC del benchmark cross-system (`bench/ldbc-queries/ic*.toml`). 
 
 | IC | Estado | Gaps restantes |
 |----|--------|----------------|
-| IC2, IC3, IC4, IC5, IC6, IC7, IC8, IC9, IC11, IC13 | implementado | — |
-| IC1 | blocked | GROUP BY por alias (2.12). Named paths + `PATH_LENGTH`/`NODES` ✅ (2.9), `RECORD` ✅, `ANY SHORTEST` ✅, `COLLECT_LIST` ✅ (2.11) |
+| IC1, IC2, IC3, IC4, IC5, IC6, IC7, IC8, IC9, IC11, IC13 | implementado | — |
 | IC10 | blocked | temporal ISO para predicado de cumpleaños por mes/día (2.10). `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ✅ |
-| IC12 | blocked | GROUP BY por alias (2.12). `COLLECT_LIST` ✅ (2.11); `[:isSubclassOf]->{0,}` ya parsea y el typechecker lo admite bajo un prefijo de modo (`ACYCLIC`/`TRAIL`) — divergencia de traducción, sin código nuevo |
+| IC12 | blocked | GROUP BY por alias ✅ (2.12). Solo queda aplicar la divergencia de traducción `[:isSubclassOf]->{0,}` → prefijo de modo (`ACYCLIC`/`TRAIL`) en el query del toml — el typechecker ya lo admite, sin código nuevo. `COLLECT_LIST` ✅ (2.11) |
 | IC14 | blocked | list comprehension (2.10). Named paths + `NODES` ✅ (2.9), `VALUE` ✅, `*` ✅ |
 
 ### Roadmap para los 14 IC completos
@@ -138,11 +141,11 @@ Ordenado por leverage (ICs desbloqueados por feature):
 
 1. ~~**Named path patterns + path functions** (2.9)~~ — **hecho (2026-06-03)**. `MATCH path = [ANY|ALL] SHORTEST (...)`, `ELEMENTS`, `PATH_LENGTH`, `CARDINALITY`, más `NODES`/`EDGES` (divergencia). Desbloqueó el prerequisito de **IC1, IC13, IC14**.
 2. ~~**`COLLECT_LIST` / multiset aggregate** (2.11)~~ — **hecho (2026-06-03)**. `GeneralSetKind::CollectList`, reducer a `Value::List`, drop de records all-null. Era prerequisito de **IC1 e IC12**, pero ninguno cierra sin (3).
-3. **GROUP BY por alias** (2.12) — cierra **IC1 e IC12** (con la divergencia `{0,}`→prefijo en IC12). Resolución de nombres en una pre-pasada de elaboración.
+3. ~~**GROUP BY por alias** (2.12)~~ — **hecho (2026-06-04)**. Resolución de nombres en una pre-pasada de elaboración (`resolve_group_key`). Cerró **IC1**; **IC12** queda solo a un reescribir-toml (`{0,}`→prefijo de modo, sin código nuevo).
 4. **Temporales ISO para la ventana de cumpleaños de IC10** (2.10) — cierra **IC10**. No usar `EXTRACT(...)` como atajo: no es sintaxis ISO GQL.
 5. **List comprehension `[x IN list | expr]`** (2.10) — cierra **IC14**. `Expr::ListComprehension` + runtime sobre `Value::List`.
 
-Con (3)–(5) los 14 IC corren. Named paths (1), `COLLECT_LIST` (2), `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ya están; el siguiente paso crítico es (3), que IC1 e IC12 comparten.
+Quedan **IC10** (temporales ISO), **IC12** (reescritura de traducción `{0,}`→prefijo) e **IC14** (list comprehension). Named paths (1), `COLLECT_LIST` (2), GROUP BY por alias (3), `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ya están.
 
 ## Recomendación
 
