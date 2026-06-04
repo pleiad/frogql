@@ -52,6 +52,12 @@ pub struct Typechecker {
     /// element type is not tracked precisely; a name in this stack resolves
     /// to `Star` in `Var` / `AttrLookup` instead of erroring as unbound.
     comprehension_scope: Vec<String>,
+    /// Outer environment(s) visible inside a correlated subquery body
+    /// (`EXISTS`/`VALUE`). Merged into a `Filter` predicate's environment so
+    /// the body's WHERE can reference outer-bound variables. A stack to
+    /// support nesting. Empty outside subquery bodies, so a top-level
+    /// per-clause WHERE keeps its strict pattern-local scope.
+    ambient_env: Vec<TypeEnvironment>,
 }
 
 impl Typechecker {
@@ -61,6 +67,7 @@ impl Typechecker {
             errors: Vec::new(),
             warnings: Vec::new(),
             comprehension_scope: Vec::new(),
+            ambient_env: Vec::new(),
         }
     }
 
@@ -535,7 +542,22 @@ impl Typechecker {
 
             PathPattern::Filter(pattern, expr) => {
                 let r = self.check_path_pattern(pattern);
-                let t = self.check_expr(expr, &r.env);
+                // Inside a correlated subquery body, the predicate may
+                // reference outer-bound variables; merge the ambient outer
+                // environment under the pattern's own bindings.
+                let filter_env = match self.ambient_env.last() {
+                    Some(outer) => {
+                        let mut merged = outer.clone();
+                        for k in r.env.keys() {
+                            if let Some(v) = r.env.get(k) {
+                                merged.set(k, v.clone());
+                            }
+                        }
+                        merged
+                    }
+                    None => r.env.clone(),
+                };
+                let t = self.check_expr(expr, &filter_env);
 
                 if SimpleType::meet(&t, &SimpleType::B).is_empty() {
                     self.warnings.push(format!(
@@ -926,6 +948,11 @@ impl Typechecker {
     fn check_subquery_body(&mut self, q: &Query, outer: &TypeEnvironment) -> TypecheckResult {
         let mut env = outer.clone();
         let mut path: Option<PathType> = None;
+        // Make the outer environment available to the body's `Filter`
+        // predicates so a correlated WHERE (e.g. `WHERE x IN NODES(path)`)
+        // can reference outer-bound variables. The runtime evaluates such a
+        // body per outer row with the same correlation.
+        self.ambient_env.push(outer.clone());
         for m in &q.matches {
             let r = self.check_path_pattern(m.pattern());
             if path.is_none() {
@@ -948,6 +975,7 @@ impl Typechecker {
                 }
             };
         }
+        self.ambient_env.pop();
         let path = path.unwrap_or(PathType::Zero);
         let mut r = TypecheckResult::new(path, env);
         r.empty = r.path.is_unsatisfiable() || r.env.is_empty();
