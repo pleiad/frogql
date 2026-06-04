@@ -47,6 +47,11 @@ pub struct Typechecker {
     pub schema: Schema,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
+    /// Variables bound locally by an enclosing list comprehension
+    /// (`[x IN ... | ...]`). The source list types as `List(Star)`, so the
+    /// element type is not tracked precisely; a name in this stack resolves
+    /// to `Star` in `Var` / `AttrLookup` instead of erroring as unbound.
+    comprehension_scope: Vec<String>,
 }
 
 impl Typechecker {
@@ -55,6 +60,7 @@ impl Typechecker {
             schema,
             errors: Vec::new(),
             warnings: Vec::new(),
+            comprehension_scope: Vec::new(),
         }
     }
 
@@ -628,15 +634,26 @@ impl Typechecker {
             // the value type of the bound variable. `Group` (paths from
             // repetition `{n,m}`) is not yet projectable as a value;
             // documented as a future gap.
-            Expr::Var(name) => match env.get(name) {
-                Some(t) => variable_type_to_simple_type(t),
-                None => {
-                    self.errors
-                        .push(format!("Variable {} not found in context", name));
-                    SimpleType::Zero
+            Expr::Var(name) => {
+                if self.comprehension_scope.iter().any(|v| v == name) {
+                    return SimpleType::Star;
                 }
-            },
+                match env.get(name) {
+                    Some(t) => variable_type_to_simple_type(t),
+                    None => {
+                        self.errors
+                            .push(format!("Variable {} not found in context", name));
+                        SimpleType::Zero
+                    }
+                }
+            }
 
+            Expr::AttrLookup { var, attr } if self.comprehension_scope.iter().any(|v| v == var) => {
+                let _ = attr;
+                // A comprehension element's attributes are not statically
+                // typed (element type is `Star`); resolve to `Star`.
+                SimpleType::Star
+            }
             Expr::AttrLookup { var, attr } => match env.get(var) {
                 Some(t) => {
                     if matches!(t, VariableType::Zero) {
@@ -822,6 +839,36 @@ impl Typechecker {
                     acc = SimpleType::union(&acc, &SimpleType::Zero);
                 }
                 acc
+            }
+
+            Expr::ListComprehension {
+                var,
+                source,
+                filter,
+                body,
+            } => {
+                // `source` is evaluated in the current scope and must be a
+                // list (lenient: `Star` and `List(_)` both pass).
+                let src_t = self.check_expr(source, env);
+                if !matches!(src_t, SimpleType::List(_) | SimpleType::Star)
+                    && SimpleType::meet(&src_t, &SimpleType::Star) != src_t
+                {
+                    self.warnings.push(format!(
+                        "list comprehension source has non-list type {src_t}"
+                    ));
+                }
+                // `var` is in scope for `filter`/`body` only.
+                self.comprehension_scope.push(var.clone());
+                if let Some(f) = filter {
+                    let f_t = self.check_expr(f, env);
+                    if SimpleType::meet(&f_t, &SimpleType::B) == SimpleType::Zero {
+                        self.warnings
+                            .push(format!("list comprehension WHERE has non-bool type {f_t}"));
+                    }
+                }
+                let body_t = self.check_expr(body, env);
+                self.comprehension_scope.pop();
+                SimpleType::List(Box::new(body_t))
             }
 
             Expr::Record { fields } => {

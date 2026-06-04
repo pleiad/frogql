@@ -1699,6 +1699,19 @@ impl Parser {
                 if self.eat(&Token::RBracket) {
                     return Ok(Expr::Const(Value::List(Vec::new())));
                 }
+                // List comprehension `[<var> IN <source> [WHERE <f>] | <body>]`.
+                // Distinguished from a list literal whose first element is an
+                // `IN` expression (`[a IN b, ...]`) by the `|` separator: we
+                // try the comprehension and rewind if no `|`/`WHERE` follows.
+                let saved = self.pos;
+                if matches!(self.peek(), Token::Name(_))
+                    && matches!(self.peek_at(1), Some(Token::In))
+                {
+                    if let Some(expr) = self.try_list_comprehension()? {
+                        return Ok(expr);
+                    }
+                    self.pos = saved;
+                }
                 let saved = self.pos;
                 if let Ok(inner) = self.simple_type() {
                     if self.eat(&Token::RBracket) {
@@ -1967,6 +1980,49 @@ impl Parser {
             branches,
             else_expr,
         })
+    }
+
+    /// Parse a list comprehension body after the opening `[` has been
+    /// consumed and the caller has verified the next two tokens are
+    /// `<Name> IN`. Returns `Ok(None)` (so the caller can rewind and try a
+    /// list literal) when the `<var> IN <source>` head is not followed by a
+    /// `WHERE` filter or a `|` body separator — i.e. it was an `IN`
+    /// expression inside a plain list literal, not a comprehension.
+    fn try_list_comprehension(&mut self) -> Result<Option<Expr>, String> {
+        let var = match self.advance() {
+            Token::Name(n) => n,
+            _ => return Ok(None),
+        };
+        if !self.eat(&Token::In) {
+            return Ok(None);
+        }
+        let source = Box::new(self.expr()?);
+        let filter = if self.eat(&Token::Where) {
+            // A `WHERE` commits us to the comprehension form.
+            Some(Box::new(self.expr()?))
+        } else if !self.eat(&Token::Pipe) {
+            // No filter and no `|`: this was a list literal element.
+            return Ok(None);
+        } else {
+            // `|` already consumed above for the no-filter case.
+            let body = Box::new(self.expr()?);
+            self.expect(&Token::RBracket)?;
+            return Ok(Some(Expr::ListComprehension {
+                var,
+                source,
+                filter: None,
+                body,
+            }));
+        };
+        self.expect(&Token::Pipe)?;
+        let body = Box::new(self.expr()?);
+        self.expect(&Token::RBracket)?;
+        Ok(Some(Expr::ListComprehension {
+            var,
+            source,
+            filter,
+            body,
+        }))
     }
 
     fn mod_expr(&mut self) -> Result<Expr, String> {

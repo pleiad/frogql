@@ -149,6 +149,12 @@ pub struct Runtime<'g, G: GraphAccess> {
     value_subquery_cache: RefCell<HashMap<usize, ValueSubqueryCache>>,
     /// Set only while evaluating `PathPattern::Selected`.
     unbounded_policy: Cell<UnboundedPolicy>,
+    /// Local bindings introduced by an enclosing list comprehension
+    /// (`[x IN ... | ...]`), used as a scope stack. `Expr::Var` /
+    /// `Expr::AttrLookup` consult it before the pattern `Assignment`, so a
+    /// comprehension element (a `Value`, which `Assignment` cannot hold)
+    /// resolves correctly. Pushed/popped per element during evaluation.
+    comprehension_scope: RefCell<Vec<(String, Value)>>,
 }
 
 /// Cached evaluation result for an existential predicate.
@@ -182,6 +188,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             exists_cache: RefCell::new(HashMap::new()),
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
+            comprehension_scope: RefCell::new(Vec::new()),
         }
     }
 
@@ -196,6 +203,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             exists_cache: RefCell::new(HashMap::new()),
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
+            comprehension_scope: RefCell::new(Vec::new()),
         }
     }
 
@@ -2227,6 +2235,40 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
     }
 
+    /// Resolve a name against the list-comprehension scope stack, most
+    /// recent binding first (so inner comprehensions shadow outer ones).
+    fn comprehension_lookup(&self, name: &str) -> Option<Value> {
+        self.comprehension_scope
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    }
+
+    /// Attribute access on a comprehension element `Value`: graph element
+    /// props for Node/Edge references, field access for a record. A missing
+    /// attribute is null (3VL), consistent with `AttrLookup` on `mu`.
+    fn attr_of_value(&self, v: &Value, attr: &str) -> ExprResult {
+        match v {
+            Value::Node(id) => match self.graph.node_props(*id).get(attr) {
+                Some(v) => ExprResult::Success(v.clone()),
+                None => ExprResult::Success(Value::Null),
+            },
+            Value::Edge(id) => match self.graph.edge_props(*id).get(attr) {
+                Some(v) => ExprResult::Success(v.clone()),
+                None => ExprResult::Success(Value::Null),
+            },
+            Value::Record(m) => match m.get(attr) {
+                Some(v) => ExprResult::Success(v.clone()),
+                None => ExprResult::Success(Value::Null),
+            },
+            other => ExprResult::Failure(format!(
+                "attribute '{attr}' access on non-element value: {other}"
+            )),
+        }
+    }
+
     /// Evaluate an `Expr` against a binding row. Public so the DML
     /// runtime (`runtime::dm`) can resolve `INSERT (b {who: a.name})`-
     /// style expressions in MVP-1.
@@ -2239,12 +2281,23 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             // null when the variable is bound to `PathValue::Nothing`
             // (an OPTIONAL match that did not fire). Failure is
             // reserved for repetition-grouping and unbound names.
-            Expr::Var(name) => match mu.get(name) {
-                Some(pv) => ExprResult::Success(path_value_to_value(pv)),
-                None => ExprResult::Failure(format!("variable '{name}' not bound")),
-            },
+            Expr::Var(name) => {
+                if let Some(v) = self.comprehension_lookup(name) {
+                    return ExprResult::Success(v);
+                }
+                match mu.get(name) {
+                    Some(pv) => ExprResult::Success(path_value_to_value(pv)),
+                    None => ExprResult::Failure(format!("variable '{name}' not bound")),
+                }
+            }
 
             Expr::AttrLookup { var, attr } => {
+                // A comprehension-bound element resolves its attributes from
+                // the element `Value` directly (the pattern `Assignment`
+                // cannot hold a scalar/element Value).
+                if let Some(v) = self.comprehension_lookup(var) {
+                    return self.attr_of_value(&v, attr);
+                }
                 let pv = match mu.get(var) {
                     Some(pv) => pv,
                     None => return ExprResult::Failure(format!("variable '{var}' not bound")),
@@ -2392,6 +2445,54 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     Some(value) => self.run_expr(mu, value),
                     None => ExprResult::Success(Value::Null),
                 }
+            }
+
+            Expr::ListComprehension {
+                var,
+                source,
+                filter,
+                body,
+            } => {
+                let items = match self.run_expr(mu, source) {
+                    ExprResult::Success(Value::List(items)) => items,
+                    // A null/failed/empty source yields an empty list (a
+                    // null source per ISO is the empty collection here).
+                    ExprResult::Success(Value::Null) | ExprResult::Failure(_) => {
+                        return ExprResult::Success(Value::List(Vec::new()))
+                    }
+                    ExprResult::Success(other) => {
+                        return ExprResult::Failure(format!(
+                            "list comprehension source is not a list: {other}"
+                        ))
+                    }
+                };
+                let mut out = Vec::new();
+                for item in items {
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((var.clone(), item));
+                    let keep = match filter {
+                        Some(f) => {
+                            matches!(self.run_expr(mu, f), ExprResult::Success(Value::Bool(true)))
+                        }
+                        None => true,
+                    };
+                    let result = if keep {
+                        Some(self.run_expr(mu, body))
+                    } else {
+                        None
+                    };
+                    self.comprehension_scope.borrow_mut().pop();
+                    if let Some(r) = result {
+                        match r {
+                            // A failing element maps to Null (3VL), so the
+                            // list length still mirrors the kept elements.
+                            ExprResult::Success(v) => out.push(v),
+                            ExprResult::Failure(_) => out.push(Value::Null),
+                        }
+                    }
+                }
+                ExprResult::Success(Value::List(out))
             }
 
             Expr::Type(_) => ExprResult::Failure("bare type in expression".into()),
