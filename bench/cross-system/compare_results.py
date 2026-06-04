@@ -269,7 +269,46 @@ def main() -> int:
         print()
 
     # ---- 4. Memory footprint (only when results_dir is given) ----
-    if results_dir is not None:
+    # Preferred source: memory.csv, written by run_all.sh from the
+    # memrun.py monitor that wraps every runner. It is authoritative
+    # (process-group peak RSS sampled from /proc, no psutil needed) and
+    # carries the cap status — including any memory_error rows where a
+    # runner was killed for exceeding the cap. Fall back to the older
+    # psutil-stderr scrape only when memory.csv is absent.
+    mem_csv = results_dir / "memory.csv" if results_dir is not None else None
+    if mem_csv is not None and mem_csv.exists():
+        print()
+        print("=== Memory + cap (peak RSS per system+IC, from memrun) ===")
+        print()
+        rows = []
+        killed = []
+        with mem_csv.open(encoding="utf-8") as f:
+            next(f, None)  # header
+            for line in f:
+                parts = line.rstrip("\n").split(";")
+                if len(parts) < 6:
+                    continue
+                sys_ic, status, peak_mib, limit_mib, wall_s, _exit = parts[:6]
+                rows.append((sys_ic, status, peak_mib, limit_mib, wall_s))
+                if status == "memory_error":
+                    killed.append(sys_ic)
+        print(f"  {'system.ic':<28}  {'status':<13}  {'peak MiB':>9}  "
+              f"{'cap MiB':>9}  {'wall s':>8}")
+        print("  " + "-" * 76)
+        for sys_ic, status, peak_mib, limit_mib, wall_s in sorted(rows):
+            print(f"  {sys_ic:<28}  {status:<13}  {peak_mib:>9}  "
+                  f"{limit_mib:>9}  {wall_s:>8}")
+        if killed:
+            print()
+            print(f"  !! {len(killed)} runner(s) hit the memory cap and were "
+                  f"killed (memory_error):")
+            for k in killed:
+                print(f"       {k}")
+        print()
+        print("  peak MiB is the runner's whole process-group resident set")
+        print("  (engine + DB + interpreter for the Python runners; ~Rust")
+        print("  binary RSS for gqlite). The cap is enforced by SIGKILL.")
+    elif results_dir is not None:
         rss = collect_rss(results_dir)
         if rss:
             print()

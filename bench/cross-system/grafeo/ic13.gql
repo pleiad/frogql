@@ -1,0 +1,13 @@
+-- GQL translation of bench/ldbc-queries/ic13.toml for Grafeo.
+-- Single shortest path: knows-hop count between two persons, -1 if none.
+--
+-- !! UNVERIFIED: relies on Grafeo supporting the ISO §16.6 selective
+--    path prefix `ANY SHORTEST`, a named path binding (`path = ...`),
+--    `PATH_LENGTH(path)`, and `CASE WHEN`. The toml is itself GQL, so
+--    this is a near-verbatim copy with $-params; if Grafeo 0.5.x lacks
+--    any of these, record it in DIVERGENCES.md and let the harness skip.
+--
+-- Divergences (see DIVERGENCES.md):
+--   - $-params; `~[:knows]~*` matches either direction (forward store).
+MATCH path = ANY SHORTEST (p1:Person {id: $person1Id})~[:knows]~*(p2:Person {id: $person2Id})
+RETURN CASE WHEN PATH_LENGTH(path) IS NULL THEN -1 ELSE PATH_LENGTH(path) END AS shortestPathLength

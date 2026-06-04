@@ -1,0 +1,39 @@
+-- GQL translation of bench/ldbc-queries/ic7.toml for Grafeo.
+--
+-- !! UNVERIFIED. Depends on Grafeo supporting a `VALUE { MATCH ...
+--    ORDER BY ... LIMIT 1 }` value subquery, RECORD constructors,
+--    COALESCE, CAST/FLOOR, division, NOT EXISTS, and GROUP BY by
+--    binding variable. It also projects a RECORD column (`latestLike`),
+--    which the row-hash oracle compares by repr — a hash MATCH across
+--    engines is not expected. Best-effort latency probe; verify + record
+--    the divergence (or skip) on the server.
+--
+-- Source-of-truth: bench/ldbc-queries/ic7.toml — itself ISO GQL, so
+-- this is a near-verbatim copy with $-params and the (:Comment|Post)
+-- carve-out.
+--
+-- Divergences (see DIVERGENCES.md):
+--   - $-params; (:Comment|Post) → bound var + WHERE label predicate.
+--   - GROUP BY liker, person are binding-variable grouping keys.
+MATCH (person:Person {id: $personId})<-[:hasCreator]-(m0)<-[:likes]-(liker:Person)
+WHERE (m0:Comment OR m0:Post)
+RETURN
+    liker.id AS personId,
+    liker.firstName AS personFirstName,
+    liker.lastName AS personLastName,
+    VALUE {
+        MATCH (person)<-[:hasCreator]-(m)<-[l:likes]-(liker)
+        WHERE (m:Comment OR m:Post)
+        RETURN RECORD {
+            likeCreationDate: l.creationDate,
+            commentOrPostId: m.id,
+            commentOrPostContent: COALESCE(m.content, m.imageFile),
+            minutesLatency: CAST(FLOOR(CAST(l.creationDate - m.creationDate AS FLOAT) / 60000.0) AS INTEGER)
+        } AS latest
+        ORDER BY latest.likeCreationDate DESC, latest.commentOrPostId ASC
+        LIMIT 1
+    } AS latestLike,
+    NOT EXISTS { MATCH (liker)~[:knows]~(person) } AS isNew
+GROUP BY liker, person
+ORDER BY latestLike.likeCreationDate DESC, personId ASC
+LIMIT 20
