@@ -151,7 +151,15 @@ fn fold_in_expr(e: &mut Expr, schema: &Schema) {
     let is_empty = match e {
         Expr::Exists { body } | Expr::NotExists { body } => {
             let mut tc = Typechecker::new(schema.clone());
-            tc.check_query(body).empty
+            let empty = tc.check_query(body).empty;
+            // Only fold when emptiness is proven for a *self-contained*
+            // body. Unbound-variable errors mean the body is correlated to
+            // an outer scope (e.g. `WHERE x.id = a.id` referencing an outer
+            // `a`); its emptiness cannot be decided here without binding the
+            // correlation, so leave it for the runtime. Schema-driven
+            // emptiness (an absent label, incompatible property types)
+            // produces no such error and still folds.
+            empty && tc.errors.is_empty()
         }
         _ => return,
     };
