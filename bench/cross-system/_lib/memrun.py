@@ -56,6 +56,7 @@ from pathlib import Path
 PAGE_SIZE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
 DEFAULT_LIMIT_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB
 OOM_EXIT_CODE = 137  # 128 + SIGKILL(9), the conventional "killed" code
+TIMEOUT_EXIT_CODE = 124  # GNU `timeout`'s convention
 
 
 def _read_pgrp(pid: int) -> int | None:
@@ -135,6 +136,10 @@ def main() -> int:
                     help="hard RSS cap in GiB (overridden by --limit-bytes)")
     ap.add_argument("--interval", type=float, default=0.05,
                     help="sampling interval in seconds (default 0.05)")
+    ap.add_argument("--timeout-s", type=float, default=None,
+                    help="hard wall-clock cap in seconds for the whole runner "
+                         "invocation; on expiry the process group is SIGKILLed "
+                         "and the run recorded as a timeout (default: no cap)")
     ap.add_argument("cmd", nargs=argparse.REMAINDER,
                     help="-- <command> [args...]")
     args = ap.parse_args()
@@ -201,6 +206,7 @@ def main() -> int:
     pgid = proc.pid  # session/group leader pid == pgid
     peak = 0
     oom = False
+    timed_out = False
 
     while True:
         rc = proc.poll()
@@ -212,6 +218,18 @@ def main() -> int:
             sys.stderr.write(
                 f"memrun[{label}]: MEMORY LIMIT EXCEEDED — peak "
                 f"{peak / (1024 * 1024):.1f} MiB > cap {limit_mib:.0f} MiB; "
+                f"killing process group {pgid}.\n"
+            )
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            break
+        if args.timeout_s is not None and (time.perf_counter() - t0) > args.timeout_s:
+            timed_out = True
+            sys.stderr.write(
+                f"memrun[{label}]: TIME LIMIT EXCEEDED — ran "
+                f"{time.perf_counter() - t0:.0f}s > cap {args.timeout_s:.0f}s; "
                 f"killing process group {pgid}.\n"
             )
             try:
@@ -245,6 +263,9 @@ def main() -> int:
     if oom:
         status = "memory_error"
         exit_code = OOM_EXIT_CODE
+    elif timed_out:
+        status = "timeout"
+        exit_code = TIMEOUT_EXIT_CODE
     elif child_rc == 0:
         status = "ok"
         exit_code = 0
@@ -261,6 +282,7 @@ def main() -> int:
         "peak_rss_mib": f"{peak_mib:.1f}",
         "limit_bytes": limit,
         "limit_mib": f"{limit_mib:.1f}",
+        "timeout_s": args.timeout_s if args.timeout_s is not None else 0,
         "elapsed_s": f"{elapsed:.3f}",
         "monitored": 1,
     })

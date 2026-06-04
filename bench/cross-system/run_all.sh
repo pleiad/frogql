@@ -75,6 +75,9 @@ ABLATE=0
 MEM_LIMIT_GB=10          # hard per-(system,IC) RSS cap; exceeding it kills the
                          # runner and records a memory_error. See _lib/memrun.py.
 SAMPLE_MS=50             # memrun sampling interval (ms).
+TIMEOUT_S=0              # per-(system,IC) wall-clock cap in seconds; 0 = none.
+                         # On expiry the runner is killed and recorded as a
+                         # timeout (a hung/runaway query won't stall the run).
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --ic|--ics)         ICS_ARG="$2"; shift 2 ;;
@@ -85,6 +88,7 @@ while [[ $# -gt 0 ]]; do
         --ablate)           ABLATE=1; shift ;;
         --mem-limit-gb)     MEM_LIMIT_GB="$2"; shift 2 ;;
         --sample-ms)        SAMPLE_MS="$2"; shift 2 ;;
+        --timeout-s)        TIMEOUT_S="$2"; shift 2 ;;
         -h|--help)
             awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
             exit 0 ;;
@@ -146,6 +150,10 @@ cd "$REPO_ROOT"
 # stdlib — no psutil needed. See _lib/memrun.py.
 MEMRUN=(python "$SCRIPT_DIR/_lib/memrun.py"
         --limit-gb "$MEM_LIMIT_GB" --interval "$(awk "BEGIN{print $SAMPLE_MS/1000}")")
+# A wall-clock cap (>0) bounds a hung/runaway query per (system, IC).
+if awk "BEGIN{exit !($TIMEOUT_S > 0)}"; then
+    MEMRUN+=(--timeout-s "$TIMEOUT_S")
+fi
 
 echo "=== Cross-system bench — $TIMESTAMP ==="
 echo "  results:   $OUT_DIR"
@@ -154,6 +162,11 @@ echo "  iters:     $ITERS"
 echo "  warmup:    $WARMUP"
 echo "  systems:   ${SYSTEMS[*]}"
 echo "  mem cap:   ${MEM_LIMIT_GB} GiB/runner (sample every ${SAMPLE_MS} ms)"
+if awk "BEGIN{exit !($TIMEOUT_S > 0)}"; then
+    echo "  time cap:  ${TIMEOUT_S}s/runner"
+else
+    echo "  time cap:  none (use --timeout-s N to bound a hung query)"
+fi
 [[ $REBUILD -eq 1 ]] && echo "  setup:   --rebuild-setup (force fresh per-system load)"
 [[ $ABLATE -eq 1 ]] && echo "  ablate:  --ablate (gqlite: baseline + lazy-no-fold)"
 echo ""
@@ -362,6 +375,9 @@ for sys in "${SYSTEMS[@]}"; do
                     if [[ "$mem_status" == "memory_error" ]]; then
                         echo "[MEMLIMIT] $sys $mode ic$ic exceeded ${MEM_LIMIT_GB} GiB — runner killed" \
                             | tee -a "$OUT_DIR/skipped.log"
+                    elif [[ "$mem_status" == "timeout" ]]; then
+                        echo "[TIMEOUT] $sys $mode ic$ic exceeded ${TIMEOUT_S}s — runner killed" \
+                            | tee -a "$OUT_DIR/skipped.log"
                     else
                         echo "[FAIL] $sys $mode ic$ic runner returned non-zero" \
                             | tee -a "$OUT_DIR/skipped.log"
@@ -386,6 +402,9 @@ for sys in "${SYSTEMS[@]}"; do
                 mem_status=$(awk -F= '/^status=/{print $2}' "$mem_out" 2>/dev/null)
                 if [[ "$mem_status" == "memory_error" ]]; then
                     echo "[MEMLIMIT] $sys ic$ic exceeded ${MEM_LIMIT_GB} GiB — runner killed" \
+                        | tee -a "$OUT_DIR/skipped.log"
+                elif [[ "$mem_status" == "timeout" ]]; then
+                    echo "[TIMEOUT] $sys ic$ic exceeded ${TIMEOUT_S}s — runner killed" \
                         | tee -a "$OUT_DIR/skipped.log"
                 else
                     echo "[FAIL] $sys ic$ic runner returned non-zero" \
