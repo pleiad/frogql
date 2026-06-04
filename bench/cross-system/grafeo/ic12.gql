@@ -1,0 +1,23 @@
+-- GQL translation of bench/ldbc-queries/ic12.toml for Grafeo.
+-- Expert search: friends whose comments reply to posts tagged under a
+-- (transitive) tag class.
+--
+-- !! UNVERIFIED. Depends on Grafeo supporting the ISO ACYCLIC path
+--    mode, zero-or-more repetition `{0,}`, and COLLECT_LIST(DISTINCT).
+--    The `tagNames` list column's element ORDER can differ across
+--    engines, so a row-hash MATCH may not hold even when the sets
+--    agree. Best-effort latency probe; verify + record on the server.
+--
+-- Divergences (see DIVERGENCES.md):
+--   - $-params; `~[:knows]~` matches either direction.
+--   - GROUP BY by the projected expressions (not the RETURN aliases).
+MATCH ACYCLIC (person:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(comment:Comment)-[:replyOf]->(post:Post)-[:hasTag]->(tag:Tag)-[:hasType]->(tagClass:TagClass)-[:isSubclassOf]->{0,}(:TagClass {name: $tagClassName})
+RETURN
+    friend.id AS friendId,
+    friend.firstName AS friendFirstName,
+    friend.lastName AS friendLastName,
+    COLLECT_LIST(DISTINCT tag.name) AS tagNames,
+    COUNT(comment) AS replyCount
+GROUP BY friend.id, friend.firstName, friend.lastName
+ORDER BY replyCount DESC, CAST(friendId AS INTEGER) ASC
+LIMIT 20

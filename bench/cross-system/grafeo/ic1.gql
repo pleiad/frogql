@@ -1,0 +1,40 @@
+-- GQL translation of bench/ldbc-queries/ic1.toml for Grafeo.
+--
+-- !! UNVERIFIED, multiple risks. This translation depends on Grafeo
+--    supporting: named paths + ANY SHORTEST, PATH_LENGTH, two OPTIONAL
+--    MATCH clauses, COLLECT_LIST(RECORD {...}), and GROUP BY over many
+--    keys. It also reads Person MVAs (friend.email / friend.speaks)
+--    which the Grafeo loader does NOT currently import (see setup.py /
+--    DIVERGENCES.md) — those two columns will be NULL, so row-hash
+--    parity with frogql is NOT expected even if the query runs. Treat
+--    this as a best-effort latency probe; verify on the server and
+--    record the divergence (or skip) rather than assuming parity.
+--
+-- Divergences (see DIVERGENCES.md):
+--   - $-params; no :University/:City/:Company/:Country sub-labels
+--     (reached via :Organisation/:Place + `type`).
+--   - GROUP BY uses the projected expressions, not the RETURN aliases.
+--   - friend.email / friend.speaks resolve to NULL (MVAs not loaded).
+MATCH path = ANY SHORTEST (p:Person {id: $personId})~[:knows]~{1,3}(friend:Person {firstName: $firstName})
+WHERE p <> friend
+OPTIONAL MATCH (friend)-[studyAt:studyAt]->(uni:Organisation)-[:isLocatedIn]->(uniCity:Place)
+WHERE uni.type = 'university'
+OPTIONAL MATCH (friend)-[workAt:workAt]->(company:Organisation)-[:isLocatedIn]->(companyCountry:Place)
+WHERE company.type = 'company'
+RETURN
+    friend.id AS friendId,
+    friend.lastName AS friendLastName,
+    PATH_LENGTH(path) AS distanceFromPerson,
+    friend.birthday AS friendBirthday,
+    friend.creationDate AS friendCreationDate,
+    friend.gender AS friendGender,
+    friend.browserUsed AS friendBrowserUsed,
+    friend.locationIP AS friendLocationIp,
+    friend.email AS friendEmails,
+    friend.speaks AS friendLanguages,
+    uniCity.name AS friendCityName,
+    COLLECT_LIST(RECORD {uniName: uni.name, classYear: studyAt.classYear, uniCityName: uniCity.name}) AS friendUniversities,
+    COLLECT_LIST(RECORD {companyName: company.name, workFrom: workAt.workFrom, companyCountryName: companyCountry.name}) AS friendCompanies
+GROUP BY friend.id, friend.lastName, PATH_LENGTH(path), friend.birthday, friend.creationDate, friend.gender, friend.browserUsed, friend.locationIP, friend.email, friend.speaks, uniCity.name
+ORDER BY distanceFromPerson ASC, friendLastName ASC, CAST(friendId AS INTEGER) ASC
+LIMIT 20

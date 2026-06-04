@@ -42,6 +42,17 @@ focus going forward.
 | GraphLite — GraphLite-AI/GraphLite (ISO GQL, Sled-backed) | — | not yet integrated |
 | GQLite — webbery/gqlite (custom DSL, dead since April 2023) | — | not yet integrated |
 
+**IC coverage.** The harness now defaults to every IC frogQL implements
+(IC1,2,3,4,5,6,7,8,9,11,12,13; IC10 and IC14 remain blocked). The six
+original cross-system ICs (2,5,6,8,9,11) are row-equivalence verified;
+the newer six (1,3,4,7,12,13) ship Kuzu/Grafeo translations that the
+author could not validate offline — the server run's row-hash oracle is
+the verification gate. ICs that project list/struct columns (IC1, IC7,
+IC12) are expected to **diverge on the row hash** by column encoding
+even when logically correct, so they are kept primarily for the
+**latency + memory** signal; per-IC notes live in each system's
+`DIVERGENCES.md`.
+
 ## Setup
 
 ### 1. Shared dataset
@@ -120,8 +131,50 @@ python bench/cross-system/kuzu/setup.py --force
 
 ## Running
 
+### On a server (recommended entry point)
+
+For an unattended run on a separate Linux box — frogQL vs Kuzu vs
+Grafeo on **every implemented IC**, measuring **latency and peak
+memory** with a hard **10 GiB per-runner cap** — use the server
+driver. It builds the gqlite binaries, downloads/builds the LDBC
+dataset if missing, optionally installs the external engines' Python
+deps, then drives `run_all.sh` and tees a durable log:
+
 ```bash
-# Default: IC2 against every implemented system.
+# One-shot, unattended (logs to the file AND results/<ts>.server.log):
+nohup bench/cross-system/run_server.sh --install-deps \
+    > /tmp/frogql-bench.out 2>&1 &
+tail -f /tmp/frogql-bench.out
+
+# Defaults: --systems gqlite,kuzu,grafeo, all implemented ICs,
+#           --iters 10 --warmup 2 --mem-limit-gb 10.
+# Override any of them; unknown flags pass through to run_all.sh:
+bench/cross-system/run_server.sh --systems gqlite,kuzu --ics 2,3,4 \
+    --mem-limit-gb 8 --rebuild-data
+bench/cross-system/run_server.sh --help
+```
+
+### Memory cap + measurement (10 GiB default)
+
+Every runner invocation is wrapped in `_lib/memrun.py`, a pure-stdlib
+(`/proc`-based, no psutil) monitor that:
+
+- samples the runner's **whole process-group RSS** every 50 ms and
+  records the **peak**;
+- **SIGKILLs the group** the instant the peak crosses the cap
+  (`--mem-limit-gb`, default 10), recording a `memory_error` instead of
+  letting a runaway query take the host down;
+- writes a per-(system, IC) `key=value` summary, folded into
+  `results/<ts>/memory.csv` and surfaced in `comparison.txt`.
+
+A `memory_error` row in `memory.csv` / `skipped.log` (`[MEMLIMIT]`) is
+the headline for "this query couldn't run in 10 GiB on this engine" —
+a real finding, not a gap to hide.
+
+### Lower-level: run_all.sh directly
+
+```bash
+# Default: every implemented IC against every implemented system.
 bench/cross-system/run_all.sh
 
 # Multi-IC sweep, all in one invocation:
@@ -130,6 +183,9 @@ bench/cross-system/run_all.sh --ics 2,3,11
 # Subset of systems (useful while iterating on a per-system runner):
 bench/cross-system/run_all.sh --only gqlite
 bench/cross-system/run_all.sh --only gqlite,graphqlite
+
+# Lower the per-runner memory cap to 4 GiB:
+bench/cross-system/run_all.sh --mem-limit-gb 4
 
 # Tune iteration count:
 bench/cross-system/run_all.sh --iters 30 --warmup 3
@@ -173,9 +229,14 @@ Output lands in `bench/cross-system/results/<timestamp>/`:
 - `<system>.ic<n>.csv` per (system, IC) — raw per-iter rows in
   schema `query;backend;params;row;iter;result_count;elapsed_ns`
 - `cross_system.csv` — concatenation of all the above
+- `memory.csv` — per (system, IC): `status` (ok / memory_error /
+  runner_error), peak RSS (MiB), cap (MiB), wall seconds. Written from
+  the `memrun.py` monitor; `memory_error` = killed at the cap.
+- `<system>.ic<n>.mem.txt` — raw `memrun.py` key=value summary per run
+- `<ts>.server.log` — full tee'd output when launched via `run_server.sh`
 - `comparison.txt` — `compare_results.py` output (latency table +
-  count/shape consistency check + side-by-side comparison + memory
-  footprint + per-(system, IC) shape pass/fail)
+  count/shape consistency check + side-by-side comparison + memory +
+  cap table + per-(system, IC) shape pass/fail)
 - `setup_times.txt` — per-system load wall time **and on-disk DB
   size** (`db_bytes` column). Sizes are measured against each
   system's `marker` path (see `SETUP_MARKER` in `run_all.sh`); for

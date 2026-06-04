@@ -248,10 +248,23 @@ def main() -> int:
                 if cur > peak_rss_mib:
                     peak_rss_mib = cur
 
-            actual_shape = shape_of_rows(iter0_result or [], columns)
+            # Column order for the canonical row encoding. The toml's
+            # `return_columns` is the source of truth when present; some
+            # ICs (e.g. IC1/IC7/IC12/IC13) omit it, in which case we fall
+            # back to the projection order Grafeo returns in the result
+            # dicts. Passing the wrong/empty column list would hash empty
+            # cells, so this fallback is required for those ICs to produce
+            # a meaningful cross-system row hash.
+            eff_columns = columns
+            if not eff_columns and iter0_result:
+                first = iter0_result[0]
+                if isinstance(first, dict):
+                    eff_columns = list(first.keys())
+
+            actual_shape = shape_of_rows(iter0_result or [], eff_columns)
             actual_count = len(iter0_result or [])
             rows_blob, row_hash = canonicalize_and_hash(
-                iter0_result or [], columns
+                iter0_result or [], eff_columns or None
             )
             sys.stderr.write(
                 f"  ROW row={row_idx} count={actual_count} "
