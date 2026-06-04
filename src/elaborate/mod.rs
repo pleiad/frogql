@@ -22,7 +22,7 @@ use crate::syntax::query::{MatchStatement, Query, ReturnItem, SortKey};
 
 pub fn elaborate_query(q: Query) -> Query {
     let fresh = FreshVars::new(&q);
-    let matches = q
+    let matches: Vec<MatchStatement> = q
         .matches
         .into_iter()
         .map(|m| match m {
@@ -59,12 +59,56 @@ pub fn elaborate_query(q: Query) -> Query {
             })
             .collect()
     });
+    // Resolve `GROUP BY <RETURN alias>` against the (already elaborated)
+    // RETURN list. ISO restricts a grouping element to a binding-variable
+    // reference; this lowers the common convenience form `... AS k ... GROUP
+    // BY k` to the underlying expression so both the typechecker's functional
+    // dependency check and the runtime see a key evaluable over the binding
+    // table. A name that is a binding variable shadows any same-named alias.
+    let group_by = q.group_by.map(|items| {
+        let mut bound = std::collections::HashSet::new();
+        for m in &matches {
+            visit(m.pattern(), &mut bound);
+        }
+        items
+            .into_iter()
+            .map(|g| resolve_group_key(g, &bound, returns.as_deref()))
+            .collect()
+    });
     Query {
         matches,
         returns,
+        group_by,
         order_by,
         ..q
     }
+}
+
+/// Lower one GROUP BY element. A bare `Expr::Var(name)` that is *not* a
+/// binding variable but *is* a RETURN alias is replaced by the aliased
+/// expression (already elaborated). Binding variables and spelled-out
+/// expressions pass through (the latter still elaborated for subquery
+/// bodies). Aggregate-aliased or unresolved names are left as `Var` so the
+/// typechecker reports them.
+fn resolve_group_key(
+    g: Expr,
+    bound: &std::collections::HashSet<String>,
+    returns: Option<&[ReturnItem]>,
+) -> Expr {
+    if let Expr::Var(name) = &g {
+        if bound.contains(name) {
+            return g;
+        }
+        if let Some(items) = returns {
+            if let Some(ReturnItem::Expr { expr, .. }) =
+                items.iter().find(|it| it.alias() == Some(name.as_str()))
+            {
+                return expr.clone();
+            }
+        }
+        return g;
+    }
+    elaborate_expr(g)
 }
 
 /// Elaborate an expression, recursing into any subquery body (EXISTS /
