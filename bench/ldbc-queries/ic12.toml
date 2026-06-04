@@ -3,37 +3,24 @@
 
 id = 12
 name = "Expert search"
-status = "blocked"
+status = "implemented"
 
-blocked_reason = """
-Re-audited 2026-06-03 (post COLLECT_LIST / casted alias ordering). One real blocker:
-  - GROUP BY by RETURN *alias* — the query groups by `friendId,
-    friendFirstName, friendLastName` (RETURN aliases, not binding
-    variables). The typechecker only groups by binding variable and
-    rejects the alias with "Variable friendId not found in context".
-    See §2.12.
-
-What's now fine:
-  - `COLLECT_LIST(DISTINCT tag.name)` — list aggregate landed
-    (2026-06-03); `COLLECT` / `ARRAY_AGG` aliases too. See §2.11.
-  - `[:isSubclassOf]->{0,}` — unbounded repetition parses, and the
-    typechecker admits it under a restrictive path-mode prefix. Since
-    `isSubclassOf` is a DAG, wrap the operand as
-    `ACYCLIC (...)-[:isSubclassOf]->{0,}(...)` — a translation
-    divergence, no engine change. (Bare `{0,}` is still rejected by
-    the typechecker as infinite under `WALK ALL`, which is correct.)
-  - `COUNT(comment)` — bare-node aggregates work since PR #42.
-"""
-
-required_features = [
-    "GROUP BY by RETURN alias",
-]
+# Re-audited 2026-06-04. Both former blockers cleared:
+#   - GROUP BY by RETURN alias — resolved in elaboration (see §2.12).
+#   - `[:isSubclassOf]->{0,}` unbounded repetition — wrapped the operand
+#     in the ISO §16.6 `ACYCLIC` path-mode prefix so the repetition is
+#     finite (bare `{0,}` is correctly rejected as infinite under
+#     `WALK ALL`). `isSubclassOf` is a DAG, so ACYCLIC and WALK yield the
+#     same paths; this is a translation divergence, no engine change.
+#
+# Translation divergence vs the Cypher source: `ACYCLIC` prefix added to
+# the operand (Cypher `*0..` is unbounded without a prefix).
 
 params_file = "interactive_12_param.txt"
 param_columns = ["personId", "tagClassName"]
 param_types = ["int", "string"]
 query = """
-MATCH (person:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(comment:Comment)-[:replyOf]->(post:Post)-[:hasTag]->(tag:Tag)-[:hasType]->(tagClass:TagClass)-[:isSubclassOf]->{0,}(:TagClass {name: $tagClassName})
+MATCH ACYCLIC (person:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(comment:Comment)-[:replyOf]->(post:Post)-[:hasTag]->(tag:Tag)-[:hasType]->(tagClass:TagClass)-[:isSubclassOf]->{0,}(:TagClass {name: $tagClassName})
 RETURN 
     friend.id AS friendId, 
     friend.firstName AS friendFirstName, 

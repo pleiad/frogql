@@ -130,9 +130,8 @@ Estado de los 14 IC del benchmark cross-system (`bench/ldbc-queries/ic*.toml`). 
 
 | IC | Estado | Gaps restantes |
 |----|--------|----------------|
-| IC1, IC2, IC3, IC4, IC5, IC6, IC7, IC8, IC9, IC11, IC13 | implementado | — |
+| IC1, IC2, IC3, IC4, IC5, IC6, IC7, IC8, IC9, IC11, IC12, IC13 | implementado | — |
 | IC10 | blocked | temporal ISO para predicado de cumpleaños por mes/día (2.10). `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ✅ |
-| IC12 | blocked | GROUP BY por alias ✅ (2.12). Solo queda aplicar la divergencia de traducción `[:isSubclassOf]->{0,}` → prefijo de modo (`ACYCLIC`/`TRAIL`) en el query del toml — el typechecker ya lo admite, sin código nuevo. `COLLECT_LIST` ✅ (2.11) |
 | IC14 | blocked | list comprehension (2.10). Named paths + `NODES` ✅ (2.9), `VALUE` ✅, `*` ✅ |
 
 ### Roadmap para los 14 IC completos
@@ -141,11 +140,11 @@ Ordenado por leverage (ICs desbloqueados por feature):
 
 1. ~~**Named path patterns + path functions** (2.9)~~ — **hecho (2026-06-03)**. `MATCH path = [ANY|ALL] SHORTEST (...)`, `ELEMENTS`, `PATH_LENGTH`, `CARDINALITY`, más `NODES`/`EDGES` (divergencia). Desbloqueó el prerequisito de **IC1, IC13, IC14**.
 2. ~~**`COLLECT_LIST` / multiset aggregate** (2.11)~~ — **hecho (2026-06-03)**. `GeneralSetKind::CollectList`, reducer a `Value::List`, drop de records all-null. Era prerequisito de **IC1 e IC12**, pero ninguno cierra sin (3).
-3. ~~**GROUP BY por alias** (2.12)~~ — **hecho (2026-06-04)**. Resolución de nombres en una pre-pasada de elaboración (`resolve_group_key`). Cerró **IC1**; **IC12** queda solo a un reescribir-toml (`{0,}`→prefijo de modo, sin código nuevo).
+3. ~~**GROUP BY por alias** (2.12)~~ — **hecho (2026-06-04)**. Resolución de nombres en una pre-pasada de elaboración (`resolve_group_key`). Cerró **IC1 e IC12** (este último con la divergencia de traducción `{0,}`→prefijo `ACYCLIC` ya aplicada en su toml, sin código nuevo).
 4. **Temporales ISO para la ventana de cumpleaños de IC10** (2.10) — cierra **IC10**. No usar `EXTRACT(...)` como atajo: no es sintaxis ISO GQL.
 5. **List comprehension `[x IN list | expr]`** (2.10) — cierra **IC14**. `Expr::ListComprehension` + runtime sobre `Value::List`.
 
-Quedan **IC10** (temporales ISO), **IC12** (reescritura de traducción `{0,}`→prefijo) e **IC14** (list comprehension). Named paths (1), `COLLECT_LIST` (2), GROUP BY por alias (3), `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ya están.
+Quedan **IC10** (temporales ISO) e **IC14** (list comprehension). Named paths (1), `COLLECT_LIST` (2), GROUP BY por alias (3), `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ya están.
 
 ## Recomendación
 
