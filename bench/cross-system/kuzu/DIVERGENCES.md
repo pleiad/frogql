@@ -248,3 +248,39 @@ row-content hash oracle.
 - **Result iteration** — `QueryResult.has_next()` /
   `.get_next()` returns Python-native types (int / float / str /
   None / list). No custom converters needed for IC2's column types.
+
+## Additional ICs (IC1, IC3, IC4, IC7, IC12, IC13)
+
+The cross-system set grew from {2,5,6,8,9,11} to every IC frogQL
+implements. The translations for the new six are written from the
+canonical toml + LDBC reference Cypher and adapted to this loader's
+schema. They have NOT been row-hash-verified by the author (no LDBC
+dataset / Kuzu install was available when they were written); the
+server run's row-equivalence oracle is the verification gate. Per-IC
+notes:
+
+- **IC3** (`ic3.cypher`) — `label()` message-union (as IC2/IC8/IC9),
+  `:City`/`:Country` via `Place.type`, `DURATION({days:N})` → `N *
+  86400000` ms, two `count(DISTINCT ...)` + their sum. Scalar columns,
+  so a row-hash match against frogQL is expected if the query is right.
+- **IC4** (`ic4.cypher`) — `NOT EXISTS { MATCH ... }` existential
+  subquery (Kuzu ≥ 0.4). Scalar columns; row-hash match expected.
+- **IC13** (`ic13.cypher`) — recursive `SHORTEST` join `-[:knows*
+  SHORTEST 1..30]-`; `length(path)` is the hop count, `-1` when the
+  pair is in different components. Single scalar column; match expected
+  if the SHORTEST syntax + bound are right.
+- **IC1** (`ic1.cypher`) — recursive `SHORTEST` to named friends plus
+  two `collect({...})` list-of-struct columns and the Person MVAs
+  (`email`/`language` STRING[]). **Row-hash match NOT expected** —
+  struct/list columns repr differently across engines. Latency +
+  scalar columns are the comparable parts.
+- **IC7** (`ic7.cypher`) — arg-max-per-liker via `collect({...})` +
+  `[1]`; projects a STRUCT column (`latestLike`). **Row-hash match NOT
+  expected** (struct repr).
+- **IC12** (`ic12.cypher`) — recursive `isSubclassOf*0..10`,
+  `collect(DISTINCT tag.name)` list column. **Row-hash match NOT
+  expected** (list element order).
+
+The list/struct ICs are kept for their latency signal; the row oracle
+will (correctly) flag the column-encoding divergence — record it,
+don't mask it.

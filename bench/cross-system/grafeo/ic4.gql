@@ -1,0 +1,24 @@
+-- GQL translation of bench/ldbc-queries/ic4.toml for Grafeo.
+-- New topics: tags a friend posted about inside the window but never before.
+--
+-- !! UNVERIFIED: relies on Grafeo supporting a NOT EXISTS { MATCH ... }
+--    subquery. If Grafeo 0.5.x rejects it, this IC has no faithful
+--    Grafeo translation — record that in DIVERGENCES.md and let the
+--    harness skip it (the runner errors cleanly, logged in skipped.log).
+--
+-- Divergences (see DIVERGENCES.md):
+--   - $-params; `~[:knows]~` matches either direction (forward-only store).
+--   - DURATION({days:N}) → N*86400000 ms.
+--   - GROUP BY by the projected expression (tag.name); ORDER BY by the
+--     `tagName` alias.
+MATCH (person:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(post:Post)-[:hasTag]->(tag:Tag)
+WHERE post.creationDate >= $startDate
+  AND post.creationDate < $startDate + $durationDays * 86400000
+  AND NOT EXISTS {
+      MATCH (friend)<-[:hasCreator]-(post2:Post)-[:hasTag]->(tag)
+      WHERE post2.creationDate < $startDate
+  }
+RETURN tag.name AS tagName, COUNT(post) AS postCount
+GROUP BY tag.name
+ORDER BY postCount DESC, tagName ASC
+LIMIT 10

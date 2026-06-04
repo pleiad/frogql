@@ -1,0 +1,42 @@
+-- GQL translation of bench/ldbc-queries/ic3.toml for Grafeo.
+-- Friends + FoF who posted in both country X and country Y in a window.
+--
+-- Divergences (see DIVERGENCES.md):
+--   - $-params instead of the toml's {name}.
+--   - The toml's four MATCH clauses fold into one comma-joined MATCH
+--     (Grafeo rejects a second top-level MATCH); all filters move to a
+--     single trailing WHERE.
+--   - (messageX:Comment|Post) → bound var + `(messageX:Comment OR
+--     messageX:Post)` (Grafeo rejects pattern label alternation).
+--   - No :City / :Country sub-labels: reach them as :Place filtered by
+--     `type` ('city' / 'country').
+--   - DURATION({days:N}) desugars to N*86400000 ms (creationDate is int
+--     epoch-millis).
+--   - GROUP BY uses the projected expressions (otherPerson.id, ...),
+--     not the RETURN aliases. otherPerson.id is int, so ORDER BY
+--     otherPersonId sorts numerically (= the toml's CAST(... INTEGER)).
+MATCH (person:Person {id: $personId})~[:knows]~{1,2}(otherPerson:Person),
+      (otherPerson)-[:isLocatedIn]->(city:Place)-[:isPartOf]->(country:Place),
+      (otherPerson)<-[:hasCreator]-(messageX)-[:isLocatedIn]->(cx:Place),
+      (otherPerson)<-[:hasCreator]-(messageY)-[:isLocatedIn]->(cy:Place)
+WHERE person <> otherPerson
+  AND city.type = 'city' AND country.type = 'country'
+  AND country.name <> $countryXName AND country.name <> $countryYName
+  AND (messageX:Comment OR messageX:Post)
+  AND cx.type = 'country' AND cx.name = $countryXName
+  AND messageX.creationDate >= $startDate
+  AND messageX.creationDate < $startDate + $durationDays * 86400000
+  AND (messageY:Comment OR messageY:Post)
+  AND cy.type = 'country' AND cy.name = $countryYName
+  AND messageY.creationDate >= $startDate
+  AND messageY.creationDate < $startDate + $durationDays * 86400000
+RETURN
+    otherPerson.id AS otherPersonId,
+    otherPerson.firstName AS otherPersonFirstName,
+    otherPerson.lastName AS otherPersonLastName,
+    COUNT(DISTINCT messageX) AS xCount,
+    COUNT(DISTINCT messageY) AS yCount,
+    COUNT(DISTINCT messageX) + COUNT(DISTINCT messageY) AS totalCount
+GROUP BY otherPerson.id, otherPerson.firstName, otherPerson.lastName
+ORDER BY totalCount DESC, otherPersonId ASC
+LIMIT 20
