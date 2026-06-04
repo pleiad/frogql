@@ -1,5 +1,20 @@
 # Plan: BFS fast-path para SHORTEST (cierra IC1, IC13, IC14)
 
+> **ESTADO: implementado (2026-06-04).** Niveles 1+2 del plan entregados como
+> `Runtime::try_shortest_bfs` en `src/runtime/engine.rs`, enganchado en el arm
+> `Selected` antes del fallback `run_repetition_shortest`. Conduce desde el
+> lado de menor cardinalidad (sin necesitar la bidireccional explícita del
+> nivel 2 para alcanzar milisegundos), reconstruye caminos vía DAG de
+> predecesores y reproduce la semántica WALK para extremos coincidentes.
+> Verificado contra `bench/data/ldbc-sf0.1.gdb` (backend lazy):
+> **IC1 ~75 s→~33 ms**, **IC13 ~27 s→~20 ms** mediana por fila; **IC14**
+> deja de hacer OOM (~0.7 s mediana, resultados reales). Suite diferencial
+> BFS≡genérico en `tests/shortest_bfs_test.rs`; `GQLITE_DISABLE_SHORTEST_BFS=1`
+> lo apaga. Pendiente futuro: nivel 3 (producto NFA×grafo) para uniones de
+> label, modos restrictivos y `SHORTEST k>1`. Open items abajo (IC12, IC10)
+> siguen vigentes. El placeholder `$`→`{}` de IC1/IC14 se normalizó en sus
+> toml para poder correrlos por `ldbc_bench`.
+
 Handoff para retomar en otra sesión. Objetivo: reemplazar la enumeración de
 walks por una BFS con dominancia por nodo en el caso común de shortest path
 no ponderado, que es el que miden los LDBC IC.

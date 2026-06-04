@@ -26,7 +26,7 @@ params_file = "interactive_14_param.txt"
 param_columns = ["person1Id", "person2Id"]
 param_types = ["int", "int"]
 query = """
-MATCH path = ALL SHORTEST (p1:Person {id: $person1Id})~[:knows]~*(p2:Person {id: $person2Id})
+MATCH path = ALL SHORTEST (p1:Person {id: {person1Id}})~[:knows]~*(p2:Person {id: {person2Id}})
 RETURN
     [n IN NODES(path) | n.id] AS personIdsInPath,
     SUM(

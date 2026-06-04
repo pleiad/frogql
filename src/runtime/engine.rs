@@ -26,7 +26,7 @@ use super::ltj::triple_index::TripleIndex;
 use super::path_select::apply_path_prefix;
 use super::path_select::path_satisfies_mode;
 use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
-use crate::syntax::path_prefix::{PathMode, PathPrefix, UnboundedSupport};
+use crate::syntax::path_prefix::{PathMode, PathPrefix, PathSearch, UnboundedSupport};
 
 /// Finite evaluation policy for unbounded repetition inside `Selected`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +52,185 @@ fn unbounded_policy_for(prefix: Option<PathPrefix>) -> UnboundedPolicy {
 /// Number of edges in a path = its length for shortest-path ranking.
 fn path_edge_len(path: &Path) -> usize {
     path.0.iter().filter(|pv| pv.is_edge()).count()
+}
+
+/// The three edge orientations the SHORTEST BFS fast-path understands.
+/// `EdgeAnyDirection` is deliberately excluded (it is a union of the
+/// three and would need separate adjacency walks per direction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BfsEdgeDir {
+    /// `-[:L]->` — forward traversal follows outgoing edges to their target.
+    Out,
+    /// `<-[:L]-` — forward traversal follows incoming edges to their source.
+    In,
+    /// `~[:L]~` — symmetric; either endpoint reaches the other.
+    Undirected,
+}
+
+/// If `p` is a single directed/undirected edge pattern, return its
+/// descriptor and orientation. Any-direction and non-edge patterns → None.
+fn single_edge_dir(p: &PathPattern) -> Option<(Option<&Descriptor>, BfsEdgeDir)> {
+    match p {
+        PathPattern::EdgeRight(d) => Some((d.as_ref(), BfsEdgeDir::Out)),
+        PathPattern::EdgeLeft(d) => Some((d.as_ref(), BfsEdgeDir::In)),
+        PathPattern::EdgeUndirected(d) => Some((d.as_ref(), BfsEdgeDir::Undirected)),
+        _ => None,
+    }
+}
+
+/// A node endpoint, optionally wrapped in a value `Filter` — the only two
+/// shapes the BFS endpoint evaluator peels.
+fn node_endpoint(p: &PathPattern) -> Option<&PathPattern> {
+    match p {
+        PathPattern::Node(_) => Some(p),
+        PathPattern::Filter(inner, _) => node_endpoint(inner),
+        _ => None,
+    }
+}
+
+/// True for a plain `(x)` / `(x:ANY)` endpoint that constrains nothing —
+/// any node qualifies. Such a side need not be materialized: membership is
+/// universal and the per-node row is synthesized on demand.
+fn is_unconstrained_node(p: &PathPattern) -> bool {
+    match node_endpoint(p) {
+        Some(PathPattern::Node(None)) => true,
+        Some(PathPattern::Node(Some(d))) => {
+            d.dtype.label == LabelType::Star
+                && matches!(&d.dtype.props, PropertyType::Open(m) if m.is_empty())
+                && d.value_preds.is_empty()
+                && d.value_filters.is_empty()
+        }
+        _ => false,
+    }
+}
+
+/// The bound variable of a node endpoint (peeking through a Filter).
+fn endpoint_var(p: &PathPattern) -> Option<String> {
+    match node_endpoint(p) {
+        Some(PathPattern::Node(d)) => d.as_ref().and_then(|d| d.var.clone()),
+        _ => None,
+    }
+}
+
+/// Edge path-value of the reference kind matching the BFS direction.
+fn bfs_edge_pv(dir: BfsEdgeDir, eid: Id) -> PathValue {
+    match dir {
+        BfsEdgeDir::Undirected => PathValue::EdgeUndirectional(eid),
+        BfsEdgeDir::Out | BfsEdgeDir::In => PathValue::EdgeDirectional(eid),
+    }
+}
+
+/// Reconstruct shortest path(s) from `s` to `t` through the BFS predecessor
+/// DAG. Each returned sequence is in `s`→`t` order, alternating Node/Edge.
+/// With `groups`, every minimum-length path is enumerated (up to a generous
+/// cap guarding against pathological fan-out); otherwise a single path.
+fn reconstruct_bfs_paths(
+    s: Id,
+    t: Id,
+    preds: &HashMap<Id, Vec<(Id, Id)>>,
+    dir: BfsEdgeDir,
+    groups: bool,
+) -> Vec<Vec<PathValue>> {
+    if t == s {
+        return vec![vec![PathValue::Node(s)]];
+    }
+    if !groups {
+        // Single chain: follow the first predecessor back to the source.
+        let mut rev = vec![PathValue::Node(t)];
+        let mut cur = t;
+        while cur != s {
+            let Some(ps) = preds.get(&cur) else {
+                return Vec::new(); // unreachable in a well-formed DAG
+            };
+            let (p, e) = ps[0];
+            rev.push(bfs_edge_pv(dir, e));
+            rev.push(PathValue::Node(p));
+            cur = p;
+        }
+        rev.reverse();
+        return vec![rev];
+    }
+    const CAP: usize = 100_000;
+    let mut memo: HashMap<Id, Vec<Vec<PathValue>>> = HashMap::new();
+    bfs_paths_to(t, s, preds, dir, &mut memo, CAP)
+}
+
+/// Memoized expansion: all `s`→`cur` sequences (in `s`..`cur` order),
+/// capped to bound fan-out on dense shortest-path DAGs.
+fn bfs_paths_to(
+    cur: Id,
+    s: Id,
+    preds: &HashMap<Id, Vec<(Id, Id)>>,
+    dir: BfsEdgeDir,
+    memo: &mut HashMap<Id, Vec<Vec<PathValue>>>,
+    cap: usize,
+) -> Vec<Vec<PathValue>> {
+    if cur == s {
+        return vec![vec![PathValue::Node(s)]];
+    }
+    if let Some(v) = memo.get(&cur) {
+        return v.clone();
+    }
+    let mut result: Vec<Vec<PathValue>> = Vec::new();
+    if let Some(ps) = preds.get(&cur) {
+        for &(p, e) in ps {
+            for mut sub in bfs_paths_to(p, s, preds, dir, memo, cap) {
+                sub.push(bfs_edge_pv(dir, e));
+                sub.push(PathValue::Node(cur));
+                result.push(sub);
+                if result.len() >= cap {
+                    break;
+                }
+            }
+            if result.len() >= cap {
+                break;
+            }
+        }
+    }
+    memo.insert(cur, result.clone());
+    result
+}
+
+/// One side of a SHORTEST pattern's endpoints, resolved to either the
+/// universal set (any node) or an explicit candidate map keyed by node id.
+enum BfsEndpoint {
+    /// `(x)` with no constraint — every node is a candidate.
+    All { var: Option<String> },
+    /// A constrained endpoint, materialized once. Maps node id → the row
+    /// that bound it (so the endpoint's own variable/path survive).
+    Set { rows: HashMap<Id, ResultRow> },
+}
+
+impl BfsEndpoint {
+    /// Number of driving sources this side offers; `None` for the
+    /// universal set (which can never drive the search).
+    fn finite_len(&self) -> Option<usize> {
+        match self {
+            BfsEndpoint::All { .. } => None,
+            BfsEndpoint::Set { rows } => Some(rows.len()),
+        }
+    }
+
+    fn contains(&self, id: Id) -> bool {
+        match self {
+            BfsEndpoint::All { .. } => true,
+            BfsEndpoint::Set { rows } => rows.contains_key(&id),
+        }
+    }
+
+    /// The row binding this endpoint to `id`: the materialized one for a
+    /// `Set`, or a synthesized single-node row for `All`.
+    fn row_for(&self, id: Id) -> ResultRow {
+        match self {
+            BfsEndpoint::All { var } => ResultRow::new(
+                Path(vec![PathValue::Node(id)]),
+                Assignment::from_optional(var.as_deref(), PathValue::Node(id)),
+            ),
+            BfsEndpoint::Set { rows } => rows.get(&id).cloned().unwrap_or_else(|| {
+                ResultRow::new(Path(vec![PathValue::Node(id)]), Assignment::new())
+            }),
+        }
+    }
 }
 
 /// Min-heap entry for the k-shortest repetition search. `BinaryHeap` is a
@@ -1232,6 +1411,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
             PathPattern::Join(q1, q2) => self.run_join(q1, q2, limit),
             PathPattern::Selected { prefix, pattern } => {
+                // Node-dominated BFS fast-path for the common single-edge
+                // SHORTEST shape; falls through to the generic selection
+                // when its preconditions don't hold.
+                if let Some(ir) = self.try_shortest_bfs(prefix, pattern, limit) {
+                    return ir;
+                }
                 // Selection ranks the full candidate set, so the inner runs
                 // without LIMIT and the caller limit is applied afterwards.
                 let prev = self.unbounded_policy.get();
@@ -2076,6 +2261,428 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             result.truncate(limit);
         }
         IntermediateResult::new(result)
+    }
+
+    /// Neighbors of `node` for the BFS, honoring the edge label and the
+    /// traversal direction. `reverse` flips a directed edge's adjacency —
+    /// used when the search is driven from the *target* endpoint set, so a
+    /// forward `-[:L]->` is walked backwards. Yields `(edge_id, neighbor)`.
+    fn bfs_neighbors(
+        &self,
+        node: Id,
+        desc: Option<&Descriptor>,
+        dir: BfsEdgeDir,
+        reverse: bool,
+    ) -> Vec<(Id, Id)> {
+        let mut out = Vec::new();
+        // For a directed edge, decide whether forward traversal follows the
+        // outgoing (→tgt) or incoming (→src) adjacency; `reverse` swaps it.
+        let follow_outgoing = match dir {
+            BfsEdgeDir::Out => !reverse,
+            BfsEdgeDir::In => reverse,
+            BfsEdgeDir::Undirected => {
+                for eid in self.graph.undirected_edges_of(node) {
+                    if !self.filter_edge(eid, desc) {
+                        continue;
+                    }
+                    let s = self.graph.src(eid);
+                    let t = self.graph.tgt(eid);
+                    out.push((eid, if s == node { t } else { s }));
+                }
+                return out;
+            }
+        };
+        let edges = if follow_outgoing {
+            self.graph.outgoing_edges(node)
+        } else {
+            self.graph.incoming_edges(node)
+        };
+        for eid in edges {
+            if !self.filter_edge(eid, desc) {
+                continue;
+            }
+            let nbr = if follow_outgoing {
+                self.graph.tgt(eid)
+            } else {
+                self.graph.src(eid)
+            };
+            out.push((eid, nbr));
+        }
+        out
+    }
+
+    /// Resolve one endpoint pattern to a [`BfsEndpoint`]: the universal set
+    /// for an unconstrained `(x)`, or a materialized candidate map.
+    fn bfs_endpoint(&self, p: &PathPattern) -> BfsEndpoint {
+        if is_unconstrained_node(p) {
+            return BfsEndpoint::All {
+                var: endpoint_var(p),
+            };
+        }
+        let ir = self.run_path_pattern(p, 0);
+        let mut rows: HashMap<Id, ResultRow> = HashMap::with_capacity(ir.rows.len());
+        for r in ir.rows {
+            if let Some(id) = r.path().last_node_id() {
+                rows.entry(id).or_insert(r);
+            }
+        }
+        BfsEndpoint::Set { rows }
+    }
+
+    /// Fast-path for `[ANY|ALL] SHORTEST` (count 1) over a single repeated
+    /// edge between two node endpoints: a node-dominated BFS instead of the
+    /// walk-enumeration heap in [`run_repetition_shortest`]. Each node is
+    /// settled once, so the cost is O(V + E) per source rather than `b^d`.
+    ///
+    /// Returns `None` (caller falls back to the generic selection path)
+    /// whenever a precondition fails, so semantics never regress:
+    ///   - prefix is not WALK + `SHORTEST 1 PATHS|GROUPS`
+    ///     (`ANY SHORTEST` / `ALL SHORTEST`);
+    ///   - the pattern is not `(src) [single-edge]{lb,ub} (tgt)`;
+    ///   - the repeated edge binds a variable, is any-direction, or the
+    ///     lower bound is ≥ 2 (shortest-walk-of-length-≥2 may revisit
+    ///     nodes — outside the simple-BFS regime);
+    ///   - both endpoints are unconstrained (a true all-pairs search).
+    fn try_shortest_bfs(
+        &self,
+        prefix: &PathPrefix,
+        pattern: &PathPattern,
+        limit: usize,
+    ) -> Option<IntermediateResult> {
+        if std::env::var("GQLITE_DISABLE_SHORTEST_BFS").is_ok() {
+            return None;
+        }
+        if prefix.mode != PathMode::Walk {
+            return None;
+        }
+        let groups = match prefix.search {
+            PathSearch::ShortestPaths { count: 1 } => false,
+            PathSearch::ShortestGroups { count: 1 } => true,
+            _ => return None,
+        };
+
+        // Shape: Concat(Concat(src, Repeat{single-edge, lb, ub}), tgt),
+        // where src/tgt are node endpoints (possibly Filter-wrapped).
+        let PathPattern::Concat(left, tgt) = pattern else {
+            return None;
+        };
+        let PathPattern::Concat(src, rep) = left.as_ref() else {
+            return None;
+        };
+        let PathPattern::Repeat {
+            pattern: inner,
+            lb,
+            ub,
+        } = rep.as_ref()
+        else {
+            return None;
+        };
+        let (lb, ub) = (*lb, *ub);
+        if lb > 1 {
+            return None;
+        }
+        let (edge_desc, dir) = single_edge_dir(inner)?;
+        if edge_desc.and_then(|d| d.var.as_deref()).is_some() {
+            return None;
+        }
+        // Validate both endpoints are node patterns; evaluate the full
+        // (Filter-wrapped) sub-patterns so endpoint value predicates run.
+        node_endpoint(src)?;
+        node_endpoint(tgt)?;
+        let src_end = self.bfs_endpoint(src);
+        let tgt_end = self.bfs_endpoint(tgt);
+
+        // A both-unconstrained pattern is a genuine all-pairs search; leave
+        // it to the generic path rather than enumerate the whole graph.
+        if src_end.finite_len().is_none() && tgt_end.finite_len().is_none() {
+            return None;
+        }
+
+        let mut rows: Vec<ResultRow> = Vec::new();
+
+        // `*` (lb == 0) admits the length-0 self match for every node that
+        // satisfies BOTH endpoints — the unique shortest path for its
+        // (n, n) partition, so no longer (n, n) path is ever emitted.
+        // Coincident-endpoint pairs (a node satisfying BOTH endpoints).
+        let self_ids: Vec<Id> = match (&src_end, &tgt_end) {
+            (BfsEndpoint::Set { rows: s }, _) => s
+                .keys()
+                .copied()
+                .filter(|id| tgt_end.contains(*id))
+                .collect(),
+            (_, BfsEndpoint::Set { rows: t }) => t
+                .keys()
+                .copied()
+                .filter(|id| src_end.contains(*id))
+                .collect(),
+            _ => Vec::new(), // both All — excluded above
+        };
+        if lb == 0 {
+            // `*` admits the length-0 self match — the unique shortest path
+            // for each (n, n) partition.
+            for &id in &self_ids {
+                let a = src_end.row_for(id);
+                let b = tgt_end.row_for(id);
+                if !a.assignment.can_unify(&b.assignment) {
+                    continue;
+                }
+                rows.push(ResultRow::with_paths(
+                    vec![Path(vec![PathValue::Node(id)])],
+                    a.assignment.unify(&b.assignment),
+                ));
+            }
+        } else if !self_ids.is_empty() {
+            // `+`/`{1,…}`: a coincident pair needs a closed walk of length
+            // ≥ 1. Under WALK an undirected edge yields the trivial reuse
+            // walk `n-e-m-e-n` (length 2, or 1 for a self-loop), matching the
+            // generic enumerator. A directed closed walk is a genuine cycle
+            // search; defer those to the generic path to stay exact.
+            if dir == BfsEdgeDir::Undirected {
+                for &id in &self_ids {
+                    self.emit_undirected_self_cycles(
+                        id, edge_desc, ub, groups, &src_end, &tgt_end, &mut rows,
+                    );
+                }
+            } else {
+                return None;
+            }
+        }
+
+        // Drive the BFS from the side with fewer sources; that side must be
+        // finite. When driving from the target endpoint, walk the adjacency
+        // in reverse and re-orient reconstructed paths to src→tgt order.
+        let drive_from_src = match (src_end.finite_len(), tgt_end.finite_len()) {
+            (Some(s), Some(t)) => s <= t,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => unreachable!("both-All returned above"),
+        };
+        let (driving, other, reverse) = if drive_from_src {
+            (&src_end, &tgt_end, false)
+        } else {
+            (&tgt_end, &src_end, true)
+        };
+
+        let driving_ids: Vec<Id> = match driving {
+            BfsEndpoint::Set { rows } => rows.keys().copied().collect(),
+            BfsEndpoint::All { .. } => unreachable!("driving side is finite"),
+        };
+        let other_ids: Option<HashSet<Id>> = match other {
+            BfsEndpoint::Set { rows } => Some(rows.keys().copied().collect()),
+            BfsEndpoint::All { .. } => None,
+        };
+
+        for s in driving_ids {
+            self.bfs_from_source(
+                s,
+                edge_desc,
+                dir,
+                reverse,
+                ub,
+                groups,
+                &other_ids,
+                drive_from_src,
+                &src_end,
+                &tgt_end,
+                &mut rows,
+                limit,
+            );
+            if limit > 0 && rows.len() >= limit {
+                break;
+            }
+        }
+
+        if limit > 0 && rows.len() > limit {
+            rows.truncate(limit);
+        }
+        Some(IntermediateResult::new(rows))
+    }
+
+    /// Emit the shortest closed walk(s) from `n` back to `n` over an
+    /// undirected edge, for a coincident `(n, n)` pair under `+`/`{1,…}`.
+    /// WALK allows edge and node reuse, so the minimum is a self-loop
+    /// (length 1) when one exists, else the trivial `n-e-m-e-n` reuse walk
+    /// (length 2) over every incident edge — emitted only if the upper bound
+    /// `ub` admits that length. With `groups` all minimum-length walks are
+    /// emitted; otherwise one. Mirrors the generic enumerator.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_undirected_self_cycles(
+        &self,
+        n: Id,
+        edge_desc: Option<&Descriptor>,
+        ub: Option<usize>,
+        groups: bool,
+        src_end: &BfsEndpoint,
+        tgt_end: &BfsEndpoint,
+        rows: &mut Vec<ResultRow>,
+    ) {
+        let admits = |len: usize| ub.is_none_or(|u| len <= u);
+        let a = src_end.row_for(n);
+        let b = tgt_end.row_for(n);
+        if !a.assignment.can_unify(&b.assignment) {
+            return;
+        }
+        let mu = a.assignment.unify(&b.assignment);
+
+        let mut self_loops: Vec<Id> = Vec::new();
+        let mut spokes: Vec<(Id, Id)> = Vec::new(); // (edge_id, neighbor)
+        for eid in self.graph.undirected_edges_of(n) {
+            if !self.filter_edge(eid, edge_desc) {
+                continue;
+            }
+            let s = self.graph.src(eid);
+            let t = self.graph.tgt(eid);
+            if s == n && t == n {
+                self_loops.push(eid);
+            } else {
+                spokes.push((eid, if s == n { t } else { s }));
+            }
+        }
+
+        let loop_path = |eid: Id| {
+            Path(vec![
+                PathValue::Node(n),
+                PathValue::EdgeUndirectional(eid),
+                PathValue::Node(n),
+            ])
+        };
+        let spoke_path = |eid: Id, m: Id| {
+            Path(vec![
+                PathValue::Node(n),
+                PathValue::EdgeUndirectional(eid),
+                PathValue::Node(m),
+                PathValue::EdgeUndirectional(eid),
+                PathValue::Node(n),
+            ])
+        };
+
+        let paths: Vec<Path> = if !self_loops.is_empty() && admits(1) {
+            if groups {
+                self_loops.into_iter().map(loop_path).collect()
+            } else {
+                vec![loop_path(self_loops[0])]
+            }
+        } else if !spokes.is_empty() && admits(2) {
+            if groups {
+                spokes
+                    .into_iter()
+                    .map(|(eid, m)| spoke_path(eid, m))
+                    .collect()
+            } else {
+                let (eid, m) = spokes[0];
+                vec![spoke_path(eid, m)]
+            }
+        } else {
+            Vec::new()
+        };
+        for p in paths {
+            rows.push(ResultRow::with_paths(vec![p], mu.clone()));
+        }
+    }
+
+    /// One source's BFS over the (label-, direction-filtered) adjacency,
+    /// settling each node once and recording shortest-path predecessors.
+    /// Emits one row per reached qualifying endpoint (all minimum-length
+    /// paths when `groups`, otherwise a single path).
+    #[allow(clippy::too_many_arguments)]
+    fn bfs_from_source(
+        &self,
+        s: Id,
+        edge_desc: Option<&Descriptor>,
+        dir: BfsEdgeDir,
+        reverse: bool,
+        ub: Option<usize>,
+        groups: bool,
+        other_ids: &Option<HashSet<Id>>,
+        drive_from_src: bool,
+        src_end: &BfsEndpoint,
+        tgt_end: &BfsEndpoint,
+        rows: &mut Vec<ResultRow>,
+        limit: usize,
+    ) {
+        let mut dist: HashMap<Id, u32> = HashMap::new();
+        dist.insert(s, 0);
+        let mut preds: HashMap<Id, Vec<(Id, Id)>> = HashMap::new();
+        let mut frontier: Vec<Id> = vec![s];
+        // For a finite "other" side, stop once every target is settled.
+        let mut remaining: Option<HashSet<Id>> = other_ids.as_ref().map(|ids| {
+            let mut r = ids.clone();
+            r.remove(&s);
+            r
+        });
+
+        let mut level = 0u32;
+        while !frontier.is_empty() {
+            if let Some(u) = ub {
+                if level as usize >= u {
+                    break;
+                }
+            }
+            let nd = level + 1;
+            let mut next: Vec<Id> = Vec::new();
+            for &node in &frontier {
+                for (eid, nbr) in self.bfs_neighbors(node, edge_desc, dir, reverse) {
+                    match dist.get(&nbr) {
+                        None => {
+                            dist.insert(nbr, nd);
+                            preds.entry(nbr).or_default().push((node, eid));
+                            next.push(nbr);
+                            if let Some(r) = remaining.as_mut() {
+                                r.remove(&nbr);
+                            }
+                        }
+                        // Another equal-length predecessor: kept only when
+                        // enumerating all-shortest groups.
+                        Some(&d) if groups && d == nd => {
+                            preds.entry(nbr).or_default().push((node, eid));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            level += 1;
+            frontier = next;
+            if matches!(&remaining, Some(r) if r.is_empty()) {
+                break;
+            }
+        }
+
+        // Reached endpoints: every settled node (dist ≥ 1) that satisfies
+        // the *other* side. `lb` ≤ 1 here, so any dist ≥ 1 clears it.
+        let other = if drive_from_src { tgt_end } else { src_end };
+        let mut targets: Vec<Id> = dist
+            .keys()
+            .copied()
+            .filter(|&id| id != s && other.contains(id))
+            .collect();
+        targets.sort_unstable(); // deterministic row order across runs
+        for t in targets {
+            let paths = reconstruct_bfs_paths(s, t, &preds, dir, groups);
+            for seq in paths {
+                // `seq` is in driving-source→target order. When driving from
+                // the target endpoint, flip it back to src→tgt.
+                let oriented = if drive_from_src {
+                    seq
+                } else {
+                    let mut v = seq;
+                    v.reverse();
+                    v
+                };
+                let (src_id, tgt_id) = if drive_from_src { (s, t) } else { (t, s) };
+                let a = src_end.row_for(src_id);
+                let b = tgt_end.row_for(tgt_id);
+                if !a.assignment.can_unify(&b.assignment) {
+                    continue;
+                }
+                rows.push(ResultRow::with_paths(
+                    vec![Path(oriented)],
+                    a.assignment.unify(&b.assignment),
+                ));
+                if limit > 0 && rows.len() >= limit {
+                    return;
+                }
+            }
+        }
     }
 
     /// Enumerate unbounded repetition under a finite restrictive mode.
