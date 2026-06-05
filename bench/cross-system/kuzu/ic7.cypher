@@ -27,6 +27,11 @@ MATCH (person:Person {id: $personId})<-[:hasCreator]-(message)<-[liked:likes]-(l
 WHERE label(message) IN ['Comment', 'Post']
 WITH person, liker, message, liked
 ORDER BY liked.creationDate DESC, message.id ASC
+// Kuzu requires SKIP/LIMIT after an ORDER BY in a WITH clause. A LIMIT far
+// above any possible (liker, message, like) row count for one person never
+// truncates, so the ordered collect below still sees every row — same result,
+// just satisfies the binder. (1e9 ≫ likes-per-person through SF1000.)
+LIMIT 1000000000
 WITH person, liker, collect({
         likeCreationDate: liked.creationDate,
         commentOrPostId: message.id,

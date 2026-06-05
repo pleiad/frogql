@@ -16,7 +16,10 @@ RETURN
     friend.id AS friendId,
     friend.firstName AS friendFirstName,
     friend.lastName AS friendLastName,
-    COLLECT_LIST(DISTINCT tag.name) AS tagNames,
+    -- Grafeo lacks frogql's COLLECT_LIST; try the Cypher-style COLLECT name.
+    -- SPECULATIVE: if Grafeo has no list aggregate at all this still errors
+    -- (no faithful translation then). Verify on the server.
+    COLLECT(DISTINCT tag.name) AS tagNames,
     COUNT(comment) AS replyCount
 GROUP BY friend.id, friend.firstName, friend.lastName
 ORDER BY replyCount DESC, CAST(friendId AS INTEGER) ASC

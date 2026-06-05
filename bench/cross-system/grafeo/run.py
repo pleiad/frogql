@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 from pathlib import Path
@@ -125,6 +126,32 @@ def coerce(s: str) -> int | str:
         return int(s)
     except ValueError:
         return s
+
+
+def inline_params(query: str, header: list[str], raw_row: list[str]) -> str:
+    """Substitute every ``$<col>`` placeholder with its literal value so the
+    engine never receives a bound parameter.
+
+    Grafeo 0.5.x does not yet support a bound ``$param`` inside a WHERE filter
+    (``GRAFEO-X001: Parameters not yet supported in filters``). This is the
+    same textual-substitution path frogql's ``ldbc_bench`` already uses, so it
+    is benchmark-consistent. A literal and a bound param with the same value
+    produce the same rows — the row-hash oracle still guards equivalence.
+
+    Ints inline raw; strings are single-quoted with ISO ``''`` escaping. Names
+    are replaced longest-first with a trailing non-identifier guard so ``$start``
+    cannot shadow ``$startDate``.
+    """
+    out = query
+    for col, val in sorted(zip(header, raw_row), key=lambda kv: -len(kv[0])):
+        v = coerce(val)
+        literal = str(v) if isinstance(v, int) else "'" + str(v).replace("'", "''") + "'"
+        out = re.sub(
+            r"\$" + re.escape(col) + r"(?![A-Za-z0-9_])",
+            lambda _m, lit=literal: lit,  # lambda avoids backref interpretation
+            out,
+        )
+    return out
 
 
 def derive_columns(return_columns: list[str]) -> list[str]:
@@ -222,19 +249,20 @@ def main() -> int:
         out.write("query;backend;params;row;iter;result_count;elapsed_ns\n")
 
         for row_idx, raw_row in enumerate(params_rows):
-            # Grafeo param dict keys do NOT include the `$` prefix — the
-            # engine maps `$name` in the query to `name` in the dict.
-            param_dict = {col: coerce(val) for col, val in zip(header, raw_row)}
+            # Inline the params as literals rather than binding them: Grafeo
+            # rejects $-params inside WHERE filters, and frogql's runner inlines
+            # too, so this keeps the comparison consistent. Built once per row.
+            inlined = inline_params(query, header, raw_row)
             joined = "|".join(raw_row)
 
             for _ in range(args.warmup):
-                db.execute(query, param_dict).to_list()
+                db.execute(inlined, {}).to_list()
 
             iter0_result = None
             elapsed_ns = 0
             for n in range(args.iters):
                 t = time.perf_counter_ns()
-                result = db.execute(query, param_dict).to_list()
+                result = db.execute(inlined, {}).to_list()
                 elapsed_ns = time.perf_counter_ns() - t
                 out.write(
                     f"{query_label};{BACKEND_LABEL};{joined};{row_idx};{n};"
