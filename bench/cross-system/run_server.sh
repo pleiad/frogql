@@ -6,8 +6,9 @@
 # box down).
 #
 # This is the "run it on a separate Linux server" entry point. It:
-#   1. verifies / builds the gqlite release binaries (ldbc_bench,
-#      bench_setup);
+#   1. verifies / builds the gqlite release binaries (frogql,
+#      ldbc_bench, bench_setup — bench_setup shells out to frogql to
+#      import the CSVs into the .gdb);
 #   2. downloads + builds the LDBC SF0.1 dataset (bench_setup) if the
 #      .gdb / CSVs are missing — Linux only, no Windows UAC issue;
 #   3. installs the Python deps for the external engines if asked;
@@ -30,6 +31,9 @@
 #   --iters N           measured iters     (default: 10)
 #   --warmup N          warmup iters       (default: 2)
 #   --mem-limit-gb G    per-runner RSS cap (default: 10)
+#   --timeout-s N       per-(system,IC) wall-clock cap (default: 600;
+#                       0 = none). A hung/runaway external query is killed
+#                       and recorded as a timeout instead of stalling the run.
 #   --install-deps      pip-install the external engines first
 #                       (bench/cross-system/install_python_deps.sh)
 #   --rebuild-data      force re-download/rebuild of the LDBC dataset
@@ -52,6 +56,9 @@ ICS=""                 # empty => let run_all.sh use its all-implemented default
 ITERS=10
 WARMUP=2
 MEM_LIMIT_GB=10
+TIMEOUT_S=600          # per-(system,IC) wall-clock cap. Bounds a hung/runaway
+                       # external query (a single IC sweep) so the whole run
+                       # can't stall for hours. 0 disables it.
 INSTALL_DEPS=0
 REBUILD_DATA=0
 PASSTHROUGH=()
@@ -63,6 +70,7 @@ while [[ $# -gt 0 ]]; do
         --iters)         ITERS="$2"; shift 2 ;;
         --warmup)        WARMUP="$2"; shift 2 ;;
         --mem-limit-gb)  MEM_LIMIT_GB="$2"; shift 2 ;;
+        --timeout-s)     TIMEOUT_S="$2"; shift 2 ;;
         --install-deps)  INSTALL_DEPS=1; shift ;;
         --rebuild-data)  REBUILD_DATA=1; shift ;;
         -h|--help)
@@ -112,8 +120,8 @@ fi
 
 # --- gqlite release binaries -----------------------------------------
 log "Building gqlite release binaries"
-cargo build --release --bin ldbc_bench --bin bench_setup
-echo "  ldbc_bench + bench_setup built."
+cargo build --release --bin frogql --bin ldbc_bench --bin bench_setup
+echo "  frogql + ldbc_bench + bench_setup built."
 
 # --- LDBC dataset ----------------------------------------------------
 if [[ $REBUILD_DATA -eq 1 || ! -f "$GDB" || ! -d "$CSV_DIR" ]]; then
@@ -134,7 +142,7 @@ SERVER_LOG="$SCRIPT_DIR/results/${TS}.server.log"
 mkdir -p "$SCRIPT_DIR/results"
 
 RUN_ARGS=(--only "$SYSTEMS" --iters "$ITERS" --warmup "$WARMUP"
-          --mem-limit-gb "$MEM_LIMIT_GB")
+          --mem-limit-gb "$MEM_LIMIT_GB" --timeout-s "$TIMEOUT_S")
 [[ -n "$ICS" ]] && RUN_ARGS+=(--ics "$ICS")
 RUN_ARGS+=("${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}")
 
@@ -143,6 +151,7 @@ echo "  systems:   $SYSTEMS"
 echo "  ics:       ${ICS:-<all implemented>}"
 echo "  iters:     $ITERS (warmup $WARMUP)"
 echo "  mem cap:   ${MEM_LIMIT_GB} GiB/runner"
+echo "  time cap:  ${TIMEOUT_S}s/runner (0 = none)"
 echo "  log:       $SERVER_LOG"
 echo ""
 
