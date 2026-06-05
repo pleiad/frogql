@@ -1,15 +1,17 @@
 -- GQL translation of bench/ldbc-queries/ic7.toml for Grafeo.
 --
--- !! UNVERIFIED. Depends on Grafeo supporting a `VALUE { MATCH ...
---    ORDER BY ... LIMIT 1 }` value subquery, RECORD constructors,
---    COALESCE, CAST/FLOOR, division, NOT EXISTS, and GROUP BY by
---    binding variable. It also projects a RECORD column (`latestLike`),
---    which the row-hash oracle compares by repr — a hash MATCH across
---    engines is not expected. Best-effort latency probe; verify + record
---    the divergence (or skip) on the server.
+-- Parse/plan verified against Grafeo 0.5.34 (in-memory probe): the
+-- `VALUE { MATCH ... ORDER BY ... LIMIT 1 }` value subquery, COALESCE,
+-- CAST/FLOOR, division, NOT EXISTS and GROUP BY by binding variable all
+-- parse. One rewrite vs. the ISO source: `RECORD {...}` -> bare map
+-- `{...}` (Grafeo has no RECORD keyword); same value.
+--
+-- !! Row-hash parity NOT expected: `latestLike` is a map/struct column
+--    and the oracle compares structs by repr, which differs across
+--    engines. Latency is the comparable part; verify on the server.
 --
 -- Source-of-truth: bench/ldbc-queries/ic7.toml — itself ISO GQL, so
--- this is a near-verbatim copy with $-params and the (:Comment|Post)
+-- this is a near-verbatim copy with inlined params and the (:Comment|Post)
 -- carve-out.
 --
 -- Divergences (see DIVERGENCES.md):
@@ -24,7 +26,7 @@ RETURN
     VALUE {
         MATCH (person)<-[:hasCreator]-(m)<-[l:likes]-(liker)
         WHERE (m:Comment OR m:Post)
-        RETURN RECORD {
+        RETURN {
             likeCreationDate: l.creationDate,
             commentOrPostId: m.id,
             commentOrPostContent: COALESCE(m.content, m.imageFile),

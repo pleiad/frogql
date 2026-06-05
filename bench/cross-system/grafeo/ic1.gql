@@ -1,26 +1,32 @@
 -- GQL translation of bench/ldbc-queries/ic1.toml for Grafeo.
 --
--- !! UNVERIFIED, multiple risks. This translation depends on Grafeo
---    supporting: named paths + ANY SHORTEST, PATH_LENGTH, two OPTIONAL
---    MATCH clauses, COLLECT_LIST(RECORD {...}), and GROUP BY over many
---    keys. It also reads Person MVAs (friend.email / friend.speaks)
---    which the Grafeo loader does NOT currently import (see setup.py /
---    DIVERGENCES.md) — those two columns will be NULL, so row-hash
---    parity with frogql is NOT expected even if the query runs. Treat
---    this as a best-effort latency probe; verify on the server and
---    record the divergence (or skip) rather than assuming parity.
+-- Parse/plan verified against Grafeo 0.5.34 (in-memory probe): named
+-- paths + ANY SHORTEST, PATH_LENGTH, two OPTIONAL MATCH, COLLECT of a map
+-- literal, and the big GROUP BY all parse and plan. Three rewrites were
+-- needed vs. the ISO source, each semantics-preserving:
+--   1. RECORD {...} -> bare map {...} (Grafeo has no RECORD keyword).
+--   2. COLLECT_LIST -> COLLECT (Grafeo's list aggregate name).
+--   3. The sub-label type filters move INTO the node pattern
+--      (uni:Organisation {type:'university'}) and `WHERE p <> friend`
+--      moves AFTER the OPTIONAL MATCH clauses — Grafeo rejects a WHERE
+--      sitting between MATCH and OPTIONAL MATCH. p/friend are always
+--      bound and the inline filter stays inside the optional, so neither
+--      move changes the result.
+--
+-- !! Row-hash parity NOT expected: friend.email / friend.speaks are
+--    Person MVAs the Grafeo loader does not import (see setup.py /
+--    DIVERGENCES.md), so those two columns resolve to NULL. The query
+--    runs (latency probe); confirm + record the divergence on the server.
 --
 -- Divergences (see DIVERGENCES.md):
---   - $-params; no :University/:City/:Company/:Country sub-labels
---     (reached via :Organisation/:Place + `type`).
+--   - $-params inlined as literals by run.py; no :University/:City/
+--     :Company/:Country sub-labels (reached via :Organisation/:Place + `type`).
 --   - GROUP BY uses the projected expressions, not the RETURN aliases.
 --   - friend.email / friend.speaks resolve to NULL (MVAs not loaded).
 MATCH path = ANY SHORTEST (p:Person {id: $personId})~[:knows]~{1,3}(friend:Person {firstName: $firstName})
+OPTIONAL MATCH (friend)-[studyAt:studyAt]->(uni:Organisation {type: 'university'})-[:isLocatedIn]->(uniCity:Place)
+OPTIONAL MATCH (friend)-[workAt:workAt]->(company:Organisation {type: 'company'})-[:isLocatedIn]->(companyCountry:Place)
 WHERE p <> friend
-OPTIONAL MATCH (friend)-[studyAt:studyAt]->(uni:Organisation)-[:isLocatedIn]->(uniCity:Place)
-WHERE uni.type = 'university'
-OPTIONAL MATCH (friend)-[workAt:workAt]->(company:Organisation)-[:isLocatedIn]->(companyCountry:Place)
-WHERE company.type = 'company'
 RETURN
     friend.id AS friendId,
     friend.lastName AS friendLastName,
@@ -33,8 +39,8 @@ RETURN
     friend.email AS friendEmails,
     friend.speaks AS friendLanguages,
     uniCity.name AS friendCityName,
-    COLLECT_LIST(RECORD {uniName: uni.name, classYear: studyAt.classYear, uniCityName: uniCity.name}) AS friendUniversities,
-    COLLECT_LIST(RECORD {companyName: company.name, workFrom: workAt.workFrom, companyCountryName: companyCountry.name}) AS friendCompanies
+    COLLECT({uniName: uni.name, classYear: studyAt.classYear, uniCityName: uniCity.name}) AS friendUniversities,
+    COLLECT({companyName: company.name, workFrom: workAt.workFrom, companyCountryName: companyCountry.name}) AS friendCompanies
 GROUP BY friend.id, friend.lastName, PATH_LENGTH(path), friend.birthday, friend.creationDate, friend.gender, friend.browserUsed, friend.locationIP, friend.email, friend.speaks, uniCity.name
 ORDER BY distanceFromPerson ASC, friendLastName ASC, CAST(friendId AS INTEGER) ASC
 LIMIT 20
