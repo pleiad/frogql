@@ -946,7 +946,7 @@ fn convert_results<G: GraphAccess>(
         for &(start, end) in &ranges {
             let mut path_elements = Vec::new();
             for ti in start..end {
-                let (src_var, tgt_var, ref edge_var, _kind) = decomp.triple_info[ti];
+                let (src_var, tgt_var, ref edge_var, kind) = decomp.triple_info[ti];
                 let src_id = tuple
                     .vars
                     .iter()
@@ -959,14 +959,29 @@ fn convert_results<G: GraphAccess>(
                     .map(|(_, id)| *id);
 
                 if let (Some(src), Some(tgt)) = (src_id, tgt_id) {
+                    // Orient the triple along the chain's traversal direction.
+                    // `decompose_flat_chain` stores a Left (reverse `<-`) edge as
+                    // (src = next node, tgt = current boundary), so the node already
+                    // in the path is the *tgt* and the newly reached node is the
+                    // *src*. Pushing `tgt` blindly (as the old code did) re-emitted
+                    // the boundary node and dropped the new endpoint — producing a
+                    // path with a duplicated node that then failed ACYCLIC/SIMPLE/
+                    // TRAIL checks and corrupted SHORTEST lengths and named-path
+                    // functions. `entry` is the boundary, `exit` is the new node.
+                    let (entry, exit) = match kind {
+                        EdgeKind::Right | EdgeKind::Undirected => (src, tgt),
+                        EdgeKind::Left => (tgt, src),
+                    };
                     if path_elements.is_empty() {
-                        path_elements.push(PathValue::Node(src));
+                        path_elements.push(PathValue::Node(entry));
                     }
                     // Prefer the eid carried out of the LTJ trie (matches
                     // the bound (src, label, tgt) exactly). Fall back to
                     // adjacency only when the per-triple eid is unset, e.g.
                     // when the iterator never bottomed out — defensive,
-                    // shouldn't fire on well-formed patterns.
+                    // shouldn't fire on well-formed patterns. `find_edge` keeps
+                    // the triple's stored (src, tgt) orientation — that is the
+                    // edge's real direction, independent of traversal sense.
                     let resolved_eid = tuple
                         .triple_eids
                         .get(ti)
@@ -983,7 +998,7 @@ fn convert_results<G: GraphAccess>(
                             assignment.extend(ev.clone(), pv);
                         }
                     }
-                    path_elements.push(PathValue::Node(tgt));
+                    path_elements.push(PathValue::Node(exit));
                 }
             }
             paths.push(Path(path_elements));

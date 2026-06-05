@@ -20,7 +20,7 @@ params_file = "interactive_12_param.txt"
 param_columns = ["personId", "tagClassName"]
 param_types = ["int", "string"]
 query = """
-MATCH ACYCLIC (person:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(comment:Comment)-[:replyOf]->(post:Post)-[:hasTag]->(tag:Tag)-[:hasType]->(tagClass:TagClass)-[:isSubclassOf]->{0,}(:TagClass {name: $tagClassName})
+MATCH ACYCLIC (person:Person {id: {personId}})~[:knows]~(friend:Person)<-[:hasCreator]-(comment:Comment)-[:replyOf]->(post:Post)-[:hasTag]->(tag:Tag)-[:hasType]->(tagClass:TagClass)-[:isSubclassOf]->{0,}(:TagClass {name: {tagClassName}})
 RETURN 
     friend.id AS friendId, 
     friend.firstName AS friendFirstName, 
