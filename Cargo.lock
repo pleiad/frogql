@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "frogql-node"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "gqlrust",
  "napi",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "frogql-py"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "gqlrust",
  "pyo3",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "frogql-wasm"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "console_error_panic_hook",
  "gqlrust",
