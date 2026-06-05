@@ -482,3 +482,75 @@ mode-only prefixes and `retain_vars(boundary)` for selective ones.
 Tests: `selected_shortest_pushes_boundary_value_preds`,
 `selected_shortest_keeps_interior_value_pred_as_filter`,
 `selected_mode_all_pushes_interior_value_preds` (in `pushdown.rs`).
+
+
+## 13. Pinned correlated subquery probes (EXISTS / VALUE)
+
+**Before:** a *correlated* `EXISTS { ... }` / `NOT EXISTS { ... }` /
+`VALUE { ... }` (one that shares a pattern variable with the outer
+row) evaluated its body **once over the whole graph**
+(`run_match_chain(body, 0)`), bucketed the rows by the correlation
+tuple, and probed a `HashSet` / map per outer row. That amortises when
+the outer side has *many* distinct correlation tuples, but the LDBC
+anti-join / arg-max shape is the opposite — one person, a handful of
+correlated values — so the global scan dominates and never amortises:
+
+- **IC4** `NOT EXISTS { (friend)<-[:hasCreator]-(post2)-[:hasTag]->(tag)
+  WHERE post2.creationDate < $start }` (`friend`, `tag` correlated):
+  the body materialised every pre-`$start` `(friend, tag)` pair in the
+  graph — a fixed ~3 s floor per param on a slow host, enough to blow
+  past the cross-system bench's 600 s wall-cap.
+- **IC7** `VALUE { (person)<-[:hasCreator]-(m)<-[l:likes]-(liker) ...
+  ORDER BY ... LIMIT 1 }` (`person`, `liker` correlated): inside the
+  subquery `person` carries no `{id}` filter, so uncorrelated the body
+  computes the **entire** like relation — 109 440 triples / param —
+  when the real correlated work for one person is ~111 rows.
+
+**After:** when the body is LTJ-pinnable, run it **per outer row with
+the correlation variables pinned to that row's node ids** (the same
+`try_ltj_with_pins` machinery as the OPTIONAL bind-pushdown, §6, via a
+new `pinned_run_multi` that also unwraps the `Filter` carrying the
+body's WHERE so the predicate still runs), and **memoise the verdict
+by correlation tuple**. The body is evaluated once per *distinct*
+correlation tuple, never globally. `exists_body_pinned` returns a
+bool; `value_subquery_pinned` projects the single RETURN item + body
+ORDER BY + LIMIT 1 (the arg-max). New cache variants
+`ExistsCache::CorrelatedPinned { memo }` and
+`ValueSubqueryCache { map, pinned: true }` hold the lazily-filled
+memo; the original full-materialisation path stays as the fallback
+under `ExistsCache::Correlated` / `pinned: false`.
+
+**Correctness — undirected edges.** Pinning **both** endpoints of an
+undirected edge (`~[...]~`) does **not** constrain the LTJ to that
+specific pair (it yields false positives), so a body containing one
+must not take the pinned path. `PathPattern::has_undirected_edge`
+gates both probes back to the global materialisation; IC7's
+`isNew = NOT EXISTS { (liker)~[:knows]~(person) }` takes this fallback
+while its `VALUE` body (all directed) stays pinned. *(This caveat was
+found the hard way: the first EXISTS-pin cut shipped without the gate
+and produced wrong `isNew` results — the cross-system oracle missed it
+because it canonicalises row order. `ic7_test` is the regression
+guard; it was absent from the standard sweep at the time.)*
+
+**Falls back to the global materialisation** when: a correlation value
+is not a `Node`; the body is OPTIONAL / `Selected` / not
+LTJ-decomposable; the body contains an undirected edge; (VALUE only) a
+parameter correlation or a grouping/aggregate body needing
+`run_aggregated`. Force off with `GQLITE_DISABLE_EXISTS_PIN=1` /
+`GQLITE_DISABLE_VALUE_SUBQUERY_PIN=1`.
+
+**Impact (LDBC SF0.1, lazy, median per param; results byte-identical
+to the materialise-once reference):**
+
+| Query | Before | After | Speedup |
+|---|---|---|---|
+| IC4 (`NOT EXISTS` anti-join) | ~3 s floor (600 s-cap timeout on slow host) | ~85 ms | no longer times out |
+| IC7 (`VALUE` arg-max subquery) | 1305 ms | ~9 ms | ~145× |
+
+**Files changed:** `runtime/engine.rs` (`eval_exists_correlated`
+split into pinned + `build_correlated_set` fallback, new
+`exists_body_pinned`; `eval_value_subquery` split into pinned +
+materialise fallback, new `value_subquery_pinned`; `pinned_run_multi`),
+`syntax/path_pattern.rs` (`has_undirected_edge`). Tests:
+`exists_runtime_test`, `value_subquery_test`, `correlated_subquery_test`,
+`ic7_test` (the undirected-EXISTS guard).

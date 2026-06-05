@@ -149,6 +149,8 @@ Estado de los 14 IC del benchmark cross-system (`bench/ldbc-queries/ic*.toml`). 
 | IC1–IC9, IC11, IC12, IC13, IC14 | implementado | — |
 | IC10 | blocked | temporal ISO para predicado de cumpleaños por mes/día (2.10). `CASE`, `MOD(a,b)` y `ORDER BY CAST(alias)` ✅ |
 
+Nota de rendimiento (2026-06-05): IC4 e IC7 corrían pero materializaban el cuerpo de su subconsulta correlacionada (`NOT EXISTS` en IC4, `VALUE` arg-max en IC7) sobre todo el grafo, con un piso fijo de ~3 s por parámetro que excedía el tope de 600 s del bench cross-system en hosts lentos. Ahora el cuerpo se evalúa por fila externa con las variables de correlación fijadas a los ids de esa fila (probe pinned, memoizado por tupla): IC4 deja de hacer timeout y IC7 baja de 1305 ms a ~9 ms, con filas byte-idénticas a la referencia. Detalle en `implemented-optimizations.md` §13. El mismo cambio corrigió un bug de corrección en `NOT EXISTS` sobre aristas no dirigidas (`~[...]~`) que el pin introdujo antes de incorporar el gate `has_undirected_edge`.
+
 ### Roadmap para los 14 IC completos
 
 Ordenado por leverage (ICs desbloqueados por feature):
