@@ -298,12 +298,13 @@ fn value_node_equality_is_by_id() {
 // Edge cases surfaced by the post-implementation survey
 // =====================================================================
 
-/// `-[r]->{1,2}` binds `r` to a `PathValue::Group`. Projection of a
-/// group as a single reference value is not yet supported — runtime
-/// emits `Failure` which the projection layer maps to `Value::Null`.
-/// Pinned for the future "lift Group to List of refs".
+/// `-[r]->{1,2}` binds `r` to a `PathValue::Group` of the matched edges.
+/// Projecting a repetition-group variable lifts the group to a
+/// `Value::List` of edge reference values, in match order. Here the graph
+/// has a single edge `u1 -[OWNS]-> p1` and `p1` has no out-edge, so the
+/// `{1,2}` repetition yields exactly one 1-edge path: `r ↦ [OWNS]`.
 #[test]
-fn runtime_return_bare_repetition_var_yields_null() {
+fn runtime_return_bare_repetition_var_yields_list_of_edges() {
     let g = graph_users_pets();
     let rt = Runtime::new(&g);
     let q = compile_query("MATCH ()-[r]->{1,2}() RETURN r").unwrap();
@@ -311,14 +312,12 @@ fn runtime_return_bare_repetition_var_yields_null() {
         QueryResult::Projected(rs) => rs,
         _ => panic!("expected projected"),
     };
-    assert!(!rows.is_empty(), "the pattern itself matches");
-    for row in &rows {
-        assert_eq!(
-            row[0],
-            Value::Null,
-            "Group references project as Null until List-lifting lands"
-        );
-    }
+    assert_eq!(rows.len(), 1, "exactly one 1-edge path matches");
+    assert_eq!(
+        rows[0][0],
+        Value::List(vec![Value::Edge(0)]),
+        "a repetition-group variable projects as a List of edge references"
+    );
 }
 
 /// `WHERE n = e` (node vs edge): per §4.4.4 reference values of
