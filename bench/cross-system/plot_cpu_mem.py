@@ -31,7 +31,7 @@ try:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Patch
+    from matplotlib.patches import Patch, Rectangle
 except ImportError as e:
     sys.stderr.write(f"missing dep ({e}). Install:\n  pip install matplotlib pandas\n")
     sys.exit(1)
@@ -51,6 +51,15 @@ COLOR = {"froGQL": "#2c8a3e", "Kuzu": "#c2792e", "Grafeo": "#9b59b6",
          "GraphQLite": "#3b6ea5", "froGQL (disk)": "#1f5e2b",
          "froGQL (mem)": "#56a86a"}
 SYS_ORDER = ["froGQL", "Kuzu", "Grafeo", "GraphQLite"]
+# Failure markers: a hatched block fills the system's slot so a missing
+# result is unmistakable (vs. a tiny tick at the axis floor). Colour + label
+# per failure kind.
+FAIL_STYLE = {
+    "OOM": ("#b00020", "OOM"),       # killed for exceeding the RSS cap
+    "ERR": ("#c0392b", "ERR"),       # runner/translation error
+    "TIMEOUT": ("#e67e22", "TIMEOUT"),  # wall-clock cap hit
+    "n/a": ("#9e9e9e", "n/a"),       # no data / not run
+}
 
 
 def ic_num(s: str) -> int:
@@ -78,10 +87,23 @@ def grouped_bars(ax, ics, systems, value_of, fmt, log):
                 ax.annotate(fmt(v), (x, v), ha="center", va="bottom",
                             fontsize=6.5, rotation=0)
             elif note:
-                # Failed / timed-out / missing: annotate near the axis floor.
-                y = (ax.get_ylim()[0] if log else 0)
-                ax.annotate(note, (x, y), ha="center", va="bottom",
-                            fontsize=6, rotation=90, color="#b00", alpha=0.8)
+                # Failed / timed-out / missing: fill the slot with a hatched
+                # block + bold label so it reads as "no result here", not as a
+                # near-zero bar. Blended transform (x in data, y in axes
+                # fraction) keeps the block the same visible size on a log or
+                # linear axis.
+                fc, txt = FAIL_STYLE.get(note, FAIL_STYLE["n/a"])
+                trans = ax.get_xaxis_transform()
+                # Full-height faint band: spans 0→1 in axes fraction so it
+                # cannot be misread as a value bar (no real bar reaches the
+                # top). Label centred vertically reads as a slot annotation.
+                ax.add_patch(Rectangle(
+                    (x - bw / 2, 0.0), bw, 1.0, transform=trans,
+                    facecolor=fc, alpha=0.10, edgecolor=fc, linestyle=":",
+                    hatch="////", linewidth=0.8, zorder=0.5))
+                ax.text(x, 0.5, txt, transform=trans, ha="center",
+                        va="center", fontsize=8, fontweight="bold",
+                        color=fc, rotation=90, zorder=3)
     ax.set_xticks(range(len(ics)))
     ax.set_xticklabels([f"IC{ic}" for ic in ics])
     if log:
@@ -124,7 +146,9 @@ def main() -> int:
     systems = [s for s in SYS_ORDER if s in present] + \
               [s for s in present if s not in SYS_ORDER]
 
-    NOTE = {"timeout": "TIMEOUT", "runner_error": "ERR", "oom": "OOM"}
+    # Map run_all.sh / memrun status strings to a short marker label.
+    NOTE = {"timeout": "TIMEOUT", "runner_error": "ERR",
+            "oom": "OOM", "memory_error": "OOM"}
 
     def lat_val(ic, s):
         v = lat_med.get((ic, s))
@@ -150,7 +174,16 @@ def main() -> int:
     ax2.set_xlabel("query")
 
     handles = [Patch(facecolor=COLOR.get(s, "#888"), label=s) for s in systems]
-    ax1.legend(handles=handles, frameon=False, ncol=len(systems), fontsize=9,
+    # Append a legend entry for each failure kind actually present, so the
+    # hatched blocks are self-documenting.
+    present_fails = {NOTE.get(st) for st in mem_status.values()
+                     if st != "ok" and NOTE.get(st)}
+    for label in ("ERR", "TIMEOUT", "OOM"):
+        if label in present_fails:
+            fc, txt = FAIL_STYLE.get(label, ("#9e9e9e", label))
+            handles.append(Patch(facecolor=fc, alpha=0.18, edgecolor=fc,
+                                 hatch="////", label=txt))
+    ax1.legend(handles=handles, frameon=False, ncol=len(handles), fontsize=9,
                loc="upper left")
     fig.tight_layout()
 
