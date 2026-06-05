@@ -347,12 +347,24 @@ pub struct Runtime<'g, G: GraphAccess> {
 enum ExistsCache {
     Uncorrelated(bool),
     Correlated {
-        /// Correlation variables, sorted by name so probe-key order is
-        /// deterministic across rows.
-        keys: Vec<String>,
-        /// Hash of `(value at keys[0], value at keys[1], ...)` tuples
-        /// for every row of the body's evaluation.
+        /// Hash of `(value at correlation[0], correlation[1], ...)` tuples
+        /// (correlation variables sorted by name) for every row of the
+        /// body's evaluation. The probe key is rebuilt from the caller's
+        /// `correlation` slice per outer row, so the names live there.
         set: HashSet<Vec<PathValue>>,
+    },
+    /// Per-correlation-key pinned anti/semi-join. Instead of materialising
+    /// the body over the whole graph once (the `Correlated` variant), the
+    /// body pattern is run per outer row with the correlation variables
+    /// pinned to that row's node ids (`try_ltj_with_pins`), and the
+    /// non-emptiness verdict is memoised by correlation tuple. Chosen when
+    /// the body is LTJ-pinnable; far cheaper than a global materialisation
+    /// when the outer side binds few distinct correlation tuples (the
+    /// LDBC IC4 / IC10 anti-join shape: one person → a handful of friends).
+    CorrelatedPinned {
+        /// Memoised non-emptiness per correlation tuple (same key order as
+        /// `Correlated::set`).
+        memo: HashMap<Vec<PathValue>, bool>,
     },
 }
 
@@ -840,6 +852,42 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 Some(IntermediateResult::new(filtered))
             }
             _ => pattern_extract::try_ltj_with_pin(self.graph, pattern, index, 0, var, id),
+        }
+    }
+
+    /// Multi-pin sibling of `pinned_run`: pins every `(var, id)` in `pins`
+    /// before running the pattern's LTJ, unwrapping `Union` / `Filter`
+    /// the same way. `limit` is passed through to the leaf; pass `0` (no
+    /// early-exit) when a wrapping `Filter` must see every candidate row
+    /// before deciding — an early-limited inner could return rows that the
+    /// filter then rejects, masking surviving matches. Returns `None` when
+    /// any leaf chain is non-decomposable (caller falls back to the global
+    /// materialisation). Used by the correlated EXISTS pinned probe.
+    fn pinned_run_multi(
+        &self,
+        pattern: &PathPattern,
+        index: &TripleIndex,
+        pins: &[(&str, u32)],
+        limit: usize,
+    ) -> Option<IntermediateResult> {
+        match pattern {
+            PathPattern::Union(a, b) => {
+                let ir_a = self.pinned_run_multi(a, index, pins, limit)?;
+                let ir_b = self.pinned_run_multi(b, index, pins, limit)?;
+                let mut rows = ir_a.rows;
+                rows.extend(ir_b.rows);
+                Some(IntermediateResult::new(rows))
+            }
+            PathPattern::Filter(inner, expr) => {
+                let ir = self.pinned_run_multi(inner, index, pins, 0)?;
+                let filtered: Vec<ResultRow> = ir
+                    .rows
+                    .into_iter()
+                    .filter(|r| self.run_expr(&r.assignment, expr).get_bool())
+                    .collect();
+                Some(IntermediateResult::new(filtered))
+            }
+            _ => pattern_extract::try_ltj_with_pins(self.graph, pattern, index, limit, pins),
         }
     }
 
@@ -3449,64 +3497,142 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         correlation: &[String],
         negated: bool,
     ) -> ExprResult {
-        // Build the cache on first encounter for this body.
-        let need_build = !matches!(
-            self.exists_cache.borrow().get(&body_ptr),
-            Some(ExistsCache::Correlated { .. })
-        );
-        if need_build {
-            let ir = self.run_match_chain(body, /*limit=*/ 0);
-            let mut set: HashSet<Vec<PathValue>> = HashSet::with_capacity(ir.rows.len());
-            for row in &ir.rows {
-                let mut key: Vec<PathValue> = Vec::with_capacity(correlation.len());
-                let mut complete = true;
-                for v in correlation {
-                    match row.assignment.get(v) {
-                        Some(pv) => key.push(pv.clone()),
-                        None => {
-                            // Body row does not bind a correlation
-                            // var (e.g. left-joined OPTIONAL row);
-                            // it cannot match any outer row on this
-                            // key, so skip it.
-                            complete = false;
-                            break;
-                        }
-                    }
-                }
-                if complete {
-                    set.insert(key);
-                }
-            }
-            self.exists_cache.borrow_mut().insert(
-                body_ptr,
-                ExistsCache::Correlated {
-                    keys: correlation.to_vec(),
-                    set,
-                },
-            );
-        }
-
-        // Probe with the current outer row.
-        let cache = self.exists_cache.borrow();
-        let (keys, set) = match cache.get(&body_ptr) {
-            Some(ExistsCache::Correlated { keys, set }) => (keys, set),
-            _ => unreachable!("cache populated above"),
-        };
-        let mut probe_key: Vec<PathValue> = Vec::with_capacity(keys.len());
-        for v in keys {
+        // Build the probe key for this outer row up front.
+        let mut probe_key: Vec<PathValue> = Vec::with_capacity(correlation.len());
+        for v in correlation {
             match mu.get(v) {
                 Some(pv) => probe_key.push(pv.clone()),
                 None => {
-                    // Should not happen — `correlation` was built
-                    // from the intersection with `mu.keys()`. Treat
-                    // as no match (drop EXISTS, satisfy NOT EXISTS).
+                    // Should not happen — `correlation` was built from the
+                    // intersection with `mu.keys()`. Treat as no match
+                    // (drop EXISTS, satisfy NOT EXISTS).
                     return ExprResult::Success(Value::Bool(negated));
                 }
             }
         }
+        let verdict = |nonempty: bool| {
+            ExprResult::Success(Value::Bool(if negated { !nonempty } else { nonempty }))
+        };
+
+        // Fast path: a strategy is already cached for this body.
+        {
+            let cache = self.exists_cache.borrow();
+            match cache.get(&body_ptr) {
+                Some(ExistsCache::Correlated { set, .. }) => {
+                    return verdict(set.contains(&probe_key));
+                }
+                Some(ExistsCache::CorrelatedPinned { memo, .. }) => {
+                    if let Some(&b) = memo.get(&probe_key) {
+                        return verdict(b);
+                    }
+                    // Miss — compute below without holding the borrow.
+                }
+                _ => {}
+            }
+        }
+
+        let pinned_active = matches!(
+            self.exists_cache.borrow().get(&body_ptr),
+            Some(ExistsCache::CorrelatedPinned { .. })
+        );
+
+        // Pinned semi-join: run the body restricted to this row's
+        // correlation node ids instead of materialising it over the whole
+        // graph. `None` ⇒ this row is not pinnable (a correlation var is
+        // not a Node, or the body pattern is not LTJ-decomposable); fall
+        // back to the global materialisation, which is always correct.
+        if pinned_active || self.exists_cache.borrow().get(&body_ptr).is_none() {
+            if let Some(nonempty) = self.exists_body_pinned(mu, body, correlation) {
+                let mut cache = self.exists_cache.borrow_mut();
+                match cache.get_mut(&body_ptr) {
+                    Some(ExistsCache::CorrelatedPinned { memo, .. }) => {
+                        memo.insert(probe_key.clone(), nonempty);
+                    }
+                    _ => {
+                        let mut memo = HashMap::new();
+                        memo.insert(probe_key.clone(), nonempty);
+                        cache.insert(body_ptr, ExistsCache::CorrelatedPinned { memo });
+                    }
+                }
+                return verdict(nonempty);
+            }
+            // Not pinnable for this row — fall through to materialise-once.
+        }
+
+        // Fallback: materialise the body once over the whole graph and
+        // build the correlation-key set (the original semi-join path).
+        let set = self.build_correlated_set(body, correlation);
         let nonempty = set.contains(&probe_key);
-        let truth = if negated { !nonempty } else { nonempty };
-        ExprResult::Success(Value::Bool(truth))
+        self.exists_cache
+            .borrow_mut()
+            .insert(body_ptr, ExistsCache::Correlated { set });
+        verdict(nonempty)
+    }
+
+    /// Probe a correlated EXISTS body for one outer row by pinning the
+    /// correlation variables to that row's node ids and running the body's
+    /// LTJ restricted. Returns `Some(non_empty)` when the body is pinnable
+    /// (every correlation value is a `Node` and the pattern decomposes),
+    /// `None` otherwise so the caller can fall back to the global
+    /// materialisation. Disable with `GQLITE_DISABLE_EXISTS_PIN=1`.
+    fn exists_body_pinned(
+        &self,
+        mu: &Assignment,
+        body: &Query,
+        correlation: &[String],
+    ) -> Option<bool> {
+        if std::env::var("GQLITE_DISABLE_EXISTS_PIN").is_ok() {
+            return None;
+        }
+        // Pinning collapses the body to a single pattern; an OPTIONAL or a
+        // §16.6-selected body cannot be collapsed soundly.
+        if body.has_any_optional() || body.has_any_selected() {
+            return None;
+        }
+        let mut pins: Vec<(&str, u32)> = Vec::with_capacity(correlation.len());
+        for v in correlation {
+            match mu.get(v) {
+                Some(PathValue::Node(id)) => pins.push((v.as_str(), *id)),
+                // Edge / undirected / Group / Nothing: not pinnable.
+                _ => return None,
+            }
+        }
+        let pattern = body.collapsed_pattern();
+        let index = self.triple_index();
+        let ir = self.pinned_run_multi(&pattern, &index, &pins, 0)?;
+        Some(!ir.rows.is_empty())
+    }
+
+    /// Materialise a correlated EXISTS body over the whole graph and
+    /// collect the set of correlation-key tuples its rows bind. The
+    /// fallback build side of the semi-join when the body is not pinnable.
+    fn build_correlated_set(
+        &self,
+        body: &Query,
+        correlation: &[String],
+    ) -> HashSet<Vec<PathValue>> {
+        let ir = self.run_match_chain(body, /*limit=*/ 0);
+        let mut set: HashSet<Vec<PathValue>> = HashSet::with_capacity(ir.rows.len());
+        for row in &ir.rows {
+            let mut key: Vec<PathValue> = Vec::with_capacity(correlation.len());
+            let mut complete = true;
+            for v in correlation {
+                match row.assignment.get(v) {
+                    Some(pv) => key.push(pv.clone()),
+                    None => {
+                        // Body row does not bind a correlation var (e.g. a
+                        // left-joined OPTIONAL row); it cannot match any
+                        // outer row on this key, so skip it.
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete {
+                set.insert(key);
+            }
+        }
+        set
     }
 
     fn eval_binop(op: &BinOp, lv: &Value, rv: &Value) -> ExprResult {
