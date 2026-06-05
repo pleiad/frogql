@@ -374,8 +374,18 @@ enum ExistsCache {
 /// value (after the body's ORDER BY + LIMIT 1). Uncorrelated bodies use
 /// an empty `keys` and a single entry under the empty tuple.
 struct ValueSubqueryCache {
-    keys: Vec<String>,
+    /// Correlation tuple → projected value. The probe key (same sorted
+    /// correlation-variable order) is rebuilt from the caller's `keys`
+    /// slice per outer row, so the names need not be stored here.
     map: HashMap<Vec<PathValue>, Value>,
+    /// `false`: `map` was fully materialised over the whole graph in one
+    /// pass — a missing key means the bucket is genuinely empty (→ Null).
+    /// `true`: `map` is filled lazily, one entry per outer correlation
+    /// tuple, by pinning the body to that tuple's node ids — a missing key
+    /// means "not computed yet, run the pinned probe now". The pinned mode
+    /// avoids materialising the body across the entire graph when the
+    /// outer side binds few distinct tuples (LDBC IC7's arg-max-per-liker).
+    pinned: bool,
 }
 
 impl<'g, G: GraphAccess> Runtime<'g, G> {
@@ -3308,72 +3318,176 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             return self.eval_value_subquery_param_correlated(mu, body, &params);
         }
 
-        let need_build = !self.value_subquery_cache.borrow().contains_key(&body_ptr);
-        if need_build {
-            // Correlation = body free vars also bound in the outer row.
-            let body_vars = query_freevars(body);
-            let outer_keys = mu.keys();
-            let mut keys: Vec<String> = body_vars
-                .iter()
-                .filter(|v| outer_keys.contains(*v))
-                .cloned()
-                .collect();
-            keys.sort();
+        // Correlation = body free vars also bound in the outer row.
+        let body_vars = query_freevars(body);
+        let mut keys: Vec<String> = body_vars
+            .iter()
+            .filter(|v| outer_keys.contains(*v))
+            .cloned()
+            .collect();
+        keys.sort();
 
-            // Run the full body match chain (uncorrelated), then bucket
-            // rows by their correlation tuple.
-            let ir = self.run_match_chain(body, /*limit=*/ 0);
-            let mut groups: HashMap<Vec<PathValue>, Vec<ResultRow>> = HashMap::new();
-            for row in ir.rows {
-                let mut key: Vec<PathValue> = Vec::with_capacity(keys.len());
-                let mut complete = true;
-                for v in &keys {
-                    match row.assignment.get(v) {
-                        Some(pv) => key.push(pv.clone()),
-                        None => {
-                            complete = false;
-                            break;
-                        }
-                    }
-                }
-                if complete {
-                    groups.entry(key).or_default().push(row);
-                }
-            }
-
-            // Per group: project the single RETURN item, apply ORDER BY,
-            // take the first row (LIMIT 1), keep its projected value.
-            let items = body.returns.as_deref().unwrap_or(&[]);
-            let mut map: HashMap<Vec<PathValue>, Value> = HashMap::with_capacity(groups.len());
-            for (key, rows) in groups {
-                let mut projected = self.run_row_by_row(items, &rows, /*distinct=*/ false);
-                if let Some(specs) = &body.order_by {
-                    sort_projected_rows(&mut projected, specs, /*limit=*/ 1);
-                }
-                let value = projected
-                    .first()
-                    .and_then(|cols| cols.first())
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                map.insert(key, value);
-            }
-
-            self.value_subquery_cache
-                .borrow_mut()
-                .insert(body_ptr, ValueSubqueryCache { keys, map });
-        }
-
-        let cache = self.value_subquery_cache.borrow();
-        let entry = cache.get(&body_ptr).expect("populated above");
-        let mut probe: Vec<PathValue> = Vec::with_capacity(entry.keys.len());
-        for v in &entry.keys {
+        // Probe key for this outer row.
+        let mut probe: Vec<PathValue> = Vec::with_capacity(keys.len());
+        for v in &keys {
             match mu.get(v) {
                 Some(pv) => probe.push(pv.clone()),
                 // Correlation var unbound in this outer row → no match.
                 None => return ExprResult::Success(Value::Null),
             }
         }
-        ExprResult::Success(entry.map.get(&probe).cloned().unwrap_or(Value::Null))
+
+        // Fast path: cache already exists for this body.
+        {
+            let cache = self.value_subquery_cache.borrow();
+            if let Some(entry) = cache.get(&body_ptr) {
+                if let Some(v) = entry.map.get(&probe) {
+                    return ExprResult::Success(v.clone());
+                }
+                if !entry.pinned {
+                    // Fully materialised: a miss is a genuinely empty bucket.
+                    return ExprResult::Success(Value::Null);
+                }
+                // Pinned mode, key not computed yet → compute below.
+            }
+        }
+
+        let cache_absent = !self.value_subquery_cache.borrow().contains_key(&body_ptr);
+
+        // Pinned per-key probe: run the body restricted to this outer row's
+        // correlation node ids instead of materialising it over the whole
+        // graph. `None` ⇒ not pinnable here (a correlation value is not a
+        // Node, the body groups/aggregates, or is non-decomposable); fall
+        // back to the global materialisation, which is always correct.
+        if cache_absent
+            || matches!(
+                self.value_subquery_cache.borrow().get(&body_ptr),
+                Some(ValueSubqueryCache { pinned: true, .. })
+            )
+        {
+            if let Some(value) = self.value_subquery_pinned(mu, body, &keys, &params) {
+                let mut cache = self.value_subquery_cache.borrow_mut();
+                match cache.get_mut(&body_ptr) {
+                    Some(entry) if entry.pinned => {
+                        entry.map.insert(probe.clone(), value.clone());
+                    }
+                    _ => {
+                        let mut map = HashMap::new();
+                        map.insert(probe.clone(), value.clone());
+                        cache.insert(body_ptr, ValueSubqueryCache { map, pinned: true });
+                    }
+                }
+                return ExprResult::Success(value);
+            }
+            // Not pinnable for this row — fall through to materialise-once.
+        }
+
+        // Fallback: materialise the body once over the whole graph, bucket
+        // rows by correlation tuple, project + ORDER BY + LIMIT 1 per bucket.
+        let ir = self.run_match_chain(body, /*limit=*/ 0);
+        let mut groups: HashMap<Vec<PathValue>, Vec<ResultRow>> = HashMap::new();
+        for row in ir.rows {
+            let mut key: Vec<PathValue> = Vec::with_capacity(keys.len());
+            let mut complete = true;
+            for v in &keys {
+                match row.assignment.get(v) {
+                    Some(pv) => key.push(pv.clone()),
+                    None => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete {
+                groups.entry(key).or_default().push(row);
+            }
+        }
+
+        let items = body.returns.as_deref().unwrap_or(&[]);
+        let mut map: HashMap<Vec<PathValue>, Value> = HashMap::with_capacity(groups.len());
+        for (key, rows) in groups {
+            let mut projected = self.run_row_by_row(items, &rows, /*distinct=*/ false);
+            if let Some(specs) = &body.order_by {
+                sort_projected_rows(&mut projected, specs, /*limit=*/ 1);
+            }
+            let value = projected
+                .first()
+                .and_then(|cols| cols.first())
+                .cloned()
+                .unwrap_or(Value::Null);
+            map.insert(key, value);
+        }
+
+        let result = map.get(&probe).cloned().unwrap_or(Value::Null);
+        self.value_subquery_cache
+            .borrow_mut()
+            .insert(body_ptr, ValueSubqueryCache { map, pinned: false });
+        ExprResult::Success(result)
+    }
+
+    /// Probe a correlated `VALUE { ... }` subquery for one outer row by
+    /// pinning the correlation variables to that row's node ids and running
+    /// the body restricted, then projecting its single RETURN item with the
+    /// body's ORDER BY + LIMIT 1 (arg-max). Returns `Some(value)` when the
+    /// body is pinnable, `None` (→ global materialisation fallback) when a
+    /// correlation value is not a `Node`, the body groups/aggregates or is
+    /// OPTIONAL/`Selected`, there is a non-pinned parameter correlation, or
+    /// the pattern is not LTJ-decomposable. Disable with
+    /// `GQLITE_DISABLE_VALUE_SUBQUERY_PIN=1`.
+    fn value_subquery_pinned(
+        &self,
+        mu: &Assignment,
+        body: &Query,
+        keys: &[String],
+        params: &[String],
+    ) -> Option<Value> {
+        if std::env::var("GQLITE_DISABLE_VALUE_SUBQUERY_PIN").is_ok() {
+            return None;
+        }
+        // A parameter correlation (outer var referenced but not bound by the
+        // body pattern) cannot be supplied through a pin; the materialise
+        // path is the existing home for that shape. Grouping/aggregate
+        // bodies take a different projection path (`run_aggregated`); keep
+        // the pinned path to the plain arg-max shape it mirrors.
+        if !params.is_empty() || body.group_by.is_some() {
+            return None;
+        }
+        if body.has_any_optional() || body.has_any_selected() {
+            return None;
+        }
+        let items = body.returns.as_deref().unwrap_or(&[]);
+        if items.iter().any(|it| match it {
+            ReturnItem::Aggregate { .. } => true,
+            ReturnItem::Expr { expr, .. } => expr.contains_agg(),
+        }) {
+            return None;
+        }
+        let mut pins: Vec<(&str, u32)> = Vec::with_capacity(keys.len());
+        for v in keys {
+            match mu.get(v) {
+                Some(PathValue::Node(id)) => pins.push((v.as_str(), *id)),
+                _ => return None,
+            }
+        }
+        let pattern = body.collapsed_pattern();
+        // See `exists_body_pinned`: undirected-edge bodies are not soundly
+        // pinnable, so defer them to the global materialisation.
+        if pattern.has_undirected_edge() {
+            return None;
+        }
+        let index = self.triple_index();
+        let ir = self.pinned_run_multi(&pattern, &index, &pins, 0)?;
+        let mut projected = self.run_row_by_row(items, &ir.rows, /*distinct=*/ false);
+        if let Some(specs) = &body.order_by {
+            sort_projected_rows(&mut projected, specs, /*limit=*/ 1);
+        }
+        Some(
+            projected
+                .first()
+                .and_then(|cols| cols.first())
+                .cloned()
+                .unwrap_or(Value::Null),
+        )
     }
 
     /// Per-outer-row evaluation of a parameter-correlated `VALUE { ... }`
@@ -3598,6 +3712,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
         }
         let pattern = body.collapsed_pattern();
+        // Pinning both endpoints of an undirected edge does not constrain
+        // the LTJ to that specific pair (false positives); leave those
+        // bodies to the global materialisation.
+        if pattern.has_undirected_edge() {
+            return None;
+        }
         let index = self.triple_index();
         let ir = self.pinned_run_multi(&pattern, &index, &pins, 0)?;
         Some(!ir.rows.is_empty())

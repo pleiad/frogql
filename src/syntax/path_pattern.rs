@@ -93,6 +93,31 @@ impl PathPattern {
         }
     }
 
+    /// Whether this pattern contains an undirected edge (`~[...]~`).
+    ///
+    /// Pinning both endpoints of an undirected edge in the LTJ decomposition
+    /// does not constrain the match to that specific pair, so the
+    /// per-outer-row pinned probes (correlated EXISTS / VALUE subquery) must
+    /// not fire on a body that contains one — they fall back to the global
+    /// materialisation instead.
+    pub fn has_undirected_edge(&self) -> bool {
+        match self {
+            PathPattern::EdgeUndirected(_) => true,
+            PathPattern::Node(_)
+            | PathPattern::EdgeRight(_)
+            | PathPattern::EdgeLeft(_)
+            | PathPattern::EdgeAnyDirection(_) => false,
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                a.has_undirected_edge() || b.has_undirected_edge()
+            }
+            PathPattern::Filter(p, _)
+            | PathPattern::Questioned(p)
+            | PathPattern::Repeat { pattern: p, .. }
+            | PathPattern::Selected { pattern: p, .. }
+            | PathPattern::Named { pattern: p, .. } => p.has_undirected_edge(),
+        }
+    }
+
     /// Get the descriptor ref (for node/edge patterns).
     pub fn descriptor(&self) -> Option<&Descriptor> {
         match self {
