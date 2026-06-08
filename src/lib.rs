@@ -65,6 +65,23 @@ fn collect_expr_vars(expr: &Expr, acc: &mut HashSet<String>) {
             inner.remove(var);
             acc.extend(inner);
         }
+        Expr::AllReduce {
+            acc_name,
+            initial,
+            step_var,
+            list_expr,
+            reduction,
+            predicate,
+        } => {
+            collect_expr_vars(initial, acc);
+            collect_expr_vars(list_expr, acc);
+            let mut inner = HashSet::new();
+            collect_expr_vars(reduction, &mut inner);
+            collect_expr_vars(predicate, &mut inner);
+            inner.remove(acc_name);
+            inner.remove(step_var);
+            acc.extend(inner);
+        }
         Expr::Agg(agg) => match agg.as_ref() {
             Aggregator::CountStar => {}
             Aggregator::GeneralSet { expr, .. } => {

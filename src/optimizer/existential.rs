@@ -143,6 +143,18 @@ fn fold_in_expr(e: &mut Expr, schema: &Schema) {
             }
             fold_in_expr(body, schema);
         }
+        Expr::AllReduce {
+            initial,
+            list_expr,
+            reduction,
+            predicate,
+            ..
+        } => {
+            fold_in_expr(initial, schema);
+            fold_in_expr(list_expr, schema);
+            fold_in_expr(reduction, schema);
+            fold_in_expr(predicate, schema);
+        }
         Expr::Const(_) | Expr::Var(_) | Expr::AttrLookup { .. } | Expr::Type(_) => {}
     }
 
