@@ -219,3 +219,23 @@ fn differential_unreachable() {
     // 3 has no outgoing R edges, so 3→0 is unreachable forward.
     assert_same(&g, "MATCH path = ANY SHORTEST (s:N {id:3})-[:R]->*(t:N {id:0}) RETURN s.id, t.id, PATH_LENGTH(path) AS len");
 }
+
+#[test]
+fn differential_edge_variables() {
+    let g = g_undirected();
+    // Test ANY SHORTEST with edge variable on undirected graph
+    assert_same(&g, "MATCH path = ANY SHORTEST (s:N {id:0})~[e:R]~*(t:N {id:3}) RETURN s.id, t.id, e, PATH_LENGTH(path) AS len");
+    // Test ALL SHORTEST with edge variable on undirected graph
+    assert_same(&g, "MATCH path = ALL SHORTEST (s:N {id:0})~[e:R]~*(t:N {id:3}) RETURN s.id, t.id, e, PATH_LENGTH(path) AS len");
+    // Test length-0 self-match with edge variable
+    assert_same(&g, "MATCH path = ANY SHORTEST (s:N {id:0})~[e:R]~*(t:N {id:0}) RETURN s.id, t.id, e, PATH_LENGTH(path) AS len");
+    // Test coincident endpoint with `+` undirected (which does self cycles)
+    assert_same(&g, "MATCH path = ANY SHORTEST (s:N {id:0})~[e:R]~+(t:N {id:0}) RETURN s.id, t.id, e, PATH_LENGTH(path) AS len");
+    assert_same(&g, "MATCH path = ALL SHORTEST (s:N {id:0})~[e:R]~+(t:N {id:0}) RETURN s.id, t.id, e, PATH_LENGTH(path) AS len");
+
+    let g2 = g_directed();
+    // Test ANY SHORTEST with edge variable on directed graph
+    assert_same(&g2, "MATCH path = ANY SHORTEST (s:N {id:0})-[e:R]->*(t:N {id:3}) RETURN s.id, t.id, e, PATH_LENGTH(path) AS len");
+    // Test ALL SHORTEST with edge variable on directed graph
+    assert_same(&g2, "MATCH path = ALL SHORTEST (s:N {id:0})-[e:R]->*(t:N {id:3}) RETURN s.id, t.id, e, PATH_LENGTH(path) AS len");
+}

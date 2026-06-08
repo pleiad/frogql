@@ -2720,9 +2720,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             return None;
         }
         let (edge_desc, dir) = single_edge_dir(inner)?;
-        if edge_desc.and_then(|d| d.var.as_deref()).is_some() {
-            return None;
-        }
+        let edge_var = edge_desc.and_then(|d| d.var.clone());
         // Validate both endpoints are node patterns; evaluate the full
         // (Filter-wrapped) sub-patterns so endpoint value predicates run.
         node_endpoint(src)?;
@@ -2764,9 +2762,17 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 if !a.assignment.can_unify(&b.assignment) {
                     continue;
                 }
+                let mut mu = a.assignment.unify(&b.assignment);
+                if let Some(ref name) = edge_var {
+                    let group_pv = PathValue::Group(vec![]);
+                    if !mu.can_unify(&Assignment::from_optional(Some(name), group_pv.clone())) {
+                        continue;
+                    }
+                    mu.extend(name.clone(), group_pv);
+                }
                 rows.push(ResultRow::with_paths(
                     vec![Path(vec![PathValue::Node(id)])],
-                    a.assignment.unify(&b.assignment),
+                    mu,
                 ));
             }
         } else if !self_ids.is_empty() {
@@ -2778,7 +2784,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             if dir == BfsEdgeDir::Undirected {
                 for &id in &self_ids {
                     self.emit_undirected_self_cycles(
-                        id, edge_desc, ub, groups, &src_end, &tgt_end, &mut rows,
+                        id, edge_desc, &edge_var, ub, groups, &src_end, &tgt_end, &mut rows,
                     );
                 }
             } else {
@@ -2814,6 +2820,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             self.bfs_from_source(
                 s,
                 edge_desc,
+                &edge_var,
                 dir,
                 reverse,
                 ub,
@@ -2848,6 +2855,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         &self,
         n: Id,
         edge_desc: Option<&Descriptor>,
+        edge_var: &Option<String>,
         ub: Option<usize>,
         groups: bool,
         src_end: &BfsEndpoint,
@@ -2914,7 +2922,20 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             Vec::new()
         };
         for p in paths {
-            rows.push(ResultRow::with_paths(vec![p], mu.clone()));
+            let mut row_mu = mu.clone();
+            if let Some(ref name) = edge_var {
+                let edges: Vec<PathValue> = p.0.iter()
+                    .enumerate()
+                    .filter(|(idx, _)| idx % 2 == 1)
+                    .map(|(_, pv)| pv.clone())
+                    .collect();
+                let group_pv = PathValue::Group(edges);
+                if !row_mu.can_unify(&Assignment::from_optional(Some(name), group_pv.clone())) {
+                    continue;
+                }
+                row_mu.extend(name.clone(), group_pv);
+            }
+            rows.push(ResultRow::with_paths(vec![p], row_mu));
         }
     }
 
@@ -2927,6 +2948,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         &self,
         s: Id,
         edge_desc: Option<&Descriptor>,
+        edge_var: &Option<String>,
         dir: BfsEdgeDir,
         reverse: bool,
         ub: Option<usize>,
@@ -3012,9 +3034,22 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 if !a.assignment.can_unify(&b.assignment) {
                     continue;
                 }
+                let mut mu = a.assignment.unify(&b.assignment);
+                if let Some(ref name) = edge_var {
+                    let edges: Vec<PathValue> = oriented.iter()
+                        .enumerate()
+                        .filter(|(idx, _)| idx % 2 == 1)
+                        .map(|(_, pv)| pv.clone())
+                        .collect();
+                    let group_pv = PathValue::Group(edges);
+                    if !mu.can_unify(&Assignment::from_optional(Some(name), group_pv.clone())) {
+                        continue;
+                    }
+                    mu.extend(name.clone(), group_pv);
+                }
                 rows.push(ResultRow::with_paths(
                     vec![Path(oriented)],
-                    a.assignment.unify(&b.assignment),
+                    mu,
                 ));
                 if limit > 0 && rows.len() >= limit {
                     return;
