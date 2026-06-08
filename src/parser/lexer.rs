@@ -112,6 +112,8 @@ pub enum Token {
     /// Soft keyword (only before `{`) so `value` stays usable as an
     /// identifier. Runs a correlated subquery and projects one value.
     Value,
+    /// Cypher 25 `allReduce` function. Soft keyword (only before `(`).
+    AllReduce,
 
     // Symbols
     LParen,      // (
@@ -616,6 +618,7 @@ impl Lexer {
                         }
                         "FLOOR" | "floor" if self.peek_non_space() == Some('(') => Token::Floor,
                         "CAST" | "cast" if self.peek_non_space() == Some('(') => Token::Cast,
+                        "allReduce" | "ALLREDUCE" if self.peek_non_space() == Some('(') => Token::AllReduce,
                         // RECORD / VALUE are gated on a following `{` so the
                         // lowercase forms stay usable as identifiers.
                         "RECORD" | "record" if self.peek_non_space() == Some('{') => Token::Record,

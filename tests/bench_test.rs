@@ -530,15 +530,15 @@ fn bench_graph_vs_lazy() {
     // --- Measure memory for all three ---
     let before = allocated_bytes();
     let g_mem = MemoryGraphStore::open(&db_path).unwrap();
-    let mem_graph = allocated_bytes() - before;
+    let mem_graph = allocated_bytes().saturating_sub(before);
 
     let before = allocated_bytes();
     let g_lazy = LazyGraphStore::open(&db_path).unwrap();
-    let mem_lazy = allocated_bytes() - before;
+    let mem_lazy = allocated_bytes().saturating_sub(before);
 
     let before = allocated_bytes();
     let g_disk = DiskGraphStore::open(&db_path).unwrap();
-    let mem_disk = allocated_bytes() - before;
+    let mem_disk = allocated_bytes().saturating_sub(before);
 
     print_graph_stats(&g_mem);
     println!("\n  Memory:");
@@ -650,19 +650,19 @@ fn bench_memory_scaling() {
         // Measure MemoryGraphStore memory
         let before = allocated_bytes();
         let g = MemoryGraphStore::open(&db_path).unwrap();
-        let graph_mem = allocated_bytes() - before;
+        let graph_mem = allocated_bytes().saturating_sub(before);
         drop(g);
 
         // Measure Lazy memory
         let before = allocated_bytes();
         let l = LazyGraphStore::open(&db_path).unwrap();
-        let lazy_mem = allocated_bytes() - before;
+        let lazy_mem = allocated_bytes().saturating_sub(before);
         drop(l);
 
         // Measure Disk memory
         let before = allocated_bytes();
         let d = DiskGraphStore::open(&db_path).unwrap();
-        let disk_mem = allocated_bytes() - before;
+        let disk_mem = allocated_bytes().saturating_sub(before);
         drop(d);
 
         println!(

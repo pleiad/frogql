@@ -893,6 +893,36 @@ impl Typechecker {
                 SimpleType::List(Box::new(body_t))
             }
 
+            Expr::AllReduce {
+                acc_name,
+                initial,
+                step_var,
+                list_expr,
+                reduction,
+                predicate,
+            } => {
+                let _init_t = self.check_expr(initial, env);
+                let list_t = self.check_expr(list_expr, env);
+                if !matches!(list_t, SimpleType::List(_) | SimpleType::Star)
+                    && SimpleType::meet(&list_t, &SimpleType::Star) != list_t
+                {
+                    self.warnings.push(format!(
+                        "allReduce source list has non-list type {list_t}"
+                    ));
+                }
+                self.comprehension_scope.push(acc_name.clone());
+                self.comprehension_scope.push(step_var.clone());
+                let _red_t = self.check_expr(reduction, env);
+                let pred_t = self.check_expr(predicate, env);
+                if SimpleType::meet(&pred_t, &SimpleType::B) == SimpleType::Zero {
+                    self.warnings
+                        .push(format!("allReduce predicate has non-bool type {pred_t}"));
+                }
+                self.comprehension_scope.pop();
+                self.comprehension_scope.pop();
+                SimpleType::B
+            }
+
             Expr::Record { fields } => {
                 // A record constructor types as a closed record over the
                 // field expression types.

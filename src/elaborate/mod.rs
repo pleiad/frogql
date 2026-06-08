@@ -174,6 +174,21 @@ pub fn elaborate_expr(e: Expr) -> Expr {
             filter: filter.map(|f| Box::new(elaborate_expr(*f))),
             body: Box::new(elaborate_expr(*body)),
         },
+        Expr::AllReduce {
+            acc_name,
+            initial,
+            step_var,
+            list_expr,
+            reduction,
+            predicate,
+        } => Expr::AllReduce {
+            acc_name,
+            initial: Box::new(elaborate_expr(*initial)),
+            step_var,
+            list_expr: Box::new(elaborate_expr(*list_expr)),
+            reduction: Box::new(elaborate_expr(*reduction)),
+            predicate: Box::new(elaborate_expr(*predicate)),
+        },
         other => other,
     }
 }
