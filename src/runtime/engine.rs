@@ -1766,6 +1766,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     return optimized;
                 }
             }
+            PathPattern::Repeat { pattern, lb, ub } => {
+                if let Some(optimized) =
+                    self.try_concat_with_edge_repetition(&ir1, pattern, *lb, *ub, limit)
+                {
+                    return optimized;
+                }
+            }
             _ => {}
         }
 
@@ -1960,6 +1967,134 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
         }
         IntermediateResult::new(rows)
+    }
+
+    fn try_concat_with_edge_repetition(
+        &self,
+        ir1: &IntermediateResult,
+        edge_pat: &PathPattern,
+        lb: usize,
+        ub: Option<usize>,
+        limit: usize,
+    ) -> Option<IntermediateResult> {
+        let Some(ub_val) = ub else {
+            return None;
+        };
+        if !matches!(
+            edge_pat,
+            PathPattern::EdgeRight(_)
+                | PathPattern::EdgeLeft(_)
+                | PathPattern::EdgeUndirected(_)
+                | PathPattern::EdgeAnyDirection(_)
+        ) {
+            return None;
+        }
+
+        let mut anon_edge_pat = edge_pat.clone();
+        let var_name = match &mut anon_edge_pat {
+            PathPattern::EdgeRight(Some(d))
+            | PathPattern::EdgeLeft(Some(d))
+            | PathPattern::EdgeUndirected(Some(d))
+            | PathPattern::EdgeAnyDirection(Some(d)) => d.var.take(),
+            _ => None,
+        };
+
+        let freevars = edge_pat.freevars();
+        let mut accumulated_rows = Vec::new();
+
+        if lb == 0 {
+            for r in &ir1.rows {
+                let mut row = r.clone();
+                row.assignment.fill_empty_list(&freevars);
+                accumulated_rows.push(row);
+                if limit > 0 && accumulated_rows.len() >= limit {
+                    accumulated_rows.truncate(limit);
+                    return Some(IntermediateResult::new(accumulated_rows));
+                }
+            }
+        }
+
+        let mut level_ir = self.run_concat_pattern_step(ir1, &anon_edge_pat, 0);
+        if let Some(ref name) = var_name {
+            for row in &mut level_ir.rows {
+                let edge_val = Self::get_last_edge(row.path());
+                row.assignment.extend(name.clone(), PathValue::Group(vec![edge_val]));
+            }
+        }
+        if lb <= 1 {
+            for r in &level_ir.rows {
+                accumulated_rows.push(r.clone());
+                if limit > 0 && accumulated_rows.len() >= limit {
+                    accumulated_rows.truncate(limit);
+                    return Some(IntermediateResult::new(accumulated_rows));
+                }
+            }
+        }
+
+        for k in 2..=ub_val {
+            let next_ir = self.run_concat_pattern_step(&level_ir, &anon_edge_pat, 0);
+            level_ir = next_ir;
+            if let Some(ref name) = var_name {
+                for row in &mut level_ir.rows {
+                    let edge_val = Self::get_last_edge(row.path());
+                    if let Some(PathValue::Group(prev_group)) = row.assignment.get(name) {
+                        let mut new_group = prev_group.clone();
+                        new_group.push(edge_val);
+                        row.assignment.extend(name.clone(), PathValue::Group(new_group));
+                    }
+                }
+            }
+            if k >= lb {
+                for r in &level_ir.rows {
+                    accumulated_rows.push(r.clone());
+                    if limit > 0 && accumulated_rows.len() >= limit {
+                        accumulated_rows.truncate(limit);
+                        return Some(IntermediateResult::new(accumulated_rows));
+                    }
+                }
+            }
+        }
+
+        Some(IntermediateResult::new(accumulated_rows))
+    }
+
+    fn run_concat_pattern_step(
+        &self,
+        ir: &IntermediateResult,
+        anon_edge_pat: &PathPattern,
+        limit: usize,
+    ) -> IntermediateResult {
+        match anon_edge_pat {
+            PathPattern::EdgeRight(desc) => {
+                self.concat_with_directed_edge(ir, desc.as_ref(), true, limit)
+            }
+            PathPattern::EdgeLeft(desc) => {
+                self.concat_with_directed_edge(ir, desc.as_ref(), false, limit)
+            }
+            PathPattern::EdgeUndirected(desc) => {
+                self.concat_with_undirected_edge(ir, desc.as_ref(), limit)
+            }
+            PathPattern::EdgeAnyDirection(desc) => {
+                let right = self.concat_with_directed_edge(ir, desc.as_ref(), true, limit);
+                if limit > 0 && right.rows.len() >= limit {
+                    return right;
+                }
+                let remaining = if limit > 0 { limit - right.rows.len() } else { 0 };
+                let left = self.concat_with_directed_edge(ir, desc.as_ref(), false, remaining);
+                let combined = right.union(left);
+                if limit > 0 && combined.rows.len() >= limit {
+                    return combined;
+                }
+                let remaining = if limit > 0 { limit - combined.rows.len() } else { 0 };
+                let und = self.concat_with_undirected_edge(ir, desc.as_ref(), remaining);
+                combined.union(und)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn get_last_edge(path: &Path) -> PathValue {
+        path.0[path.0.len() - 2].clone()
     }
 
     /// Hash-join on the concatenation key (last node of ir1 = first node of ir2).
