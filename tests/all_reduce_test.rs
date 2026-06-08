@@ -9,7 +9,7 @@ use gqlrust::runtime::result::QueryResult;
 fn graph() -> MemoryGraphStore {
     let json = r#"{
       "nodes": [
-        {"id": "a", "labels": ["Station"], "props": {"id": "a"}},
+        {"id": "a", "labels": ["Station"], "props": {"id": "a", "cost_limit": 6}},
         {"id": "b", "labels": ["Station"], "props": {"id": "b"}},
         {"id": "c", "labels": ["Station"], "props": {"id": "c"}},
         {"id": "d", "labels": ["Station"], "props": {"id": "d"}},
@@ -94,6 +94,22 @@ fn all_reduce_path_pruning_under_8() {
         rows,
         vec![vec![Value::Str("b".into())], vec![Value::Str("c".into())]]
     );
+}
+
+#[test]
+fn all_reduce_path_pruning_with_global_constraint() {
+    let g = graph();
+    // With threshold < a.cost_limit (which is 6):
+    // a -> b (cost 3, valid)
+    // a -> b -> c (cost 7, pruned)
+    // a -> x (cost 10, pruned)
+    let rows = proj(
+        &g,
+        "MATCH (a:Station {id: 'a'})-[e:LINK]->{1,3}(n) \
+         WHERE allReduce(dist = 0, edge IN e | dist + edge.cost, dist < a.cost_limit) \
+         RETURN n.id AS nid ORDER BY nid ASC",
+    );
+    assert_eq!(rows, vec![vec![Value::Str("b".into())]]);
 }
 
 #[test]
