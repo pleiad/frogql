@@ -130,3 +130,29 @@ fn typecheck_all_reduce() {
     );
     assert!(q.is_ok()); // Warnings are not errors, query still compiles.
 }
+
+#[test]
+fn all_reduce_deep_repetition_pruning() {
+    let g = graph();
+    // With threshold < 15 and repetition {1,8} (which exceeds MAX_UNROLL (4) and triggers try_concat_with_edge_repetition):
+    // a -> b (cost 3, valid)
+    // a -> x (cost 10, valid)
+    // a -> b -> c (cost 7, valid)
+    // a -> x -> y (cost 20, pruned at step 2)
+    // a -> b -> c -> d (cost 12, valid)
+    let rows = proj(
+        &g,
+        "MATCH (a:Station {id: 'a'})-[e:LINK]->{1,8}(n) \
+         WHERE allReduce(dist = 0, edge IN e | dist + edge.cost, dist < 15) \
+         RETURN n.id AS nid ORDER BY nid ASC",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Str("b".into())],
+            vec![Value::Str("c".into())],
+            vec![Value::Str("d".into())],
+            vec![Value::Str("x".into())],
+        ]
+    );
+}

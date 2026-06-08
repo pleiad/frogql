@@ -1990,9 +1990,7 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         ub: Option<usize>,
         limit: usize,
     ) -> Option<IntermediateResult> {
-        let Some(ub_val) = ub else {
-            return None;
-        };
+        let ub_val = ub?;
         if !matches!(
             edge_pat,
             PathPattern::EdgeRight(_)
@@ -2034,6 +2032,8 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             }
         }
 
+        let mut acc_cache: HashMap<(usize, Path), Value> = HashMap::new();
+
         let mut level_ir = self.run_concat_pattern_step(ir1, &anon_edge_pat, 0);
         if let Some(ref name) = var_name {
             for row in &mut level_ir.rows {
@@ -2041,14 +2041,33 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                 row.assignment.extend(name.clone(), PathValue::Group(vec![edge_val]));
             }
             if !active_reduces.is_empty() {
+                let mut cache_inserts = Vec::new();
                 level_ir.rows.retain(|row| {
-                    active_reduces.iter().all(|expr| {
-                        matches!(
-                            self.run_expr(&row.assignment, expr),
-                            ExprResult::Success(Value::Bool(true))
-                        )
-                    })
+                    let mut ok = true;
+                    let edge_val = Self::get_last_edge(row.path());
+                    for (idx, expr) in active_reduces.iter().enumerate() {
+                        if let Some((next_acc, match_ok)) = self.eval_all_reduce_incremental(
+                            &row.assignment,
+                            expr,
+                            &edge_val,
+                            None,
+                        ) {
+                            if match_ok {
+                                cache_inserts.push(((idx, row.path().clone()), next_acc));
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    ok
                 });
+                for (key, val) in cache_inserts {
+                    acc_cache.insert(key, val);
+                }
             }
         }
         if lb <= 1 {
@@ -2074,14 +2093,36 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
                     }
                 }
                 if !active_reduces.is_empty() {
+                    let mut cache_inserts = Vec::new();
                     level_ir.rows.retain(|row| {
-                        active_reduces.iter().all(|expr| {
-                            matches!(
-                                self.run_expr(&row.assignment, expr),
-                                ExprResult::Success(Value::Bool(true))
-                            )
-                        })
+                        let mut ok = true;
+                        let path_len = row.path().0.len();
+                        let parent_path = Path(row.path().0[..path_len - 2].to_vec());
+                        let edge_val = Self::get_last_edge(row.path());
+                        for (idx, expr) in active_reduces.iter().enumerate() {
+                            let prev_acc = acc_cache.get(&(idx, parent_path.clone())).cloned();
+                            if let Some((next_acc, match_ok)) = self.eval_all_reduce_incremental(
+                                &row.assignment,
+                                expr,
+                                &edge_val,
+                                prev_acc,
+                            ) {
+                                if match_ok {
+                                    cache_inserts.push(((idx, row.path().clone()), next_acc));
+                                } else {
+                                    ok = false;
+                                    break;
+                                }
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        ok
                     });
+                    for (key, val) in cache_inserts {
+                        acc_cache.insert(key, val);
+                    }
                 }
             }
             if k >= lb {
@@ -2096,6 +2137,70 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         }
 
         Some(IntermediateResult::new(accumulated_rows))
+    }
+
+    fn eval_all_reduce_incremental(
+        &self,
+        mu: &Assignment,
+        expr: &Expr,
+        new_edge: &PathValue,
+        prev_acc: Option<Value>,
+    ) -> Option<(Value, bool)> {
+        let Expr::AllReduce {
+            acc_name,
+            initial,
+            step_var,
+            list_expr: _,
+            reduction,
+            predicate,
+        } = expr else {
+            return None;
+        };
+
+        // 1. Get previous/initial accumulator value
+        let acc_value = match prev_acc {
+            Some(v) => v,
+            None => match self.run_expr(mu, initial) {
+                ExprResult::Success(v) => v,
+                ExprResult::Failure(_) => return None,
+            },
+        };
+
+        let step_value = path_value_to_value(new_edge);
+
+        // 2. Compute next accumulator value: acc_value = reduction(acc_value, step_value)
+        self.comprehension_scope
+            .borrow_mut()
+            .push((acc_name.clone(), acc_value));
+        self.comprehension_scope
+            .borrow_mut()
+            .push((step_var.clone(), step_value.clone()));
+        let next_acc_res = self.run_expr(mu, reduction);
+        self.comprehension_scope.borrow_mut().pop();
+        self.comprehension_scope.borrow_mut().pop();
+
+        let next_acc = match next_acc_res {
+            ExprResult::Success(v) => v,
+            ExprResult::Failure(_) => return None,
+        };
+
+        // 3. Evaluate predicate on the next accumulator: predicate(next_acc, step_value)
+        self.comprehension_scope
+            .borrow_mut()
+            .push((acc_name.clone(), next_acc.clone()));
+        self.comprehension_scope
+            .borrow_mut()
+            .push((step_var.clone(), step_value));
+        let pred_res = self.run_expr(mu, predicate);
+        self.comprehension_scope.borrow_mut().pop();
+        self.comprehension_scope.borrow_mut().pop();
+
+        let ok = match pred_res {
+            ExprResult::Success(Value::Bool(b)) => b,
+            _ => false,
+        };
+
+        Some((next_acc, ok))
     }
 
     fn run_concat_pattern_step(
