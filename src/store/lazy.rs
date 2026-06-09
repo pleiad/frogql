@@ -1026,6 +1026,52 @@ impl GraphAccess for LazyGraphStore {
         base
     }
 
+    fn node_prop(&self, id: Id, prop: &str) -> Option<Value> {
+        let overlay = self.overlay.borrow();
+        if let Some(n) = overlay.get_new_node(id) {
+            return n.props.get(prop).cloned();
+        }
+        if let Some(mods) = overlay.mod_node_props.get(&id) {
+            if let Some(op) = mods.set.get(prop) {
+                return op.clone();
+            }
+            if mods.cleared {
+                return None;
+            }
+        }
+        let sid = self.strings.id_for_str(prop)?;
+        let decoded = self.read_node_record(id);
+        for &(name_sid, ref pv) in &decoded.props {
+            if name_sid == sid {
+                return Some(self.prop_to_value(pv));
+            }
+        }
+        None
+    }
+
+    fn edge_prop(&self, id: Id, prop: &str) -> Option<Value> {
+        let overlay = self.overlay.borrow();
+        if let Some(e) = overlay.get_new_edge(id) {
+            return e.props.get(prop).cloned();
+        }
+        if let Some(mods) = overlay.mod_edge_props.get(&id) {
+            if let Some(op) = mods.set.get(prop) {
+                return op.clone();
+            }
+            if mods.cleared {
+                return None;
+            }
+        }
+        let sid = self.strings.id_for_str(prop)?;
+        let decoded = self.read_edge_record(id);
+        for &(name_sid, ref pv) in &decoded.node.props {
+            if name_sid == sid {
+                return Some(self.prop_to_value(pv));
+            }
+        }
+        None
+    }
+
     fn src(&self, edge_id: Id) -> Id {
         if let Some(e) = self.overlay.borrow().get_new_edge(edge_id) {
             return e.src;

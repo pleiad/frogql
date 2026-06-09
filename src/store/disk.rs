@@ -324,6 +324,28 @@ impl GraphAccess for DiskGraphStore {
         self.decode_props(&decoded.node.props)
     }
 
+    fn node_prop(&self, id: Id, prop: &str) -> Option<Value> {
+        let sid = self.strings.id_for_str(prop)?;
+        let decoded = self.read_node_record(id);
+        for &(name_sid, ref pv) in &decoded.props {
+            if name_sid == sid {
+                return Some(self.prop_to_value(pv));
+            }
+        }
+        None
+    }
+
+    fn edge_prop(&self, id: Id, prop: &str) -> Option<Value> {
+        let sid = self.strings.id_for_str(prop)?;
+        let decoded = self.read_edge_record(id);
+        for &(name_sid, ref pv) in &decoded.node.props {
+            if name_sid == sid {
+                return Some(self.prop_to_value(pv));
+            }
+        }
+        None
+    }
+
     fn src(&self, edge_id: Id) -> Id {
         self.edge_src[edge_id as usize]
     }

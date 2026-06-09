@@ -265,13 +265,31 @@ impl Ord for ShortestEntry {
     }
 }
 
-/// Apply value predicates pushed down by the optimizer to raw graph properties.
+/// Apply value predicates pushed down by the optimizer to node properties.
 /// Missing key → predicate is null → reject.
-fn check_value_preds(preds: &[(String, BinOp, Value)], props: &Props) -> bool {
+fn check_node_value_preds<G: GraphAccess + ?Sized>(
+    graph: &G,
+    id: Id,
+    preds: &[(String, BinOp, Value)],
+) -> bool {
     preds
         .iter()
-        .all(|(attr, op, expected)| match props.get(attr) {
-            Some(actual) => cmp_values(actual, *op, expected),
+        .all(|(attr, op, expected)| match graph.node_prop(id, attr) {
+            Some(ref actual) => cmp_values(actual, *op, expected),
+            None => false,
+        })
+}
+
+/// Apply value predicates pushed down by the optimizer to edge properties.
+fn check_edge_value_preds<G: GraphAccess + ?Sized>(
+    graph: &G,
+    id: Id,
+    preds: &[(String, BinOp, Value)],
+) -> bool {
+    preds
+        .iter()
+        .all(|(attr, op, expected)| match graph.edge_prop(id, attr) {
+            Some(ref actual) => cmp_values(actual, *op, expected),
             None => false,
         })
 }
@@ -3155,14 +3173,19 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         match desc {
             None => true,
             Some(d) => {
-                let raw_props = self.graph.node_props(id);
                 let actual_label = self.graph.node_labels(id);
-                let actual_props = Self::check_record(&raw_props);
-                let actual = DescriptorType::new(actual_label.clone(), actual_props);
-                if !DescriptorType::is_subtype(&actual, &d.dtype) {
+                if !LabelType::is_subtype(&actual_label, &d.dtype.label) {
                     return false;
                 }
-                check_value_preds(&d.value_preds, &raw_props)
+                if !matches!(&d.dtype.props, PropertyType::Open(m) if m.is_empty()) {
+                    let raw_props = self.graph.node_props(id);
+                    let actual_props = Self::check_record(&raw_props);
+                    let actual = DescriptorType::new(actual_label, actual_props);
+                    if !DescriptorType::is_subtype(&actual, &d.dtype) {
+                        return false;
+                    }
+                }
+                check_node_value_preds(self.graph, id, &d.value_preds)
             }
         }
     }
@@ -3171,14 +3194,19 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         match desc {
             None => true,
             Some(d) => {
-                let raw_props = self.graph.edge_props(id);
                 let actual_label = self.graph.edge_labels(id);
-                let actual_props = Self::check_record(&raw_props);
-                let actual = DescriptorType::new(actual_label.clone(), actual_props);
-                if !DescriptorType::is_subtype(&actual, &d.dtype) {
+                if !LabelType::is_subtype(&actual_label, &d.dtype.label) {
                     return false;
                 }
-                check_value_preds(&d.value_preds, &raw_props)
+                if !matches!(&d.dtype.props, PropertyType::Open(m) if m.is_empty()) {
+                    let raw_props = self.graph.edge_props(id);
+                    let actual_props = Self::check_record(&raw_props);
+                    let actual = DescriptorType::new(actual_label, actual_props);
+                    if !DescriptorType::is_subtype(&actual, &d.dtype) {
+                        return false;
+                    }
+                }
+                check_edge_value_preds(self.graph, id, &d.value_preds)
             }
         }
     }
@@ -3254,13 +3282,13 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
             Some(id) => id,
             None => return ExprResult::Failure(format!("variable '{var}' has no id")),
         };
-        let props = if pv.is_node() {
-            self.graph.node_props(id)
+        let val_opt = if pv.is_node() {
+            self.graph.node_prop(id, attr)
         } else {
-            self.graph.edge_props(id)
+            self.graph.edge_prop(id, attr)
         };
-        match props.get(attr) {
-            Some(v) => ExprResult::Success(v.clone()),
+        match val_opt {
+            Some(v) => ExprResult::Success(v),
             None => ExprResult::Failure(format!("attribute '{attr}' not found")),
         }
     }
@@ -3270,12 +3298,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
     /// attribute is null (3VL), consistent with `AttrLookup` on `mu`.
     fn attr_of_value(&self, v: &Value, attr: &str) -> ExprResult {
         match v {
-            Value::Node(id) => match self.graph.node_props(*id).get(attr) {
-                Some(v) => ExprResult::Success(v.clone()),
+            Value::Node(id) => match self.graph.node_prop(*id, attr) {
+                Some(v) => ExprResult::Success(v),
                 None => ExprResult::Success(Value::Null),
             },
-            Value::Edge(id) => match self.graph.edge_props(*id).get(attr) {
-                Some(v) => ExprResult::Success(v.clone()),
+            Value::Edge(id) => match self.graph.edge_prop(*id, attr) {
+                Some(v) => ExprResult::Success(v),
                 None => ExprResult::Success(Value::Null),
             },
             Value::Record(m) => match m.get(attr) {
@@ -4755,7 +4783,7 @@ impl BtreeMergeCursor {
     fn new<G: GraphAccess>(graph: &G, label: String, ids: Vec<Id>, attr: &str) -> Self {
         let head_value = ids
             .first()
-            .and_then(|&id| graph.node_props(id).get(attr).cloned());
+            .and_then(|&id| graph.node_prop(id, attr));
         Self {
             _label: label,
             ids,
@@ -4773,7 +4801,7 @@ impl BtreeMergeCursor {
         self.head_value = self
             .ids
             .get(self.pos)
-            .and_then(|&id| graph.node_props(id).get(attr).cloned());
+            .and_then(|&id| graph.node_prop(id, attr));
     }
 
     fn is_done(&self) -> bool {
