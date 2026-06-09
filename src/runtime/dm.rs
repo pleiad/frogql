@@ -98,7 +98,8 @@ where
         // actually filter rows. Without this the Descriptor's
         // `value_filters` field would be silently ignored at runtime.
         let elaborated = crate::elaborate::elaborate_query(q);
-        let ir = runtime.run(&elaborated.collapsed_pattern());
+        let mut ir = runtime.run(&elaborated.collapsed_pattern());
+        ir.ensure_flat();
         ir.rows.into_iter().map(|r| r.assignment).collect()
     };
 
