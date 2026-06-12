@@ -162,18 +162,47 @@ def main() -> int:
     limit_mib = limit / (1024 * 1024)
 
     if not _proc_available():
-        # Non-Linux / no procfs: run unmonitored rather than fail. The
-        # bench server is Linux, so this is a portability courtesy.
+        # Non-Linux / no procfs: no RSS sampling, but the wall-clock
+        # timeout still applies — a hung query must not stall a
+        # validation run on macOS either. (The bench server is Linux;
+        # this branch is a dev-machine courtesy.)
         sys.stderr.write(
             f"memrun[{label}]: /proc unavailable; running WITHOUT memory "
-            f"monitoring or cap.\n"
+            f"monitoring or cap"
+            + (f" (wall-clock cap {args.timeout_s:.0f}s still enforced)"
+               if args.timeout_s is not None else "")
+            + ".\n"
         )
         t0 = time.perf_counter()
-        rc = subprocess.call(cmd)
+        proc = subprocess.Popen(cmd, start_new_session=True)
+        pgid = proc.pid
+        timed_out = False
+        while True:
+            rc = proc.poll()
+            if rc is not None:
+                break
+            if (args.timeout_s is not None
+                    and (time.perf_counter() - t0) > args.timeout_s):
+                timed_out = True
+                sys.stderr.write(
+                    f"memrun[{label}]: TIME LIMIT EXCEEDED — ran "
+                    f"{time.perf_counter() - t0:.0f}s > cap "
+                    f"{args.timeout_s:.0f}s; killing process group {pgid}.\n"
+                )
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.wait()
+                rc = TIMEOUT_EXIT_CODE
+                break
+            time.sleep(args.interval)
         elapsed = time.perf_counter() - t0
+        status = ("timeout" if timed_out
+                  else "ok" if rc == 0 else "runner_error")
         _write_peak_out(args.peak_out, {
             "label": label,
-            "status": "ok" if rc == 0 else "runner_error",
+            "status": status,
             "exit_code": rc,
             "peak_rss_bytes": -1,
             "peak_rss_mib": -1,
@@ -182,7 +211,7 @@ def main() -> int:
             "elapsed_s": f"{elapsed:.3f}",
             "monitored": 0,
         })
-        return rc
+        return rc if not timed_out else TIMEOUT_EXIT_CODE
 
     sys.stderr.write(
         f"memrun[{label}]: cap {limit_mib:.0f} MiB, "

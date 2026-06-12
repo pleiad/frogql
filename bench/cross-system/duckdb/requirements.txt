@@ -1,0 +1,6 @@
+# DuckDB in-situ CSV baseline. Any recent 1.x works; >=1.0 required
+# for stable named-parameter binding ($name + dict) in the Python API.
+duckdb>=1.0
+# psutil for cross-platform peak-RSS sampling in run.py.
+# resource.getrusage isn't available on Windows.
+psutil>=5.9

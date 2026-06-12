@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Server driver for the cross-system bench: frogQL (gqlite) vs Kuzu vs
-# Grafeo, on EVERY IC frogQL implements, measuring both LATENCY and
-# PEAK MEMORY, with a hard 10 GiB per-runner cap (a query that exceeds
-# it is killed and recorded as a memory_error rather than taking the
-# box down).
+# Server driver for the cross-system bench: frogQL (gqlite, lazy+disk
+# backends) vs GraphQLite vs Kuzu vs Grafeo vs Neo4j (docker) vs DuckDB
+# (in-situ CSV baseline), on EVERY IC frogQL implements, measuring both
+# LATENCY and PEAK MEMORY, with a hard 10 GiB per-runner cap (a query
+# that exceeds it is killed and recorded as a memory_error rather than
+# taking the box down).
 #
 # This is the "run it on a separate Linux server" entry point. It:
 #   1. verifies / builds the gqlite release binaries (frogql,
@@ -26,7 +27,11 @@
 #   tail -f /tmp/frogql-bench.out
 #
 # Flags (server-driver-specific; all others pass through to run_all.sh):
-#   --systems a,b,c     systems to bench   (default: gqlite,kuzu,grafeo)
+#   --systems a,b,c     systems to bench
+#                       (default: gqlite,graphqlite,kuzu,grafeo,neo4j,duckdb.
+#                       neo4j needs docker — the driver auto-starts its
+#                       container via neo4j/docker.sh when docker is
+#                       available, else drops neo4j from the run)
 #   --ics 1,2,3         IC subset          (default: all implemented)
 #   --iters N           measured iters     (default: 10)
 #   --warmup N          warmup iters       (default: 2)
@@ -51,7 +56,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-SYSTEMS="gqlite,kuzu,grafeo"
+SYSTEMS="gqlite,graphqlite,kuzu,grafeo,neo4j,duckdb"
 ICS=""                 # empty => let run_all.sh use its all-implemented default
 ITERS=10
 WARMUP=2
@@ -134,6 +139,18 @@ if [[ $REBUILD_DATA -eq 1 || ! -f "$GDB" || ! -d "$CSV_DIR" ]]; then
 else
     log "LDBC dataset present"
     echo "  $GDB and $CSV_DIR exist (pass --rebuild-data to force)."
+fi
+
+# --- Neo4j container (only if neo4j is among the requested systems) ---
+if [[ ",$SYSTEMS," == *",neo4j,"* ]]; then
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        log "Starting Neo4j container"
+        bash "$SCRIPT_DIR/neo4j/docker.sh" up
+    else
+        echo "WARNING: neo4j requested but docker is unavailable —" >&2
+        echo "  dropping neo4j from this run." >&2
+        SYSTEMS=$(echo "$SYSTEMS" | tr ',' '\n' | grep -v '^neo4j$' | paste -sd, -)
+    fi
 fi
 
 # --- Run -------------------------------------------------------------

@@ -41,20 +41,30 @@ SYSTEM_LABEL = {
     "lazy": "froGQL",
     "lazy-baseline": "froGQL",
     "lazy-no-fold": "froGQL (no-fold)",
+    "lazy-no-unroll": "froGQL (no-unroll)",
+    "lazy-no-pin": "froGQL (no-pin)",
+    "lazy-no-bfs": "froGQL (no-bfs)",
     "disk": "froGQL (disk)",
     "memory": "froGQL (mem)",
     "graphqlite-cypher": "GraphQLite",
     "kuzu-cypher": "Kuzu",
     "grafeo-gql": "Grafeo",
+    "neo4j-cypher": "Neo4j",
+    "duckdb-sql": "DuckDB (in-situ)",
 }
 SYSTEM_COLOR = {
     "froGQL": "#2c8a3e",
     "froGQL (no-fold)": "#7fc08c",
+    "froGQL (no-unroll)": "#a8d4b2",
+    "froGQL (no-pin)": "#cfe8d5",
+    "froGQL (no-bfs)": "#5fae72",
     "froGQL (disk)": "#1f5e2b",
     "froGQL (mem)": "#56a86a",
     "GraphQLite": "#3b6ea5",
     "Kuzu": "#c2792e",
     "Grafeo": "#9b59b6",
+    "Neo4j": "#0a6e8a",
+    "DuckDB (in-situ)": "#b5a642",
 }
 
 

@@ -392,11 +392,19 @@ def main() -> int:
                     "lazy",
                     "lazy-baseline",
                     "lazy-no-fold",
+                    "lazy-no-unroll",
+                    "lazy-no-pin",
+                    "lazy-no-bfs",
                     "disk",
                     "disk-baseline",
                     "memory",
                     "gqlite-baseline",
                     "gqlite-no-fold",
+                    "gqlite-no-unroll",
+                    "gqlite-no-pin",
+                    "gqlite-no-bfs",
+                    "gqlite-lazy",
+                    "gqlite-disk",
                 ):
                     return "gqlite"
                 if s == "graphqlite-cypher":
@@ -405,6 +413,10 @@ def main() -> int:
                     return "kuzu"
                 if s == "grafeo-gql":
                     return "grafeo"
+                if s == "neo4j-cypher":
+                    return "neo4j"
+                if s == "duckdb-sql":
+                    return "duckdb"
                 return s
 
             queries_h = sorted({q for (q, _) in by_cell_h})

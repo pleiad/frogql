@@ -35,23 +35,37 @@ focus going forward.
 
 | System | Subdir | Status |
 |---|---|---|
-| gqlite (lazy backend) | [`gqlite/`](gqlite/) | ✅ implemented |
+| gqlite (lazy + disk backends — `--backends lazy,disk`, both run by default) | [`gqlite/`](gqlite/) | ✅ implemented |
 | GraphQLite — colliery-io/graphqlite (Cypher, SQLite-backed) | [`graphqlite/`](graphqlite/) | ✅ implemented; see [`graphqlite/DIVERGENCES.md`](graphqlite/DIVERGENCES.md) for the int64 RETURN-projection bug surfaced by the row-equivalence oracle |
 | Kuzu — kuzudb (vectorized columnar engine, CIDR 2023; pinned to v0.11.3 since [upstream archived 2025-10-10](https://github.com/kuzudb/kuzu)) | [`kuzu/`](kuzu/) | ✅ implemented; see [`kuzu/DIVERGENCES.md`](kuzu/DIVERGENCES.md) for the archival-status framing and the `label()`-predicate query-shape divergence (Kuzu's optimizer doesn't push `label()` through multi-hop joins → IC8 ~14s/iter, an honest finding) |
 | Grafeo — GrafeoDB/grafeo (GQL-native, vectorized/SIMD; pinned to v0.5.34) | [`grafeo/`](grafeo/) | ✅ implemented — all six ICs (2,5,6,8,9,11) row-equivalence verified byte-identical to gqlite; see [`grafeo/README.md`](grafeo/README.md) for the dialect map and [`grafeo/DIVERGENCES.md`](grafeo/DIVERGENCES.md) (multi-MATCH fold, WHERE/OPTIONAL ordering, label-alternation → WHERE, Company/Country via `type`) |
+| Neo4j 5 community (dockerized server, bolt driver) — the "production system" reference point reviewers asked for | [`neo4j/`](neo4j/) | ✅ implemented — all 12 ICs row-equivalence verified (180/180 row hashes vs gqlite); needs docker (`neo4j/docker.sh up`); see [`neo4j/DIVERGENCES.md`](neo4j/DIVERGENCES.md) |
+| DuckDB (in-situ SQL over the raw LDBC CSVs — no ingest, prices the "query the CSV in place" alternative for the break-even analysis) | [`duckdb/`](duckdb/) | ✅ implemented for IC2/IC6/IC11 (45/45 row hashes vs gqlite); `duckdb/breakeven.py` computes ingest-vs-latency break-even counts |
 | GraphLite — GraphLite-AI/GraphLite (ISO GQL, Sled-backed) | — | not yet integrated |
 | GQLite — webbery/gqlite (custom DSL, dead since April 2023) | — | not yet integrated |
 
-**IC coverage.** The harness now defaults to every IC frogQL implements
-(IC1,2,3,4,5,6,7,8,9,11,12,13; IC10 and IC14 remain blocked). The six
-original cross-system ICs (2,5,6,8,9,11) are row-equivalence verified;
-the newer six (1,3,4,7,12,13) ship Kuzu/Grafeo translations that the
-author could not validate offline — the server run's row-hash oracle is
-the verification gate. ICs that project list/struct columns (IC1, IC7,
-IC12) are expected to **diverge on the row hash** by column encoding
-even when logically correct, so they are kept primarily for the
-**latency + memory** signal; per-IC notes live in each system's
-`DIVERGENCES.md`.
+**IC coverage** (verified 2026-06-11, 1-iter full-suite run on SF0.1).
+The harness defaults to every IC frogQL implements
+(IC1,2,3,4,5,6,7,8,9,11,12,13; IC10 and IC14 remain blocked) and runs
+gqlite under both storage backends (`--backends lazy,disk`; the two
+are row-identical by construction). Verified row-equivalence vs
+gqlite's hashes:
+
+- **neo4j**: 12/12 ICs, 180/180 rows — including the list/record ICs
+  (1, 7, 12), thanks to the runner's canonical re-encoding of
+  structured cells (see `neo4j/DIVERGENCES.md` §2–3).
+- **kuzu**: 9/12 ICs byte-identical; IC1/IC7/IC12 diverge **only by
+  list/struct column encoding** (logically correct — latency/memory
+  signal still valid). Porting neo4j's re-encoding to the kuzu runner
+  would close this.
+- **grafeo**: 8/12 byte-identical (IC13 additionally diverges); IC3
+  times out at 600 s (also on the server runs).
+- **graphqlite**: IC2 + IC8 exact, IC11 14/15 (documented runtime
+  bug); IC5/6/9 are **silently wrong** due to graphqlite's
+  forward-only variable-length traversal bug — do not quote those
+  latency cells (see `graphqlite/DIVERGENCES.md`).
+- **duckdb**: IC2/IC6/IC11 exact (45/45) — the in-situ baseline is
+  deliberately 3 ICs.
 
 ## Setup
 
@@ -101,6 +115,9 @@ piecemeal, they're:
 | `gqlite` | `cargo build --release` (covered by step 1) | none |
 | `graphqlite` | `pip install -r bench/cross-system/graphqlite/requirements.txt` | none |
 | `kuzu` | `pip install -r bench/cross-system/kuzu/requirements.txt` | none — `kuzu==0.11.3` pinned, archived but reproducible |
+| `grafeo` | `pip install -r bench/cross-system/grafeo/requirements.txt` | none — `grafeo==0.5.34` pinned |
+| `neo4j` | `pip install -r bench/cross-system/neo4j/requirements.txt` | docker; start the server with `bash bench/cross-system/neo4j/docker.sh up` |
+| `duckdb` | `pip install -r bench/cross-system/duckdb/requirements.txt` | none — queries the CSVs in place, no data load |
 
 Each per-system subdir has its own `README.md` documenting prereqs,
 CLI, and any per-system gotchas. Failing-but-scaffolded systems
@@ -127,6 +144,26 @@ To pre-load explicitly (or to time setup separately):
 ```bash
 python bench/cross-system/graphqlite/setup.py --force
 python bench/cross-system/kuzu/setup.py --force
+python bench/cross-system/grafeo/setup.py --force
+bash   bench/cross-system/neo4j/docker.sh up && python bench/cross-system/neo4j/setup.py --force
+# duckdb: no load — in-situ over the CSVs by design
+```
+
+For the paper's ingest-cost table (CSV → ready-to-query wall time +
+on-disk size per system, all force-rebuilt, gqlite included via a
+scratch `.gdb`):
+
+```bash
+bash bench/cross-system/ingest_bench.sh            # all systems
+bash bench/cross-system/ingest_bench.sh --only gqlite,kuzu,neo4j
+```
+
+Feed its output CSV plus a results dir into the break-even analysis:
+
+```bash
+python bench/cross-system/duckdb/breakeven.py \
+    bench/cross-system/results/ingest_<ts>.csv \
+    bench/cross-system/results/<ts>/
 ```
 
 ## Running

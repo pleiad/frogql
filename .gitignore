@@ -10,7 +10,10 @@ __pycache__/
 # system loaded data (each system imports LDBC CSVs into its native
 # format under bench/data/cross-system/<system>/).
 /bench/cross-system/results/
+/bench/cross-system/.venv/
 /bench/data/cross-system/
+# Scaling sweep outputs (bench/scaling/run_scaling.sh), timestamped per run.
+/bench/scaling/results/
 # Internal bench (typecheck_bench) outputs: full.csv/txt + smoke.csv/txt
 # captured per local run. Regeneration is fast; not useful in git.
 /bench/internal-results/

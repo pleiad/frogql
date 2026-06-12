@@ -16,7 +16,12 @@
 //     disjunction in patterns; we use `WHERE message:Comment OR
 //     message:Post`. Same logical query.
 //   - Edge labels lowercase per loader convention.
-MATCH (:Person {ldbcId: $personId})-[:knows]-(friend:Person)<-[:hasCreator]-(message)
+//   - graphqlite 0.4.4's Cypher->SQL transpiler fails on an ANONYMOUS
+//     start node with an inline property filter
+//     (`(:Person {ldbcId: $p})` -> "SQL prepare failed: near '.'"),
+//     so the start node is named (`start`) even though the toml leaves
+//     it anonymous. Purely syntactic; same logical query.
+MATCH (start:Person {ldbcId: $personId})-[:knows]-(friend:Person)<-[:hasCreator]-(message)
 WHERE (message:Comment OR message:Post) AND message.creationDate <= $maxDate
 RETURN friend.ldbcId AS personId,
        friend.firstName AS personFirstName,

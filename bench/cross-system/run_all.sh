@@ -18,6 +18,9 @@
 #       [--iters N]                   # default: 10 measured iters per param row
 #       [--warmup N]                  # default: 2
 #       [--only gqlite,kuzu]          # subset of systems
+#       [--backends lazy,disk]        # gqlite storage backends to bench
+#                                     #   (default both; other systems
+#                                     #   are unaffected)
 #       [--mem-limit-gb G]            # default: 10. Hard per-(system,IC) RSS
 #                                     #   cap. A runner whose process-group RSS
 #                                     #   crosses this is SIGKILLed and recorded
@@ -25,9 +28,11 @@
 #       [--sample-ms MS]              # default: 50. memrun RSS sampling period.
 #       [--rebuild-setup]             # force per-system setup re-run
 #                                     # (default: skip setup if DB exists)
-#       [--ablate]                    # run gqlite in 2 modes: baseline
-#                                     # (all opts on) and
-#                                     # GQLITE_DISABLE_INDEX_FOLD=1.
+#       [--ablate]                    # run gqlite in 5 modes: baseline
+#                                     # (all opts on), no-fold, no-unroll,
+#                                     # no-pin, no-bfs — one optimization
+#                                     # disabled per mode via its
+#                                     # GQLITE_DISABLE_* env var.
 #                                     # The fold pass turns
 #                                     # `MATCH (n {id:X})` into a single
 #                                     # NodeId pre-bind via the secondary
@@ -70,6 +75,11 @@ ICS_ARG="1,2,3,4,5,6,7,8,9,11,12,13"   # default: every IC currently flipped to 
 ITERS=10
 WARMUP=2
 ONLY=""
+BACKENDS_ARG="lazy,disk"   # gqlite storage backends to bench (comma list of
+                           # lazy|disk). Both by default: reviewers asked for
+                           # the disk-resident config next to the lazy one so
+                           # the comparison vs buffer-managed engines (Kuzu)
+                           # is apples-to-apples. Other systems ignore this.
 REBUILD=0
 ABLATE=0
 MEM_LIMIT_GB=10          # hard per-(system,IC) RSS cap; exceeding it kills the
@@ -84,6 +94,7 @@ while [[ $# -gt 0 ]]; do
         --iters)            ITERS="$2"; shift 2 ;;
         --warmup)           WARMUP="$2"; shift 2 ;;
         --only)             ONLY="$2"; shift 2 ;;
+        --backends)         BACKENDS_ARG="$2"; shift 2 ;;
         --rebuild-setup)    REBUILD=1; shift ;;
         --ablate)           ABLATE=1; shift ;;
         --mem-limit-gb)     MEM_LIMIT_GB="$2"; shift 2 ;;
@@ -97,11 +108,31 @@ while [[ $# -gt 0 ]]; do
 done
 
 IFS=',' read -ra IC_LIST <<<"$ICS_ARG"
+IFS=',' read -ra BACKEND_LIST <<<"$BACKENDS_ARG"
+for be in "${BACKEND_LIST[@]}"; do
+    if [[ "$be" != "lazy" && "$be" != "disk" ]]; then
+        echo "--backends entries must be lazy|disk, got: $be" >&2
+        exit 1
+    fi
+done
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OUT_DIR="$RESULTS_ROOT/$TIMESTAMP"
 mkdir -p "$OUT_DIR"
 START_EPOCH=$(date +%s)
+
+# Hardware specs — portable across macOS (sysctl) and Linux (/proc).
+# Reviewers asked for machine specs in the eval section; capturing them
+# per run means any results dir is self-describing.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    CPU_MODEL=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)
+    CPU_CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo unknown)
+    RAM_GB=$(awk "BEGIN{printf \"%.1f\", $(sysctl -n hw.memsize 2>/dev/null || echo 0)/1073741824}")
+else
+    CPU_MODEL=$(awk -F: '/model name/{sub(/^ /,"",$2); print $2; exit}' /proc/cpuinfo 2>/dev/null || echo unknown)
+    CPU_CORES=$(nproc 2>/dev/null || echo unknown)
+    RAM_GB=$(awk '/MemTotal/{printf "%.1f", $2/1048576}' /proc/meminfo 2>/dev/null || echo unknown)
+fi
 
 # Run-environment metadata. Captured up-front so any future re-analysis
 # of the timestamped results dir knows which gqlite revision and host
@@ -109,6 +140,7 @@ START_EPOCH=$(date +%s)
 {
     echo "timestamp:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "ics:              ${IC_LIST[*]}"
+    echo "gqlite_backends:  ${BACKEND_LIST[*]}"
     echo "iters:            $ITERS"
     echo "warmup:           $WARMUP"
     echo "rebuild_setup:    $REBUILD"
@@ -117,6 +149,9 @@ START_EPOCH=$(date +%s)
     echo "sample_ms:        $SAMPLE_MS"
     echo "host:             $(hostname 2>/dev/null || echo unknown)"
     echo "uname:            $(uname -a 2>/dev/null || echo unknown)"
+    echo "cpu_model:        $CPU_MODEL"
+    echo "cpu_cores:        $CPU_CORES"
+    echo "ram_gb:           $RAM_GB"
     echo "gqlite_branch:    $(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
     echo "gqlite_commit:    $(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
     echo "gqlite_dirty:     $(git -C "$REPO_ROOT" diff --quiet 2>/dev/null && echo no || echo yes)"
@@ -128,13 +163,16 @@ START_EPOCH=$(date +%s)
     echo "graphqlite_ver:   $(python -c 'import importlib.metadata as m; print(m.version("graphqlite"))' 2>/dev/null || echo missing)"
     echo "kuzu_ver:         $(python -c 'import importlib.metadata as m; print(m.version("kuzu"))' 2>/dev/null || echo missing)"
     echo "grafeo_ver:       $(python -c 'import importlib.metadata as m; print(m.version("grafeo"))' 2>/dev/null || echo missing)"
+    echo "neo4j_driver_ver: $(python -c 'import importlib.metadata as m; print(m.version("neo4j"))' 2>/dev/null || echo missing)"
+    echo "neo4j_server_ver: $(docker exec frogql-bench-neo4j neo4j --version 2>/dev/null || echo 'missing (container not running)')"
+    echo "duckdb_ver:       $(python -c 'import importlib.metadata as m; print(m.version("duckdb"))' 2>/dev/null || echo missing)"
     echo "psutil_ver:       $(python -c 'import importlib.metadata as m; print(m.version("psutil"))' 2>/dev/null || echo missing)"
     echo "ldbc_dataset:     SF0.1"
 } > "$OUT_DIR/run_info.txt"
 
 # Systems registered here. Order is per-system bench order; doesn't
 # affect comparison since compare_results.py sorts independently.
-ALL_SYSTEMS=(gqlite graphqlite kuzu grafeo)
+ALL_SYSTEMS=(gqlite graphqlite kuzu grafeo neo4j duckdb)
 
 if [[ -n "$ONLY" ]]; then
     IFS=',' read -ra SYSTEMS <<<"$ONLY"
@@ -161,6 +199,7 @@ echo "  ics:       ${IC_LIST[*]}"
 echo "  iters:     $ITERS"
 echo "  warmup:    $WARMUP"
 echo "  systems:   ${SYSTEMS[*]}"
+echo "  backends:  ${BACKEND_LIST[*]} (gqlite only)"
 echo "  mem cap:   ${MEM_LIMIT_GB} GiB/runner (sample every ${SAMPLE_MS} ms)"
 if awk "BEGIN{exit !($TIMEOUT_S > 0)}"; then
     echo "  time cap:  ${TIMEOUT_S}s/runner"
@@ -188,19 +227,40 @@ echo ""
 # external bench's job is to compare gqlite to other systems on
 # user-facing query latency; gqlite-internal sub-knob ablations are
 # off-charter here.
+#
+# Beyond no-fold, three more single-knob modes attribute the headline
+# per-IC wins to their optimization (reviewer ask: "which pass buys
+# what"):
+#   no-unroll  GQLITE_DISABLE_REPEAT_UNROLL — bounded {n,m} repetitions
+#              stay on the hash-join repetition path instead of being
+#              unrolled into LTJ-compatible unions.
+#   no-pin     GQLITE_DISABLE_EXISTS_PIN + GQLITE_DISABLE_VALUE_SUBQUERY_PIN
+#              — correlated EXISTS / VALUE subqueries materialize the
+#              body globally instead of probing per outer row (IC4/IC7).
+#   no-bfs     GQLITE_DISABLE_SHORTEST_BFS — single-edge SHORTEST falls
+#              back to the generic length-ordered heap (IC1/IC13).
 declare -A ABLATION_LABELS=(
     [baseline]="lazy-baseline"
     [no-fold]="lazy-no-fold"
+    [no-unroll]="lazy-no-unroll"
+    [no-pin]="lazy-no-pin"
+    [no-bfs]="lazy-no-bfs"
 )
 declare -A ABLATION_ENV=(
     [baseline]=""
     [no-fold]="GQLITE_DISABLE_INDEX_FOLD=1"
+    [no-unroll]="GQLITE_DISABLE_REPEAT_UNROLL=1"
+    [no-pin]="GQLITE_DISABLE_EXISTS_PIN=1 GQLITE_DISABLE_VALUE_SUBQUERY_PIN=1"
+    [no-bfs]="GQLITE_DISABLE_SHORTEST_BFS=1"
 )
 declare -A ABLATION_ARGS=(
     [baseline]=""
     [no-fold]=""
+    [no-unroll]=""
+    [no-pin]=""
+    [no-bfs]=""
 )
-ABLATION_MODES=(baseline no-fold)
+ABLATION_MODES=(baseline no-fold no-unroll no-pin no-bfs)
 
 # ---- Per-system loop ------------------------------------------------
 
@@ -226,16 +286,25 @@ ABLATION_MODES=(baseline no-fold)
 # `cargo run --release --bin bench_setup -- --rebuild` from a
 # non-MSYS shell (Windows: PowerShell or cmd.exe). On Linux/macOS
 # this whole problem doesn't exist.
+# neo4j: setup loads over bolt into the dockerized server (start it
+# first: bench/cross-system/neo4j/docker.sh up). Its marker is a
+# sentinel file written by setup.py after a successful load — the DB
+# itself lives inside the container.
+# duckdb: in-situ by design (queries the raw CSVs in place), so there
+# is no setup command; its marker is the CSV dir itself and the setup
+# row reports "user-managed".
 declare -A SETUP_CMD=(
     [graphqlite]="python $SCRIPT_DIR/graphqlite/setup.py"
     [kuzu]="python $SCRIPT_DIR/kuzu/setup.py"
     [grafeo]="python $SCRIPT_DIR/grafeo/setup.py"
+    [neo4j]="python $SCRIPT_DIR/neo4j/setup.py"
 )
 
 declare -A REBUILD_FLAG=(
     [graphqlite]="--force"
     [kuzu]="--force"
     [grafeo]="--force"
+    [neo4j]="--force"
 )
 
 # Per-system DB-existence checks. Setup is skipped if the marker
@@ -247,6 +316,8 @@ declare -A SETUP_MARKER=(
     [graphqlite]="$REPO_ROOT/bench/data/cross-system/graphqlite/ldbc-sf01.db"
     [kuzu]="$REPO_ROOT/bench/data/cross-system/kuzu/ldbc-sf01.db"
     [grafeo]="$REPO_ROOT/bench/data/cross-system/grafeo/ldbc-sf01.grafeo"
+    [neo4j]="$REPO_ROOT/bench/data/cross-system/neo4j/.loaded"
+    [duckdb]="$REPO_ROOT/bench/data/ldbc-sf0.1/social_network-sf0.1-CsvBasic-LongDateFormatter"
 )
 
 # Per-system runner commands (path is per-system; dispatch is per-runner).
@@ -256,6 +327,8 @@ declare -A RUNNER=(
     [graphqlite]="python $SCRIPT_DIR/graphqlite/run.py"
     [kuzu]="python $SCRIPT_DIR/kuzu/run.py"
     [grafeo]="python $SCRIPT_DIR/grafeo/run.py"
+    [neo4j]="python $SCRIPT_DIR/neo4j/run.py"
+    [duckdb]="python $SCRIPT_DIR/duckdb/run.py"
 )
 
 SETUP_TIMES_FILE="$OUT_DIR/setup_times.txt"
@@ -394,23 +467,43 @@ for sys in "${SYSTEMS[@]}"; do
                     && mv "$out_csv.tmp" "$out_csv"
             done
         else
-            out_csv="$OUT_DIR/${sys}.ic${ic}.csv"
-            stderr_log="$OUT_DIR/${sys}.ic${ic}.stderr.log"
-            mem_out="$OUT_DIR/${sys}.ic${ic}.mem.txt"
-            if ! eval "${MEMRUN[*]} --peak-out $mem_out --label ${sys}-ic${ic} -- $runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP" \
-                    2>"$stderr_log"; then
-                mem_status=$(awk -F= '/^status=/{print $2}' "$mem_out" 2>/dev/null)
-                if [[ "$mem_status" == "memory_error" ]]; then
-                    echo "[MEMLIMIT] $sys ic$ic exceeded ${MEM_LIMIT_GB} GiB — runner killed" \
-                        | tee -a "$OUT_DIR/skipped.log"
-                elif [[ "$mem_status" == "timeout" ]]; then
-                    echo "[TIMEOUT] $sys ic$ic exceeded ${TIMEOUT_S}s — runner killed" \
-                        | tee -a "$OUT_DIR/skipped.log"
-                else
-                    echo "[FAIL] $sys ic$ic runner returned non-zero" \
-                        | tee -a "$OUT_DIR/skipped.log"
-                fi
+            # gqlite runs once per requested storage backend
+            # (--backends lazy,disk → gqlite-lazy.icN.csv +
+            # gqlite-disk.icN.csv); other systems run once. The CSV
+            # `backend` column distinguishes the modes (ldbc_bench
+            # writes lazy/disk itself), so no awk rewrite is needed.
+            if [[ "$sys" == "gqlite" ]]; then
+                variants=("${BACKEND_LIST[@]}")
+            else
+                variants=(single)
             fi
+            for be in "${variants[@]}"; do
+                if [[ "$sys" == "gqlite" ]]; then
+                    base="${sys}-${be}.ic${ic}"
+                    backend_arg="--backend $be"
+                    echo "    [backend: $be]"
+                else
+                    base="${sys}.ic${ic}"
+                    backend_arg=""
+                fi
+                out_csv="$OUT_DIR/${base}.csv"
+                stderr_log="$OUT_DIR/${base}.stderr.log"
+                mem_out="$OUT_DIR/${base}.mem.txt"
+                if ! eval "${MEMRUN[*]} --peak-out $mem_out --label ${base} -- $runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP $backend_arg" \
+                        2>"$stderr_log"; then
+                    mem_status=$(awk -F= '/^status=/{print $2}' "$mem_out" 2>/dev/null)
+                    if [[ "$mem_status" == "memory_error" ]]; then
+                        echo "[MEMLIMIT] $base exceeded ${MEM_LIMIT_GB} GiB — runner killed" \
+                            | tee -a "$OUT_DIR/skipped.log"
+                    elif [[ "$mem_status" == "timeout" ]]; then
+                        echo "[TIMEOUT] $base exceeded ${TIMEOUT_S}s — runner killed" \
+                            | tee -a "$OUT_DIR/skipped.log"
+                    else
+                        echo "[FAIL] $base runner returned non-zero" \
+                            | tee -a "$OUT_DIR/skipped.log"
+                    fi
+                fi
+            done
         fi
     done
 

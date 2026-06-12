@@ -1,0 +1,7 @@
+# Official Neo4j bolt driver. 5.x/6.x both speak bolt 5 against the
+# neo4j:5 server image; pin a floor, not an exact version, since the
+# server (not the wheel) is the system under test.
+neo4j>=5.20
+# psutil for cross-platform peak-RSS sampling in run.py (client-side
+# only — the engine's RSS lives in the Docker container).
+psutil>=5.9

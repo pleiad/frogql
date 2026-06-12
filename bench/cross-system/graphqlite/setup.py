@@ -124,6 +124,14 @@ def _csv_pos_rows(path: Path):
 
 
 def _bulk_insert_nodes(g: Graph, label: str, nodes: list, id_map: dict) -> None:
+    # Empty CSV field => property ABSENT (null), matching the gqlite /
+    # kuzu / neo4j / duckdb loader convention. Storing "" instead made
+    # COALESCE(content, imageFile) keep the empty string and broke IC2
+    # row-equivalence on imageFile-only posts.
+    nodes = [
+        (k, {p: v for p, v in props.items() if v != ""}, lbl)
+        for (k, props, lbl) in nodes
+    ]
     n_before = len(id_map)
     sub_map = g.insert_nodes_bulk(nodes)
     id_map.update(sub_map)

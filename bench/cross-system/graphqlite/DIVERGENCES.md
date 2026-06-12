@@ -194,3 +194,35 @@ graphqlite runtime bug, not a translation bug.
 
 **Tested versions**: graphqlite 0.4.4. Reproduces with the literal
 queries above; not yet reported upstream.
+
+## Verified row-equivalence status (2026-06-11, graphqlite 0.4.4)
+
+Re-validated against gqlite's ROW hashes (1 iter, full SF0.1) after
+two harness-side fixes:
+
+1. **ic2.cypher**: graphqlite's Cypher→SQL transpiler fails on an
+   anonymous start node with an inline property filter
+   (`(:Person {ldbcId: $p})` → `SQL prepare failed: near '.'`).
+   Naming the node (`(start:Person {...})`) is a pure-syntax
+   workaround. IC2 had silently never run on graphqlite since the
+   spec-faithful rewrite.
+2. **setup.py**: empty CSV fields were stored as `""` instead of
+   being left absent; `COALESCE(content, imageFile)` then kept the
+   empty string on imageFile-only posts. The loader now drops
+   empty-string properties (absent == null), same convention as the
+   gqlite / kuzu / neo4j / duckdb loaders.
+
+| IC | rows matching gqlite | cause of mismatch |
+|---|---|---|
+| IC2 | 15/15 ✅ (after fixes 1+2) | — |
+| IC5 | 2/15 | variable-length `-[:knows*1..2]-` silently forward-only (documented above) → wrong membership counts |
+| IC6 | 0/15 | same `*1..2` bug → zero friends-of-friends → single NULL/0 aggregate row |
+| IC8 | 15/15 ✅ | — |
+| IC9 | 0/15 | same `*1..2` bug → zero or wrong message sets |
+| IC11 | 14/15 | the documented runtime bug on param row 1 |
+
+The IC5/6/9 mismatches are graphqlite **engine** bugs (silently wrong
+results, not errors) — exactly the class of defect the row-equivalence
+oracle exists to catch. Latency numbers for those (system, IC) cells
+must NOT be quoted as comparable: the engine is doing different
+(less) work.
