@@ -144,6 +144,118 @@ def derive_columns(return_columns: list[str]) -> list[str]:
     return [c.replace(".", "_") for c in return_columns]
 
 
+def derive_columns_from_cypher(query: str) -> list[str]:
+    """Fallback when the toml has no `return_columns` (IC1/7/12/13 don't
+    define one). Parse the FINAL `RETURN ... ` clause of the cypher and
+    return its AS-aliases in order. graphqlite returns row dicts keyed by
+    the RETURN alias in RETURN order, so this matches the dict keys.
+
+    Splits on top-level commas only (depth-tracked over ()/[]/{}), cuts at
+    a top-level ORDER BY / LIMIT, and reads the trailing `AS <alias>` of
+    each item (falling back to the raw item text when un-aliased)."""
+    import re
+    idx = query.upper().rfind("RETURN")
+    tail = query[idx + len("RETURN"):]
+    # cut at top-level ORDER BY / LIMIT (depth 0)
+    depth = 0
+    cut = len(tail)
+    i = 0
+    up = tail.upper()
+    while i < len(tail):
+        ch = tail[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0:
+            if up[i:i + 8] == "ORDER BY":
+                cut = i
+                break
+            if up[i:i + 5] == "LIMIT" and (i == 0 or not up[i - 1].isalnum()):
+                cut = i
+                break
+        i += 1
+    tail = tail[:cut]
+    # split on depth-0 commas
+    items, depth, cur = [], 0, ""
+    for ch in tail:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            items.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    items.append(cur)
+    cols = []
+    for it in items:
+        it = it.strip()
+        if not it:
+            continue
+        m = re.search(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\s*$", it, re.I)
+        cols.append(m.group(1) if m else it)
+    return cols
+
+
+# ---- froGQL Value-Debug encoding for structured (list/record) cells ----
+# graphqlite returns Python lists/dicts for RECORD/COLLECT cells (IC1/7/12).
+# gqlite's canonical row blob embeds those via Rust's `{:?}` Debug form
+# (`List([Str("a")])`, `Record({...})` with sorted keys). Re-encode so the
+# hashes match. Scalar cells pass through untouched. Byte-mirror of
+# neo4j/run.py::_encode_value.
+_RUST_ESCAPE_SPECIAL = {
+    "\\": "\\\\", '"': '\\"',
+    "\n": "\\n", "\r": "\\r", "\t": "\\t", "\0": "\\0",
+}
+_RUST_NONPRINTABLE_CATS = {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp", "Zs"}
+
+
+def _escape_rust_str(s: str) -> str:
+    import unicodedata
+    out = []
+    for ch in s:
+        if ch in _RUST_ESCAPE_SPECIAL:
+            out.append(_RUST_ESCAPE_SPECIAL[ch])
+        elif ch != " " and unicodedata.category(ch) in _RUST_NONPRINTABLE_CATS:
+            out.append(f"\\u{{{ord(ch):x}}}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _encode_value(v) -> str:
+    if v is None:
+        return "Null"
+    if isinstance(v, bool):
+        return "Bool(true)" if v else "Bool(false)"
+    if isinstance(v, int):
+        return f"Int({v})"
+    if isinstance(v, float):
+        return f"Float({v!r})"
+    if isinstance(v, str):
+        return f'Str("{_escape_rust_str(v.rstrip())}")'
+    if isinstance(v, list):
+        return "List([" + ", ".join(_encode_value(x) for x in v) + "])"
+    if isinstance(v, dict):
+        inner = ", ".join(
+            f'"{_escape_rust_str(k)}": {_encode_value(v[k])}'
+            for k in sorted(v)
+        )
+        return "Record({" + inner + "})"
+    return repr(v)
+
+
+def _encode_cell(v):
+    """Scalars pass through (row_hash canonicalizes them identically on
+    both sides); lists/dicts become the Rust Debug string the gqlite blob
+    embeds for Value::List / Value::Record cells."""
+    if isinstance(v, (list, dict)):
+        return _encode_value(v)
+    return v
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("out_csv", type=Path)
@@ -188,7 +300,6 @@ def main() -> int:
         )
         return 1
 
-    columns = derive_columns(toml.get("return_columns", []))
     query_label = f"IC{ic}"
 
     if not db_path.exists():
@@ -202,6 +313,14 @@ def main() -> int:
         return 1
 
     query = load_query(query_file)
+
+    # Column order for the row hash. Prefer the toml's `return_columns`
+    # (IC2/3/4/5/6/8/9/11 define one); fall back to parsing the cypher's
+    # final RETURN aliases when it doesn't (IC1/7/12/13). graphqlite returns
+    # row dicts keyed by RETURN alias in RETURN order, so both agree.
+    rc = toml.get("return_columns", [])
+    columns = derive_columns(rc) if rc else derive_columns_from_cypher(query)
+
     header, params_rows = load_params(params_file)
     sys.stderr.write(
         f"  graphqlite ic{ic}: {len(params_rows)} param rows × {args.iters} iters "
@@ -283,9 +402,16 @@ def main() -> int:
             # the runner used to verify against `expected_shape` in
             # the toml — any column-count or per-cell-type drift
             # changes the hash. Shape stays as human context only.
-            rows_blob, row_hash = canonicalize_and_hash(
-                iter0_result or [], columns
-            )
+            # Project each dict row to a positional list in `columns`
+            # order, re-encoding any list/dict cell into froGQL's Value
+            # Debug form (see _encode_cell) so structured columns (IC1's
+            # friendUniversities, IC7's latestLike, IC12's tagNames) hash
+            # identically to gqlite's blob. Scalar cells pass through.
+            positional = [
+                [_encode_cell(r.get(c)) for c in columns]
+                for r in (iter0_result or [])
+            ]
+            rows_blob, row_hash = canonicalize_and_hash(positional)
             sys.stderr.write(
                 f"  ROW row={row_idx} count={actual_count} "
                 f"shape={actual_shape} hash={row_hash}\n"

@@ -195,34 +195,78 @@ graphqlite runtime bug, not a translation bug.
 **Tested versions**: graphqlite 0.4.4. Reproduces with the literal
 queries above; not yet reported upstream.
 
-## Verified row-equivalence status (2026-06-11, graphqlite 0.4.4)
+## graphqlite GROUP BY / aggregation reality (corrected 2026-06-12)
 
-Re-validated against gqlite's ROW hashes (1 iter, full SF0.1) after
-two harness-side fixes:
+An earlier pass recorded that graphqlite "groups implicitly on a bare
+`RETURN x, count(*)`" and that "`WITH` + aggregation is broken." Direct
+re-verification against the loaded SF0.1 DB inverts both claims. The
+accurate behaviour of graphqlite 0.4.4:
 
-1. **ic2.cypher**: graphqlite's Cypher→SQL transpiler fails on an
-   anonymous start node with an inline property filter
-   (`(:Person {ldbcId: $p})` → `SQL prepare failed: near '.'`).
-   Naming the node (`(start:Person {...})`) is a pure-syntax
-   workaround. IC2 had silently never run on graphqlite since the
-   spec-faithful rewrite.
-2. **setup.py**: empty CSV fields were stored as `""` instead of
-   being left absent; `COALESCE(content, imageFile)` then kept the
-   empty string on imageFile-only posts. The loader now drops
-   empty-string properties (absent == null), same convention as the
-   gqlite / kuzu / neo4j / duckdb loaders.
+- **There is NO `GROUP BY` clause.** `RETURN ... GROUP BY x` is a syntax
+  error (`unexpected IDENTIFIER, expecting end of file`).
+- **A bare `RETURN <key>, <agg>` does NOT group.** It returns a SINGLE
+  global-aggregate row, mislabeled with the FIRST input row's key value.
+  Verified: `MATCH (p:Person) RETURN p.gender, count(*)` → one row
+  `{male, 1528}` (1528 = the total person count, not the male count).
+  The IC6 2-hop chain returns 71 distinct non-aggregate rows, but adding
+  `count(*)` collapses to one row `{Rainer_Schüttler, 71}`.
+- **Grouping WORKS through the first `WITH <key>, <agg>`.** `MATCH (p:Person)
+  WITH p.gender AS g, count(*) AS c RETURN g, c` → `[{female,778},{male,750}]`.
+  An `OPTIONAL MATCH` before the grouping `WITH` is fine. This is the
+  canonical Cypher idiom and it is correct in graphqlite.
+- **A SECOND aggregating `WITH` (after `ORDER BY`) does NOT re-group.** The
+  arg-max idiom `WITH liker, l ORDER BY ... WITH liker, head(collect(...))`
+  collapses to one global row — blocks IC7's per-liker latest-like.
+- **`WITH` inside a UNION branch fails** with `no such table: _with_0`. So
+  grouped aggregation CANNOT cross a UNION.
+- **`collect(DISTINCT x)` does NOT dedupe.** `collect(DISTINCT p.browserUsed)`
+  → `["Chrome","Chrome"]`. Blocks IC12's `COLLECT_LIST(DISTINCT tag.name)`.
+- **Aggregating a 64-bit EDGE property returns NULL.** `max(l.creationDate)`
+  on the `:likes` edge → NULL inside a grouped `WITH` (node-property `max`
+  works). Compounds IC7's arg-max blocker.
+- **A grouped RETURN carrying a `collect()` column STRINGIFIES every column**
+  (int keys come back as `str`, the list as a JSON string). Blocks IC12 even
+  apart from the dedup bug.
 
-| IC | rows matching gqlite | cause of mismatch |
-|---|---|---|
-| IC2 | 15/15 ✅ (after fixes 1+2) | — |
-| IC5 | 2/15 | variable-length `-[:knows*1..2]-` silently forward-only (documented above) → wrong membership counts |
-| IC6 | 0/15 | same `*1..2` bug → zero friends-of-friends → single NULL/0 aggregate row |
-| IC8 | 15/15 ✅ | — |
-| IC9 | 0/15 | same `*1..2` bug → zero or wrong message sets |
-| IC11 | 14/15 | the documented runtime bug on param row 1 |
+The net consequence: any IC that needs BOTH a bidirectional variable-length
+friend set (which must be UNION-expanded, see below) AND a grouped aggregate
+is unsatisfiable in graphqlite 0.4.4 — the friend set forces a UNION and the
+grouping can't cross it. That is IC1, IC5, IC6. IC7 and IC12 are blocked by
+the arg-max / collect-DISTINCT bugs independently.
 
-The IC5/6/9 mismatches are graphqlite **engine** bugs (silently wrong
-results, not errors) — exactly the class of defect the row-equivalence
-oracle exists to catch. Latency numbers for those (system, IC) cells
-must NOT be quoted as comparable: the engine is doing different
-(less) work.
+## Verified row-equivalence status (2026-06-12, graphqlite 0.4.4)
+
+Validated against gqlite's ROW hashes (1 iter, full SF0.1). All 14 ICs with
+an `implemented` toml were run; counts are exact param-row hash matches.
+
+| IC | n/15 | verdict | evidence / root cause |
+|---|---|---|---|
+| IC1 | 1/15 | UNSUPPORTED | needs bidirectional `knows*1..3` (→ UNION) AND grouped `COLLECT_LIST(RECORD{...})`; UNION+WITH-grouping unsatisfiable; `collect(DISTINCT)` also broken. The 1 match is row 5 (reference empty). |
+| IC2 | 15/15 ✅ | VERIFIED | named-node + `:Comment OR :Post` workaround; non-aggregating projection. |
+| IC3 | 15/15 ✅* | RUNS (empty-only) | reference EMPTY on all 15 params; non-aggregate UNION form lands on the empty hash. Full grouped cross-branch SUM is inexpressible — match is coincidental on the empty oracle. |
+| IC4 | — | UNSUPPORTED | `EXISTS` has no `WHERE` clause; date-restricted anti-join inexpressible (best-effort un-dated `NOT EXISTS` → 0 rows on every param). |
+| IC5 | 2/15 | UNSUPPORTED | bidirectional `knows*1..2` (→ UNION) AND `WITH forum, count(post)` grouping — unsatisfiable together. Best-effort forward-only `*1..2` returns wrong friend set. The 2 matches are the 2 empty-result params. |
+| IC6 | 0/15 | UNSUPPORTED | same root cause as IC5 (UNION friend set vs WITH-grouping per `otherTag`). |
+| IC7 | 0/15 | UNSUPPORTED | per-liker arg-max: second-stage `WITH`+`head(collect())` doesn't re-group; edge-property `max` → NULL; no VALUE subquery / RECORD. |
+| IC8 | 15/15 ✅ | VERIFIED | non-aggregating reply projection. |
+| IC9 | 15/15 ✅ | VERIFIED | var-length `~{1,2}` → 1-hop+2-hop UNION ALL of bidirectional single hops; `toInteger()` casts. Non-aggregating. |
+| IC11 | 14/15 | VERIFIED (1 engine outlier) | `type`-property sub-label encoding + var-length. Row 1 (`24189255811707`) is a forward-only `*1..2` runtime-bug outlier. |
+| IC12 | 1/15 | RUNS-WRONG | correct friends/counts/order via `WITH friend, count(comment)`; var-length elided (all 15 targets are isSubclassOf-leaves, 0-hop suffices); but `collect(DISTINCT tag.name)` duplicates AND grouped-collect rows stringify all columns → list+int cells diverge. The 1 match is row 6 (reference empty). |
+| IC13 | VERIFIED | VERIFIED | bounded fixed-length probe (shortestPath hangs). See ic13.cypher. |
+
+\* IC3's 15/15 is an empty-only match; documented honestly in ic3.cypher.
+
+**Why IC5/IC6 were NOT fixed by the var-length UNION workaround.** That
+workaround (proven on IC9/IC11) only works for NON-aggregating projections:
+IC9 and IC11 just project rows, so a UNION ALL of hop-branches reproduces the
+multiset directly. IC5/IC6 additionally GROUP-and-COUNT over that multiset,
+and graphqlite cannot aggregate across a UNION (`_with_0` error for WITH;
+global-collapse for bare RETURN). So the workaround that lifted IC9 to 15/15
+cannot lift IC5/IC6 — they move from RUNS-WRONG to UNSUPPORTED, with the
+deeper "no grouped aggregation over a UNION" root cause now documented above.
+
+The non-VERIFIED mismatches are graphqlite **engine** limitations (broken
+grouping/collect/edge-aggregation, forward-only undirected var-length, no
+EXISTS-WHERE) — the class of defect the row-equivalence oracle exists to
+catch. Latency numbers for those (system, IC) cells must NOT be quoted as
+comparable: the engine is doing different (and usually less, or wrong) work.
