@@ -470,7 +470,10 @@ fn import(db_path: &Path, mode: &str, source: &str) {
     graph.save(db_path).expect("failed to save database");
     let save_s = t_save.elapsed().as_secs_f64();
     let size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
-    eprintln!("Saved ({:.1} MB) in {save_s:.2}s", size as f64 / 1_048_576.0);
+    eprintln!(
+        "Saved ({:.1} MB) in {save_s:.2}s",
+        size as f64 / 1_048_576.0
+    );
     eprintln!(
         "Import total (parse + save): {:.2}s",
         t0.elapsed().as_secs_f64()
