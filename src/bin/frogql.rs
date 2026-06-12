@@ -450,17 +450,31 @@ fn import(db_path: &Path, mode: &str, source: &str) {
         }
     };
 
+    // Phase 1: parse the CSV/JSON source into an in-memory graph. This
+    // is only the parse cost; the .gdb is not written yet.
+    let parse_s = t0.elapsed().as_secs_f64();
     eprintln!(
-        "Loaded {} nodes, {} edges in {:.2}s",
+        "Parsed {} nodes, {} edges in {:.2}s",
         graph.node_count(),
         graph.edge_count(),
-        t0.elapsed().as_secs_f64()
+        parse_s
     );
 
+    // Phase 2: write the .gdb (serialize, build CSR adjacency + string
+    // table, flush to disk). This is the dominant ingest cost on large
+    // datasets and was previously untimed — `Saved (… MB)` printed no
+    // duration. Time it so the end-to-end "CSV -> .gdb" cost (parse +
+    // save) is readable from one log, e.g. for the bulk-load benchmark.
     eprintln!("Saving to {}...", db_path.display());
+    let t_save = Instant::now();
     graph.save(db_path).expect("failed to save database");
+    let save_s = t_save.elapsed().as_secs_f64();
     let size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
-    eprintln!("Saved ({:.1} MB)", size as f64 / 1_048_576.0);
+    eprintln!("Saved ({:.1} MB) in {save_s:.2}s", size as f64 / 1_048_576.0);
+    eprintln!(
+        "Import total (parse + save): {:.2}s",
+        t0.elapsed().as_secs_f64()
+    );
 
     // Populate the DEFAULT graph type from the freshly-loaded data and
     // mark it active. Any errors here are non-fatal — the .gdb is still
