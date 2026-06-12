@@ -91,7 +91,13 @@ run_one() {
     echo "  cmd: $cmd"
     local t0 t1 status="ok"
     t0=$(now_ms)
-    if ! eval "$cmd" > "$SCRIPT_DIR/results/ingest_${TIMESTAMP}.${sys}.log" 2>&1; then
+    # stdin from /dev/null: the frogql binary drops into its interactive
+    # REPL after `--import-ldbc-csv` finishes (same as `bench_setup`,
+    # which uses Stdio::null() for exactly this reason). Without the
+    # redirect the REPL blocks on the terminal and the import "hangs"
+    # after completing. Harmless for the Python loaders (they don't read
+    # stdin).
+    if ! eval "$cmd" < /dev/null > "$SCRIPT_DIR/results/ingest_${TIMESTAMP}.${sys}.log" 2>&1; then
         status="fail"
         echo "  [FAIL] see results/ingest_${TIMESTAMP}.${sys}.log"
     fi
