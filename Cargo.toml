@@ -1,5 +1,5 @@
 [package]
-name = "gqlrust"
+name = "frogql"
 version = "0.1.0"
 edition = "2021"
 # MSRV of the engine library (default-features = false). Verified by
@@ -9,6 +9,20 @@ edition = "2021"
 # The optional `repl`/`bench` binaries pull third-party deps that
 # currently require a newer stable.
 rust-version = "1.71"
+description = "Embedded GQL graph database and query engine"
+license = "MIT"
+repository = "https://github.com/pleiad/frogql"
+readme = "README.md"
+# Whitelist what ships to crates.io. Without this the published tarball
+# pulls in the committed examples/*.gdb databases (~297 MiB) and blows
+# past the 10 MiB compressed package limit. Downstream only builds the
+# library + bins, so tests/, bench/, and examples/ are not shipped.
+include = [
+    "/src/**/*.rs",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE",
+]
 
 [features]
 # Defaults keep `cargo build` and CI behaviour identical to before.
@@ -68,8 +82,8 @@ required-features = ["bench"]
 members = [".", "python", "node", "wasm"]
 # resolver = "2" computes features per-target instead of unifying them
 # globally across the workspace. Without it, building the python crate
-# with --target X drags in gqlrust's default features (repl, bench)
+# with --target X drags in frogql's default features (repl, bench)
 # even though python/Cargo.toml sets default-features = false on
-# gqlrust — which pulls ring (via ureq) and breaks aarch64
+# frogql — which pulls ring (via ureq) and breaks aarch64
 # cross-builds inside the manylinux2014 container.
 resolver = "2"
