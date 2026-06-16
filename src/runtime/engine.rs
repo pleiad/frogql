@@ -388,7 +388,10 @@ struct ValueSubqueryCache {
     pinned: bool,
 }
 
-impl<'g, G: GraphAccess> Runtime<'g, G> {
+// `G: 'g` is implied by the `&'g G` field; stated explicitly so the
+// engine compiles on the MSRV (1.71), whose borrow checker does not infer
+// it for associated functions like `Self::value_type`.
+impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     pub fn new(graph: &'g G) -> Self {
         Self {
             graph,
@@ -2574,7 +2577,12 @@ impl<'g, G: GraphAccess> Runtime<'g, G> {
         tgt_end: &BfsEndpoint,
         rows: &mut Vec<ResultRow>,
     ) {
-        let admits = |len: usize| ub.is_none_or(|u| len <= u);
+        // `ub.is_none_or(...)` open-coded to keep the crate MSRV at 1.71
+        // (`Option::is_none_or` is stable only since 1.82).
+        let admits = |len: usize| match ub {
+            None => true,
+            Some(u) => len <= u,
+        };
         let a = src_end.row_for(n);
         let b = tgt_end.row_for(n);
         if !a.assignment.can_unify(&b.assignment) {

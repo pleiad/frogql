@@ -441,7 +441,7 @@ fn store_cell(
     let mut page = Page::new(page_type);
     let cell_idx = page
         .insert_cell(cell)
-        .ok_or_else(|| io::Error::other("cell too large for page"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "cell too large for page"))?;
     pager.write_page(pg, &page)?;
     pages.push(pg);
     Ok((pg, cell_idx))

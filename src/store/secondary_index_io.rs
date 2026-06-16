@@ -127,7 +127,7 @@ pub fn write_specs(pager: &mut Pager, specs: &[IndexSpec], old_root: u32) -> io:
         return Ok(0);
     }
     let json = serde_json::to_vec(&persisted)
-        .map_err(|e| io::Error::other(format!("ddl-index encode: {e}")))?;
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("ddl-index encode: {e}")))?;
     write_chain(pager, &json)
 }
 
@@ -179,7 +179,8 @@ fn write_chain(pager: &mut Pager, payload: &[u8]) -> io::Result<u32> {
     let pages_needed = if total <= PAYLOAD_FIRST {
         1
     } else {
-        1 + (total - PAYLOAD_FIRST).div_ceil(PAYLOAD_CONT)
+        // div-ceil open-coded to keep MSRV at 1.71 (`div_ceil` is 1.73).
+        1 + (total - PAYLOAD_FIRST + PAYLOAD_CONT - 1) / PAYLOAD_CONT
     };
 
     let mut nums: Vec<u32> = Vec::with_capacity(pages_needed);

@@ -76,7 +76,8 @@ pub fn dump_to_json_value<G: GraphAccess>(g: &G) -> Json {
 /// to keep human-readable diffs sane in research workflows.
 pub fn dump_to_json_file<G: GraphAccess>(g: &G, path: &Path) -> io::Result<()> {
     let v = dump_to_json_value(g);
-    let serialized = serde_json::to_string_pretty(&v).map_err(io::Error::other)?;
+    let serialized =
+        serde_json::to_string_pretty(&v).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     let mut f = std::fs::File::create(path)?;
     f.write_all(serialized.as_bytes())?;
     Ok(())
@@ -151,7 +152,7 @@ pub fn dump_to_gql_string<G: GraphAccess>(g: &G) -> Result<String, String> {
 
 /// Convenience wrapper that writes the dump to `path`.
 pub fn dump_to_gql_file<G: GraphAccess>(g: &G, path: &Path) -> io::Result<()> {
-    let script = dump_to_gql_string(g).map_err(io::Error::other)?;
+    let script = dump_to_gql_string(g).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     let mut f = std::fs::File::create(path)?;
     f.write_all(script.as_bytes())
 }

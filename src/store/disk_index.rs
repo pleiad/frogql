@@ -383,8 +383,9 @@ pub fn write_edge_topo(
         return Ok(pg);
     }
 
-    // Build entries in order, then chunk
-    let total_chunks = n.div_ceil(MAX_EDGE_TOPO_PER_PAGE);
+    // Build entries in order, then chunk. div-ceil open-coded to keep
+    // MSRV at 1.71 (`div_ceil` is 1.73).
+    let total_chunks = (n + MAX_EDGE_TOPO_PER_PAGE - 1) / MAX_EDGE_TOPO_PER_PAGE;
     let mut page_nums = Vec::with_capacity(total_chunks);
     for _ in 0..total_chunks {
         page_nums.push(pager.allocate_page()?);

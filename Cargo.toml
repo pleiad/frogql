@@ -2,6 +2,13 @@
 name = "gqlrust"
 version = "0.1.0"
 edition = "2021"
+# MSRV of the engine library (default-features = false). Verified by
+# building `--lib --no-default-features` on 1.71.0. Clippy reads this and
+# will not suggest newer std APIs (e.g. `div_ceil` 1.73, `is_none_or`
+# 1.82), which are open-coded at their call sites to hold this floor.
+# The optional `repl`/`bench` binaries pull third-party deps that
+# currently require a newer stable.
+rust-version = "1.71"
 
 [features]
 # Defaults keep `cargo build` and CI behaviour identical to before.
