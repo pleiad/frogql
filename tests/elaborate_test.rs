@@ -4,11 +4,11 @@
 
 use std::path::Path;
 
-use gqlrust::compile_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
+use frogql::compile_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
 
 fn fraud() -> MemoryGraphStore {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");

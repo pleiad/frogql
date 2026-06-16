@@ -9,13 +9,13 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::graph_access::{GraphAccess, GraphAccessMut};
-use gqlrust::model::value::Value;
-use gqlrust::parser::parse_statement;
-use gqlrust::runtime::dm::run_dm;
-use gqlrust::syntax::statement::Statement;
-use gqlrust::typing::label_type::LabelType;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::graph_access::{GraphAccess, GraphAccessMut};
+use frogql::model::value::Value;
+use frogql::parser::parse_statement;
+use frogql::runtime::dm::run_dm;
+use frogql::syntax::statement::Statement;
+use frogql::typing::label_type::LabelType;
 
 fn fraud_mem() -> MemoryGraphStore {
     let json_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
@@ -29,7 +29,7 @@ fn props(items: &[(&str, Value)]) -> std::collections::HashMap<String, Value> {
         .collect()
 }
 
-fn parse_dm_or_panic(input: &str) -> gqlrust::syntax::dm::DmStatement {
+fn parse_dm_or_panic(input: &str) -> frogql::syntax::dm::DmStatement {
     match parse_statement(input).unwrap() {
         Statement::DataModification(dm) => dm,
         other => panic!("expected DM, got {other:?}"),

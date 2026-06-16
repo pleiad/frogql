@@ -27,12 +27,12 @@ use std::collections::BTreeMap;
 
 use proptest::prelude::*;
 
-use gqlrust::typing::descriptor_type::DescriptorType;
-use gqlrust::typing::label_type::LabelType;
-use gqlrust::typing::path_type::{EdgeDir, EdgePathType, NodePathType, PathType};
-use gqlrust::typing::property_type::PropertyType;
-use gqlrust::typing::simple_type::SimpleType;
-use gqlrust::typing::variable_type::{Schema, VariableType};
+use frogql::typing::descriptor_type::DescriptorType;
+use frogql::typing::label_type::LabelType;
+use frogql::typing::path_type::{EdgeDir, EdgePathType, NodePathType, PathType};
+use frogql::typing::property_type::PropertyType;
+use frogql::typing::simple_type::SimpleType;
+use frogql::typing::variable_type::{Schema, VariableType};
 
 // =======================================================================
 // Canonicalization

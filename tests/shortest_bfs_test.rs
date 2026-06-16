@@ -5,11 +5,11 @@
 //! tests pin the known answers and differentially compare the two paths by
 //! toggling `GQLITE_DISABLE_SHORTEST_BFS`.
 
-use gqlrust::compile_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
+use frogql::compile_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
 
 /// Undirected graph with two equal-length shortest routes 0→3 and a cycle.
 /// ids: a=0, b=1, c=2, d=3, e=4. Edges (undirected `~~`, label R):

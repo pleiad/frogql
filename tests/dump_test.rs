@@ -6,8 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::graph_access::GraphAccess;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::graph_access::GraphAccess;
 
 fn temp_path(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("gqlrust_dump_phase8");
@@ -26,7 +26,7 @@ fn fraud_graph() -> MemoryGraphStore {
 fn dump_then_load_round_trips_node_and_edge_counts() {
     let g = fraud_graph();
     let dump_path = temp_path("round_trip.json");
-    gqlrust::store::dump::dump_to_json_file(&g, &dump_path).unwrap();
+    frogql::store::dump::dump_to_json_file(&g, &dump_path).unwrap();
 
     let loaded = MemoryGraphStore::from_file(&dump_path).unwrap();
     assert_eq!(loaded.node_count(), g.node_count());
@@ -37,7 +37,7 @@ fn dump_then_load_round_trips_node_and_edge_counts() {
 fn dump_includes_node_labels_and_props() {
     let g = fraud_graph();
     let dump_path = temp_path("labels_props.json");
-    gqlrust::store::dump::dump_to_json_file(&g, &dump_path).unwrap();
+    frogql::store::dump::dump_to_json_file(&g, &dump_path).unwrap();
     let loaded = MemoryGraphStore::from_file(&dump_path).unwrap();
 
     // Every Account node should still be tagged Account in the reload.
@@ -51,9 +51,9 @@ fn dump_includes_node_labels_and_props() {
 
 #[test]
 fn dump_after_mutation_captures_new_data() {
-    use gqlrust::model::graph_access::GraphAccessMut;
-    use gqlrust::store::lazy::LazyGraphStore;
-    use gqlrust::typing::label_type::LabelType;
+    use frogql::model::graph_access::GraphAccessMut;
+    use frogql::store::lazy::LazyGraphStore;
+    use frogql::typing::label_type::LabelType;
 
     // Build a temp .gdb from the fraud fixture, mutate it, dump from the
     // (overlay-aware) lazy store.
@@ -65,7 +65,7 @@ fn dump_after_mutation_captures_new_data() {
     assert!(store.is_node_alive(new_id));
 
     let dump_path = temp_path("mutate_then_dump.json");
-    gqlrust::store::dump::dump_to_json_file(&store, &dump_path).unwrap();
+    frogql::store::dump::dump_to_json_file(&store, &dump_path).unwrap();
 
     let loaded = MemoryGraphStore::from_file(&dump_path).unwrap();
     assert_eq!(loaded.node_count(), pre + 1);
@@ -80,10 +80,10 @@ fn dump_after_mutation_captures_new_data() {
 
 // --- MVP-1.F: .dump-gql round-trip --------------------------------------
 
-fn execute_gql_script(store: &gqlrust::store::lazy::LazyGraphStore, script: &str) {
-    use gqlrust::parser::parse_statement;
-    use gqlrust::runtime::dm::run_dm;
-    use gqlrust::syntax::statement::Statement;
+fn execute_gql_script(store: &frogql::store::lazy::LazyGraphStore, script: &str) {
+    use frogql::parser::parse_statement;
+    use frogql::runtime::dm::run_dm;
+    use frogql::syntax::statement::Statement;
 
     // A naive splitter: `;` followed by newline ends one statement.
     // Comment lines (`-- ...`) are stripped before parsing because the
@@ -113,14 +113,14 @@ fn execute_gql_script(store: &gqlrust::store::lazy::LazyGraphStore, script: &str
 
 #[test]
 fn dump_gql_round_trip_reproduces_graph_shape() {
-    use gqlrust::store::lazy::LazyGraphStore;
+    use frogql::store::lazy::LazyGraphStore;
 
     // Build a temp .gdb from the fraud fixture and dump-gql.
     let src_path = temp_path("dump_gql_src.gdb");
     fraud_graph().save(&src_path).unwrap();
     let src = LazyGraphStore::open(&src_path).unwrap();
 
-    let script = gqlrust::store::dump::dump_to_gql_string(&src).unwrap();
+    let script = frogql::store::dump::dump_to_gql_string(&src).unwrap();
     assert!(script.contains("INSERT"));
     assert!(script.contains("MATCH"));
     assert!(script.contains("REMOVE n._dump_id"));
@@ -174,10 +174,10 @@ fn dump_gql_round_trip_reproduces_graph_shape() {
 
 #[test]
 fn dump_gql_avoids_dump_id_collision() {
-    use gqlrust::model::graph_access::GraphAccessMut;
-    use gqlrust::model::value::Value;
-    use gqlrust::store::lazy::LazyGraphStore;
-    use gqlrust::typing::label_type::LabelType;
+    use frogql::model::graph_access::GraphAccessMut;
+    use frogql::model::value::Value;
+    use frogql::store::lazy::LazyGraphStore;
+    use frogql::typing::label_type::LabelType;
 
     // A graph that already has a `_dump_id` property: the dumper must
     // pick `__dump_id_v1` (or later) instead.
@@ -188,7 +188,7 @@ fn dump_gql_avoids_dump_id_collision() {
     props.insert("_dump_id".to_string(), Value::Str("preexisting".into()));
     store.insert_node(LabelType::Label("Tag".into()), props);
 
-    let script = gqlrust::store::dump::dump_to_gql_string(&store).unwrap();
+    let script = frogql::store::dump::dump_to_gql_string(&store).unwrap();
     assert!(
         !script.contains("INSERT (:Tag {_dump_id: 'preexisting', _dump_id:"),
         "dumper must not double-use the prop name"

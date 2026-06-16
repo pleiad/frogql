@@ -10,10 +10,10 @@
 
 use std::path::{Path, PathBuf};
 
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::graph_access::GraphAccessMut;
-use gqlrust::store::lazy::LazyGraphStore;
-use gqlrust::typing::label_type::LabelType;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::graph_access::GraphAccessMut;
+use frogql::store::lazy::LazyGraphStore;
+use frogql::typing::label_type::LabelType;
 
 fn temp_db(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("gqlrust_dm_phase7");
@@ -37,8 +37,8 @@ fn schema_has_node_label(store: &LazyGraphStore, label: &str) -> bool {
         .get("DEFAULT")
         .map(|s| {
             s.nodes.iter().any(|n| {
-                gqlrust::model::graph::MemoryGraphStore::label_strings(match n {
-                    gqlrust::typing::variable_type::VariableType::Node(d) => &d.label,
+                frogql::model::graph::MemoryGraphStore::label_strings(match n {
+                    frogql::typing::variable_type::VariableType::Node(d) => &d.label,
                     _ => return false,
                 })
                 .iter()
@@ -54,7 +54,7 @@ fn default_dirty_flag_set_after_mutation() {
     // Need DEFAULT installed at least once to clear dirty=false baseline.
     store
         .catalog_mut()
-        .install_default(gqlrust::typing::inference::infer_simple_schema(&store));
+        .install_default(frogql::typing::inference::infer_simple_schema(&store));
     assert!(!store.catalog().is_default_dirty());
 
     store.insert_node(LabelType::Label("BrandNew".into()), Default::default());
@@ -67,7 +67,7 @@ fn refresh_default_if_dirty_picks_up_new_label() {
     let store = fraud_store("refresh_picks_up.gdb");
     store
         .catalog_mut()
-        .install_default(gqlrust::typing::inference::infer_simple_schema(&store));
+        .install_default(frogql::typing::inference::infer_simple_schema(&store));
     assert!(!schema_has_node_label(&store, "BrandNew"));
 
     store.insert_node(LabelType::Label("BrandNew".into()), Default::default());
@@ -86,7 +86,7 @@ fn refresh_when_clean_is_a_noop() {
     let store = fraud_store("refresh_noop.gdb");
     store
         .catalog_mut()
-        .install_default(gqlrust::typing::inference::infer_simple_schema(&store));
+        .install_default(frogql::typing::inference::infer_simple_schema(&store));
     let before = store
         .catalog()
         .types
@@ -112,7 +112,7 @@ fn save_clears_dirty_flag_via_refresh() {
     let store = fraud_store("save_clears_dirty.gdb");
     store
         .catalog_mut()
-        .install_default(gqlrust::typing::inference::infer_simple_schema(&store));
+        .install_default(frogql::typing::inference::infer_simple_schema(&store));
     store.insert_node(LabelType::Label("BrandNew".into()), Default::default());
     store.catalog_mut().mark_default_dirty();
     let path = temp_db("save_clears_dirty.gdb");

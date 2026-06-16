@@ -1,6 +1,6 @@
 # GQL Storage Architecture
 
-This document explains how a property graph is stored in gqlrust, from the
+This document explains how a property graph is stored in frogql, from the
 conceptual model down to bytes on disk, and what each storage backend keeps
 in memory at query time.
 
@@ -348,7 +348,7 @@ a freshly-imported `.gdb` opens with `DEFAULT` already active.
 
 ## 4. Storage Backends
 
-gqlrust has three backends. All implement the same `GraphAccess` trait,
+frogql has three backends. All implement the same `GraphAccess` trait,
 so the query engine doesn't know or care which one is being used.
 
 ### 4.1 In-Memory Graph (`Graph`)

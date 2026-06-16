@@ -6,11 +6,11 @@
 //!  - Commit 6: `SUM`, `AVG`, `MIN`, `MAX`.
 //!  - Commit 7: implicit GROUP BY (RETURN mixing aggregates with plain exprs).
 
-use gqlrust::compile_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
+use frogql::compile_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
 
 /// Three-user fixture used across most aggregate tests. Two users in
 /// Boston, one in Seattle; ages 30/25/40.
@@ -567,7 +567,7 @@ fn test_compile_query_unchecked_supports_aggregates() {
     // Smoke test: the bypass path used to skip type checking should
     // still produce a runnable Query when aggregates are present.
     let g = graph_three_users();
-    let query = gqlrust::compile_query_unchecked("MATCH (x: User) RETURN COUNT(*)").unwrap();
+    let query = frogql::compile_query_unchecked("MATCH (x: User) RETURN COUNT(*)").unwrap();
     let rt = Runtime::new(&g);
     match rt.run_query(&query, 0) {
         QueryResult::Projected(rs) => assert_eq!(rs, vec![vec![Value::Int(3)]]),
@@ -628,7 +628,7 @@ fn test_implicit_groupby_unchecked_still_works() {
     // Escape hatch: compile_query_unchecked bypasses the typechecker
     // and runs the implicit grouping path for users who want it.
     let g = graph_three_users();
-    let q = gqlrust::compile_query_unchecked("MATCH (x: User) RETURN x.city, COUNT(*)").unwrap();
+    let q = frogql::compile_query_unchecked("MATCH (x: User) RETURN x.city, COUNT(*)").unwrap();
     let rt = Runtime::new(&g);
     match rt.run_query(&q, 0) {
         QueryResult::Projected(rs) => assert_eq!(rs.len(), 2), // 2 cities
@@ -695,7 +695,7 @@ fn test_groupby_explicit_unchecked_path_still_runs() {
     // Useful for users who know what they're doing or for debugging.
     let g = graph_three_users();
     let q =
-        gqlrust::compile_query_unchecked("MATCH (x: User) GROUP BY x.city RETURN x.name, COUNT(*)")
+        frogql::compile_query_unchecked("MATCH (x: User) GROUP BY x.city RETURN x.name, COUNT(*)")
             .unwrap();
     let rt = Runtime::new(&g);
     // Result is implementation-defined when RETURN has unkeyed items
@@ -770,7 +770,7 @@ fn test_groupby_canonical_with_distinct_and_multi_key() {
     // ISO §14.11: GROUP BY follows the return item list within the
     // RETURN body, even when DISTINCT is set. The clause must still
     // parse and produce the right group keys.
-    let q = gqlrust::compile_query_unchecked(
+    let q = frogql::compile_query_unchecked(
         "MATCH (x: U) RETURN DISTINCT x.country, x.city, COUNT(*) GROUP BY x.country, x.city",
     )
     .unwrap();
@@ -781,7 +781,7 @@ fn test_groupby_canonical_with_distinct_and_multi_key() {
 
 #[test]
 fn test_groupby_specified_in_both_positions_is_parse_error() {
-    let r = gqlrust::compile_query_unchecked(
+    let r = frogql::compile_query_unchecked(
         "MATCH (x: User) GROUP BY x.city RETURN x.city, COUNT(*) GROUP BY x.city",
     );
     assert!(r.is_err(), "expected parse error, got {r:?}");

@@ -17,11 +17,11 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 
-use gqlrust::compile;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::graph_access::GraphAccess;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::store::lazy::LazyGraphStore;
+use frogql::compile;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::graph_access::GraphAccess;
+use frogql::runtime::engine::Runtime;
+use frogql::store::lazy::LazyGraphStore;
 
 #[derive(Clone)]
 struct BenchCfg {

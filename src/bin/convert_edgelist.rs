@@ -12,11 +12,11 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::Instant;
 
-use gqlrust::pager::page::{Page, PageType};
-use gqlrust::pager::pager::Pager;
-use gqlrust::store::disk_index;
-use gqlrust::store::record;
-use gqlrust::store::string_table::StringTable;
+use frogql::pager::page::{Page, PageType};
+use frogql::pager::pager::Pager;
+use frogql::store::disk_index;
+use frogql::store::record;
+use frogql::store::string_table::StringTable;
 
 fn main() {
     let args: Vec<String> = env::args().collect();

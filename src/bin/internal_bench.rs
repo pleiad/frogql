@@ -27,11 +27,11 @@ use std::time::Instant;
 
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
-use gqlrust::model::graph_access::GraphAccess;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::store::disk::DiskGraphStore;
-use gqlrust::store::lazy::LazyGraphStore;
-use gqlrust::typing::variable_type::Schema;
+use frogql::model::graph_access::GraphAccess;
+use frogql::runtime::engine::Runtime;
+use frogql::store::disk::DiskGraphStore;
+use frogql::store::lazy::LazyGraphStore;
+use frogql::typing::variable_type::Schema;
 
 // ---------------------------------------------------------------------------
 
@@ -600,18 +600,18 @@ fn run_case<G: GraphAccess>(
 
         // ---- Checked compile (no runtime call) ----
         let t = Instant::now();
-        let chk_compile = gqlrust::compile_query_with_diagnostics_with(active, case.query);
+        let chk_compile = frogql::compile_query_with_diagnostics_with(active, case.query);
         let compile_chk_ns = t.elapsed().as_nanos();
 
         parse_failed = false;
         outcome = match &chk_compile {
             Ok(c) if c.guaranteed_empty => Outcome::Empty,
             Ok(_) => Outcome::Ok,
-            Err(gqlrust::CompileError::Parse(_)) => {
+            Err(frogql::CompileError::Parse(_)) => {
                 parse_failed = true;
                 Outcome::Rejected
             }
-            Err(gqlrust::CompileError::Type(_)) => Outcome::Rejected,
+            Err(frogql::CompileError::Type(_)) => Outcome::Rejected,
         };
         if !is_warmup {
             compile_chk_samples.push(compile_chk_ns);
@@ -628,7 +628,7 @@ fn run_case<G: GraphAccess>(
 
         // ---- Unchecked compile + runtime ----
         let t = Instant::now();
-        let unchk_compile = gqlrust::compile_query_unchecked(case.query);
+        let unchk_compile = frogql::compile_query_unchecked(case.query);
         let compile_unchk_ns = t.elapsed().as_nanos();
         if !is_warmup {
             compile_unchk_samples.push(compile_unchk_ns);

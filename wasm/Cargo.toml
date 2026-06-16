@@ -12,10 +12,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Same default-features = false discipline as `python/` and `node/`: the
-# wasm bundle ships only the library half of gqlrust — no rustyline /
+# wasm bundle ships only the library half of frogql — no rustyline /
 # ureq / zstd / tar / sysinfo / toml (none of which build for wasm32).
 # Resolver v2 at the workspace level keeps features per-target.
-gqlrust = { path = "..", default-features = false }
+frogql_core = { package = "frogql", path = "..", default-features = false }
 wasm-bindgen = "0.2"
 serde = "1"
 serde-wasm-bindgen = "0.6"

@@ -1,15 +1,15 @@
-use gqlrust::model::value::Value;
-use gqlrust::parser::{parse, parse_query};
-use gqlrust::syntax::descriptor::Descriptor;
-use gqlrust::syntax::expr::{BinOp, Expr, UnOp};
-use gqlrust::syntax::path_pattern::PathPattern;
-use gqlrust::syntax::query::{
+use frogql::model::value::Value;
+use frogql::parser::{parse, parse_query};
+use frogql::syntax::descriptor::Descriptor;
+use frogql::syntax::expr::{BinOp, Expr, UnOp};
+use frogql::syntax::path_pattern::PathPattern;
+use frogql::syntax::query::{
     Aggregator, GeneralSetKind, MatchStatement, ReturnItem, SetQuantifier,
 };
-use gqlrust::typing::descriptor_type::DescriptorType;
-use gqlrust::typing::label_type::LabelType;
-use gqlrust::typing::property_type::PropertyType;
-use gqlrust::typing::simple_type::SimpleType;
+use frogql::typing::descriptor_type::DescriptorType;
+use frogql::typing::label_type::LabelType;
+use frogql::typing::property_type::PropertyType;
+use frogql::typing::simple_type::SimpleType;
 
 fn star_desc() -> Descriptor {
     Descriptor::type_only(DescriptorType::star())
@@ -678,7 +678,7 @@ fn test_join_shared_var() {
 
 #[test]
 fn test_match_simple() {
-    let q = gqlrust::compile_query("MATCH (x)").unwrap();
+    let q = frogql::compile_query("MATCH (x)").unwrap();
     assert!(matches!(q.collapsed_pattern(), PathPattern::Node(_)));
     assert!(q.returns.is_none());
 }
@@ -688,7 +688,7 @@ fn test_match_simple() {
 /// covered in `optional_match_test` and `multi_match_proptest`.
 #[test]
 fn test_query_has_one_simple_match_statement() {
-    let q = gqlrust::compile_query("MATCH (x)-[:Knows]->(y) RETURN x.name").unwrap();
+    let q = frogql::compile_query("MATCH (x)-[:Knows]->(y) RETURN x.name").unwrap();
     assert_eq!(q.matches.len(), 1, "parser must produce exactly one match");
     assert!(
         matches!(&q.matches[0], MatchStatement::Simple { .. }),
@@ -698,7 +698,7 @@ fn test_query_has_one_simple_match_statement() {
 
 #[test]
 fn test_match_where_return() {
-    let q = gqlrust::compile_query(
+    let q = frogql::compile_query(
         "MATCH (x) -[:Transfer]-> (y) WHERE x.amount > 100 RETURN x.name, y.name",
     )
     .unwrap();
@@ -729,14 +729,14 @@ fn test_match_where_return() {
 
 #[test]
 fn test_match_return_distinct() {
-    let q = gqlrust::compile_query("MATCH (x) -[]-> (y) RETURN DISTINCT x.name").unwrap();
+    let q = frogql::compile_query("MATCH (x) -[]-> (y) RETURN DISTINCT x.name").unwrap();
     assert!(q.distinct);
     assert_eq!(q.returns.as_ref().unwrap().len(), 1);
 }
 
 #[test]
 fn test_match_return_alias() {
-    let q = gqlrust::compile_query("MATCH (m: Movie) RETURN m.title AS title, m.votes AS votes")
+    let q = frogql::compile_query("MATCH (m: Movie) RETURN m.title AS title, m.votes AS votes")
         .unwrap();
     let returns = q.returns.as_ref().unwrap();
     assert_eq!(returns.len(), 2);
@@ -746,7 +746,7 @@ fn test_match_return_alias() {
 
 #[test]
 fn test_no_match_keyword_still_works() {
-    let q = gqlrust::compile_query("(x) -[]-> (y)").unwrap();
+    let q = frogql::compile_query("(x) -[]-> (y)").unwrap();
     assert!(matches!(q.collapsed_pattern(), PathPattern::Concat(_, _)));
     assert!(q.returns.is_none());
 }
@@ -805,7 +805,7 @@ fn test_single_match_still_one_clause() {
 /// matches to one Simple, so post-pipeline `len == 1` even from multi-MATCH.
 #[test]
 fn test_multi_match_compiles_end_to_end() {
-    let q = gqlrust::compile_query("MATCH (x: Account) MATCH (y) RETURN x.owner").unwrap();
+    let q = frogql::compile_query("MATCH (x: Account) MATCH (y) RETURN x.owner").unwrap();
     assert_eq!(q.matches.len(), 1);
 }
 
@@ -815,7 +815,7 @@ fn test_multi_match_compiles_end_to_end() {
 
 /// Helper: parse a query and return the single aggregate item it produces.
 fn single_agg(q: &str) -> Aggregator {
-    let parsed = gqlrust::compile_query(q).unwrap();
+    let parsed = frogql::compile_query(q).unwrap();
     let returns = parsed.returns.expect("expected RETURN clause");
     assert_eq!(returns.len(), 1, "expected exactly one return item");
     match returns.into_iter().next().unwrap() {
@@ -898,7 +898,7 @@ fn test_parse_sum_avg_min_max() {
 
 #[test]
 fn test_parse_aggregate_with_alias() {
-    let parsed = gqlrust::compile_query("MATCH (x) RETURN COUNT(*) AS total").unwrap();
+    let parsed = frogql::compile_query("MATCH (x) RETURN COUNT(*) AS total").unwrap();
     let returns = parsed.returns.unwrap();
     assert_eq!(returns.len(), 1);
     match &returns[0] {
@@ -917,7 +917,7 @@ fn test_parse_mixed_aggregate_and_expr() {
     // (compile_query) requires explicit GROUP BY for this to typecheck,
     // but the parser stage doesn't enforce that — use compile_query_unchecked
     // to verify the AST shape without typechecker rejection.
-    let parsed = gqlrust::compile_query_unchecked("MATCH (x) RETURN x.country, COUNT(*)").unwrap();
+    let parsed = frogql::compile_query_unchecked("MATCH (x) RETURN x.country, COUNT(*)").unwrap();
     let returns = parsed.returns.unwrap();
     assert_eq!(returns.len(), 2);
     assert!(matches!(returns[0], ReturnItem::Expr { .. }));
@@ -929,7 +929,7 @@ fn test_count_as_field_name_still_works() {
     // Soft-keyword: `count` not followed by `(` stays a regular Name.
     // This query treats `count` as a property name in a record literal.
     let parsed =
-        gqlrust::compile_query("MATCH (x) WHERE x.id = 1 RETURN {name: 'ok', count: 1}").unwrap();
+        frogql::compile_query("MATCH (x) WHERE x.id = 1 RETURN {name: 'ok', count: 1}").unwrap();
     assert_eq!(parsed.returns.unwrap().len(), 1);
 }
 
@@ -937,7 +937,7 @@ fn test_count_as_field_name_still_works() {
 
 #[test]
 fn test_limit_after_return() {
-    let q = gqlrust::compile_query("MATCH (x) RETURN x.name LIMIT 20").unwrap();
+    let q = frogql::compile_query("MATCH (x) RETURN x.name LIMIT 20").unwrap();
     assert_eq!(q.limit, Some(20));
 }
 
@@ -945,13 +945,13 @@ fn test_limit_after_return() {
 fn test_limit_lowercase() {
     // The lexer accepts both casings (matches the existing convention
     // for MATCH/RETURN/WHERE).
-    let q = gqlrust::compile_query("MATCH (x) RETURN x.name limit 5").unwrap();
+    let q = frogql::compile_query("MATCH (x) RETURN x.name limit 5").unwrap();
     assert_eq!(q.limit, Some(5));
 }
 
 #[test]
 fn test_limit_absent_is_none() {
-    let q = gqlrust::compile_query("MATCH (x) RETURN x.name").unwrap();
+    let q = frogql::compile_query("MATCH (x) RETURN x.name").unwrap();
     assert_eq!(q.limit, None);
 }
 
@@ -960,7 +960,7 @@ fn test_limit_without_return() {
     // LIMIT is independent of RETURN — the runtime applies it to whatever
     // the query produces. `compile_query_unchecked` skips typechecking so
     // we can exercise just the parser shape.
-    let q = gqlrust::compile_query_unchecked("MATCH (x) LIMIT 7").unwrap();
+    let q = frogql::compile_query_unchecked("MATCH (x) LIMIT 7").unwrap();
     assert_eq!(q.limit, Some(7));
     assert!(q.returns.is_none());
 }
@@ -971,13 +971,13 @@ fn test_limit_zero_parses() {
     // permits it ("select first 0 records, return empty binding
     // table"). The execution semantics are checked separately by a
     // runtime test; here we only assert the AST shape.
-    let q = gqlrust::compile_query("MATCH (x) RETURN x.name LIMIT 0").unwrap();
+    let q = frogql::compile_query("MATCH (x) RETURN x.name LIMIT 0").unwrap();
     assert_eq!(q.limit, Some(0));
 }
 
 #[test]
 fn test_limit_negative_rejected() {
-    let err = gqlrust::compile_query("MATCH (x) RETURN x.name LIMIT -3").unwrap_err();
+    let err = frogql::compile_query("MATCH (x) RETURN x.name LIMIT -3").unwrap_err();
     assert!(
         err.to_lowercase().contains("limit"),
         "error should mention LIMIT, got {err:?}"
@@ -986,7 +986,7 @@ fn test_limit_negative_rejected() {
 
 #[test]
 fn test_limit_after_where() {
-    let q = gqlrust::compile_query(
+    let q = frogql::compile_query(
         "MATCH (x) -[:Transfer]-> (y) WHERE x.amount > 100 RETURN y.name LIMIT 50",
     )
     .unwrap();
@@ -999,7 +999,7 @@ fn test_limit_after_where() {
 #[test]
 fn test_limit_with_group_by_aggregate() {
     let q =
-        gqlrust::compile_query("MATCH (x) GROUP BY x.country RETURN x.country, COUNT(*) LIMIT 10")
+        frogql::compile_query("MATCH (x) GROUP BY x.country RETURN x.country, COUNT(*) LIMIT 10")
             .unwrap();
     assert_eq!(q.limit, Some(10));
     assert!(q.group_by.is_some());
@@ -1009,7 +1009,7 @@ fn test_limit_with_group_by_aggregate() {
 fn test_limit_displays_back() {
     // Round-trip Display: a parsed query renders LIMIT N back into its
     // string form, so REPL/error messages stay readable.
-    let q = gqlrust::compile_query("MATCH (x) RETURN x.name LIMIT 25").unwrap();
+    let q = frogql::compile_query("MATCH (x) RETURN x.name LIMIT 25").unwrap();
     assert!(
         q.to_string().contains("LIMIT 25"),
         "Display should include LIMIT clause, got {}",

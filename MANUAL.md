@@ -81,9 +81,9 @@ compile(query)  →  runtime.run(pattern)
 
 ```rust
 use std::path::Path;
-use gqlrust::compile;
-use gqlrust::model::graph::Graph;
-use gqlrust::runtime::engine::Runtime;
+use frogql::compile;
+use frogql::model::graph::Graph;
+use frogql::runtime::engine::Runtime;
 
 // 1. Cargar grafo desde JSON
 let graph = Graph::from_file(Path::new("datos.json")).unwrap();
@@ -108,7 +108,7 @@ println!("Total: {} resultados", results.rows.len());
 ### Con almacenamiento persistente (.gql)
 
 ```rust
-use gqlrust::store::graph_store::GraphStore;
+use frogql::store::graph_store::GraphStore;
 
 // Importar JSON a archivo .gql
 let store = GraphStore::from_json_file(

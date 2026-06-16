@@ -7,11 +7,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::graph_access::{GraphAccess, GraphAccessMut};
-use gqlrust::model::value::Value;
-use gqlrust::store::lazy::LazyGraphStore;
-use gqlrust::typing::label_type::LabelType;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::graph_access::{GraphAccess, GraphAccessMut};
+use frogql::model::value::Value;
+use frogql::store::lazy::LazyGraphStore;
+use frogql::typing::label_type::LabelType;
 
 fn temp_db(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("gqlrust_dm_phase2");

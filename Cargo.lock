@@ -288,10 +288,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "frogql"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tar",
+ "thiserror",
+ "toml",
+ "ureq",
+ "zstd",
+]
+
+[[package]]
 name = "frogql-node"
 version = "0.2.4"
 dependencies = [
- "gqlrust",
+ "frogql",
  "napi",
  "napi-build",
  "napi-derive",
@@ -302,7 +319,7 @@ dependencies = [
 name = "frogql-py"
 version = "0.2.4"
 dependencies = [
- "gqlrust",
+ "frogql",
  "pyo3",
 ]
 
@@ -311,7 +328,7 @@ name = "frogql-wasm"
 version = "0.2.4"
 dependencies = [
  "console_error_panic_hook",
- "gqlrust",
+ "frogql",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
@@ -386,23 +403,6 @@ dependencies = [
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
-]
-
-[[package]]
-name = "gqlrust"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "rustyline",
- "serde",
- "serde_json",
- "sha2",
- "sysinfo",
- "tar",
- "thiserror",
- "toml",
- "ureq",
- "zstd",
 ]
 
 [[package]]

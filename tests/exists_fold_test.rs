@@ -11,14 +11,14 @@
 //! Bodies that are non-empty stay as their original `Expr::Exists` /
 //! `Expr::NotExists` variants so the runtime evaluates them.
 
-use gqlrust::model::value::Value;
-use gqlrust::syntax::expr::Expr;
-use gqlrust::syntax::path_pattern::PathPattern;
-use gqlrust::syntax::query::{MatchStatement, ReturnItem};
-use gqlrust::typing::descriptor_type::DescriptorType;
-use gqlrust::typing::label_type::LabelType;
-use gqlrust::typing::property_type::PropertyType;
-use gqlrust::typing::variable_type::{Schema, VariableType};
+use frogql::model::value::Value;
+use frogql::syntax::expr::Expr;
+use frogql::syntax::path_pattern::PathPattern;
+use frogql::syntax::query::{MatchStatement, ReturnItem};
+use frogql::typing::descriptor_type::DescriptorType;
+use frogql::typing::label_type::LabelType;
+use frogql::typing::property_type::PropertyType;
+use frogql::typing::variable_type::{Schema, VariableType};
 
 /// Active graph type with a single node entry `(:Account)` and no
 /// edges. Anything outside that label refines to bottom.
@@ -36,7 +36,7 @@ fn account_only_schema() -> Schema {
 /// post-optimiser query. Panics if the structure does not match,
 /// which is also the assertion we want for a regression.
 fn where_expr_with(schema: &Schema, input: &str) -> Expr {
-    let q = gqlrust::compile_query_with(schema, input).expect("compile failed");
+    let q = frogql::compile_query_with(schema, input).expect("compile failed");
     let pat = match &q.matches[0] {
         MatchStatement::Simple { pattern, .. } | MatchStatement::Optional { pattern, .. } => {
             pattern
@@ -49,7 +49,7 @@ fn where_expr_with(schema: &Schema, input: &str) -> Expr {
 }
 
 fn where_expr(input: &str) -> Expr {
-    let q = gqlrust::compile_query(input).expect("compile failed");
+    let q = frogql::compile_query(input).expect("compile failed");
     let pat = match &q.matches[0] {
         MatchStatement::Simple { pattern, .. } | MatchStatement::Optional { pattern, .. } => {
             pattern
@@ -94,11 +94,11 @@ fn exists_with_unknown_property_folds_to_false() {
                 [
                     (
                         "owner".to_string(),
-                        gqlrust::typing::simple_type::SimpleType::S,
+                        frogql::typing::simple_type::SimpleType::S,
                     ),
                     (
                         "isBlocked".to_string(),
-                        gqlrust::typing::simple_type::SimpleType::B,
+                        frogql::typing::simple_type::SimpleType::B,
                     ),
                 ]
                 .into_iter()
@@ -188,7 +188,7 @@ fn nested_inner_exists_folds_outer_stays() {
 #[test]
 fn fold_runs_on_return_expression() {
     // EXISTS in RETURN, not just in WHERE. The walker reaches both.
-    let q = gqlrust::compile_query_with(
+    let q = frogql::compile_query_with(
         &account_only_schema(),
         "MATCH (x) RETURN EXISTS { (y: Person) } AS has_match",
     )

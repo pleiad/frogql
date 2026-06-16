@@ -43,14 +43,14 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
-use gqlrust::compile_query_unchecked;
-use gqlrust::model::csv_loader;
-use gqlrust::model::graph_access::GraphAccess;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::store::disk::DiskGraphStore;
-use gqlrust::store::lazy::LazyGraphStore;
+use frogql::compile_query_unchecked;
+use frogql::model::csv_loader;
+use frogql::model::graph_access::GraphAccess;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::store::disk::DiskGraphStore;
+use frogql::store::lazy::LazyGraphStore;
 
 // ----------------------------------------------------------- Result shape ---
 

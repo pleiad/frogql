@@ -1,14 +1,14 @@
 //! ISO/IEC 39075:2024 §16.6 path prefix parser/runtime tests.
 
-use gqlrust::compile_query;
-use gqlrust::compile_query_unchecked;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::syntax::path_pattern::PathPattern;
-use gqlrust::syntax::path_prefix::{PathMode, PathPrefix, PathSearch};
-use gqlrust::syntax::query::Query;
+use frogql::compile_query;
+use frogql::compile_query_unchecked;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::syntax::path_pattern::PathPattern;
+use frogql::syntax::path_prefix::{PathMode, PathPrefix, PathSearch};
+use frogql::syntax::query::Query;
 
 /// First explicit prefix in the first match pattern.
 fn first_prefix(q: &Query) -> Option<PathPrefix> {

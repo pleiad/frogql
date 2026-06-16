@@ -22,11 +22,11 @@ use std::env;
 use std::process::exit;
 use std::time::Instant;
 
-use gqlrust::parser::parse_statement;
-use gqlrust::runtime::dm::run_dm;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::store::lazy::LazyGraphStore;
-use gqlrust::syntax::statement::Statement;
+use frogql::parser::parse_statement;
+use frogql::runtime::dm::run_dm;
+use frogql::runtime::engine::Runtime;
+use frogql::store::lazy::LazyGraphStore;
+use frogql::syntax::statement::Statement;
 
 fn fail(msg: &str) -> ! {
     eprintln!("dml_bench: {msg}");
@@ -53,7 +53,7 @@ fn run_dml(store: &LazyGraphStore, rt: &Runtime<LazyGraphStore>, text: &str) -> 
 }
 
 /// Run the probe query once, return wall seconds.
-fn run_probe(rt: &Runtime<LazyGraphStore>, query: &gqlrust::syntax::query::Query) -> f64 {
+fn run_probe(rt: &Runtime<LazyGraphStore>, query: &frogql::syntax::query::Query) -> f64 {
     let t = Instant::now();
     let _ = rt.run_query(query, 10);
     t.elapsed().as_secs_f64()
@@ -114,7 +114,7 @@ fn main() {
     // so its first post-DML run pays the index rebuild. Compiled
     // unchecked: the bench graph has no GRAPH TYPE active.
     let probe_text = "MATCH (a:Person)-[:knows]->(b:Person) RETURN COUNT(b) AS c";
-    let probe = gqlrust::compile_query_unchecked(probe_text)
+    let probe = frogql::compile_query_unchecked(probe_text)
         .unwrap_or_else(|e| fail(&format!("compile probe: {e}")));
 
     // Steady-state probe latency (index warm, no DML in between).

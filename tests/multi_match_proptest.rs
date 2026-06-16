@@ -4,11 +4,11 @@
 
 use std::path::Path;
 
-use gqlrust::elaborate::elaborate_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::parser;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::syntax::query::{MatchStatement, Query};
+use frogql::elaborate::elaborate_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::parser;
+use frogql::runtime::engine::Runtime;
+use frogql::syntax::query::{MatchStatement, Query};
 use proptest::prelude::*;
 
 fn fraud_graph() -> MemoryGraphStore {
@@ -46,17 +46,17 @@ fn multi_match_query(patterns: &[String]) -> Query {
     })
 }
 
-fn optional_query(left: &str, right: &str) -> gqlrust::syntax::query::Query {
+fn optional_query(left: &str, right: &str) -> frogql::syntax::query::Query {
     let input = format!("MATCH {left} OPTIONAL MATCH {right}");
-    gqlrust::compile_query_unchecked(&input).unwrap()
+    frogql::compile_query_unchecked(&input).unwrap()
 }
 
-fn match_query(left: &str, right: &str) -> gqlrust::syntax::query::Query {
+fn match_query(left: &str, right: &str) -> frogql::syntax::query::Query {
     let input = format!("MATCH {left} MATCH {right}");
-    gqlrust::compile_query_unchecked(&input).unwrap()
+    frogql::compile_query_unchecked(&input).unwrap()
 }
 
-fn run_query_count(g: &MemoryGraphStore, q: &gqlrust::syntax::query::Query) -> usize {
+fn run_query_count(g: &MemoryGraphStore, q: &frogql::syntax::query::Query) -> usize {
     let rt = Runtime::new(g);
     rt.run_query(q, 0).row_count()
 }
@@ -109,7 +109,7 @@ proptest! {
         patterns in proptest::collection::vec(pattern(), 1..=4)
     ) {
         let input = patterns.join(", ");
-        let optimized = gqlrust::compile_query_unchecked(&input).unwrap();
+        let optimized = frogql::compile_query_unchecked(&input).unwrap();
 
         prop_assert_eq!(optimized.matches.len(), 1);
         let is_simple = matches!(&optimized.matches[0], MatchStatement::Simple { .. });
@@ -128,11 +128,11 @@ proptest! {
         let runtime = Runtime::new(&g);
 
         let multi_input = format!("MATCH {}", patterns.join(" MATCH "));
-        let multi_q = gqlrust::compile_query_unchecked(&multi_input).unwrap();
+        let multi_q = frogql::compile_query_unchecked(&multi_input).unwrap();
         let multi_rows = runtime.run(&multi_q.collapsed_pattern()).rows.len();
 
         let comma_input = format!("MATCH {}", patterns.join(", "));
-        let comma_q = gqlrust::compile_query_unchecked(&comma_input).unwrap();
+        let comma_q = frogql::compile_query_unchecked(&comma_input).unwrap();
         let comma_rows = runtime.run(&comma_q.collapsed_pattern()).rows.len();
 
         prop_assert_eq!(multi_rows, comma_rows);
@@ -154,7 +154,7 @@ proptest! {
         let runtime = Runtime::new(&g);
 
         let left_only = format!("MATCH {first}");
-        let left_q = gqlrust::compile_query_unchecked(&left_only).unwrap();
+        let left_q = frogql::compile_query_unchecked(&left_only).unwrap();
         let left_count = runtime.run(&left_q.collapsed_pattern()).rows.len();
 
         let opt_q = optional_query(&first, &second);

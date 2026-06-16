@@ -58,7 +58,7 @@ grafos de tamaño moderado que caben en RAM.
   crate-type = ["cdylib"]
 
   [dependencies]
-  gqlrust = { path = "..", default-features = false }
+  frogql_core = { package = "frogql", path = "..", default-features = false }
   wasm-bindgen = "0.2"
   serde-wasm-bindgen = "0.6"
   console_error_panic_hook = "0.1"   # panics legibles en la consola del browser

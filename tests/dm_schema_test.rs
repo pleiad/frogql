@@ -7,17 +7,17 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::graph_access::GraphAccess;
-use gqlrust::parser::parse_statement;
-use gqlrust::runtime::dm::run_dm;
-use gqlrust::store::lazy::LazyGraphStore;
-use gqlrust::syntax::statement::Statement;
-use gqlrust::typing::descriptor_type::DescriptorType;
-use gqlrust::typing::label_type::LabelType;
-use gqlrust::typing::property_type::PropertyType;
-use gqlrust::typing::simple_type::SimpleType;
-use gqlrust::typing::variable_type::{Schema, VariableType};
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::graph_access::GraphAccess;
+use frogql::parser::parse_statement;
+use frogql::runtime::dm::run_dm;
+use frogql::store::lazy::LazyGraphStore;
+use frogql::syntax::statement::Statement;
+use frogql::typing::descriptor_type::DescriptorType;
+use frogql::typing::label_type::LabelType;
+use frogql::typing::property_type::PropertyType;
+use frogql::typing::simple_type::SimpleType;
+use frogql::typing::variable_type::{Schema, VariableType};
 
 fn temp_db(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("gqlrust_dm_phase6");
@@ -35,7 +35,7 @@ fn fraud_store(name: &str) -> LazyGraphStore {
     LazyGraphStore::open(&db_path).unwrap()
 }
 
-fn parse_dm_or_panic(input: &str) -> gqlrust::syntax::dm::DmStatement {
+fn parse_dm_or_panic(input: &str) -> frogql::syntax::dm::DmStatement {
     match parse_statement(input).unwrap() {
         Statement::DataModification(dm) => dm,
         other => panic!("expected DM, got {other:?}"),

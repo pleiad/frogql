@@ -14,10 +14,10 @@
 
 use std::path::Path;
 
-use gqlrust::compile_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
+use frogql::compile_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
 
 fn graph() -> MemoryGraphStore {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/ltj_label_disjunction.json");
@@ -30,7 +30,7 @@ fn run_ids(query: &str) -> Vec<i64> {
     let q = compile_query(query).unwrap();
     let result = r.run_query(&q, 0);
     let rows = match result {
-        gqlrust::runtime::result::QueryResult::Projected(rs) => rs,
+        frogql::runtime::result::QueryResult::Projected(rs) => rs,
         _ => panic!("expected projected result"),
     };
     rows.into_iter()

@@ -9,13 +9,13 @@
 
 use std::collections::BTreeMap;
 
-use gqlrust::compile_query;
-use gqlrust::compile_query_unchecked;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::syntax::expr::Expr;
+use frogql::compile_query;
+use frogql::compile_query_unchecked;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::syntax::expr::Expr;
 
 fn graph_users_pets() -> MemoryGraphStore {
     let json = r#"{
@@ -50,7 +50,7 @@ fn parser_bare_name_in_return_produces_expr_var() {
     let q = compile_query_unchecked("MATCH (n) RETURN n").unwrap();
     let items = q.returns.unwrap();
     let expr = match &items[0] {
-        gqlrust::syntax::query::ReturnItem::Expr { expr, .. } => expr,
+        frogql::syntax::query::ReturnItem::Expr { expr, .. } => expr,
         _ => panic!("expected Expr return item"),
     };
     assert!(matches!(expr, Expr::Var(name) if name == "n"));
@@ -69,7 +69,7 @@ fn parser_bare_name_followed_by_dot_still_attr_lookup() {
     let q = compile_query_unchecked("MATCH (n) RETURN n.name").unwrap();
     let items = q.returns.unwrap();
     let expr = match &items[0] {
-        gqlrust::syntax::query::ReturnItem::Expr { expr, .. } => expr,
+        frogql::syntax::query::ReturnItem::Expr { expr, .. } => expr,
         _ => panic!("expected Expr return item"),
     };
     assert!(matches!(expr, Expr::AttrLookup { .. }));
@@ -262,7 +262,7 @@ fn runtime_coalesce_falls_through_when_optional_missing() {
 
 #[test]
 fn simple_type_lattice_node_meet_and_union() {
-    use gqlrust::typing::simple_type::SimpleType;
+    use frogql::typing::simple_type::SimpleType;
     assert_eq!(
         SimpleType::meet(&SimpleType::Node, &SimpleType::Node),
         SimpleType::Node
@@ -375,7 +375,7 @@ fn return_bare_var_keeps_var_in_ast_for_implicit_alias() {
     let q = compile_query_unchecked("MATCH (n) RETURN n").unwrap();
     let items = q.returns.unwrap();
     assert_eq!(items.len(), 1);
-    if let gqlrust::syntax::query::ReturnItem::Expr { expr, alias } = &items[0] {
+    if let frogql::syntax::query::ReturnItem::Expr { expr, alias } = &items[0] {
         assert!(matches!(expr, Expr::Var(name) if name == "n"));
         assert!(alias.is_none(), "implicit alias is applied at projection");
     } else {

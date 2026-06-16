@@ -5,11 +5,11 @@
 //! value subquery (arg-max per liker), and `GROUP BY <binding variable>`.
 //! `$personId` is replaced with a literal (the engine has no bind params).
 
-use gqlrust::compile_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
+use frogql::compile_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
 
 /// Target person P (prop id=5000) created a Comment c1 and a Post po1.
 /// Three likers L1/L2/L3 like those messages at different times; L1 also

@@ -4,10 +4,10 @@
 //! optional RETURN, plus negative cases for the constructs that ISO §16.5
 //! explicitly forbids inside an `<insert path pattern>`.
 
-use gqlrust::parser::parse_statement;
-use gqlrust::syntax::dm::{DmOp, DmStatement};
-use gqlrust::syntax::path_pattern::PathPattern;
-use gqlrust::syntax::statement::Statement;
+use frogql::parser::parse_statement;
+use frogql::syntax::dm::{DmOp, DmStatement};
+use frogql::syntax::path_pattern::PathPattern;
+use frogql::syntax::statement::Statement;
 
 fn parse_dm(input: &str) -> DmStatement {
     match parse_statement(input).unwrap_or_else(|e| panic!("parse failed for {input:?}: {e}")) {
@@ -90,7 +90,7 @@ fn insert_rejects_any_direction_edge() {
 
 #[test]
 fn delete_simple() {
-    use gqlrust::syntax::expr::Expr;
+    use frogql::syntax::expr::Expr;
     let dm = parse_dm("MATCH (a:Person) DELETE a");
     assert_eq!(dm.matches.len(), 1);
     let DmOp::Delete { detach, targets } = &dm.op else {
@@ -123,7 +123,7 @@ fn nodetach_delete_explicit() {
 
 #[test]
 fn delete_multiple_targets() {
-    use gqlrust::syntax::expr::Expr;
+    use frogql::syntax::expr::Expr;
     let dm = parse_dm("MATCH (a:Person), (b:Person) DETACH DELETE a, b");
     let DmOp::Delete { targets, .. } = &dm.op else {
         panic!();

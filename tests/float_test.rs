@@ -1,12 +1,12 @@
 //! Tests covering Float property values: parsing, JSON loading, mixed arithmetic,
 //! comparison, type predicates, and .gdb storage roundtrip.
 
-use gqlrust::compile_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::store::lazy::LazyGraphStore;
+use frogql::compile_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::store::lazy::LazyGraphStore;
 
 fn graph_with_floats() -> MemoryGraphStore {
     let json = r#"{

@@ -1,12 +1,12 @@
 //! Phase 1: List values — JSON loading, `in` operator, type predicates,
 //! list literals, `[T]` type annotations, and .gdb storage roundtrip.
 
-use gqlrust::compile_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::store::lazy::LazyGraphStore;
+use frogql::compile_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::store::lazy::LazyGraphStore;
 
 fn graph_with_lists() -> MemoryGraphStore {
     let json = r#"{

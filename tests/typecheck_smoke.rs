@@ -6,7 +6,7 @@
 //! obviously-broken query that would have compiled silently before the
 //! migration. Failure-detection coverage intentionally narrow.
 
-use gqlrust::{compile_query, compile_query_unchecked};
+use frogql::{compile_query, compile_query_unchecked};
 
 /// Each query: must typecheck successfully, and must produce the same
 /// optimized plan via the checked and unchecked entry points.

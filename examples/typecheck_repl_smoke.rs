@@ -12,10 +12,10 @@
 
 use std::path::Path;
 
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::store::lazy::LazyGraphStore;
-use gqlrust::{compile_query, compile_query_unchecked};
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::store::lazy::LazyGraphStore;
+use frogql::{compile_query, compile_query_unchecked};
 
 fn main() {
     let movies = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/movies.gdb");

@@ -3,9 +3,9 @@
 
 use std::path::Path;
 
-use gqlrust::compile;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::runtime::engine::Runtime;
+use frogql::compile;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::runtime::engine::Runtime;
 
 fn fraud_run(query: &str) -> usize {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");

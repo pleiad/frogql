@@ -2,13 +2,13 @@
 //! `#[ignore]`d cases document remaining gaps; run with
 //! `cargo test -- --ignored` to surface them as failing.
 
-use gqlrust::compile_query;
-use gqlrust::compile_query_with;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::typing::variable_type::Schema;
+use frogql::compile_query;
+use frogql::compile_query_with;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::typing::variable_type::Schema;
 
 // ISO §16.17 SR 5c (RETURN-alias as sort key) and SR 1 (aggregate
 // as sort key) — both legal per spec, both worked around in the
@@ -57,11 +57,11 @@ fn typecheck_resolves_direct_sum_aggregate_in_sort_key() {
 // ISO §22.14: sort keys must be comparable types (no Feature GA04).
 
 fn strict_user_schema() -> Schema {
-    use gqlrust::typing::descriptor_type::DescriptorType;
-    use gqlrust::typing::label_type::LabelType;
-    use gqlrust::typing::property_type::PropertyType;
-    use gqlrust::typing::simple_type::SimpleType;
-    use gqlrust::typing::variable_type::VariableType;
+    use frogql::typing::descriptor_type::DescriptorType;
+    use frogql::typing::label_type::LabelType;
+    use frogql::typing::property_type::PropertyType;
+    use frogql::typing::simple_type::SimpleType;
+    use frogql::typing::variable_type::VariableType;
 
     let mut props = PropertyType::open_empty();
     props.extend("name".into(), SimpleType::S);
@@ -82,11 +82,11 @@ fn typecheck_gap_unknown_attr_under_strict_schema() {
 
 #[test]
 fn typecheck_rejects_non_comparable_sort_key() {
-    use gqlrust::typing::descriptor_type::DescriptorType;
-    use gqlrust::typing::label_type::LabelType;
-    use gqlrust::typing::property_type::PropertyType;
-    use gqlrust::typing::simple_type::SimpleType;
-    use gqlrust::typing::variable_type::VariableType;
+    use frogql::typing::descriptor_type::DescriptorType;
+    use frogql::typing::label_type::LabelType;
+    use frogql::typing::property_type::PropertyType;
+    use frogql::typing::simple_type::SimpleType;
+    use frogql::typing::variable_type::VariableType;
 
     let mut props = PropertyType::open_empty();
     props.extend("name".into(), SimpleType::S);

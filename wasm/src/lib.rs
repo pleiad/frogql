@@ -20,18 +20,18 @@ use std::sync::Arc;
 use serde_json::{json, Map, Value as Json};
 use wasm_bindgen::prelude::*;
 
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::graph_access::GraphAccess;
-use gqlrust::model::value::{Id, PathValue, Value};
-use gqlrust::parser::parse_statement;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::ltj::triple_index::TripleIndex;
-use gqlrust::runtime::result::{IntermediateResult, QueryResult};
-use gqlrust::syntax::expr::Expr;
-use gqlrust::syntax::query::ReturnItem;
-use gqlrust::syntax::statement::Statement;
-use gqlrust::typing::inference::infer_simple_schema;
-use gqlrust::typing::variable_type::Schema;
+use frogql_core::model::graph::MemoryGraphStore;
+use frogql_core::model::graph_access::GraphAccess;
+use frogql_core::model::value::{Id, PathValue, Value};
+use frogql_core::parser::parse_statement;
+use frogql_core::runtime::engine::Runtime;
+use frogql_core::runtime::ltj::triple_index::TripleIndex;
+use frogql_core::runtime::result::{IntermediateResult, QueryResult};
+use frogql_core::syntax::expr::Expr;
+use frogql_core::syntax::query::ReturnItem;
+use frogql_core::syntax::statement::Statement;
+use frogql_core::typing::inference::infer_simple_schema;
+use frogql_core::typing::variable_type::Schema;
 
 /// A live in-memory graph plus the caches that keep query latency flat.
 #[wasm_bindgen]
@@ -161,7 +161,7 @@ impl Connection {
         to_js(&v)
     }
 
-    fn exec_dm(&self, dm: gqlrust::syntax::dm::DmStatement) -> Result<JsValue, JsError> {
+    fn exec_dm(&self, dm: frogql_core::syntax::dm::DmStatement) -> Result<JsValue, JsError> {
         let v = self.dm_json(dm).map_err(|e| JsError::new(&e))?;
         to_js(&v)
     }
@@ -171,7 +171,7 @@ impl Connection {
     /// target (the `JsValue` marshaling needs a JS runtime; this does not).
     fn query_json(&self, query: &str, limit: usize) -> Result<Json, String> {
         let schema = self.active_schema();
-        let compiled = gqlrust::compile_query_with_diagnostics_with(&schema, query)
+        let compiled = frogql_core::compile_query_with_diagnostics_with(&schema, query)
             .map_err(|e| e.message())?;
         let q = compiled.query;
 
@@ -201,10 +201,10 @@ impl Connection {
 
     /// Engine core for data-modifying statements; returns the counters
     /// object. Host-testable, same split rationale as `query_json`.
-    fn dm_json(&self, dm: gqlrust::syntax::dm::DmStatement) -> Result<Json, String> {
+    fn dm_json(&self, dm: frogql_core::syntax::dm::DmStatement) -> Result<Json, String> {
         // No catalog in the in-memory backend, so DEFAULT semantics: no
         // G2000 validation schema.
-        let exec = gqlrust::runtime::dm::run_dm(&self.store, &dm, None)?;
+        let exec = frogql_core::runtime::dm::run_dm(&self.store, &dm, None)?;
         self.invalidate_caches();
         Ok(json!({
             "nodes_inserted": exec.nodes_inserted,
@@ -221,7 +221,7 @@ impl Connection {
 /// ISO §14.11 SR 8a header derivation, mirroring the Python binding: an
 /// aliased item uses its alias; a bare variable reference uses the
 /// variable name; everything else falls back to a positional `colN`.
-fn projection_headers(q: &gqlrust::syntax::query::Query) -> Vec<String> {
+fn projection_headers(q: &frogql_core::syntax::query::Query) -> Vec<String> {
     q.returns
         .as_ref()
         .map(|items| {

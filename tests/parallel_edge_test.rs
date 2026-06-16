@@ -16,11 +16,11 @@
 //! bind an edge variable — one row per parallel edge instead of one per
 //! distinct triple.
 
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::typing::label_type::LabelType;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::typing::label_type::LabelType;
 
 fn build_parallel_graph() -> MemoryGraphStore {
     // Three nodes; the (a, b) pair carries two edges with different
@@ -64,7 +64,7 @@ fn build_parallel_graph() -> MemoryGraphStore {
 fn free_label_edge_var_returns_every_edge() {
     let g = build_parallel_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH ()-[e]->() RETURN count(*)").unwrap();
+    let q = frogql::compile_query("MATCH ()-[e]->() RETURN count(*)").unwrap();
     let result = r.run_query(&q, 0);
     let QueryResult::Projected(rows) = result else {
         panic!("expected projection")
@@ -76,7 +76,7 @@ fn free_label_edge_var_returns_every_edge() {
 fn free_label_edge_var_unique_eids() {
     let g = build_parallel_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH ()-[e]->() RETURN count(DISTINCT e)").unwrap();
+    let q = frogql::compile_query("MATCH ()-[e]->() RETURN count(DISTINCT e)").unwrap();
     let result = r.run_query(&q, 0);
     let QueryResult::Projected(rows) = result else {
         panic!("expected projection")
@@ -88,7 +88,7 @@ fn free_label_edge_var_unique_eids() {
 fn free_label_edge_var_lists_each_edge_once() {
     let g = build_parallel_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH ()-[e]->() RETURN e").unwrap();
+    let q = frogql::compile_query("MATCH ()-[e]->() RETURN e").unwrap();
     let result = r.run_query(&q, 0);
     let QueryResult::Projected(rows) = result else {
         panic!("expected projection")
@@ -113,7 +113,7 @@ fn labelled_edge_var_resolves_to_correct_eid() {
     let g = build_parallel_graph();
     let r = Runtime::new(&g);
 
-    let q = gqlrust::compile_query("MATCH (a)-[e:LIKES]->(b) RETURN e").unwrap();
+    let q = frogql::compile_query("MATCH (a)-[e:LIKES]->(b) RETURN e").unwrap();
     let result = r.run_query(&q, 0);
     let QueryResult::Projected(rows) = result else {
         panic!("expected projection")
@@ -121,7 +121,7 @@ fn labelled_edge_var_resolves_to_correct_eid() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], Value::Edge(1));
 
-    let q = gqlrust::compile_query("MATCH (a)-[e:KNOWS]->(b) RETURN e").unwrap();
+    let q = frogql::compile_query("MATCH (a)-[e:KNOWS]->(b) RETURN e").unwrap();
     let result = r.run_query(&q, 0);
     let QueryResult::Projected(rows) = result else {
         panic!("expected projection")
@@ -178,7 +178,7 @@ fn build_same_label_parallel_graph() -> MemoryGraphStore {
 fn same_label_parallels_under_free_label() {
     let g = build_same_label_parallel_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH (a)-[e]->(b) RETURN e").unwrap();
+    let q = frogql::compile_query("MATCH (a)-[e]->(b) RETURN e").unwrap();
     let result = r.run_query(&q, 0);
     let QueryResult::Projected(rows) = result else {
         panic!("expected projection")
@@ -201,7 +201,7 @@ fn same_label_parallels_under_constant_label() {
     // per physical entry sharing the (src, label, tgt) prefix.
     let g = build_same_label_parallel_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH (a)-[e:REFERENCES]->(b) RETURN e").unwrap();
+    let q = frogql::compile_query("MATCH (a)-[e:REFERENCES]->(b) RETURN e").unwrap();
     let result = r.run_query(&q, 0);
     let QueryResult::Projected(rows) = result else {
         panic!("expected projection")
@@ -224,7 +224,7 @@ fn multi_hop_with_edge_var_in_middle() {
     // stay on the LTJ path AND still recover the correct middle eid.
     let g = build_parallel_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH (a)-[e:KNOWS]->(b)-[:KNOWS]->(c) RETURN e").unwrap();
+    let q = frogql::compile_query("MATCH (a)-[e:KNOWS]->(b)-[:KNOWS]->(c) RETURN e").unwrap();
     let result = r.run_query(&q, 0);
     let QueryResult::Projected(rows) = result else {
         panic!("expected projection")

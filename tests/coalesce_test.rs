@@ -1,12 +1,12 @@
 //! Tests for `COALESCE` (ISO/IEC 39075:2024 §20.7).
 
-use gqlrust::compile_query;
-use gqlrust::compile_query_unchecked;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::syntax::expr::Expr;
+use frogql::compile_query;
+use frogql::compile_query_unchecked;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::syntax::expr::Expr;
 
 fn graph_with_optional_email() -> MemoryGraphStore {
     let json = r#"{
@@ -34,7 +34,7 @@ fn parser_coalesce_two_args_produces_coalesce_expr() {
     let q = compile_query_unchecked("MATCH (x) RETURN COALESCE(x.email, x.name)").unwrap();
     let items = q.returns.unwrap();
     let expr = match &items[0] {
-        gqlrust::syntax::query::ReturnItem::Expr { expr, .. } => expr,
+        frogql::syntax::query::ReturnItem::Expr { expr, .. } => expr,
         _ => panic!("expected Expr return item"),
     };
     match expr {
@@ -47,7 +47,7 @@ fn parser_coalesce_two_args_produces_coalesce_expr() {
 fn parser_coalesce_lowercase_works() {
     let q = compile_query_unchecked("MATCH (x) RETURN coalesce(x.a, x.b, x.c)").unwrap();
     let items = q.returns.unwrap();
-    if let gqlrust::syntax::query::ReturnItem::Expr {
+    if let frogql::syntax::query::ReturnItem::Expr {
         expr: Expr::Coalesce(args),
         ..
     } = &items[0]

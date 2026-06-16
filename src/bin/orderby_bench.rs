@@ -27,11 +27,11 @@ use std::env;
 use std::sync::Arc;
 use std::time::Instant;
 
-use gqlrust::compile_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::ltj::triple_index::TripleIndex;
-use gqlrust::store::lazy::LazyGraphStore;
+use frogql::compile_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::ltj::triple_index::TripleIndex;
+use frogql::store::lazy::LazyGraphStore;
 
 const DEFAULT_ITERS: usize = 5;
 

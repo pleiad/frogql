@@ -12,23 +12,23 @@ use std::time::Instant;
 
 use rustyline::DefaultEditor;
 
-use gqlrust::model::csv_loader;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::graph_access::GraphAccess;
-use gqlrust::model::value::PathValue;
-use gqlrust::parser::parse_statement;
-use gqlrust::runtime::catalog::ValidationStatus;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::{IntermediateResult, QueryResult};
-use gqlrust::store::lazy::LazyGraphStore;
-use gqlrust::syntax::statement::{Statement, TypeElement};
-use gqlrust::typing::descriptor_type::DescriptorType;
-use gqlrust::typing::inference::infer_simple_schema;
-use gqlrust::typing::label_type::LabelType;
-use gqlrust::typing::property_type::PropertyType;
-use gqlrust::typing::simple_type::SimpleType;
-use gqlrust::typing::validate::{validate_against_data, ElementKind, ValidationReport};
-use gqlrust::typing::variable_type::{Schema, VariableType};
+use frogql::model::csv_loader;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::graph_access::GraphAccess;
+use frogql::model::value::PathValue;
+use frogql::parser::parse_statement;
+use frogql::runtime::catalog::ValidationStatus;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::{IntermediateResult, QueryResult};
+use frogql::store::lazy::LazyGraphStore;
+use frogql::syntax::statement::{Statement, TypeElement};
+use frogql::typing::descriptor_type::DescriptorType;
+use frogql::typing::inference::infer_simple_schema;
+use frogql::typing::label_type::LabelType;
+use frogql::typing::property_type::PropertyType;
+use frogql::typing::simple_type::SimpleType;
+use frogql::typing::validate::{validate_against_data, ElementKind, ValidationReport};
+use frogql::typing::variable_type::{Schema, VariableType};
 
 fn main() {
     let mut args: Vec<String> = env::args().collect();
@@ -171,7 +171,7 @@ fn main() {
                 continue;
             }
             let t = Instant::now();
-            match gqlrust::store::dump::dump_to_json_file(&store, Path::new(target)) {
+            match frogql::store::dump::dump_to_json_file(&store, Path::new(target)) {
                 Ok(()) => eprintln!("Dumped to {target} ({:.3}s).", t.elapsed().as_secs_f64()),
                 Err(e) => eprintln!("Dump failed: {e}"),
             }
@@ -188,7 +188,7 @@ fn main() {
                 continue;
             }
             let t = Instant::now();
-            match gqlrust::store::dump::dump_to_gql_file(&store, Path::new(target)) {
+            match frogql::store::dump::dump_to_gql_file(&store, Path::new(target)) {
                 Ok(()) => eprintln!("Dumped to {target} ({:.3}s).", t.elapsed().as_secs_f64()),
                 Err(e) => eprintln!("Dump failed: {e}"),
             }
@@ -278,7 +278,7 @@ fn main() {
                     None | Some("DEFAULT") => None,
                     _ => Some(store.catalog().active_schema()),
                 };
-                match gqlrust::runtime::dm::run_dm(&store, &dm, schema_for_validation.as_ref()) {
+                match frogql::runtime::dm::run_dm(&store, &dm, schema_for_validation.as_ref()) {
                     Ok(exec) => {
                         rt.invalidate_caches();
                         // ISO §13 doesn't mention DEFAULT specifically, but
@@ -305,7 +305,7 @@ fn main() {
             Statement::Query(q) => {
                 if typecheck {
                     let active = store.catalog().active_schema();
-                    match gqlrust::compile_query_with_diagnostics_with(&active, line) {
+                    match frogql::compile_query_with_diagnostics_with(&active, line) {
                         Ok(r) => {
                             for w in &r.warnings {
                                 eprintln!("warning: {w}");
@@ -318,11 +318,11 @@ fn main() {
                             }
                             r.query
                         }
-                        Err(gqlrust::CompileError::Parse(e)) => {
+                        Err(frogql::CompileError::Parse(e)) => {
                             eprintln!("Parse error: {e}");
                             continue;
                         }
-                        Err(gqlrust::CompileError::Type(es)) => {
+                        Err(frogql::CompileError::Type(es)) => {
                             eprintln!("Type error: {}", es.join("; "));
                             continue;
                         }
@@ -332,7 +332,7 @@ fn main() {
                     // unchecked. Round-trip through the helper to keep the
                     // pipeline canonical.
                     let _ = q;
-                    match gqlrust::compile_query_unchecked(line) {
+                    match frogql::compile_query_unchecked(line) {
                         Ok(q) => q,
                         Err(e) => {
                             eprintln!("Parse error: {e}");
@@ -755,16 +755,16 @@ impl NodeType {
         let mut props = std::collections::BTreeMap::new();
         for (k, v) in &raw_props {
             let t = match v {
-                gqlrust::model::value::Value::Null => "null",
-                gqlrust::model::value::Value::Int(_) => "int",
-                gqlrust::model::value::Value::Float(_) => "float",
-                gqlrust::model::value::Value::Str(_) => "str",
-                gqlrust::model::value::Value::Bool(_) => "bool",
-                gqlrust::model::value::Value::List(_) => "list",
-                gqlrust::model::value::Value::Record(_) => "record",
-                gqlrust::model::value::Value::Node(_) => "node",
-                gqlrust::model::value::Value::Edge(_) => "edge",
-                gqlrust::model::value::Value::Path(_) => "path",
+                frogql::model::value::Value::Null => "null",
+                frogql::model::value::Value::Int(_) => "int",
+                frogql::model::value::Value::Float(_) => "float",
+                frogql::model::value::Value::Str(_) => "str",
+                frogql::model::value::Value::Bool(_) => "bool",
+                frogql::model::value::Value::List(_) => "list",
+                frogql::model::value::Value::Record(_) => "record",
+                frogql::model::value::Value::Node(_) => "node",
+                frogql::model::value::Value::Edge(_) => "edge",
+                frogql::model::value::Value::Path(_) => "path",
             };
             props.insert(k.clone(), t);
         }
@@ -824,16 +824,16 @@ fn print_schema(store: &LazyGraphStore) {
         let mut props = std::collections::BTreeMap::new();
         for (k, v) in &raw_props {
             let t = match v {
-                gqlrust::model::value::Value::Null => "null",
-                gqlrust::model::value::Value::Int(_) => "int",
-                gqlrust::model::value::Value::Float(_) => "float",
-                gqlrust::model::value::Value::Str(_) => "str",
-                gqlrust::model::value::Value::Bool(_) => "bool",
-                gqlrust::model::value::Value::List(_) => "list",
-                gqlrust::model::value::Value::Record(_) => "record",
-                gqlrust::model::value::Value::Node(_) => "node",
-                gqlrust::model::value::Value::Edge(_) => "edge",
-                gqlrust::model::value::Value::Path(_) => "path",
+                frogql::model::value::Value::Null => "null",
+                frogql::model::value::Value::Int(_) => "int",
+                frogql::model::value::Value::Float(_) => "float",
+                frogql::model::value::Value::Str(_) => "str",
+                frogql::model::value::Value::Bool(_) => "bool",
+                frogql::model::value::Value::List(_) => "list",
+                frogql::model::value::Value::Record(_) => "record",
+                frogql::model::value::Value::Node(_) => "node",
+                frogql::model::value::Value::Edge(_) => "edge",
+                frogql::model::value::Value::Path(_) => "path",
             };
             props.insert(k.clone(), t);
         }
@@ -918,16 +918,16 @@ fn print_schema_simple(store: &LazyGraphStore) {
         let mut prop_types: BTreeMap<String, &'static str> = BTreeMap::new();
         for (k, v) in &raw_props {
             let t = match v {
-                gqlrust::model::value::Value::Null => "null",
-                gqlrust::model::value::Value::Int(_) => "int",
-                gqlrust::model::value::Value::Float(_) => "float",
-                gqlrust::model::value::Value::Str(_) => "str",
-                gqlrust::model::value::Value::Bool(_) => "bool",
-                gqlrust::model::value::Value::List(_) => "list",
-                gqlrust::model::value::Value::Record(_) => "record",
-                gqlrust::model::value::Value::Node(_) => "node",
-                gqlrust::model::value::Value::Edge(_) => "edge",
-                gqlrust::model::value::Value::Path(_) => "path",
+                frogql::model::value::Value::Null => "null",
+                frogql::model::value::Value::Int(_) => "int",
+                frogql::model::value::Value::Float(_) => "float",
+                frogql::model::value::Value::Str(_) => "str",
+                frogql::model::value::Value::Bool(_) => "bool",
+                frogql::model::value::Value::List(_) => "list",
+                frogql::model::value::Value::Record(_) => "record",
+                frogql::model::value::Value::Node(_) => "node",
+                frogql::model::value::Value::Edge(_) => "edge",
+                frogql::model::value::Value::Path(_) => "path",
             };
             prop_types.insert(k.clone(), t);
         }
@@ -995,16 +995,16 @@ fn print_schema_simple(store: &LazyGraphStore) {
         let mut prop_types: BTreeMap<String, &'static str> = BTreeMap::new();
         for (k, v) in &raw_props {
             let t = match v {
-                gqlrust::model::value::Value::Null => "null",
-                gqlrust::model::value::Value::Int(_) => "int",
-                gqlrust::model::value::Value::Float(_) => "float",
-                gqlrust::model::value::Value::Str(_) => "str",
-                gqlrust::model::value::Value::Bool(_) => "bool",
-                gqlrust::model::value::Value::List(_) => "list",
-                gqlrust::model::value::Value::Record(_) => "record",
-                gqlrust::model::value::Value::Node(_) => "node",
-                gqlrust::model::value::Value::Edge(_) => "edge",
-                gqlrust::model::value::Value::Path(_) => "path",
+                frogql::model::value::Value::Null => "null",
+                frogql::model::value::Value::Int(_) => "int",
+                frogql::model::value::Value::Float(_) => "float",
+                frogql::model::value::Value::Str(_) => "str",
+                frogql::model::value::Value::Bool(_) => "bool",
+                frogql::model::value::Value::List(_) => "list",
+                frogql::model::value::Value::Record(_) => "record",
+                frogql::model::value::Value::Node(_) => "node",
+                frogql::model::value::Value::Edge(_) => "edge",
+                frogql::model::value::Value::Path(_) => "path",
             };
             prop_types.insert(k.clone(), t);
         }
@@ -1483,12 +1483,12 @@ fn handle_create_index(
     name: Option<String>,
     label: &str,
     prop: &str,
-    kind: gqlrust::syntax::statement::IndexKindStmt,
+    kind: frogql::syntax::statement::IndexKindStmt,
 ) {
-    use gqlrust::store::secondary_index::IndexKind;
+    use frogql::store::secondary_index::IndexKind;
     let store_kind = match kind {
-        gqlrust::syntax::statement::IndexKindStmt::Hash => IndexKind::Hash,
-        gqlrust::syntax::statement::IndexKindStmt::BTree => IndexKind::BTree,
+        frogql::syntax::statement::IndexKindStmt::Hash => IndexKind::Hash,
+        frogql::syntax::statement::IndexKindStmt::BTree => IndexKind::BTree,
     };
     let final_name = name.unwrap_or_else(|| {
         let suffix = match store_kind {
@@ -1538,7 +1538,7 @@ fn print_indexes(store: &LazyGraphStore) {
         println!("(no secondary indexes)");
         return;
     }
-    use gqlrust::store::secondary_index::IndexKind;
+    use frogql::store::secondary_index::IndexKind;
     println!(
         "{:<40}  {:<6}  {:<22}  {:<14}  origin",
         "name", "kind", "label", "entries"

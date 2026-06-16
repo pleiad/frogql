@@ -6,13 +6,13 @@
 
 use std::path::{Path, PathBuf};
 
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::graph_access::{GraphAccess, GraphAccessMut};
-use gqlrust::parser::parse_statement;
-use gqlrust::runtime::dm::run_dm;
-use gqlrust::store::lazy::LazyGraphStore;
-use gqlrust::syntax::statement::Statement;
-use gqlrust::typing::label_type::LabelType;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::graph_access::{GraphAccess, GraphAccessMut};
+use frogql::parser::parse_statement;
+use frogql::runtime::dm::run_dm;
+use frogql::store::lazy::LazyGraphStore;
+use frogql::syntax::statement::Statement;
+use frogql::typing::label_type::LabelType;
 
 fn temp_db(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("gqlrust_dm_phase4");

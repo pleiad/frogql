@@ -8,17 +8,17 @@
 
 use std::path::Path;
 
-use gqlrust::elaborate::elaborate_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::parser;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::syntax::path_pattern::PathPattern;
-use gqlrust::syntax::query::{MatchStatement, Query};
-use gqlrust::typing::checker::Typechecker;
-use gqlrust::typing::label_type::LabelType;
-use gqlrust::typing::variable_type::VariableType;
+use frogql::elaborate::elaborate_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::parser;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::syntax::path_pattern::PathPattern;
+use frogql::syntax::query::{MatchStatement, Query};
+use frogql::typing::checker::Typechecker;
+use frogql::typing::label_type::LabelType;
+use frogql::typing::variable_type::VariableType;
 
 fn fraud_graph() -> MemoryGraphStore {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
@@ -227,7 +227,7 @@ fn runtime_constraining_match_order_independent() {
 
 fn run_compiled(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
     let rt = Runtime::new(g);
-    let query = gqlrust::compile_query(q).unwrap();
+    let query = frogql::compile_query(q).unwrap();
     match rt.run_query(&query, 0) {
         QueryResult::Projected(rs) => rs,
         other => panic!("expected Projected, got {other:?}"),
@@ -304,7 +304,7 @@ fn optimize_query_collapses_multi_match_to_single_simple() {
     assert_eq!(q.matches.len(), 3);
 
     let input = format!("{}", q.collapsed_pattern());
-    let optimized = gqlrust::compile_query_unchecked(&input).unwrap();
+    let optimized = frogql::compile_query_unchecked(&input).unwrap();
 
     assert_eq!(optimized.matches.len(), 1);
     assert!(matches!(

@@ -1,15 +1,15 @@
 use std::path::Path;
 
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::syntax::descriptor::Descriptor;
-use gqlrust::syntax::expr::{BinOp, Expr, UnOp};
-use gqlrust::syntax::path_pattern::PathPattern;
-use gqlrust::typing::descriptor_type::DescriptorType;
-use gqlrust::typing::label_type::LabelType;
-use gqlrust::typing::property_type::PropertyType;
-use gqlrust::typing::simple_type::SimpleType;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::syntax::descriptor::Descriptor;
+use frogql::syntax::expr::{BinOp, Expr, UnOp};
+use frogql::syntax::path_pattern::PathPattern;
+use frogql::typing::descriptor_type::DescriptorType;
+use frogql::typing::label_type::LabelType;
+use frogql::typing::property_type::PropertyType;
+use frogql::typing::simple_type::SimpleType;
 
 fn fraud_graph() -> MemoryGraphStore {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
@@ -504,7 +504,7 @@ fn test_unop_neg() {
 fn test_join_no_match() {
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let p = gqlrust::compile("(x) -[]-> (), (:Car) -[]-> (x) -[]-> ()").unwrap();
+    let p = frogql::compile("(x) -[]-> (), (:Car) -[]-> (x) -[]-> ()").unwrap();
     assert_eq!(r.run(&p).rows.len(), 0);
 }
 
@@ -517,7 +517,7 @@ fn test_join_no_match() {
 fn test_join_cross_product() {
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let p = gqlrust::compile("(:Dummy), (:Account)").unwrap();
+    let p = frogql::compile("(:Dummy), (:Account)").unwrap();
     assert_eq!(r.run(&p).rows.len(), 4);
 }
 
@@ -534,7 +534,7 @@ fn test_join_cross_product() {
 fn test_join_shared_var_no_mutual() {
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let p = gqlrust::compile("(x) -[]-> (y), (y) -[]-> (x)").unwrap();
+    let p = frogql::compile("(x) -[]-> (y), (y) -[]-> (x)").unwrap();
     assert_eq!(r.run(&p).rows.len(), 0);
 }
 
@@ -552,7 +552,7 @@ fn test_join_shared_var_no_mutual() {
 fn test_join_star_pattern() {
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let p = gqlrust::compile("(x) -[:Transfer]-> (y), (x) -[:Transfer]-> (z)").unwrap();
+    let p = frogql::compile("(x) -[:Transfer]-> (y), (x) -[:Transfer]-> (z)").unwrap();
     assert_eq!(r.run(&p).rows.len(), 4);
 }
 
@@ -562,7 +562,7 @@ fn test_join_star_pattern() {
 fn test_query_match_where_return() {
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query(
+    let q = frogql::compile_query(
         "MATCH (x: Account) -[:Transfer]-> (y) WHERE x.owner = 'Jay' RETURN y.owner",
     )
     .unwrap();
@@ -570,7 +570,7 @@ fn test_query_match_where_return() {
     // Jay (p1) has one Transfer out: t1 → p2 (Mike)
     assert_eq!(result.row_count(), 1);
     match result {
-        gqlrust::runtime::result::QueryResult::Projected(rows) => {
+        frogql::runtime::result::QueryResult::Projected(rows) => {
             assert_eq!(rows[0][0], Value::Str("Mike".into()));
         }
         _ => panic!("expected Projected"),
@@ -582,10 +582,10 @@ fn test_query_return_distinct() {
     let g = fraud_graph();
     let r = Runtime::new(&g);
     // All outgoing Transfer targets — some nodes might appear multiple times
-    let q = gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN DISTINCT y.owner").unwrap();
+    let q = frogql::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN DISTINCT y.owner").unwrap();
     let result = r.run_query(&q, 0);
     match result {
-        gqlrust::runtime::result::QueryResult::Projected(rows) => {
+        frogql::runtime::result::QueryResult::Projected(rows) => {
             // Transfers: p1→p2(Mike), p2→a2(Scott), a2→a1(Aretha), a1→p1(Jay)
             // Distinct owners: Mike, Scott, Aretha, Jay = 4
             assert_eq!(rows.len(), 4);
@@ -598,10 +598,10 @@ fn test_query_return_distinct() {
 fn test_query_no_return() {
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH (x: Account)").unwrap();
+    let q = frogql::compile_query("MATCH (x: Account)").unwrap();
     let result = r.run_query(&q, 0);
     match result {
-        gqlrust::runtime::result::QueryResult::Raw(ir) => {
+        frogql::runtime::result::QueryResult::Raw(ir) => {
             assert_eq!(ir.rows.len(), 4); // 4 Account nodes
         }
         _ => panic!("expected Raw"),
@@ -615,13 +615,13 @@ fn test_repetition_groups_as_list() {
     // -[x]->{1,2} should bind x to a List of edges
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let p = gqlrust::compile("-[x]->{1,2}").unwrap();
+    let p = frogql::compile("-[x]->{1,2}").unwrap();
     let result = r.run(&p);
     assert!(!result.rows.is_empty());
     for row in &result.rows {
         let x = row.assignment.get("x").expect("x should be bound");
         assert!(
-            matches!(x, gqlrust::model::value::PathValue::Group(_)),
+            matches!(x, frogql::model::value::PathValue::Group(_)),
             "x should be a List, got {:?}",
             x
         );
@@ -633,12 +633,12 @@ fn test_repetition_list_length() {
     // -[x]->{2,2} should bind x to a List of exactly 2 edges
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let p = gqlrust::compile("-[x]->{2,2}").unwrap();
+    let p = frogql::compile("-[x]->{2,2}").unwrap();
     let result = r.run(&p);
     assert!(!result.rows.is_empty());
     for row in &result.rows {
         match row.assignment.get("x").unwrap() {
-            gqlrust::model::value::PathValue::Group(l) => assert_eq!(l.len(), 2),
+            frogql::model::value::PathValue::Group(l) => assert_eq!(l.len(), 2),
             other => panic!("expected List of len 2, got {:?}", other),
         }
     }
@@ -649,15 +649,15 @@ fn test_repetition_nested_list() {
     // (-[x]->{1,2}){1,2} should bind x to a List of Lists
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let p = gqlrust::compile("(-[x]->{1,2}){1,2}").unwrap();
+    let p = frogql::compile("(-[x]->{1,2}){1,2}").unwrap();
     let result = r.run(&p);
     assert!(!result.rows.is_empty());
     for row in &result.rows {
         match row.assignment.get("x").unwrap() {
-            gqlrust::model::value::PathValue::Group(outer) => {
+            frogql::model::value::PathValue::Group(outer) => {
                 for item in outer {
                     assert!(
-                        matches!(item, gqlrust::model::value::PathValue::Group(_)),
+                        matches!(item, frogql::model::value::PathValue::Group(_)),
                         "inner items should be Lists, got {:?}",
                         item
                     );
@@ -673,11 +673,11 @@ fn test_repetition_zero_gives_empty_list() {
     // -[x]->{0,1} with 0 repetitions should give x = []
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let p = gqlrust::compile("-[x]->{0,1}").unwrap();
+    let p = frogql::compile("-[x]->{0,1}").unwrap();
     let result = r.run(&p);
     // Some rows should have x = [] (the 0-repetition case)
     let empty_list_rows: Vec<_> = result.rows.iter()
-        .filter(|row| matches!(row.assignment.get("x"), Some(gqlrust::model::value::PathValue::Group(l)) if l.is_empty()))
+        .filter(|row| matches!(row.assignment.get("x"), Some(frogql::model::value::PathValue::Group(l)) if l.is_empty()))
         .collect();
     assert!(!empty_list_rows.is_empty(), "should have rows with x = []");
 }
@@ -692,7 +692,7 @@ fn test_repetition_zero_gives_empty_list() {
 fn test_join_star_any_label() {
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let p = gqlrust::compile("(x) -[]-> (y), (x) -[]-> (z)").unwrap();
+    let p = frogql::compile("(x) -[]-> (y), (x) -[]-> (z)").unwrap();
     assert_eq!(r.run(&p).rows.len(), 7);
 }
 
@@ -704,7 +704,7 @@ fn test_query_limit_caps_rows() {
     // LIMIT 2 in the query should cap that to 2.
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 2").unwrap();
+    let q = frogql::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 2").unwrap();
     let result = r.run_query(&q, 0);
     assert_eq!(result.row_count(), 2);
 }
@@ -715,7 +715,7 @@ fn test_query_limit_smaller_than_results_no_op() {
     let g = fraud_graph();
     let r = Runtime::new(&g);
     let q =
-        gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 1000").unwrap();
+        frogql::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 1000").unwrap();
     let result = r.run_query(&q, 0);
     assert_eq!(result.row_count(), 4);
 }
@@ -725,7 +725,7 @@ fn test_query_limit_min_with_runtime_cap() {
     // When both an in-query LIMIT and a runtime cap are set, the smaller wins.
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 3").unwrap();
+    let q = frogql::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 3").unwrap();
     // runtime cap=1 is stricter than query LIMIT 3 → expect 1 row
     let result = r.run_query(&q, 1);
     assert_eq!(result.row_count(), 1);
@@ -737,11 +737,11 @@ fn test_query_limit_no_return_caps_raw() {
     // rows. fraud_graph has 4 Account nodes; LIMIT 2 caps to 2.
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query_unchecked("MATCH (x: Account) LIMIT 2").unwrap();
+    let q = frogql::compile_query_unchecked("MATCH (x: Account) LIMIT 2").unwrap();
     assert_eq!(q.limit, Some(2));
     let result = r.run_query(&q, 0);
     match result {
-        gqlrust::runtime::result::QueryResult::Raw(ir) => {
+        frogql::runtime::result::QueryResult::Raw(ir) => {
             assert_eq!(ir.rows.len(), 2);
         }
         _ => panic!("expected Raw"),
@@ -756,11 +756,11 @@ fn test_query_limit_zero_returns_empty_projected() {
     // cap and return all rows — this test guards against that bug.
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 0").unwrap();
+    let q = frogql::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 0").unwrap();
     let result = r.run_query(&q, 0);
     assert_eq!(result.row_count(), 0);
     match result {
-        gqlrust::runtime::result::QueryResult::Projected(rows) => {
+        frogql::runtime::result::QueryResult::Projected(rows) => {
             assert!(rows.is_empty());
         }
         _ => panic!("expected Projected (LIMIT 0 with RETURN)"),
@@ -774,10 +774,10 @@ fn test_query_limit_zero_returns_empty_raw() {
     // produce if `0 = unbounded` leaked through.
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query_unchecked("MATCH (x: Account) LIMIT 0").unwrap();
+    let q = frogql::compile_query_unchecked("MATCH (x: Account) LIMIT 0").unwrap();
     let result = r.run_query(&q, 0);
     match result {
-        gqlrust::runtime::result::QueryResult::Raw(ir) => {
+        frogql::runtime::result::QueryResult::Raw(ir) => {
             assert_eq!(ir.rows.len(), 0);
         }
         _ => panic!("expected Raw"),
@@ -792,7 +792,7 @@ fn test_query_limit_zero_overrides_runtime_cap() {
     // return 4 rows from this query) and verify we still get 0.
     let g = fraud_graph();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 0").unwrap();
+    let q = frogql::compile_query("MATCH (x) -[:Transfer]-> (y) RETURN y.owner LIMIT 0").unwrap();
     let result = r.run_query(&q, 100);
     assert_eq!(result.row_count(), 0);
 }
@@ -814,7 +814,7 @@ fn test_distinct_limit_does_not_truncate_input_before_dedup() {
     )
     .unwrap();
     let r = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH (x: Person) RETURN DISTINCT x.name").unwrap();
+    let q = frogql::compile_query("MATCH (x: Person) RETURN DISTINCT x.name").unwrap();
     let result = r.run_query(&q, 2);
     assert_eq!(result.row_count(), 2);
 }

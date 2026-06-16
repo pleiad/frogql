@@ -4,11 +4,11 @@
 
 use std::path::Path;
 
-use gqlrust::model::csv_loader;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
+use frogql::model::csv_loader;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
 
 fn movies_graph() -> MemoryGraphStore {
     // Load directly from CSV files (no JSON conversion needed)
@@ -25,7 +25,7 @@ fn movies_graph() -> MemoryGraphStore {
 
 fn run_query(g: &MemoryGraphStore, q: &str) -> QueryResult {
     let rt = Runtime::new(g);
-    let query = gqlrust::compile_query(q).unwrap();
+    let query = frogql::compile_query(q).unwrap();
     rt.run_query(&query, 0)
 }
 
@@ -47,7 +47,7 @@ fn test_csv_loader_node_types() {
     let g = movies_graph();
     let rt = Runtime::new(&g);
     // Verify votes is Int, not String
-    let q = gqlrust::compile_query("MATCH (m: Movie) WHERE m.votes > 0 RETURN m.votes").unwrap();
+    let q = frogql::compile_query("MATCH (m: Movie) WHERE m.votes > 0 RETURN m.votes").unwrap();
     let result = rt.run_query(&q, 1);
     match result {
         QueryResult::Projected(rows) => {
@@ -66,7 +66,7 @@ fn test_csv_loader_node_types() {
 fn test_csv_loader_string_props() {
     let g = movies_graph();
     let rt = Runtime::new(&g);
-    let q = gqlrust::compile_query("MATCH (p: Person) WHERE p.name = 'Keanu Reeves' RETURN p.born")
+    let q = frogql::compile_query("MATCH (p: Person) WHERE p.name = 'Keanu Reeves' RETURN p.born")
         .unwrap();
     let result = rt.run_query(&q, 0);
     match result {
@@ -82,7 +82,7 @@ fn test_csv_loader_string_props() {
 fn test_csv_loader_edge_labels() {
     let g = movies_graph();
     // Verify edge labels are correctly parsed from filenames
-    use gqlrust::model::graph_access::GraphAccess;
+    use frogql::model::graph_access::GraphAccess;
     let acted_in = g.directed_edges_with_label("ACTED_IN");
     assert!(acted_in.is_some());
     assert_eq!(acted_in.unwrap().len(), 172);
@@ -234,7 +234,7 @@ fn test_join_coactors() {
 fn test_return_alias() {
     let _g = movies_graph();
     let q =
-        gqlrust::compile_query("MATCH (m: Movie) WHERE m.released = 1999 RETURN m.title AS title")
+        frogql::compile_query("MATCH (m: Movie) WHERE m.released = 1999 RETURN m.title AS title")
             .unwrap();
     let returns = q.returns.as_ref().unwrap();
     assert_eq!(returns[0].alias(), Some("title"));

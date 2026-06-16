@@ -5,11 +5,11 @@
 //! dependency check and the runtime grouping see a key evaluable over the
 //! binding table. A binding variable shadows any same-named alias.
 
-use gqlrust::compile_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
+use frogql::compile_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
 
 /// Three people across two cities; ages chosen so `age + age` collides
 /// only within a city group.

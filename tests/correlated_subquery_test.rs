@@ -4,11 +4,11 @@
 //! environment into the body's `Filter` predicates; the runtime evaluates
 //! the body per outer row with those parameters bound as an ambient scope.
 
-use gqlrust::compile_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
+use frogql::compile_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
 
 /// Three people with ids 1, 2, 3 and no edges.
 fn graph() -> MemoryGraphStore {

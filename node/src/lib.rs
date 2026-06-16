@@ -19,23 +19,23 @@ use std::sync::Arc;
 use napi_derive::napi;
 use serde_json::{json, Map, Value as JsonValue};
 
-use gqlrust::model::csv_loader;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::graph_access::GraphAccess;
-use gqlrust::model::value::{PathValue, Value};
-use gqlrust::parser::parse_statement;
-use gqlrust::runtime::catalog::ValidationStatus;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::ltj::triple_index::TripleIndex;
-use gqlrust::runtime::result::{IntermediateResult, QueryResult};
-use gqlrust::store::lazy::LazyGraphStore;
-use gqlrust::syntax::expr::Expr;
-use gqlrust::syntax::query::ReturnItem;
-use gqlrust::syntax::statement::{Statement, TypeElement};
-use gqlrust::typing::format::format_schema;
-use gqlrust::typing::inference::infer_simple_schema;
-use gqlrust::typing::validate::{validate_against_data, ElementKind};
-use gqlrust::typing::variable_type::{Schema, VariableType};
+use frogql_core::model::csv_loader;
+use frogql_core::model::graph::MemoryGraphStore;
+use frogql_core::model::graph_access::GraphAccess;
+use frogql_core::model::value::{PathValue, Value};
+use frogql_core::parser::parse_statement;
+use frogql_core::runtime::catalog::ValidationStatus;
+use frogql_core::runtime::engine::Runtime;
+use frogql_core::runtime::ltj::triple_index::TripleIndex;
+use frogql_core::runtime::result::{IntermediateResult, QueryResult};
+use frogql_core::store::lazy::LazyGraphStore;
+use frogql_core::syntax::expr::Expr;
+use frogql_core::syntax::query::ReturnItem;
+use frogql_core::syntax::statement::{Statement, TypeElement};
+use frogql_core::typing::format::format_schema;
+use frogql_core::typing::inference::infer_simple_schema;
+use frogql_core::typing::validate::{validate_against_data, ElementKind};
+use frogql_core::typing::variable_type::{Schema, VariableType};
 
 fn err<E: ToString>(e: E) -> napi::Error {
     napi::Error::from_reason(e.to_string())
@@ -320,7 +320,7 @@ impl Connection {
 
     fn exec_query(&self, query: &str, limit: usize) -> napi::Result<JsonValue> {
         let active = self.store.catalog().active_schema();
-        let result = gqlrust::compile_query_with_diagnostics_with(&active, query)
+        let result = frogql_core::compile_query_with_diagnostics_with(&active, query)
             .map_err(|e| err(e.message()))?;
         let q = result.query;
 
@@ -376,14 +376,15 @@ impl Connection {
         }
     }
 
-    fn exec_dm(&self, dm: gqlrust::syntax::dm::DmStatement) -> napi::Result<JsonValue> {
+    fn exec_dm(&self, dm: frogql_core::syntax::dm::DmStatement) -> napi::Result<JsonValue> {
         let active_name = self.store.catalog().active_name().map(str::to_string);
         let schema_for_validation = match active_name.as_deref() {
             None | Some("DEFAULT") => None,
             _ => Some(self.store.catalog().active_schema()),
         };
-        let exec = gqlrust::runtime::dm::run_dm(&self.store, &dm, schema_for_validation.as_ref())
-            .map_err(err)?;
+        let exec =
+            frogql_core::runtime::dm::run_dm(&self.store, &dm, schema_for_validation.as_ref())
+                .map_err(err)?;
         *self.triple_index.borrow_mut() = None;
         self.store.catalog_mut().mark_default_dirty();
         Ok(json!({
@@ -567,12 +568,12 @@ impl Connection {
         name: Option<String>,
         label: &str,
         prop: &str,
-        kind: gqlrust::syntax::statement::IndexKindStmt,
+        kind: frogql_core::syntax::statement::IndexKindStmt,
     ) -> napi::Result<JsonValue> {
-        use gqlrust::store::secondary_index::IndexKind;
+        use frogql_core::store::secondary_index::IndexKind;
         let store_kind = match kind {
-            gqlrust::syntax::statement::IndexKindStmt::Hash => IndexKind::Hash,
-            gqlrust::syntax::statement::IndexKindStmt::BTree => IndexKind::BTree,
+            frogql_core::syntax::statement::IndexKindStmt::Hash => IndexKind::Hash,
+            frogql_core::syntax::statement::IndexKindStmt::BTree => IndexKind::BTree,
         };
         let final_name = name.unwrap_or_else(|| {
             let suffix = match store_kind {
@@ -610,7 +611,7 @@ impl Connection {
     }
 
     fn exec_show_indexes(&self) -> JsonValue {
-        use gqlrust::store::secondary_index::IndexKind;
+        use frogql_core::store::secondary_index::IndexKind;
         let idx = self.store.secondary_indexes();
         let mut out: Vec<JsonValue> = Vec::new();
         for spec in idx.list() {

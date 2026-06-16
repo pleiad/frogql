@@ -3,11 +3,11 @@
 //! with null elimination, DISTINCT support, and the all-null-record drop
 //! for the empty side of an OPTIONAL MATCH. Unblocks LDBC IC1 / IC12.
 
-use gqlrust::compile_query;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
+use frogql::compile_query;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
 
 /// Alice authored two posts, Bob one, Carol none.
 fn graph() -> MemoryGraphStore {

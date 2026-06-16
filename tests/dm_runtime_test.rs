@@ -6,12 +6,12 @@
 
 use std::path::{Path, PathBuf};
 
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::graph_access::GraphAccess;
-use gqlrust::parser::parse_statement;
-use gqlrust::runtime::dm::run_dm;
-use gqlrust::store::lazy::LazyGraphStore;
-use gqlrust::syntax::statement::Statement;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::graph_access::GraphAccess;
+use frogql::parser::parse_statement;
+use frogql::runtime::dm::run_dm;
+use frogql::store::lazy::LazyGraphStore;
+use frogql::syntax::statement::Statement;
 
 fn temp_db(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("gqlrust_dm_phase3");
@@ -29,7 +29,7 @@ fn fraud_store(name: &str) -> LazyGraphStore {
     LazyGraphStore::open(&db_path).unwrap()
 }
 
-fn parse_dm_or_panic(input: &str) -> gqlrust::syntax::dm::DmStatement {
+fn parse_dm_or_panic(input: &str) -> frogql::syntax::dm::DmStatement {
     match parse_statement(input).unwrap() {
         Statement::DataModification(dm) => dm,
         other => panic!("expected DM, got {other:?}"),
@@ -93,7 +93,7 @@ fn detach_delete_drops_node_and_edges() {
     // unique-property MATCH instead. The fraud fixture has a `name` prop.
     let name = store.node_props(connected).get("name").cloned();
     let stmt = match name {
-        Some(gqlrust::model::value::Value::Str(s)) => {
+        Some(frogql::model::value::Value::Str(s)) => {
             format!("MATCH (a {{name: '{s}'}}) DETACH DELETE a")
         }
         _ => return, // skip if no string name
@@ -113,14 +113,14 @@ fn nodetach_delete_fails_on_connected_node() {
         .find(|&n| !store.outgoing_edges(n).is_empty())
         .unwrap();
     let name = match store.node_props(connected).get("name").cloned() {
-        Some(gqlrust::model::value::Value::Str(s)) => s,
+        Some(frogql::model::value::Value::Str(s)) => s,
         _ => return,
     };
     let dm = parse_dm_or_panic(&format!("MATCH (a {{name: '{name}'}}) DELETE a"));
     let err = run_dm(&store, &dm, None).unwrap_err();
     assert!(err.contains("G1001"), "expected G1001, got: {err}");
     // Atomicity: nothing got mutated.
-    assert!(gqlrust::model::graph_access::GraphAccessMut::is_node_alive(
+    assert!(frogql::model::graph_access::GraphAccessMut::is_node_alive(
         &store, connected
     ));
 }
@@ -167,7 +167,7 @@ fn insert_resolves_attribute_expression_per_binding() {
     let any_tag = store.nodes_with_label("Tag").unwrap()[0];
     assert!(matches!(
         store.node_props(any_tag).get("who"),
-        Some(gqlrust::model::value::Value::Str(_))
+        Some(frogql::model::value::Value::Str(_))
     ));
 }
 

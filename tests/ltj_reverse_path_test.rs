@@ -15,11 +15,11 @@
 //! chain under an `ACYCLIC` prefix was rejected for a phantom repeated node
 //! and returned zero rows.
 
-use gqlrust::compile_query_unchecked;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::PathValue;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
+use frogql::compile_query_unchecked;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::PathValue;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
 
 /// X -r-> Y <-s- Z : a forward edge followed by a reverse edge.
 fn g_fwd_rev() -> MemoryGraphStore {

@@ -5,13 +5,13 @@
 //! interactions with RETURN, DISTINCT, LIMIT, and queries that have
 //! no RETURN at all.
 
-use gqlrust::compile_query;
-use gqlrust::compile_query_unchecked;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::syntax::query::{NullsOrder, SortDir};
+use frogql::compile_query;
+use frogql::compile_query_unchecked;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::syntax::query::{NullsOrder, SortDir};
 
 /// Five users with varying `age` properties; one is missing `age`
 /// entirely so the engine's implicit-null path kicks in. Designed for

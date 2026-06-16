@@ -1,6 +1,6 @@
-use gqlrust::elaborate;
-use gqlrust::parser;
-use gqlrust::typing::checker::Typechecker;
+use frogql::elaborate;
+use frogql::parser;
+use frogql::typing::checker::Typechecker;
 
 fn main() {
     let q = std::env::args()

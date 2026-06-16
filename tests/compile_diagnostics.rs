@@ -1,7 +1,7 @@
 //! Lib-level contract for `compile_query_with_diagnostics` and the
 //! backward-compat `compile_query` wrapper.
 
-use gqlrust::{
+use frogql::{
     compile_query, compile_query_unchecked, compile_query_with_diagnostics, CompileError,
 };
 

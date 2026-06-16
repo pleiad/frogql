@@ -2,11 +2,11 @@
 //! <binding variable reference>`) and functional-dependency of
 //! non-aggregate projections on grouping keys.
 
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::{compile_query, compile_query_unchecked};
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::{compile_query, compile_query_unchecked};
 
 /// Two people; person p1 created two posts, p2 created one. Used to test
 /// that GROUP BY collapses the (creator, post) rows to one row per creator.

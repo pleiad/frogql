@@ -3,9 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use gqlrust::compile;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::runtime::engine::Runtime;
+use frogql::compile;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::runtime::engine::Runtime;
 
 fn temp_path(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("gqlrust_test");

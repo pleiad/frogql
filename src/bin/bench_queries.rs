@@ -9,8 +9,8 @@ use std::env;
 use std::fs;
 use std::time::{Duration, Instant};
 
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::store::lazy::LazyGraphStore;
+use frogql::runtime::engine::Runtime;
+use frogql::store::lazy::LazyGraphStore;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -74,7 +74,7 @@ fn main() {
     );
 
     for (qid, query_str) in queries.iter().enumerate() {
-        let pattern = match gqlrust::compile(query_str) {
+        let pattern = match frogql::compile(query_str) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("  Q{}: parse error: {}", qid, e);

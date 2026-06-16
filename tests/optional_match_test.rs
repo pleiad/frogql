@@ -9,13 +9,13 @@
 
 use std::path::Path;
 
-use gqlrust::compile_query;
-use gqlrust::compile_query_unchecked;
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::model::value::Value;
-use gqlrust::runtime::engine::Runtime;
-use gqlrust::runtime::result::QueryResult;
-use gqlrust::syntax::query::MatchStatement;
+use frogql::compile_query;
+use frogql::compile_query_unchecked;
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::value::Value;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::syntax::query::MatchStatement;
 
 fn fraud_graph() -> MemoryGraphStore {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/fraud.json");
@@ -126,10 +126,10 @@ fn has_any_optional_pins_chain_classification() {
 fn typecheck_optional_introduces_null_branch_for_new_var() {
     // y appears only in the OPTIONAL → its type is Null ⊔ T (a Union).
     // x is in the leading MATCH → its type is unchanged.
-    use gqlrust::elaborate::elaborate_query;
-    use gqlrust::parser::parse_query;
-    use gqlrust::typing::checker::Typechecker;
-    use gqlrust::typing::variable_type::{Schema, VariableType};
+    use frogql::elaborate::elaborate_query;
+    use frogql::parser::parse_query;
+    use frogql::typing::checker::Typechecker;
+    use frogql::typing::variable_type::{Schema, VariableType};
 
     let q = elaborate_query(parse_query("MATCH (x) OPTIONAL MATCH (y)").unwrap());
     let mut tc = Typechecker::new(Schema::star());
@@ -155,10 +155,10 @@ fn typecheck_optional_introduces_null_branch_for_new_var() {
 fn typecheck_leading_optional_makes_var_nullable() {
     // OPTIONAL MATCH (x) with empty Γ₁: unsuccess gives x ↦ Null,
     // success gives x ↦ T → join is Null ⊔ T.
-    use gqlrust::elaborate::elaborate_query;
-    use gqlrust::parser::parse_query;
-    use gqlrust::typing::checker::Typechecker;
-    use gqlrust::typing::variable_type::{Schema, VariableType};
+    use frogql::elaborate::elaborate_query;
+    use frogql::parser::parse_query;
+    use frogql::typing::checker::Typechecker;
+    use frogql::typing::variable_type::{Schema, VariableType};
 
     let q = elaborate_query(parse_query("OPTIONAL MATCH (x)").unwrap());
     let mut tc = Typechecker::new(Schema::star());

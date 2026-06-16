@@ -4,17 +4,17 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use gqlrust::model::graph::MemoryGraphStore;
-use gqlrust::parser::parse_statement;
-use gqlrust::runtime::catalog::GraphTypeCatalog;
-use gqlrust::store::lazy::LazyGraphStore;
-use gqlrust::syntax::statement::{Statement, TypeElement};
-use gqlrust::typing::descriptor_type::DescriptorType;
-use gqlrust::typing::inference::infer_simple_schema;
-use gqlrust::typing::label_type::LabelType;
-use gqlrust::typing::property_type::PropertyType;
-use gqlrust::typing::simple_type::SimpleType;
-use gqlrust::typing::variable_type::{Schema, VariableType};
+use frogql::model::graph::MemoryGraphStore;
+use frogql::parser::parse_statement;
+use frogql::runtime::catalog::GraphTypeCatalog;
+use frogql::store::lazy::LazyGraphStore;
+use frogql::syntax::statement::{Statement, TypeElement};
+use frogql::typing::descriptor_type::DescriptorType;
+use frogql::typing::inference::infer_simple_schema;
+use frogql::typing::label_type::LabelType;
+use frogql::typing::property_type::PropertyType;
+use frogql::typing::simple_type::SimpleType;
+use frogql::typing::variable_type::{Schema, VariableType};
 
 // -------- helpers --------
 
@@ -459,23 +459,23 @@ fn store_register_strict_persists_and_typechecks() {
     let active = store.catalog().active_schema();
     // Person is in the schema — compiles and (against the test data)
     // returns a row.
-    let q = gqlrust::compile_query_with(&active, "MATCH (x: Person) RETURN x.name").unwrap();
-    let rt = gqlrust::runtime::engine::Runtime::new(&store);
+    let q = frogql::compile_query_with(&active, "MATCH (x: Person) RETURN x.name").unwrap();
+    let rt = frogql::runtime::engine::Runtime::new(&store);
     match rt.run_query(&q, 10) {
-        gqlrust::runtime::result::QueryResult::Projected(rows) => {
+        frogql::runtime::result::QueryResult::Projected(rows) => {
             assert_eq!(rows.len(), 1, "expected one Person row");
         }
-        gqlrust::runtime::result::QueryResult::Raw(_) => panic!("expected projected result"),
+        frogql::runtime::result::QueryResult::Raw(_) => panic!("expected projected result"),
     }
 
     // Foo is not in the strict schema. The typechecker refines the type
     // to bottom; the query still parses but yields no rows when run.
-    let q_foo = gqlrust::compile_query_with(&active, "MATCH (x: Foo) RETURN x.name").unwrap();
+    let q_foo = frogql::compile_query_with(&active, "MATCH (x: Foo) RETURN x.name").unwrap();
     match rt.run_query(&q_foo, 10) {
-        gqlrust::runtime::result::QueryResult::Projected(rows) => {
+        frogql::runtime::result::QueryResult::Projected(rows) => {
             assert!(rows.is_empty(), "Foo not in schema → expected zero rows");
         }
-        gqlrust::runtime::result::QueryResult::Raw(_) => {}
+        frogql::runtime::result::QueryResult::Raw(_) => {}
     }
 }
 
@@ -578,8 +578,8 @@ fn legacy_gdb_opens_with_empty_catalog() {
     // catalog (Schema::star) without errors.
     let store = LazyGraphStore::open(&path).unwrap();
     let active = store.catalog().active_schema();
-    let q = gqlrust::compile_query_with(&active, "MATCH (x: Person) RETURN x.name").unwrap();
-    let rt = gqlrust::runtime::engine::Runtime::new(&store);
+    let q = frogql::compile_query_with(&active, "MATCH (x: Person) RETURN x.name").unwrap();
+    let rt = frogql::runtime::engine::Runtime::new(&store);
     let _ = rt.run_query(&q, 10);
 }
 
@@ -636,7 +636,7 @@ fn validate_passes_against_inferred_default() {
     let schema = infer_simple_schema(&store);
     store.catalog_mut().install_default(schema.clone());
 
-    let report = gqlrust::typing::validate::validate_against_data(&store, &schema);
+    let report = frogql::typing::validate::validate_against_data(&store, &schema);
     assert!(report.ok(), "DEFAULT should match its own inferred shape");
     assert_eq!(report.nodes_checked, 2);
     assert_eq!(report.edges_checked, 1);
@@ -658,7 +658,7 @@ fn validate_flags_strict_mismatch() {
             _ => panic!(),
         };
     let schema = build_schema_from_body(&body);
-    let report = gqlrust::typing::validate::validate_against_data(&store, &schema);
+    let report = frogql::typing::validate::validate_against_data(&store, &schema);
     assert!(!report.ok());
     assert!(report.node_violations >= 1);
 }
@@ -680,10 +680,10 @@ fn validation_status_persists() {
             .catalog_mut()
             .register("strict".into(), schema.clone())
             .unwrap();
-        let report = gqlrust::typing::validate::validate_against_data(&store, &schema);
+        let report = frogql::typing::validate::validate_against_data(&store, &schema);
         store.catalog_mut().record_validation(
             "strict",
-            gqlrust::runtime::catalog::ValidationStatus {
+            frogql::runtime::catalog::ValidationStatus {
                 against_node_count: report.nodes_checked,
                 against_edge_count: report.edges_checked,
                 violations: report.total_violations(),
@@ -708,7 +708,7 @@ fn re_register_clears_validation_cache() {
     cat.register("strict".into(), Schema::star()).unwrap();
     cat.record_validation(
         "strict",
-        gqlrust::runtime::catalog::ValidationStatus {
+        frogql::runtime::catalog::ValidationStatus {
             against_node_count: 100,
             against_edge_count: 200,
             violations: 0,
@@ -726,7 +726,7 @@ fn drop_clears_validation_cache() {
     cat.register("strict".into(), Schema::star()).unwrap();
     cat.record_validation(
         "strict",
-        gqlrust::runtime::catalog::ValidationStatus {
+        frogql::runtime::catalog::ValidationStatus {
             against_node_count: 100,
             against_edge_count: 200,
             violations: 0,
@@ -743,7 +743,7 @@ fn install_default_clears_default_validation() {
     cat.install_default(Schema::star());
     cat.record_validation(
         "DEFAULT",
-        gqlrust::runtime::catalog::ValidationStatus {
+        frogql::runtime::catalog::ValidationStatus {
             against_node_count: 100,
             against_edge_count: 200,
             violations: 0,
@@ -769,7 +769,7 @@ fn format_schema_round_trips_through_parser() {
         _ => panic!(),
     };
     let schema = build_schema_from_body(&body);
-    let out = gqlrust::typing::format::format_schema(&schema);
+    let out = frogql::typing::format::format_schema(&schema);
     assert!(out.contains("(:Person"));
     assert!(out.contains("name STRING"));
     assert!(out.contains("age INT"));
@@ -781,7 +781,7 @@ fn format_schema_round_trips_through_parser() {
 // =========================================================
 
 fn warnings_for(input: &str, schema: &Schema) -> Vec<String> {
-    gqlrust::compile_query_with_diagnostics_with(schema, input)
+    frogql::compile_query_with_diagnostics_with(schema, input)
         .map(|r| r.warnings)
         .unwrap_or_default()
 }
