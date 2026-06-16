@@ -97,19 +97,20 @@ Dev: `proptest` (used by `aggregates_proptest`, `lattice_proptest`, `multi_match
 
 ## Releases (PyPI + npm in lock-step)
 
-One git tag fires all three registries (PyPI wheel, native npm, browser WASM npm). Pushing `v*` triggers:
-- `.github/workflows/release.yml` → builds wheels (Linux x86_64+aarch64, macOS x86_64+arm64, Windows x86_64; manylinux2014, abi3-py38) + sdist, uploads via `MATURIN_PYPI_TOKEN`, runs in the `pypi` GitHub Environment for required-reviewers gating.
+One git tag fires all four registries (crates.io crate, PyPI wheel, native npm, browser WASM npm). Pushing `v*` triggers:
+- `.github/workflows/release.yml` → builds wheels (Linux x86_64+aarch64, macOS x86_64+arm64, Windows x86_64; manylinux2014, abi3-py38) + sdist, uploads via `MATURIN_PYPI_TOKEN`, runs in the `pypi` GitHub Environment for required-reviewers gating. **Also** carries the `crates-io` job: publishes the root library crate (`frogql` on crates.io) via `cargo publish --locked` with `CARGO_REGISTRY_TOKEN`, runs in the `crates-io` GitHub Environment, idempotent (skips if the version is already on crates.io). The crate ships only the library half via the `include` whitelist in the root `Cargo.toml` (no `examples/*.gdb`, `tests/`, or `bench/` — those blow past crates.io's 10 MiB compressed limit).
 - `.github/workflows/release-npm.yml` → 5-target build matrix (mac arm64 native, mac x64 cross-compiled from arm64, linux x64 native, linux arm64 via zig, windows x64 native), publishes the host `frogql` package plus the 5 platform sub-packages via `NPM_TOKEN`, runs in the `npm` GitHub Environment. Pre-release versions (any with a `-` like `0.2.0-rc.3`) land on dist-tag `next`; clean `v0.2.0` lands on `latest`.
 - `.github/workflows/release-wasm.yml` → single platform-independent build (`wasm-pack build wasm --target web`), publishes the **`frogql-wasm`** npm package (unscoped, consumed as `import init, { open_json } from "frogql-wasm"`). Reuses the `npm` Environment + `NPM_TOKEN`. WebAssembly is portable, so there's no build matrix. Same dist-tag logic and idempotent skip-if-exists as the napi job. The `web` target (not `bundler`) is deliberate: it needs no `vite-plugin-wasm` in the consumer.
 
-Cut a release by bumping **five files** in lock-step plus regenerating `Cargo.lock` (auto on any `cargo build`):
+Cut a release by bumping **six files** in lock-step plus regenerating `Cargo.lock` (auto on any `cargo build`):
+- `Cargo.toml` (root crate, semver — this is the version `cargo publish` ships to crates.io; the source of truth)
 - `python/pyproject.toml` (PEP 440 form: `0.2.0rc3`)
 - `python/Cargo.toml` (semver: `0.2.0-rc.3`)
 - `node/Cargo.toml`
 - `node/package.json` (host version + the 5 `optionalDependencies` versions)
 - `wasm/Cargo.toml` (semver; the published `frogql-wasm` version is derived from it by wasm-pack)
 
-Then `git tag vX.Y.Z && git push origin vX.Y.Z`. Both registries reject re-publishing, so always bump. The npm release also requires `node/index.js` + `node/index.d.ts` to be committed at the tagged SHA; regenerate them with `npm run build` inside `node/` whenever the API surface changes and commit the diff.
+Then `git tag vX.Y.Z && git push origin vX.Y.Z`. All four registries reject re-publishing, so always bump. The npm release also requires `node/index.js` + `node/index.d.ts` to be committed at the tagged SHA; regenerate them with `npm run build` inside `node/` whenever the API surface changes and commit the diff.
 
 **npm publish quirks** to know about:
 - The host's `npm publish` runs with `--ignore-scripts`. A `prepublishOnly` hook would call `napi prepublish` which recursively re-publishes every platform sub-package and trips 409s on re-runs.

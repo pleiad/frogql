@@ -110,3 +110,26 @@ jobs:
         with:
           command: upload
           args: --non-interactive --skip-existing dist/*
+
+  crates-io:
+    name: Publish crate to crates.io
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Idempotent like the npm/PyPI jobs: crates.io rejects re-publishing a
+      # version, so skip if this version is already on the registry (e.g. a
+      # re-run of the same tag). The root crate's version is the source of
+      # truth; it ships only the library half via the `include` whitelist.
+      - name: Publish (skip if version already on crates.io)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          if curl -sf "https://crates.io/api/v1/crates/frogql/${VERSION}" >/dev/null 2>&1; then
+            echo "frogql ${VERSION} already on crates.io; skipping."
+          else
+            cargo publish --locked
+          fi
