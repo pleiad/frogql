@@ -290,3 +290,20 @@ fn runtime_treats_list_sort_key_as_equal_so_input_order_preserved() {
         _ => panic!("expected projected"),
     }
 }
+
+// ISO §22.14: an aggregate whose result type is non-orderable (a List from
+// COLLECT_LIST) must be rejected as a sort key, not laundered through Star and
+// silently treated as Equal at runtime. Regression for the ORDER BY-over-Star
+// soundness gap (Star is reserved for base types).
+#[test]
+fn typecheck_rejects_list_aggregate_in_sort_key() {
+    let r = compile_query(
+        "MATCH (x: User) RETURN x.city, COLLECT_LIST(x.name) GROUP BY x.city \
+         ORDER BY COLLECT_LIST(x.name)",
+    );
+    let err = r.expect_err("ORDER BY over a list-valued aggregate must be rejected");
+    assert!(
+        err.contains("comparable") || err.contains("22.14") || err.contains("GA04"),
+        "got: {err}"
+    );
+}

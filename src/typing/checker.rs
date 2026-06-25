@@ -147,8 +147,10 @@ impl Typechecker {
                 SortKey::Expr(e) => self.check_expr(e, env),
                 SortKey::Column(idx) => match returns.and_then(|rs| rs.get(*idx)) {
                     Some(ReturnItem::Expr { expr, .. }) => self.check_expr(expr, env),
-                    // Aggregate output typing is a separate gap; pass-through.
-                    Some(ReturnItem::Aggregate { .. }) => SimpleType::Star,
+                    // Type the aggregate by its result type so a non-orderable
+                    // result (e.g. COLLECT_LIST -> List) is rejected below instead
+                    // of being laundered through Star (reserved for base types).
+                    Some(ReturnItem::Aggregate { agg, .. }) => self.check_aggregator(agg, env),
                     None => {
                         self.errors.push(format!(
                             "ORDER BY column reference #{idx} is out of bounds for the \
@@ -173,7 +175,7 @@ impl Typechecker {
                     // Type the projected column, then walk the record path.
                     let mut t = match returns.and_then(|rs| rs.get(*col)) {
                         Some(ReturnItem::Expr { expr, .. }) => self.check_expr(expr, env),
-                        Some(ReturnItem::Aggregate { .. }) => SimpleType::Star,
+                        Some(ReturnItem::Aggregate { agg, .. }) => self.check_aggregator(agg, env),
                         None => {
                             self.errors.push(format!(
                                 "ORDER BY column reference #{col} is out of bounds for the \
