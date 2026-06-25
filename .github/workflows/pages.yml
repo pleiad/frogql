@@ -1,10 +1,19 @@
 name: Deploy website (GitHub Pages)
 
-# Publishes the static landing page in site/ to GitHub Pages.
-# Served at https://pleiad.github.io/frogql/
+# Publishes two things to GitHub Pages, served under https://pleiad.github.io/frogql/:
+#   - the static landing page in site/            -> /frogql/
+#   - the gql-detective SPA (built from its repo)  -> /frogql/gql-detective/
 #
 # One-time setup: repo Settings → Pages → "Build and deployment" →
 # Source: "GitHub Actions".
+#
+# gql-detective lives in its own public repo (pleiad/gql-detective). Its
+# vite.config.ts pins `base: '/frogql/gql-detective/'`, so its asset and
+# .wasm URLs resolve correctly under the subfolder. This workflow checks it
+# out, builds it, and drops its dist/ into the Pages artifact under
+# gql-detective/. To redeploy when gql-detective changes, either run this
+# workflow manually (Actions → Run workflow) or have that repo send a
+# `repository_dispatch` of type `gql-detective-updated`.
 
 on:
   push:
@@ -12,6 +21,8 @@ on:
     paths:
       - "site/**"
       - ".github/workflows/pages.yml"
+  repository_dispatch:
+    types: [ gql-detective-updated ]
   workflow_dispatch:
 
 permissions:
@@ -30,10 +41,37 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout frogql (landing page in site/)
+        uses: actions/checkout@v4
+
+      - name: Checkout gql-detective
+        uses: actions/checkout@v4
+        with:
+          repository: pleiad/gql-detective
+          path: gql-detective-src
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gql-detective-src/package-lock.json
+
+      - name: Build gql-detective
+        working-directory: gql-detective-src
+        run: |
+          npm ci
+          npm run build
+
+      - name: Assemble Pages site
+        run: |
+          mkdir -p _site
+          cp -r site/. _site/
+          mkdir -p _site/gql-detective
+          cp -r gql-detective-src/dist/. _site/gql-detective/
+
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: _site
       - id: deployment
         uses: actions/deploy-pages@v4
