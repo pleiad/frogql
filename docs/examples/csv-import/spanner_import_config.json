@@ -1,0 +1,17 @@
+{
+  "files": [
+    {
+      "path": "Person.csv",
+      "columns": { "vid": "STRING", "name": "STRING", "age": "INT64" }
+    },
+    {
+      "path": "Movie.csv",
+      "columns": { "vid": "STRING", "title": "STRING", "year": "INT64" }
+    },
+    {
+      "path": "acted_in.csv",
+      "label": "ACTED_IN",
+      "columns": { "SRC_ID": "STRING", "DST_ID": "STRING", "role": "STRING" }
+    }
+  ]
+}
