@@ -3272,6 +3272,15 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 BinOp::As => {
                     let l = self.run_expr(mu, left);
                     match (&l, right.as_ref()) {
+                        // 3VL: null inhabits every type — `null AS T` is null,
+                        // regardless of target. This also lets a null operand
+                        // pass the implicit argument cast in the wrapper below
+                        // and reach the 3VL logic (the runtime `△(bop)`
+                        // relaxation), without changing the `IS`/`TYPED`
+                        // predicate (which uses `value_is_type` directly).
+                        (ExprResult::Success(Value::Null), Expr::Type(_)) => {
+                            ExprResult::Success(Value::Null)
+                        }
                         (ExprResult::Success(val), Expr::Type(ty)) => {
                             if Expr::value_is_type(val, ty) {
                                 ExprResult::Success(val.clone())
