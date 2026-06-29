@@ -738,6 +738,27 @@ impl Typechecker {
                 }
 
                 let t2 = self.check_expr(right, env);
+
+                // Logical connectives short-circuit under 3VL, so we override
+                // the default `c̃od` propagation for them: the result is `B`
+                // unless BOTH operands are incompatible with `B` (a ⊥/Null
+                // operand beside a valid Bool still yields a Bool, e.g.
+                // `true OR ⊥`). Only when both sides meet ⊥ against `B` do we
+                // degrade to ⊥.
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    let both_bottom = SimpleType::meet(&t1, &SimpleType::B) == SimpleType::Zero
+                        && SimpleType::meet(&t2, &SimpleType::B) == SimpleType::Zero;
+                    return if both_bottom {
+                        self.warnings.push(format!(
+                            "Binop {:?} between types {} and {} is not defined",
+                            op, t1, t2
+                        ));
+                        SimpleType::Zero
+                    } else {
+                        SimpleType::B
+                    };
+                }
+
                 let (expected_t1, expected_t2, result_t) = op.delta(&t1, &t2);
 
                 if SimpleType::meet(&t1, &expected_t1) != SimpleType::Zero
