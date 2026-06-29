@@ -3283,6 +3283,69 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                         _ => ExprResult::Failure("invalid 'as' operands".into()),
                     }
                 }
+                // Logical connectives follow SQL three-valued logic (3VL) and
+                // short-circuit. They are handled here, *outside* the generic
+                // operator wrapper below, so a `Null`/`Failure` operand reaches
+                // the 3VL table instead of being rejected by the implicit
+                // argument cast. `Failure` (a missing attribute, an unbound
+                // variable, a type error) is treated as the unknown/null input,
+                // matching how `IsNull`/`Coalesce`/aggregates already read it.
+                BinOp::Or => {
+                    let l = self.run_expr(mu, left);
+                    // true OR _ = true (short-circuit; rhs not evaluated).
+                    if matches!(l, ExprResult::Success(Value::Bool(true))) {
+                        return ExprResult::Success(Value::Bool(true));
+                    }
+                    let r = self.run_expr(mu, right);
+                    match (&l, &r) {
+                        // _ OR true = true
+                        (_, ExprResult::Success(Value::Bool(true))) => {
+                            ExprResult::Success(Value::Bool(true))
+                        }
+                        // false OR false = false
+                        (
+                            ExprResult::Success(Value::Bool(false)),
+                            ExprResult::Success(Value::Bool(false)),
+                        ) => ExprResult::Success(Value::Bool(false)),
+                        // false OR null, null OR false, null OR null = null.
+                        (
+                            ExprResult::Success(Value::Bool(false) | Value::Null)
+                            | ExprResult::Failure(_),
+                            ExprResult::Success(Value::Bool(false) | Value::Null)
+                            | ExprResult::Failure(_),
+                        ) => ExprResult::Success(Value::Null),
+                        // A concrete non-bool operand (e.g. Int) is a real error.
+                        _ => ExprResult::Failure("or requires bools".into()),
+                    }
+                }
+                BinOp::And => {
+                    let l = self.run_expr(mu, left);
+                    // false AND _ = false (short-circuit; rhs not evaluated).
+                    if matches!(l, ExprResult::Success(Value::Bool(false))) {
+                        return ExprResult::Success(Value::Bool(false));
+                    }
+                    let r = self.run_expr(mu, right);
+                    match (&l, &r) {
+                        // _ AND false = false
+                        (_, ExprResult::Success(Value::Bool(false))) => {
+                            ExprResult::Success(Value::Bool(false))
+                        }
+                        // true AND true = true
+                        (
+                            ExprResult::Success(Value::Bool(true)),
+                            ExprResult::Success(Value::Bool(true)),
+                        ) => ExprResult::Success(Value::Bool(true)),
+                        // true AND null, null AND true, null AND null = null.
+                        (
+                            ExprResult::Success(Value::Bool(true) | Value::Null)
+                            | ExprResult::Failure(_),
+                            ExprResult::Success(Value::Bool(true) | Value::Null)
+                            | ExprResult::Failure(_),
+                        ) => ExprResult::Success(Value::Null),
+                        // A concrete non-bool operand (e.g. Int) is a real error.
+                        _ => ExprResult::Failure("and requires bools".into()),
+                    }
+                }
                 _ => {
                     let (ty_l, _, _) = op.delta(&SimpleType::Star, &SimpleType::Star);
                     let cast_left = Expr::Binop {
@@ -3324,6 +3387,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                         },
                         UnOp::Not => match val {
                             Value::Bool(b) => ExprResult::Success(Value::Bool(!b)),
+                            // 3VL: NOT null = null (a Failure operand already
+                            // propagates to null below).
+                            Value::Null => ExprResult::Success(Value::Null),
                             _ => ExprResult::Failure("not requires bool".into()),
                         },
                     },
@@ -4076,12 +4142,27 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 }
                 _ => ExprResult::Failure("'in' requires a list on the right".into()),
             },
+            // NOTE: `And`/`Or` are normally intercepted in `run_expr` (3VL +
+            // short-circuit) and do not reach here. These arms are kept
+            // consistent with that 3VL table for any direct caller.
             BinOp::And => match (lv, rv) {
-                (Value::Bool(a), Value::Bool(b)) => ExprResult::Success(Value::Bool(*a && *b)),
+                (Value::Bool(false), _) | (_, Value::Bool(false)) => {
+                    ExprResult::Success(Value::Bool(false))
+                }
+                (Value::Bool(true), Value::Bool(true)) => ExprResult::Success(Value::Bool(true)),
+                (Value::Bool(true) | Value::Null, Value::Bool(true) | Value::Null) => {
+                    ExprResult::Success(Value::Null)
+                }
                 _ => ExprResult::Failure("and requires bools".into()),
             },
             BinOp::Or => match (lv, rv) {
-                (Value::Bool(a), Value::Bool(b)) => ExprResult::Success(Value::Bool(*a || *b)),
+                (Value::Bool(true), _) | (_, Value::Bool(true)) => {
+                    ExprResult::Success(Value::Bool(true))
+                }
+                (Value::Bool(false), Value::Bool(false)) => ExprResult::Success(Value::Bool(false)),
+                (Value::Bool(false) | Value::Null, Value::Bool(false) | Value::Null) => {
+                    ExprResult::Success(Value::Null)
+                }
                 _ => ExprResult::Failure("or requires bools".into()),
             },
             _ => ExprResult::Failure(format!("unexpected op {op} in eval_binop")),
