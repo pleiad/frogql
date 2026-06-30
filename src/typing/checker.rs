@@ -144,9 +144,9 @@ impl Typechecker {
 
         for spec in specs {
             let t = match &spec.key {
-                SortKey::Expr(e) => self.check_expr(e, env),
+                SortKey::Expr(e) => self.order_key_type(e, env),
                 SortKey::Column(idx) => match returns.and_then(|rs| rs.get(*idx)) {
-                    Some(ReturnItem::Expr { expr, .. }) => self.check_expr(expr, env),
+                    Some(ReturnItem::Expr { expr, .. }) => self.order_key_type(expr, env),
                     // Type the aggregate by its result type so a non-orderable
                     // result (e.g. COLLECT_LIST -> List) is rejected below instead
                     // of being laundered through Star (reserved for base types).
@@ -174,7 +174,7 @@ impl Typechecker {
                 SortKey::ColumnField { col, path } => {
                     // Type the projected column, then walk the record path.
                     let mut t = match returns.and_then(|rs| rs.get(*col)) {
-                        Some(ReturnItem::Expr { expr, .. }) => self.check_expr(expr, env),
+                        Some(ReturnItem::Expr { expr, .. }) => self.order_key_type(expr, env),
                         Some(ReturnItem::Aggregate { agg, .. }) => self.check_aggregator(agg, env),
                         None => {
                             self.errors.push(format!(
@@ -212,6 +212,21 @@ impl Typechecker {
                 ));
             }
         }
+    }
+
+    /// Type of an ORDER BY sort-key expression, hardened against the
+    /// `simple_type_of_value` punt that launders a constant record to
+    /// `Star` (which is reserved for base types in the gradual design). A
+    /// record literal is not a base type and is not orderable without
+    /// Feature GA04, so type it as `Record` here — locally to ORDER BY —
+    /// so the §22.14 check below rejects it. The global constant typing
+    /// (`Expr::Const`) is left unchanged, keeping the blast radius to sort
+    /// keys (RETURN/WHERE/COALESCE still see a constant record as `Star`).
+    fn order_key_type(&mut self, e: &Expr, env: &TypeEnvironment) -> SimpleType {
+        if let Expr::Const(v) = e {
+            return const_order_type(v);
+        }
+        self.check_expr(e, env)
     }
 
     /// Reject unbounded repetition unless its nearest prefix makes it finite.
@@ -1134,6 +1149,22 @@ fn create_context(desc: &Option<Descriptor>, t: VariableType) -> TypeEnvironment
 /// element/field types would require recursive typing of values, which
 /// fppc doesn't do (it has no list literals). Documented in
 /// `docs/internals/typechecker_migration.md` as a phase-1 punt.
+/// Like `simple_type_of_value`, but does not launder a record to `Star`:
+/// a constant record (possibly nested) types as `Record` so the ORDER BY
+/// comparability check (§22.14) rejects it. Used only for sort keys, via
+/// `order_key_type`; the global constant typing keeps the `Star` punt.
+fn const_order_type(v: &Value) -> SimpleType {
+    match v {
+        Value::Record(fields) => SimpleType::Record(
+            fields
+                .iter()
+                .map(|(k, vv)| (k.clone(), const_order_type(vv)))
+                .collect(),
+        ),
+        other => simple_type_of_value(other),
+    }
+}
+
 fn simple_type_of_value(v: &Value) -> SimpleType {
     match v {
         // Null literal is the SQL untyped null: it inhabits every type for
