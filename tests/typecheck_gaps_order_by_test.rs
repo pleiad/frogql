@@ -339,6 +339,19 @@ fn typecheck_accepts_record_scalar_field_in_sort_key() {
     assert!(r.is_ok(), "got: {:?}", r.err());
 }
 
+// A repetition-group variable (bound by `{n,m}`) is not a base type and
+// is not orderable. `variable_type_to_simple_type` launders `Group` to
+// `Star`; `order_key_type` types it as `Group` so ORDER BY rejects it.
+#[test]
+fn typecheck_rejects_group_variable_in_sort_key() {
+    let r = compile_query("MATCH (a)-[e]->{1,2}(b) RETURN a, b ORDER BY e");
+    let err = r.expect_err("ORDER BY over a repetition group must be rejected");
+    assert!(
+        err.contains("comparable") || err.contains("22.14") || err.contains("GA04"),
+        "got: {err}"
+    );
+}
+
 // Drilling into a field that is itself a record stays non-orderable.
 #[test]
 fn typecheck_rejects_record_nested_record_field_in_sort_key() {

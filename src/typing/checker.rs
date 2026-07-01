@@ -223,10 +223,21 @@ impl Typechecker {
     /// (`Expr::Const`) is left unchanged, keeping the blast radius to sort
     /// keys (RETURN/WHERE/COALESCE still see a constant record as `Star`).
     fn order_key_type(&mut self, e: &Expr, env: &TypeEnvironment) -> SimpleType {
-        if let Expr::Const(v) = e {
-            return const_order_type(v);
+        match e {
+            // A constant record (possibly nested) folds to `Value::Record`
+            // and is laundered to `Star` by `simple_type_of_value`; type it
+            // precisely so the comparability check rejects it.
+            Expr::Const(v) => const_order_type(v),
+            // A repetition-group variable is not a base type either;
+            // `variable_type_to_simple_type` launders `Group` to `Star`.
+            // Type it as `Group` here so the check rejects it (ordering by a
+            // group of matched edges/nodes is not a comparable value).
+            Expr::Var(name) => match env.get(name) {
+                Some(VariableType::Group(_)) => SimpleType::Group(Box::new(SimpleType::Star)),
+                _ => self.check_expr(e, env),
+            },
+            _ => self.check_expr(e, env),
         }
-        self.check_expr(e, env)
     }
 
     /// Reject unbounded repetition unless its nearest prefix makes it finite.
