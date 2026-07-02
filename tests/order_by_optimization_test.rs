@@ -262,7 +262,32 @@ fn btree_ltj_real_matches_pdqsort_on_join_query() {
         };
         real_groups.entry(u_id).or_default().insert(f_id);
     }
-    assert_eq!(pdq_groups, real_groups, "u.id groups differ");
+    // Both engines return the same u.id keys with the same per-group counts.
+    // ORDER BY is on u.id only, so `LIMIT 10` may cut *within* a peer group
+    // (equal u.id): which f.id peers land in that truncated group is
+    // implementation-defined (ISO §16.17 GR 1k), and pdqsort vs btree-ltj-real
+    // legitimately pick different peers there. Only the boundary group — the
+    // largest u.id present, the one LIMIT can truncate — is allowed to differ,
+    // and only in *which* peers, not how many. Every fully-included group must
+    // match exactly.
+    assert_eq!(
+        pdq_groups.keys().collect::<Vec<_>>(),
+        real_groups.keys().collect::<Vec<_>>(),
+        "u.id keys differ"
+    );
+    let boundary = pdq_groups.keys().next_back().copied();
+    for (u_id, pdq_fs) in &pdq_groups {
+        let real_fs = &real_groups[u_id];
+        if Some(*u_id) == boundary {
+            assert_eq!(
+                pdq_fs.len(),
+                real_fs.len(),
+                "boundary group u.id={u_id} size differs (pdq={pdq_fs:?} real={real_fs:?})"
+            );
+        } else {
+            assert_eq!(pdq_fs, real_fs, "u.id group {u_id} differs");
+        }
+    }
 }
 
 #[test]
