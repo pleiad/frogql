@@ -35,12 +35,19 @@ pub struct DiskGraphStore {
     // Root page pointers (from header)
     node_label_root: u32,
     edge_label_root: u32,
-    adjacency_root: u32,
 
     // Cached index roots: label_sid → first_page (loaded once from root pages)
     node_label_dir: RefCell<Option<Vec<(u32, u32)>>>,
     edge_label_dir: RefCell<Option<Vec<(u32, u32)>>>,
-    adj_dir: RefCell<Option<Vec<(u32, u32)>>>,
+
+    // Adjacency as in-RAM CSR `(offsets, flat)` per direction, built at open
+    // from the edge-topology arrays. Independent of the on-disk adjacency
+    // format, so it works whether the file carries CSR, the legacy per-node
+    // chains, or neither. `offsets` has length node_count+1; node `n`'s edge
+    // ids are `flat[offsets[n]..offsets[n+1]]`.
+    out_adj: (Vec<u32>, Vec<u32>),
+    in_adj: (Vec<u32>, Vec<u32>),
+    und_adj: (Vec<u32>, Vec<u32>),
 
     // Node/edge record page locations internal_id → (page_num, cell_index)
     // These are compact (8 bytes per element) and needed for any record access.
@@ -70,7 +77,6 @@ impl DiskGraphStore {
         let string_table_root = pager.header.string_table_root;
         let node_label_root = pager.header.label_index_root;
         let edge_label_root = pager.header.edge_label_index_root;
-        let adjacency_root = pager.header.adjacency_root;
         let node_locs_root = pager.header.node_locs_root;
         let edge_topo_root = pager.header.edge_topo_root;
 
@@ -146,15 +152,19 @@ impl DiskGraphStore {
             pager.write_header()?;
         }
 
+        let (out_adj, in_adj, und_adj) =
+            build_direction_csr(node_count as usize, &edge_src, &edge_tgt, &edge_directed);
+
         Ok(DiskGraphStore {
             pager: RefCell::new(pager),
             strings,
             node_label_root,
             edge_label_root,
-            adjacency_root,
             node_label_dir: RefCell::new(None),
             edge_label_dir: RefCell::new(None),
-            adj_dir: RefCell::new(None),
+            out_adj,
+            in_adj,
+            und_adj,
             node_locs,
             edge_locs,
             edge_src,
@@ -186,15 +196,6 @@ impl DiskGraphStore {
             )
             .unwrap_or_default();
             *self.edge_label_dir.borrow_mut() = Some(dir);
-        }
-    }
-
-    fn ensure_adj_dir(&self) {
-        if self.adj_dir.borrow().is_none() {
-            let dir =
-                disk_index::read_adjacency_root(&mut self.pager.borrow_mut(), self.adjacency_root)
-                    .unwrap_or_default();
-            *self.adj_dir.borrow_mut() = Some(dir);
         }
     }
 
@@ -256,22 +257,18 @@ impl DiskGraphStore {
     }
 
     fn get_adj_entries(&self, node_iid: u32, kind: u8) -> Vec<u32> {
-        self.ensure_adj_dir();
-        let dir = self.adj_dir.borrow();
-        let dir = dir.as_ref().unwrap();
-
-        // Find this node's adjacency page
-        if let Some((_, adj_page)) = dir.iter().find(|(niid, _)| *niid == node_iid) {
-            let triples = disk_index::read_triple_chain(&mut self.pager.borrow_mut(), *adj_page)
-                .unwrap_or_default();
-            triples
-                .iter()
-                .filter(|(_, _, k)| *k == kind)
-                .map(|(edge_iid, _, _)| *edge_iid)
-                .collect()
-        } else {
-            vec![]
+        let (offsets, flat) = match kind {
+            ADJ_OUTGOING => &self.out_adj,
+            ADJ_INCOMING => &self.in_adj,
+            _ => &self.und_adj,
+        };
+        let n = node_iid as usize;
+        if n + 1 >= offsets.len() {
+            return vec![];
         }
+        let start = offsets[n] as usize;
+        let end = offsets[n + 1] as usize;
+        flat[start..end].to_vec()
     }
 
     fn label_index_lookup(&self, label: &str, dir: &[(u32, u32)]) -> Option<Vec<u32>> {
@@ -405,6 +402,58 @@ fn cell_bounds(page: &crate::pager::page::Page, index: u16) -> (usize, usize) {
         page.cell_offset(index - 1).unwrap() as usize
     };
     (offset, end)
+}
+
+/// Build `(out, in, undirected)` CSR adjacency from the edge-topology arrays.
+/// Each returned pair is `(offsets, flat)` with `offsets.len() == node_count+1`.
+#[allow(clippy::type_complexity)]
+fn build_direction_csr(
+    node_count: usize,
+    edge_src: &[u32],
+    edge_tgt: &[u32],
+    edge_directed: &[bool],
+) -> (
+    (Vec<u32>, Vec<u32>),
+    (Vec<u32>, Vec<u32>),
+    (Vec<u32>, Vec<u32>),
+) {
+    let mut out_pairs: Vec<(u32, u32)> = Vec::new();
+    let mut in_pairs: Vec<(u32, u32)> = Vec::new();
+    let mut und_pairs: Vec<(u32, u32)> = Vec::new();
+    for (eid, &directed) in edge_directed.iter().enumerate() {
+        let e = eid as u32;
+        if directed {
+            out_pairs.push((edge_src[eid], e));
+            in_pairs.push((edge_tgt[eid], e));
+        } else {
+            und_pairs.push((edge_src[eid], e));
+            und_pairs.push((edge_tgt[eid], e));
+        }
+    }
+    (
+        csr_from_pairs(node_count, &out_pairs),
+        csr_from_pairs(node_count, &in_pairs),
+        csr_from_pairs(node_count, &und_pairs),
+    )
+}
+
+/// Bucket-sort `(node, edge)` pairs into a CSR `(offsets, flat)` in O(N + E).
+fn csr_from_pairs(node_count: usize, pairs: &[(u32, u32)]) -> (Vec<u32>, Vec<u32>) {
+    let mut offsets = vec![0u32; node_count + 1];
+    for (n, _) in pairs {
+        offsets[*n as usize + 1] += 1;
+    }
+    for i in 1..offsets.len() {
+        offsets[i] += offsets[i - 1];
+    }
+    let mut flat = vec![0u32; pairs.len()];
+    let mut cursor = offsets[..node_count].to_vec();
+    for (n, e) in pairs {
+        let pos = cursor[*n as usize] as usize;
+        flat[pos] = *e;
+        cursor[*n as usize] += 1;
+    }
+    (offsets, flat)
 }
 
 fn collect_st_pages(pager: &mut Pager) -> io::Result<Vec<u32>> {

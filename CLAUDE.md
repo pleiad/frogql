@@ -351,10 +351,10 @@ Tests in `tests/named_path_test.rs`. Full ISO context + roadmap in `docs/interna
 
 4 KB pages, slotted-page layout for variable-length records. Header page 0 stores root pointers to string table, label indexes, adjacency index, and (since recently) a CSR adjacency root. Node/edge records reference strings by string table ID. Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6).
 
-Adjacency has two on-disk representations and the loader prefers whichever is present:
+Adjacency has two on-disk representations. The current writer emits **only CSR**; the legacy format is read-only-supported for backward compat:
 
-- **CSR (preferred, header `csr_adjacency_root`)** — six `Vec<u32>` page chains: `[out_offsets, out_flat, in_offsets, in_flat, und_offsets, und_flat]`. Loaded in O(N + E) total via six big sequential reads; node `n`'s edges are `flat[offsets[n]..offsets[n+1]]`. Stored in memory as three `AdjCsr { offsets: Vec<u32>, flat: Vec<u32> }` on `LazyGraphStore`. Built and written by every `save_graph` call after the format was added (commit `34d97c0`).
-- **Legacy per-node chains (header `adjacency_root`)** — one small page chain per node listing `(edge_id, other_node, kind)` triples (kind 0=out, 1=in, 2=und). The loader still understands this format and rebuilds CSR in memory at open via bucket-sort; legacy `.gdb` files keep working but pay ~30× more time on the topology phase (~5s vs ~0.1s for SF0.1) until they're re-saved into the new format.
+- **CSR (written, header `csr_adjacency_root`)** — six `Vec<u32>` page chains: `[out_offsets, out_flat, in_offsets, in_flat, und_offsets, und_flat]`. Loaded in O(N + E) total via six big sequential reads; node `n`'s edges are `flat[offsets[n]..offsets[n+1]]`. Stored in memory as three `AdjCsr { offsets: Vec<u32>, flat: Vec<u32> }` on `LazyGraphStore`. Built and written by every `save_graph` call (added commit `34d97c0`).
+- **Legacy per-node chains (header `adjacency_root`)** — one page chain per node listing `(edge_id, other_node, kind)` triples (kind 0=out, 1=in, 2=und). **No longer written**: it spent one 4KB page per node, ~93% of them near-empty (1.33 GiB of 1.42 GiB at SF0.1). Dropping it took the SF0.1 `.gdb` from 1.39 GiB to 136 MiB (~10.5×), comparable to the 89 MiB source CSV. `LazyGraphStore` still reads it (rebuilding CSR via bucket-sort) for pre-CSR files; `DiskGraphStore` now builds adjacency in RAM from the edge-topology arrays it already loads, so it ignores both on-disk adjacency roots. Re-save old files to shrink them.
 
 See `docs/internals/storage-architecture.md` for the full spec.
 
