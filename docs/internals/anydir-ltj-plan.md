@@ -149,11 +149,23 @@ landed the feature:
    any-direction chains/joins run against the mirror. Oracle:
    `tests/anydir_iso_test.rs` (hand-computed ISO counts, not the fallback).
 
-Still open (documented, not blocking): the **scan/hash-join fallback** —
-used for mixed directed+any-direction patterns and for any-direction
-*repetitions* (the seeded traversal) — retains its own multiplicity and is
-not yet aligned to ISO. Mixed-direction LTJ (per-triple index routing) is
-also deferred.
+Follow-on: with the mirror in place, `unroll_repeat` no longer excludes
+any-direction inners — a bounded, unused-edge `-[]-{n,m}` unrolls into a
+Union whose flat any-direction arms each run through `try_ltj_anydir`
+(ISO-correct, seeded by the boundary filter). So the issue-#57 shape
+`(a)-[e]-{1,3}(b)` with `e` unprojected now takes the mirror-LTJ path
+rather than the seeded adjacency traversal.
+
+Still open (documented, not blocking):
+
+- **The seeded adjacency traversal** (`try_concat_with_edge_repetition`) —
+  used for any-direction repetitions that *bind* an edge variable (LTJ
+  cannot carry a `PathValue::Group` across a variable-length repeat), have
+  `lb = 0`, or exceed `MAX_UNROLL` — is correct but not yet ISO
+  bag-aligned; it needs per-edge fan-out in `concat_with_*`.
+- **The scan/hash-join fallback** for mixed directed+any-direction patterns
+  likewise retains its own multiplicity.
+- **Mixed-direction LTJ** (per-triple index routing) is deferred.
 
 ## Acceptance criteria
 

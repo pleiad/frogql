@@ -98,8 +98,11 @@ fn differential_any_direction_named() {
 
 #[test]
 fn differential_any_direction_anonymous() {
-    // Post-gate, the anonymous any-direction repeat also stays a Repeat
-    // (unroll rejects it) and routes through the seeded traversal.
+    // An anonymous (unused-edge) any-direction repeat now UNROLLS into a
+    // Union whose arms run through the mirrored LTJ (issue #71), so it no
+    // longer reaches the seeded traversal — both toggle settings agree
+    // trivially. Kept as a smoke test that the query still executes; the
+    // seeded path proper is covered by the named-edge cases below.
     assert_differential("MATCH (n1:N)-[]-{1,2}(n2:N) WHERE n1.id = 0 RETURN n1.id, n2.id");
 }
 

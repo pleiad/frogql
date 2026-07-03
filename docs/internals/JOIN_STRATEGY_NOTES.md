@@ -460,10 +460,14 @@ engine.rs          Integration: run_join() and run_concat_pattern() call
    stores every edge in both senses so a single forward triple matches
    either orientation in one LTJ pass. Verified against a hand-computed ISO
    oracle (`tests/{iso_multiplicity,anydir_iso}_test.rs`), behind
-   `GQLITE_DISABLE_ANYDIR_LTJ`. Full rationale in `anydir-ltj-plan.md`.
-   *Remaining:* the scan/hash-join fallback (mixed direction, any-direction
-   repetition) is not yet aligned to ISO bag multiplicity, and mixed
-   directed+any-direction chains still need per-triple index routing.
+   `GQLITE_DISABLE_ANYDIR_LTJ`. Bounded unused-edge any-direction
+   *repetitions* (`(a)-[]-{1,3}(b)`) also reach the mirror: `unroll_repeat`
+   unrolls them into flat any-direction arms. Full rationale in
+   `anydir-ltj-plan.md`. *Remaining:* the seeded adjacency traversal
+   (any-direction repetitions that bind an edge var, or `lb = 0`, or exceed
+   `MAX_UNROLL`) and the scan fallback (mixed direction) are not yet aligned
+   to ISO bag multiplicity; mixed directed+any-direction chains still need
+   per-triple index routing.
 
 ### Caveat: the Ring's bidirectionality ≠ undirected edges
 

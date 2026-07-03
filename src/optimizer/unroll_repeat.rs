@@ -30,11 +30,13 @@
 //!     a Node descriptor and is out of scope for the unroll pass.
 //!   - `ub` must be bounded (`Some(_)`); unbounded `{n,}` is a transitive
 //!     closure and stays on the existing fallback.
-//!   - The inner edge must be LTJ-decomposable (directed or
-//!     `~`-undirected). Any-direction `-[]-` is rejected: LTJ cannot
-//!     take the unrolled arms, so unrolling would only trade the seeded
-//!     repetition traversal for a global hash-join enumeration (the
-//!     issue-#57 OOM shape).
+//!   - The inner edge is a single edge of any orientation: directed,
+//!     `~`-undirected, or any-direction `-[]-`. Any-direction arms run
+//!     against the mirrored index via `try_ltj_anydir` (issue #71); before
+//!     that index existed they fell to the global hash-join (the issue-#57
+//!     OOM), which is why the runtime also keeps the seeded adjacency
+//!     traversal for repetitions that bind an edge variable and so cannot
+//!     unroll.
 //!
 //! Disable with `GQLITE_DISABLE_REPEAT_UNROLL=1`.
 
@@ -180,21 +182,23 @@ fn can_unroll(p: &PathPattern, lb: usize, ub: usize) -> bool {
     // ambiguous and could produce illegal `Node Node` adjacencies; bail
     // out and let the runtime keep its hash-join repetition.
     //
-    // Any-direction `-[]-` is excluded: the unrolled chain is NOT
-    // LTJ-decomposable (`decompose_flat_chain` rejects
-    // `EdgeAnyDirection` — the either-orientation disjunction has no
-    // triple form), so every arm of the Union falls back to the
-    // pairwise hash-join, which materializes the inner hops globally
-    // before any boundary filter applies. On a connected graph that is
-    // the issue-#57 OOM. Keeping the `Repeat` instead routes the
-    // pattern to the seeded adjacency traversal
-    // (`try_concat_with_edge_repetition`), which expands level-by-level
-    // from the already-filtered left rows. Unrolling any-direction
-    // becomes profitable only if LTJ learns a merged forward+reverse
-    // iterator for these edges.
+    // Any-direction `-[]-` is included now that the mirrored index exists
+    // (`TripleIndex::from_graph_anydir`, issue #71): each unrolled arm is a
+    // pure any-direction flat chain that `try_ltj_anydir` runs in a single
+    // LTJ pass seeded by the boundary filter, ISO-correct via the base-case
+    // per-edge fan-out. Before the mirror the arms fell to the global
+    // hash-join (the issue-#57 OOM), so this was excluded; the mirror is
+    // exactly the "merged forward+reverse iterator" that precondition
+    // wanted. A repetition that *binds* an edge variable has non-empty
+    // freevars, stays a `Repeat`, and routes to the seeded adjacency
+    // traversal — LTJ cannot bind a `Group` across a variable-length
+    // repetition.
     matches!(
         p,
-        PathPattern::EdgeRight(_) | PathPattern::EdgeLeft(_) | PathPattern::EdgeUndirected(_)
+        PathPattern::EdgeRight(_)
+            | PathPattern::EdgeLeft(_)
+            | PathPattern::EdgeUndirected(_)
+            | PathPattern::EdgeAnyDirection(_)
     )
 }
 
@@ -324,17 +328,16 @@ mod tests {
     }
 
     #[test]
-    fn keeps_repeat_when_inner_any_direction() {
-        // `-[]-{1,2}`: the unrolled arms would contain EdgeAnyDirection,
-        // which the LTJ decomposer rejects — every arm would fall back to
-        // the global hash-join (issue #57). The Repeat must survive so the
-        // runtime can use the seeded adjacency traversal instead.
+    fn unrolls_any_direction_inner() {
+        // `-[]-{1,2}`: with the mirrored index, the unrolled any-direction
+        // arms are LTJ-decomposable (`try_ltj_anydir`), so the repetition
+        // unrolls into a Union like the directed / `~` cases (issue #71).
         let p = PathPattern::Repeat {
             pattern: Box::new(PathPattern::EdgeAnyDirection(None)),
             lb: 1,
             ub: Some(2),
         };
-        assert!(matches!(optimize(p), PathPattern::Repeat { .. }));
+        assert!(matches!(optimize(p), PathPattern::Union(_, _)));
     }
 
     #[test]

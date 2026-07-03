@@ -106,6 +106,28 @@ fn distinct_collapses_to_endpoint_pairs() {
 }
 
 #[test]
+fn unused_edge_repetition_unrolls_to_mirrored_ltj() {
+    // `(x)-[]-{1,2}(y)` with the edge unused unrolls into a Union whose
+    // any-direction arms run through the mirrored LTJ (issue #71, #57).
+    // From a, lengths 1..2, WALK semantics over the three a↔b edges and the
+    // c-self-loop. Length 1 from a: b (×3, one per incident a↔b edge).
+    // Length 2 from a: back to a (×9: 3 hops out to b × 3 hops back), and
+    // b's only other neighbour is a, so no new nodes. So targets:
+    //   len 1 → b three times
+    //   len 2 → a nine times
+    let g = graph();
+    let rows = proj(&g, "MATCH (x:N)-[]-{1,2}(y:N) WHERE x.id = 0 RETURN y.id");
+    let mut ys = sorted_ints(&rows, 0);
+    ys.dedup();
+    // The distinct reachable set is {a, b}; multiplicity is exercised in
+    // the pinned counts below.
+    assert_eq!(ys, vec![0, 1]);
+    let all = sorted_ints(&rows, 0);
+    assert_eq!(all.iter().filter(|&&v| v == 1).count(), 3, "len-1 → b ×3");
+    assert_eq!(all.iter().filter(|&&v| v == 0).count(), 9, "len-2 → a ×9");
+}
+
+#[test]
 fn comma_join_any_direction() {
     // Pure any-direction comma-join goes through try_ltj_anydir (run_join).
     // (x)-[:R]-(y), (y)-[:R]-(z) with x=a: y ∈ {b (×3)}, then from b:
