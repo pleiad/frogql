@@ -70,6 +70,107 @@ pub fn try_ltj<G: GraphAccess>(
     try_ltj_inner(graph, pattern, index, limit, &[])
 }
 
+/// LTJ over any-direction edges, using the pre-mirrored any-direction
+/// index (`TripleIndex::from_graph_anydir`). Applies only to patterns
+/// whose edges are **all** any-direction (`-[e]-`); a single fixed-
+/// direction edge means the pattern would need per-triple index routing
+/// (mixed directed + any-direction), which is deferred — the caller falls
+/// back to the hash-join for those.
+///
+/// The transform is: rewrite every `EdgeAnyDirection` to `EdgeRight`, then
+/// decompose and run exactly as a directed pattern. Against the mirrored
+/// index a forward triple `(x, L, y)` matches an edge between `x` and `y`
+/// in either physical orientation, so the disjunction is absorbed by the
+/// data, not the iterator. Result reconstruction is unchanged:
+/// `edge_path_value(eid)` still tags each edge with its physical variant,
+/// and the base-case per-eid fan-out gives ISO bag multiplicity (issue
+/// #71). Disabled with `GQLITE_DISABLE_ANYDIR_LTJ=1`.
+pub fn try_ltj_anydir<G: GraphAccess>(
+    graph: &G,
+    pattern: &PathPattern,
+    anydir_index: &TripleIndex,
+    limit: usize,
+) -> Option<IntermediateResult> {
+    if std::env::var("GQLITE_DISABLE_ANYDIR_LTJ").is_ok() {
+        return None;
+    }
+    if !is_pure_any_direction(pattern) {
+        return None;
+    }
+    let rewritten = rewrite_anydir_to_right(pattern);
+    try_ltj_inner(graph, &rewritten, anydir_index, limit, &[])
+}
+
+/// True when the pattern contains at least one any-direction edge and no
+/// fixed-direction (`->`, `<-`, `~`) edge. Only then is running the whole
+/// decomposition against the mirrored index sound — a fixed-direction edge
+/// there would spuriously match its reverse.
+pub fn is_pure_any_direction(p: &PathPattern) -> bool {
+    fn walk(p: &PathPattern, saw_any: &mut bool, saw_fixed: &mut bool) {
+        match p {
+            PathPattern::EdgeAnyDirection(_) => *saw_any = true,
+            PathPattern::EdgeRight(_)
+            | PathPattern::EdgeLeft(_)
+            | PathPattern::EdgeUndirected(_) => *saw_fixed = true,
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                walk(a, saw_any, saw_fixed);
+                walk(b, saw_any, saw_fixed);
+            }
+            PathPattern::Filter(inner, _)
+            | PathPattern::Questioned(inner)
+            | PathPattern::Repeat { pattern: inner, .. }
+            | PathPattern::Selected { pattern: inner, .. }
+            | PathPattern::Named { pattern: inner, .. } => walk(inner, saw_any, saw_fixed),
+            PathPattern::Node(_) => {}
+        }
+    }
+    let mut saw_any = false;
+    let mut saw_fixed = false;
+    walk(p, &mut saw_any, &mut saw_fixed);
+    saw_any && !saw_fixed
+}
+
+/// Rewrite every `EdgeAnyDirection` to `EdgeRight`, preserving the
+/// descriptor. Structural recursion over every variant so nested shapes
+/// (which `decompose` may still reject) are transformed uniformly.
+fn rewrite_anydir_to_right(p: &PathPattern) -> PathPattern {
+    match p {
+        PathPattern::EdgeAnyDirection(d) => PathPattern::EdgeRight(d.clone()),
+        PathPattern::Concat(a, b) => PathPattern::Concat(
+            Box::new(rewrite_anydir_to_right(a)),
+            Box::new(rewrite_anydir_to_right(b)),
+        ),
+        PathPattern::Union(a, b) => PathPattern::Union(
+            Box::new(rewrite_anydir_to_right(a)),
+            Box::new(rewrite_anydir_to_right(b)),
+        ),
+        PathPattern::Join(a, b) => PathPattern::Join(
+            Box::new(rewrite_anydir_to_right(a)),
+            Box::new(rewrite_anydir_to_right(b)),
+        ),
+        PathPattern::Filter(inner, e) => {
+            PathPattern::Filter(Box::new(rewrite_anydir_to_right(inner)), e.clone())
+        }
+        PathPattern::Questioned(inner) => {
+            PathPattern::Questioned(Box::new(rewrite_anydir_to_right(inner)))
+        }
+        PathPattern::Repeat { pattern, lb, ub } => PathPattern::Repeat {
+            pattern: Box::new(rewrite_anydir_to_right(pattern)),
+            lb: *lb,
+            ub: *ub,
+        },
+        PathPattern::Selected { prefix, pattern } => PathPattern::Selected {
+            prefix: *prefix,
+            pattern: Box::new(rewrite_anydir_to_right(pattern)),
+        },
+        PathPattern::Named { var, pattern } => PathPattern::Named {
+            var: var.clone(),
+            pattern: Box::new(rewrite_anydir_to_right(pattern)),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Like `try_ltj` but with an externally supplied variable pin: `pin_var`
 /// is forced to bind to `pin_id` before the LTJ runs, exactly as the
 /// internal index-resolved pinning works. Used by the BTree-LTJ-real
@@ -257,17 +358,9 @@ fn try_ltj_inner<G: GraphAccess>(
         }
     }
 
-    // Flag triples that bind an edge variable. The LTJ base case uses this
-    // to fan out one row per parallel entry in those triples — the only
-    // way to recover edges that share the same (src, label, tgt) prefix,
-    // since the trie collapses them by design.
-    let triple_has_edge_var: Vec<bool> = decomp
-        .triple_info
-        .iter()
-        .map(|(_, _, edge_var, _)| edge_var.is_some())
-        .collect();
-
-    // Run LTJ
+    // Run LTJ. The base case fans out one row per physical edge at the
+    // bound (s, p, o) unconditionally (ISO bag semantics, issue #71), so
+    // there is no per-triple edge-var flag to thread through anymore.
     let algorithm = LtjAlgorithm::new(
         iterators,
         var_to_iterators,
@@ -276,7 +369,6 @@ fn try_ltj_inner<G: GraphAccess>(
         filters_at_level,
         num_vars,
         pinned,
-        triple_has_edge_var,
     );
 
     let mut runner = LtjRunner::new(algorithm, graph);

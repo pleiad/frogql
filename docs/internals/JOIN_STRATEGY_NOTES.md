@@ -452,18 +452,18 @@ engine.rs          Integration: run_join() and run_concat_pattern() call
 4. **Compact tries**: replace sorted Vec with LOUDS bitvectors for space
    efficiency on very large graphs (billions of edges).
 
-5. **Handle any-direction edges (`-[e]-`)**: currently the only edge form
-   that still falls back to hash-join. Could be modelled as a union of
-   forward/reverse triples at extraction time. **Blocked on a semantics
-   decision, not just engineering** — see `anydir-ltj-plan.md`. A prototype
-   (mirrored index, one LTJ pass) worked and was fast, but a differential
-   suite showed the any-direction *bag multiplicity* over a multigraph is
-   unsettled: the mirrored LTJ, the hash-join fallback, and ISO ground
-   truth returned 9 / 14 / 16 rows for the same single-hop query. The LTJ
-   trie collapses reciprocal / parallel edges that share `(s, L, o)` when
-   no edge variable is bound (intrinsic to the vertex-join base case). Ship
-   only alongside a uniform bag-semantics fix across the fallback, the
-   directed LTJ, and this path.
+5. **Handle any-direction edges (`-[e]-`)**: **DONE** for pure
+   any-direction chains and comma-joins (issue #71). The team adopted ISO
+   bag semantics; the LTJ base case now fans out one row per physical edge
+   at the bound `(s, L, o)` unconditionally (fixing the directed
+   parallel-edge collapse too), and a mirrored index (`from_graph_anydir`)
+   stores every edge in both senses so a single forward triple matches
+   either orientation in one LTJ pass. Verified against a hand-computed ISO
+   oracle (`tests/{iso_multiplicity,anydir_iso}_test.rs`), behind
+   `GQLITE_DISABLE_ANYDIR_LTJ`. Full rationale in `anydir-ltj-plan.md`.
+   *Remaining:* the scan/hash-join fallback (mixed direction, any-direction
+   repetition) is not yet aligned to ISO bag multiplicity, and mixed
+   directed+any-direction chains still need per-triple index routing.
 
 ### Caveat: the Ring's bidirectionality ≠ undirected edges
 

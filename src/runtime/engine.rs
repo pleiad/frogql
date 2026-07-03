@@ -313,6 +313,12 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// RefCell so internal lazy initialization stays an immutable-self
     /// API for callers.
     triple_index: RefCell<Option<Arc<TripleIndex>>>,
+    /// Shared LTJ index for **any-direction** edges (`-[e]-`): every edge
+    /// mirrored both senses (see `TripleIndex::from_graph_anydir`). Built
+    /// lazily and separately from `triple_index` — only queries that
+    /// actually contain an any-direction edge pay for it, and directed /
+    /// `~` queries keep using the un-mirrored `triple_index`.
+    anydir_index: RefCell<Option<Arc<TripleIndex>>>,
     /// Memoization for `EXISTS` / `NOT EXISTS` predicates. Keyed by
     /// the body's `Box<Query>` heap address, which stays stable while
     /// the compiled AST is alive. Across queries the address is *not*
@@ -405,6 +411,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         Self {
             graph,
             triple_index: RefCell::new(None),
+            anydir_index: RefCell::new(None),
             exists_cache: RefCell::new(HashMap::new()),
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
@@ -421,6 +428,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         Self {
             graph,
             triple_index: RefCell::new(Some(idx)),
+            anydir_index: RefCell::new(None),
             exists_cache: RefCell::new(HashMap::new()),
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
@@ -443,6 +451,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// reads see the post-mutation state.
     pub fn invalidate_caches(&self) {
         *self.triple_index.borrow_mut() = None;
+        *self.anydir_index.borrow_mut() = None;
         self.exists_cache.borrow_mut().clear();
         self.value_subquery_cache.borrow_mut().clear();
     }
@@ -460,6 +469,20 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             .borrow()
             .clone()
             .expect("triple index just built")
+    }
+
+    /// Lazily build (or return) the cached any-direction LTJ index. Only
+    /// called when a query actually contains an any-direction edge, so a
+    /// workload without `-[e]-` never pays the mirror-build cost.
+    fn anydir_index(&self) -> Arc<TripleIndex> {
+        if self.anydir_index.borrow().is_none() {
+            let idx = Arc::new(TripleIndex::from_graph_anydir(self.graph));
+            *self.anydir_index.borrow_mut() = Some(idx);
+        }
+        self.anydir_index
+            .borrow()
+            .clone()
+            .expect("anydir index just built")
     }
 
     pub fn run(&self, pattern: &PathPattern) -> IntermediateResult {
@@ -1660,6 +1683,17 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         if let Some(result) = pattern_extract::try_ltj(self.graph, &join_pattern, &index, limit) {
             return result;
         }
+        // Pure any-direction join: run against the mirrored index.
+        if pattern_extract::is_pure_any_direction(&join_pattern) {
+            if let Some(result) = pattern_extract::try_ltj_anydir(
+                self.graph,
+                &join_pattern,
+                &self.anydir_index(),
+                limit,
+            ) {
+                return result;
+            }
+        }
 
         // Fallback to pairwise hash-join
         let ir1 = self.run_path_pattern(q1, 0);
@@ -1729,6 +1763,20 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         let index = self.triple_index();
         if let Some(result) = pattern_extract::try_ltj(self.graph, &concat_pattern, &index, limit) {
             return result;
+        }
+        // Pure any-direction chain: run against the mirrored index. A
+        // repetition is not decomposable, so a chain containing `-[e]-{n,m}`
+        // still takes the seeded traversal below; this catches flat
+        // any-direction chains like `(a)-[]-(b)-[]-(c)`.
+        if pattern_extract::is_pure_any_direction(&concat_pattern) {
+            if let Some(result) = pattern_extract::try_ltj_anydir(
+                self.graph,
+                &concat_pattern,
+                &self.anydir_index(),
+                limit,
+            ) {
+                return result;
+            }
         }
 
         let ir1 = self.run_path_pattern(p1, 0);

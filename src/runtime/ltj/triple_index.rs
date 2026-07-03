@@ -26,15 +26,47 @@ pub struct TripleIndex {
 }
 
 impl TripleIndex {
-    /// Build the index from a graph.
-    /// Iterates all directed edges, extracts labels, assigns numeric label IDs,
-    /// and builds 6 sorted orderings.
+    /// Build the standard index from a graph: directed edges in their
+    /// physical sense only, undirected edges in both senses. This is the
+    /// index for directed / `~`-undirected / leftward pattern edges.
     pub fn from_graph<G: GraphAccess>(graph: &G) -> Self {
+        Self::from_graph_impl(graph, false)
+    }
+
+    /// Build the **any-direction** index: *every* physical edge — directed
+    /// and undirected alike — is stored in both senses, sharing one eid.
+    /// A pattern edge `-[e]-` decomposes to a single forward triple
+    /// `(x, L, y)` run against this index, which then matches an edge
+    /// between `x` and `y` regardless of physical orientation, in one LTJ
+    /// pass — no per-edge `2^k` branch enumeration, no reverse-view
+    /// intricacy in the iterator. Combined with the base-case per-eid
+    /// fan-out (issue #71), this reproduces ISO bag multiplicity: a
+    /// directed edge `a→b` yields two matches under `-[e]-` (`x=a,y=b` and
+    /// `x=b,y=a`), a reciprocal pair yields two per endpoint binding, etc.
+    /// Roughly doubles the directed-triple count vs `from_graph`; built
+    /// lazily, only when a query actually contains an any-direction edge.
+    pub fn from_graph_anydir<G: GraphAccess>(graph: &G) -> Self {
+        Self::from_graph_impl(graph, true)
+    }
+
+    fn from_graph_impl<G: GraphAccess>(graph: &G, mirror_directed: bool) -> Self {
         let mut label_to_id: HashMap<String, u32> = HashMap::new();
         let mut id_to_label: Vec<String> = Vec::new();
 
         // Collect all triples: (src, label_id, tgt, edge_id)
         let mut raw_triples: Vec<(u32, u32, u32, u32)> = Vec::new();
+
+        // In the any-direction index, mirror directed edges too, so a
+        // forward triple lookup finds them from either endpoint. Self-loops
+        // are pushed twice (matching the fallback's `right` + `left`
+        // solutions); parallel edges keep their multiplicity (build_ordering
+        // does not dedup, and the base case fans out per eid).
+        let push_directed = |raw: &mut Vec<(u32, u32, u32, u32)>, s, lid, o, e| {
+            raw.push((s, lid, o, e));
+            if mirror_directed {
+                raw.push((o, lid, s, e));
+            }
+        };
 
         for eid in graph.edges_directed() {
             let src = graph.src(eid);
@@ -45,12 +77,12 @@ impl TripleIndex {
             if label_strings.is_empty() {
                 // Edge with no label — use a special "no label" ID
                 let lid = Self::get_or_insert_label(&mut label_to_id, &mut id_to_label, "");
-                raw_triples.push((src, lid, tgt, eid));
+                push_directed(&mut raw_triples, src, lid, tgt, eid);
             } else {
                 // One triple per label
                 for ls in label_strings {
                     let lid = Self::get_or_insert_label(&mut label_to_id, &mut id_to_label, ls);
-                    raw_triples.push((src, lid, tgt, eid));
+                    push_directed(&mut raw_triples, src, lid, tgt, eid);
                 }
             }
         }

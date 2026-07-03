@@ -1,9 +1,13 @@
 # Any-direction edges in LTJ — design note
 
-Status: **proposed, not implemented.** The issue-#57 OOM is already resolved
-without this (see *Relationship to issue #57* below); this note scopes the
-*performance* follow-up so it lands as its own reviewable, benchmarked PR
-rather than riding along with the OOM fix.
+Status: **IMPLEMENTED** (Approach B — stored mirrored index), after the team
+adopted ISO bag semantics (issue #71). The unblocking prerequisite — the LTJ
+base-case per-eid fan-out — landed first; the mirrored index then produced
+ISO-correct multiplicity and verifies against a hand-computed ground-truth
+oracle (`tests/anydir_iso_test.rs`). Behind `GQLITE_DISABLE_ANYDIR_LTJ`.
+This note is retained as the rationale record; the *Multiplicity* section
+below documents the earlier reverted prototype and why the fan-out fix was
+the missing piece.
 
 ## Problem
 
@@ -131,13 +135,25 @@ vertex joins"). Making the mirrored path match the fallback would require
 forcing per-eid fan-out for any-direction triples; making *everything*
 match ISO would require aligning the fallback too.
 
-**Consequence for sequencing:** enabling any-direction LTJ is blocked on a
-prior decision about multiplicity semantics, applied uniformly across the
-fallback, the directed LTJ (which has the same collapse), and this path.
-That is a correctness project in its own right — it must not ride in on a
-performance PR. The reverted prototype lives in git history; resurrect it
-only alongside a settled bag-semantics spec and a differential oracle that
-is *ISO ground truth*, not the current fallback.
+**Resolution (issue #71).** The team adopted ISO bag semantics. Two steps
+landed the feature:
+
+1. **LTJ base-case fan-out** (`algorithm.rs`): the base case now emits one
+   row per physical eid at the bound `(s, p, o)` unconditionally — not only
+   when an edge variable is bound. This fixes the collapse for directed
+   parallel edges too (a shipped inconsistency) and is the exact mechanism
+   that makes the mirror correct: reciprocal `a→b`/`b→a` become two
+   distinct eids at the fact `(a, L, b)` and fan out to two rows. Oracle:
+   `tests/iso_multiplicity_test.rs`.
+2. **Mirrored index** (`from_graph_anydir` + `try_ltj_anydir`): pure
+   any-direction chains/joins run against the mirror. Oracle:
+   `tests/anydir_iso_test.rs` (hand-computed ISO counts, not the fallback).
+
+Still open (documented, not blocking): the **scan/hash-join fallback** —
+used for mixed directed+any-direction patterns and for any-direction
+*repetitions* (the seeded traversal) — retains its own multiplicity and is
+not yet aligned to ISO. Mixed-direction LTJ (per-triple index routing) is
+also deferred.
 
 ## Acceptance criteria
 
