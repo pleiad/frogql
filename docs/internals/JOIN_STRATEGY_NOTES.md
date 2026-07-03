@@ -454,4 +454,27 @@ engine.rs          Integration: run_join() and run_concat_pattern() call
 
 5. **Handle any-direction edges (`-[e]-`)**: currently the only edge form
    that still falls back to hash-join. Could be modelled as a union of
-   forward/reverse triples at extraction time.
+   forward/reverse triples at extraction time. **Blocked on a semantics
+   decision, not just engineering** — see `anydir-ltj-plan.md`. A prototype
+   (mirrored index, one LTJ pass) worked and was fast, but a differential
+   suite showed the any-direction *bag multiplicity* over a multigraph is
+   unsettled: the mirrored LTJ, the hash-join fallback, and ISO ground
+   truth returned 9 / 14 / 16 rows for the same single-hop query. The LTJ
+   trie collapses reciprocal / parallel edges that share `(s, L, o)` when
+   no edge variable is bound (intrinsic to the vertex-join base case). Ship
+   only alongside a uniform bag-semantics fix across the fallback, the
+   directed LTJ, and this path.
+
+### Caveat: the Ring's bidirectionality ≠ undirected edges
+
+A recurring slip when reading the Ring / CLTJ papers: the ring lets you
+traverse the *attributes* `s/p/o` in either order (which you bind first in
+the variable elimination), so one compact structure serves all 6 orderings.
+That is **access-order** bidirectionality — it is *not* the same as an
+edge's semantic orientation. The stored triples stay directed: a directed
+edge `a→b` is the single fact `(a, L, b)`, reachable via OSP by binding `b`
+first, but the reverse *fact* `(b, L, a)` is never manufactured by re-
+ordering. Only genuinely undirected edges are stored in both senses
+(`triple_index.rs`, `push_both`). So the ring buys cheap reverse *access*,
+never any-direction *matching*; conflating the two is how `-[e]-` looks
+"already supported" when it is not.

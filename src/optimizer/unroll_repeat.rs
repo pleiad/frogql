@@ -30,6 +30,11 @@
 //!     a Node descriptor and is out of scope for the unroll pass.
 //!   - `ub` must be bounded (`Some(_)`); unbounded `{n,}` is a transitive
 //!     closure and stays on the existing fallback.
+//!   - The inner edge must be LTJ-decomposable (directed or
+//!     `~`-undirected). Any-direction `-[]-` is rejected: LTJ cannot
+//!     take the unrolled arms, so unrolling would only trade the seeded
+//!     repetition traversal for a global hash-join enumeration (the
+//!     issue-#57 OOM shape).
 //!
 //! Disable with `GQLITE_DISABLE_REPEAT_UNROLL=1`.
 
@@ -174,12 +179,22 @@ fn can_unroll(p: &PathPattern, lb: usize, ub: usize) -> bool {
     // `Node-Edge-Node` repeats) the join boundary insertion would be
     // ambiguous and could produce illegal `Node Node` adjacencies; bail
     // out and let the runtime keep its hash-join repetition.
+    //
+    // Any-direction `-[]-` is excluded: the unrolled chain is NOT
+    // LTJ-decomposable (`decompose_flat_chain` rejects
+    // `EdgeAnyDirection` — the either-orientation disjunction has no
+    // triple form), so every arm of the Union falls back to the
+    // pairwise hash-join, which materializes the inner hops globally
+    // before any boundary filter applies. On a connected graph that is
+    // the issue-#57 OOM. Keeping the `Repeat` instead routes the
+    // pattern to the seeded adjacency traversal
+    // (`try_concat_with_edge_repetition`), which expands level-by-level
+    // from the already-filtered left rows. Unrolling any-direction
+    // becomes profitable only if LTJ learns a merged forward+reverse
+    // iterator for these edges.
     matches!(
         p,
-        PathPattern::EdgeRight(_)
-            | PathPattern::EdgeLeft(_)
-            | PathPattern::EdgeUndirected(_)
-            | PathPattern::EdgeAnyDirection(_)
+        PathPattern::EdgeRight(_) | PathPattern::EdgeLeft(_) | PathPattern::EdgeUndirected(_)
     )
 }
 
@@ -302,6 +317,20 @@ mod tests {
                 value_filters: vec![],
                 value_preds: vec![],
             }))),
+            lb: 1,
+            ub: Some(2),
+        };
+        assert!(matches!(optimize(p), PathPattern::Repeat { .. }));
+    }
+
+    #[test]
+    fn keeps_repeat_when_inner_any_direction() {
+        // `-[]-{1,2}`: the unrolled arms would contain EdgeAnyDirection,
+        // which the LTJ decomposer rejects — every arm would fall back to
+        // the global hash-join (issue #57). The Repeat must survive so the
+        // runtime can use the seeded adjacency traversal instead.
+        let p = PathPattern::Repeat {
+            pattern: Box::new(PathPattern::EdgeAnyDirection(None)),
             lb: 1,
             ub: Some(2),
         };
