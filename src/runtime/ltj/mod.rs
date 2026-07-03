@@ -1,4 +1,5 @@
 pub mod algorithm;
+pub mod compact;
 pub mod iterator;
 pub mod pattern_extract;
 pub mod triple_index;
