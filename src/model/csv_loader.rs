@@ -1080,8 +1080,8 @@ mod ldbc_tests {
         let place = g
             .node_id_by_name("Place:1")
             .expect("place 1 should be loaded");
-        match g.node_props(place).get("id") {
-            Some(Value::Int(v)) => assert_eq!(*v, 1),
+        match g.node_prop(place, "id") {
+            Some(Value::Int(v)) => assert_eq!(v, 1),
             other => panic!("expected id=Int(1) on place 1, got {:?}", other),
         }
 

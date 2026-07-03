@@ -19,6 +19,10 @@ pub trait GraphAccess {
     fn node_props(&self, id: Id) -> Props;
     /// Properties for an edge by internal ID.
     fn edge_props(&self, id: Id) -> Props;
+    /// Single property lookup for a node by internal ID and key name.
+    fn node_prop(&self, id: Id, prop: &str) -> Option<Value>;
+    /// Single property lookup for an edge by internal ID and key name.
+    fn edge_prop(&self, id: Id, prop: &str) -> Option<Value>;
     /// Source node ID of a directed edge.
     fn src(&self, edge_id: Id) -> Id;
     /// Target node ID of a directed edge.

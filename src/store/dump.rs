@@ -167,12 +167,12 @@ fn pick_dump_id_prop<G: GraphAccess>(g: &G) -> String {
         .collect();
     let prop_used = |name: &str| -> bool {
         for nid in g.nodes() {
-            if g.node_props(nid).contains_key(name) {
+            if g.node_prop(nid, name).is_some() {
                 return true;
             }
         }
         for eid in g.edges_directed().into_iter().chain(g.edges_undirected()) {
-            if g.edge_props(eid).contains_key(name) {
+            if g.edge_prop(eid, name).is_some() {
                 return true;
             }
         }

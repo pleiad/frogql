@@ -25,7 +25,7 @@ use super::ltj::pattern_extract;
 use super::ltj::triple_index::TripleIndex;
 use super::path_select::apply_path_prefix;
 use super::path_select::path_satisfies_mode;
-use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
+use super::result::{ExprResult, FactorNode, IntermediateResult, QueryResult, ResultRow};
 use crate::syntax::path_prefix::{PathMode, PathPrefix, PathSearch, UnboundedSupport};
 
 /// Finite evaluation policy for unbounded repetition inside `Selected`.
@@ -265,13 +265,31 @@ impl Ord for ShortestEntry {
     }
 }
 
-/// Apply value predicates pushed down by the optimizer to raw graph properties.
+/// Apply value predicates pushed down by the optimizer to node properties.
 /// Missing key → predicate is null → reject.
-fn check_value_preds(preds: &[(String, BinOp, Value)], props: &Props) -> bool {
+fn check_node_value_preds<G: GraphAccess + ?Sized>(
+    graph: &G,
+    id: Id,
+    preds: &[(String, BinOp, Value)],
+) -> bool {
     preds
         .iter()
-        .all(|(attr, op, expected)| match props.get(attr) {
-            Some(actual) => cmp_values(actual, *op, expected),
+        .all(|(attr, op, expected)| match graph.node_prop(id, attr) {
+            Some(ref actual) => cmp_values(actual, *op, expected),
+            None => false,
+        })
+}
+
+/// Apply value predicates pushed down by the optimizer to edge properties.
+fn check_edge_value_preds<G: GraphAccess + ?Sized>(
+    graph: &G,
+    id: Id,
+    preds: &[(String, BinOp, Value)],
+) -> bool {
+    preds
+        .iter()
+        .all(|(attr, op, expected)| match graph.edge_prop(id, attr) {
+            Some(ref actual) => cmp_values(actual, *op, expected),
             None => false,
         })
 }
@@ -334,6 +352,9 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// comprehension element (a `Value`, which `Assignment` cannot hold)
     /// resolves correctly. Pushed/popped per element during evaluation.
     comprehension_scope: RefCell<Vec<(String, Value)>>,
+    /// Active query Filters at the parent level, used to extract allReduce
+    /// predicates for early path pruning during repetition traversals.
+    active_filters: RefCell<Vec<Expr>>,
     /// Outer bindings made visible inside a *parameter-correlated* subquery
     /// body — outer variables referenced in the body's WHERE/RETURN but not
     /// bound by the body's own pattern. `Expr::Var` / `Expr::AttrLookup`
@@ -400,6 +421,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
             comprehension_scope: RefCell::new(Vec::new()),
+            active_filters: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
         }
     }
@@ -416,6 +438,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
             comprehension_scope: RefCell::new(Vec::new()),
+            active_filters: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
         }
     }
@@ -459,7 +482,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // A raw pattern carries no selected-prefix context, so unbounded repetition
         // (if any) has no license here.
         self.unbounded_policy.set(UnboundedPolicy::Forbidden);
-        self.run_path_pattern(pattern, 0)
+        let mut ir = self.run_path_pattern(pattern, 0);
+        ir.ensure_flat();
+        ir
     }
 
     /// Run with a result limit (0 = unlimited). Stops early once limit is reached.
@@ -467,7 +492,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         self.exists_cache.borrow_mut().clear();
         self.value_subquery_cache.borrow_mut().clear();
         self.unbounded_policy.set(UnboundedPolicy::Forbidden);
-        self.run_path_pattern(pattern, limit)
+        let mut ir = self.run_path_pattern(pattern, limit);
+        ir.ensure_flat();
+        ir
     }
 
     /// Run a full Query (MATCH ... WHERE ... RETURN [LIMIT N]).
@@ -536,6 +563,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 }
                 let input_limit = if has_order { 0 } else { limit };
                 let mut ir = self.run_match_chain(query, input_limit);
+                ir.ensure_flat();
                 if let Some(specs) = &query.order_by {
                     self.route_pre_sort(&mut ir.rows, specs, &query.matches, limit);
                     if limit > 0 && ir.rows.len() > limit {
@@ -557,7 +585,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
 
         let (mut ir, used_real) = match real_rows {
             Some(rows) => (IntermediateResult::new(rows), true),
-            None => (self.run_match_chain(query, input_limit), false),
+            None => {
+                let mut ir = self.run_match_chain(query, input_limit);
+                ir.ensure_flat();
+                (ir, false)
+            }
         };
 
         let pre_projection_sort = !needs_grouping && !has_column_sort_key && !used_real;
@@ -856,7 +888,10 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 Some(IntermediateResult::new(rows))
             }
             PathPattern::Filter(inner, expr) => {
-                let ir = self.pinned_run(inner, index, var, id)?;
+                self.active_filters.borrow_mut().push(expr.clone());
+                let ir = self.pinned_run(inner, index, var, id);
+                self.active_filters.borrow_mut().pop();
+                let ir = ir?;
                 let filtered: Vec<ResultRow> = ir
                     .rows
                     .into_iter()
@@ -892,7 +927,10 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 Some(IntermediateResult::new(rows))
             }
             PathPattern::Filter(inner, expr) => {
-                let ir = self.pinned_run_multi(inner, index, pins, 0)?;
+                self.active_filters.borrow_mut().push(expr.clone());
+                let ir = self.pinned_run_multi(inner, index, pins, 0);
+                self.active_filters.borrow_mut().pop();
+                let ir = ir?;
                 let filtered: Vec<ResultRow> = ir
                     .rows
                     .into_iter()
@@ -1021,24 +1059,27 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             acc = match m {
                 MatchStatement::Simple { .. } => {
                     let ir_new = self.run_path_pattern(pattern, 0);
-                    natural_join(&acc, &ir_new, 0)
+                    natural_join(acc, ir_new, 0)
                 }
                 MatchStatement::Optional { .. } => {
                     let pushed = if !pattern.has_selected() {
-                        self.optional_via_bind_pushdown(&acc, pattern, &bound_vars, &new_vars)
+                        self.optional_via_bind_pushdown(&mut acc, pattern, &bound_vars, &new_vars)
                     } else {
                         None
                     };
                     pushed.unwrap_or_else(|| {
                         let ir_new = self.run_path_pattern(pattern, 0);
-                        left_outer_join(&acc, &ir_new, &bound_vars, &new_vars)
+                        left_outer_join(acc, ir_new, &bound_vars, &new_vars)
                     })
                 }
             };
             bound_vars.extend(new_vars);
-            if limit > 0 && acc.rows.len() >= limit {
-                acc.rows.truncate(limit);
-                break;
+            if limit > 0 {
+                acc.ensure_flat();
+                if acc.rows.len() >= limit {
+                    acc.rows.truncate(limit);
+                    break;
+                }
             }
         }
 
@@ -1075,11 +1116,12 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     ///     any-direction edges).
     fn optional_via_bind_pushdown(
         &self,
-        acc: &IntermediateResult,
+        acc: &mut IntermediateResult,
         pattern: &PathPattern,
         bound_vars: &HashSet<String>,
         new_vars: &HashSet<String>,
     ) -> Option<IntermediateResult> {
+        acc.ensure_flat();
         if std::env::var("GQLITE_DISABLE_OPTIONAL_PUSHDOWN").is_ok() {
             return None;
         }
@@ -1409,26 +1451,29 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             PathPattern::Union(p1, p2) => {
                 let ir1 = self.run_path_pattern(p1, limit);
                 let remaining = if limit > 0 {
-                    limit.saturating_sub(ir1.rows.len())
+                    let mut ir1_flat = ir1.clone();
+                    ir1_flat.ensure_flat();
+                    limit.saturating_sub(ir1_flat.rows.len())
                 } else {
                     0
                 };
                 let ir2 = self.run_path_pattern(p2, remaining);
-                let dom = p.freevars();
-                let mut rows = Vec::new();
-                for mut r in ir1.rows.into_iter().chain(ir2.rows) {
-                    r.assignment.fill_nones(&dom);
-                    rows.push(r);
-                    if self.limit_reached(&rows, limit) {
-                        break;
+                let mut combined = ir1.union(ir2);
+                if limit > 0 {
+                    combined.ensure_flat();
+                    if combined.rows.len() > limit {
+                        combined.rows.truncate(limit);
                     }
                 }
-                IntermediateResult::new(rows)
+                combined
             }
             PathPattern::Filter(inner, expr) => {
                 // For filters, we can't know how many pre-filter results we need,
                 // so pass 0 (unlimited) to inner and filter+truncate after.
-                let ir = self.run_path_pattern(inner, 0);
+                self.active_filters.borrow_mut().push(expr.clone());
+                let mut ir = self.run_path_pattern(inner, 0);
+                ir.ensure_flat();
+                self.active_filters.borrow_mut().pop();
                 let mut rows = Vec::new();
                 for r in ir.rows {
                     if self.run_expr(&r.assignment, expr).get_bool() {
@@ -1483,9 +1528,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 let prev = self.unbounded_policy.get();
                 self.unbounded_policy
                     .set(unbounded_policy_for(Some(*prefix)));
-                let ir = self.run_path_pattern(pattern, 0);
+                let mut ir = self.run_path_pattern(pattern, 0);
+                ir.ensure_flat();
                 self.unbounded_policy.set(prev);
                 let mut selected = apply_path_prefix(ir, *prefix);
+                selected.ensure_flat();
                 if limit > 0 && selected.rows.len() > limit {
                     selected.rows.truncate(limit);
                 }
@@ -1497,6 +1544,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 // contains a top-level Join, so `paths` has one entry) to
                 // the path variable as a materialized `PathValue::Path`.
                 let mut ir = self.run_path_pattern(pattern, limit);
+                ir.ensure_flat();
                 for row in &mut ir.rows {
                     let elems = row.path().0.clone();
                     row.assignment.extend(var.clone(), PathValue::Path(elems));
@@ -1652,59 +1700,10 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             return result;
         }
 
-        // Fallback to pairwise hash-join
         let ir1 = self.run_path_pattern(q1, 0);
         let ir2 = self.run_path_pattern(q2, 0);
 
-        let shared_vars: Vec<String> = {
-            let fv1 = q1.freevars();
-            let fv2 = q2.freevars();
-            fv1.intersection(&fv2).cloned().collect()
-        };
-
-        // If there are shared variables, build a hash index on ir2 for efficiency
-        if let Some(join_var) = shared_vars.first() {
-            let mut ir2_by_val: HashMap<&PathValue, Vec<usize>> = HashMap::new();
-            for (i, r2) in ir2.rows.iter().enumerate() {
-                if let Some(pv) = r2.assignment.get(join_var) {
-                    ir2_by_val.entry(pv).or_default().push(i);
-                }
-            }
-
-            let mut rows = Vec::new();
-            'outer: for r1 in &ir1.rows {
-                if let Some(pv) = r1.assignment.get(join_var) {
-                    if let Some(indices) = ir2_by_val.get(pv) {
-                        for &idx in indices {
-                            let r2 = &ir2.rows[idx];
-                            if r1.assignment.can_unify(&r2.assignment) {
-                                rows.push(ResultRow::join(
-                                    r1,
-                                    r2,
-                                    r1.assignment.unify(&r2.assignment),
-                                ));
-                                if self.limit_reached(&rows, limit) {
-                                    break 'outer;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            return IntermediateResult::new(rows);
-        }
-
-        // No shared variables: full cross-product
-        let mut rows = Vec::new();
-        'outer2: for r1 in &ir1.rows {
-            for r2 in &ir2.rows {
-                rows.push(ResultRow::join(r1, r2, r1.assignment.unify(&r2.assignment)));
-                if self.limit_reached(&rows, limit) {
-                    break 'outer2;
-                }
-            }
-        }
-        IntermediateResult::new(rows)
+        natural_join(ir1, ir2, limit)
     }
 
     // --- Optimized concatenation: uses adjacency when right side is edge/node ---
@@ -1722,20 +1721,24 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             return result;
         }
 
-        let ir1 = self.run_path_pattern(p1, 0);
+        let mut ir1 = self.run_path_pattern(p1, 0);
 
         // Optimization: if p2 is a simple edge or node pattern, use adjacency-driven execution
         match p2 {
             PathPattern::EdgeRight(desc) => {
+                ir1.ensure_flat();
                 return self.concat_with_directed_edge(&ir1, desc.as_ref(), true, limit);
             }
             PathPattern::EdgeLeft(desc) => {
+                ir1.ensure_flat();
                 return self.concat_with_directed_edge(&ir1, desc.as_ref(), false, limit);
             }
             PathPattern::EdgeUndirected(desc) => {
+                ir1.ensure_flat();
                 return self.concat_with_undirected_edge(&ir1, desc.as_ref(), limit);
             }
             PathPattern::EdgeAnyDirection(desc) => {
+                ir1.ensure_flat();
                 let right = self.concat_with_directed_edge(&ir1, desc.as_ref(), true, limit);
                 if self.limit_reached(&right.rows, limit) {
                     return right;
@@ -1746,7 +1749,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     0
                 };
                 let left = self.concat_with_directed_edge(&ir1, desc.as_ref(), false, remaining);
-                let combined = right.union(left);
+                let mut combined = right.union(left);
+                combined.ensure_flat();
                 if self.limit_reached(&combined.rows, limit) {
                     return combined;
                 }
@@ -1759,12 +1763,22 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 return combined.union(und);
             }
             PathPattern::Node(desc) => {
+                ir1.ensure_flat();
                 return self.concat_with_node(&ir1, desc.as_ref(), limit);
             }
             // For Filter wrapping an edge pattern, we can still optimize the edge part
             PathPattern::Filter(inner, expr) => {
+                ir1.ensure_flat();
                 if let Some(optimized) =
                     self.try_concat_with_filtered_edge(&ir1, inner, expr, limit)
+                {
+                    return optimized;
+                }
+            }
+            PathPattern::Repeat { pattern, lb, ub } => {
+                ir1.ensure_flat();
+                if let Some(optimized) =
+                    self.try_concat_with_edge_repetition(&ir1, pattern, *lb, *ub, limit)
                 {
                     return optimized;
                 }
@@ -1774,7 +1788,18 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
 
         // Fallback: cross-product for complex right-side patterns
         let ir2 = self.run_path_pattern(p2, 0);
-        Self::hash_join(&ir1, &ir2, limit)
+        let factorized = FactorNode::PathConcat(vec![
+            ir1.into_root(),
+            ir2.into_root(),
+        ]);
+        let mut combined = IntermediateResult::from_node(factorized);
+        if limit > 0 {
+            combined.ensure_flat();
+            if combined.rows.len() > limit {
+                combined.rows.truncate(limit);
+            }
+        }
+        combined
     }
 
     /// Adjacency-driven concat: left results → outgoing/incoming edges → target nodes.
@@ -1949,10 +1974,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
 
     fn apply_filter(
         &self,
-        ir: IntermediateResult,
+        mut ir: IntermediateResult,
         expr: &Expr,
         limit: usize,
     ) -> IntermediateResult {
+        ir.ensure_flat();
         let mut rows = Vec::new();
         for r in ir.rows {
             if self.run_expr(&r.assignment, expr).get_bool() {
@@ -1965,40 +1991,269 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         IntermediateResult::new(rows)
     }
 
-    /// Hash-join on the concatenation key (last node of ir1 = first node of ir2).
-    /// O(n + m) expected instead of O(n × m) cross-product.
-    fn hash_join(
+    fn try_concat_with_edge_repetition(
+        &self,
         ir1: &IntermediateResult,
-        ir2: &IntermediateResult,
+        edge_pat: &PathPattern,
+        lb: usize,
+        ub: Option<usize>,
         limit: usize,
-    ) -> IntermediateResult {
-        // Build hash map: first_node_id → Vec<index into ir2.rows>
-        let mut ir2_by_first: HashMap<Id, Vec<usize>> = HashMap::new();
-        for (i, r2) in ir2.rows.iter().enumerate() {
-            if let Some(first) = r2.path().first_node_id() {
-                ir2_by_first.entry(first).or_default().push(i);
+    ) -> Option<IntermediateResult> {
+        let ub_val = ub?;
+        if !matches!(
+            edge_pat,
+            PathPattern::EdgeRight(_)
+                | PathPattern::EdgeLeft(_)
+                | PathPattern::EdgeUndirected(_)
+                | PathPattern::EdgeAnyDirection(_)
+        ) {
+            return None;
+        }
+
+        let mut anon_edge_pat = edge_pat.clone();
+        let var_name = match &mut anon_edge_pat {
+            PathPattern::EdgeRight(Some(d))
+            | PathPattern::EdgeLeft(Some(d))
+            | PathPattern::EdgeUndirected(Some(d))
+            | PathPattern::EdgeAnyDirection(Some(d)) => d.var.take(),
+            _ => None,
+        };
+
+        let mut active_reduces = Vec::new();
+        if let Some(ref name) = var_name {
+            for filter_expr in self.active_filters.borrow().iter() {
+                active_reduces.extend(find_all_reduce_for_var(filter_expr, name));
             }
         }
 
-        let mut rows = Vec::new();
-        'outer: for r1 in &ir1.rows {
-            let Some(last) = r1.path().last_node_id() else {
-                continue;
-            };
-            let Some(matches) = ir2_by_first.get(&last) else {
-                continue;
-            };
-            for &idx in matches {
-                let r2 = &ir2.rows[idx];
-                if r1.assignment.can_unify(&r2.assignment) {
-                    rows.push(r1.extend_path(r2.path(), r1.assignment.unify(&r2.assignment)));
-                    if limit > 0 && rows.len() >= limit {
-                        break 'outer;
+        let freevars = edge_pat.freevars();
+        let mut accumulated_rows = Vec::new();
+
+        if lb == 0 {
+            for r in &ir1.rows {
+                let mut row = r.clone();
+                row.assignment.fill_empty_list(&freevars);
+                accumulated_rows.push(row);
+                if limit > 0 && accumulated_rows.len() >= limit {
+                    accumulated_rows.truncate(limit);
+                    return Some(IntermediateResult::new(accumulated_rows));
+                }
+            }
+        }
+
+        let mut acc_cache: HashMap<(usize, Path), Value> = HashMap::new();
+
+        let mut level_ir = self.run_concat_pattern_step(ir1, &anon_edge_pat, 0);
+        if let Some(ref name) = var_name {
+            for row in &mut level_ir.rows {
+                let edge_val = Self::get_last_edge(row.path());
+                row.assignment.extend(name.clone(), PathValue::Group(vec![edge_val]));
+            }
+            if !active_reduces.is_empty() {
+                let mut cache_inserts = Vec::new();
+                level_ir.rows.retain(|row| {
+                    let mut ok = true;
+                    let edge_val = Self::get_last_edge(row.path());
+                    for (idx, expr) in active_reduces.iter().enumerate() {
+                        if let Some((next_acc, match_ok)) = self.eval_all_reduce_incremental(
+                            &row.assignment,
+                            expr,
+                            &edge_val,
+                            None,
+                        ) {
+                            if match_ok {
+                                cache_inserts.push(((idx, row.path().clone()), next_acc));
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    ok
+                });
+                for (key, val) in cache_inserts {
+                    acc_cache.insert(key, val);
+                }
+            }
+        }
+        if lb <= 1 {
+            for r in &level_ir.rows {
+                accumulated_rows.push(r.clone());
+                if limit > 0 && accumulated_rows.len() >= limit {
+                    accumulated_rows.truncate(limit);
+                    return Some(IntermediateResult::new(accumulated_rows));
+                }
+            }
+        }
+
+        for k in 2..=ub_val {
+            let next_ir = self.run_concat_pattern_step(&level_ir, &anon_edge_pat, 0);
+            level_ir = next_ir;
+            if let Some(ref name) = var_name {
+                for row in &mut level_ir.rows {
+                    let edge_val = Self::get_last_edge(row.path());
+                    if let Some(PathValue::Group(prev_group)) = row.assignment.get(name) {
+                        let mut new_group = prev_group.clone();
+                        new_group.push(edge_val);
+                        row.assignment.extend(name.clone(), PathValue::Group(new_group));
+                    }
+                }
+                if !active_reduces.is_empty() {
+                    let mut cache_inserts = Vec::new();
+                    level_ir.rows.retain(|row| {
+                        let mut ok = true;
+                        let path_len = row.path().0.len();
+                        let parent_path = Path(row.path().0[..path_len - 2].to_vec());
+                        let edge_val = Self::get_last_edge(row.path());
+                        for (idx, expr) in active_reduces.iter().enumerate() {
+                            let prev_acc = acc_cache.get(&(idx, parent_path.clone())).cloned();
+                            if let Some((next_acc, match_ok)) = self.eval_all_reduce_incremental(
+                                &row.assignment,
+                                expr,
+                                &edge_val,
+                                prev_acc,
+                            ) {
+                                if match_ok {
+                                    cache_inserts.push(((idx, row.path().clone()), next_acc));
+                                } else {
+                                    ok = false;
+                                    break;
+                                }
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        ok
+                    });
+                    for (key, val) in cache_inserts {
+                        acc_cache.insert(key, val);
+                    }
+                }
+            }
+            if k >= lb {
+                for r in &level_ir.rows {
+                    accumulated_rows.push(r.clone());
+                    if limit > 0 && accumulated_rows.len() >= limit {
+                        accumulated_rows.truncate(limit);
+                        return Some(IntermediateResult::new(accumulated_rows));
                     }
                 }
             }
         }
-        IntermediateResult::new(rows)
+
+        Some(IntermediateResult::new(accumulated_rows))
+    }
+
+    fn eval_all_reduce_incremental(
+        &self,
+        mu: &Assignment,
+        expr: &Expr,
+        new_edge: &PathValue,
+        prev_acc: Option<Value>,
+    ) -> Option<(Value, bool)> {
+        let Expr::AllReduce {
+            acc_name,
+            initial,
+            step_var,
+            list_expr: _,
+            reduction,
+            predicate,
+        } = expr else {
+            return None;
+        };
+
+        // 1. Get previous/initial accumulator value
+        let acc_value = match prev_acc {
+            Some(v) => v,
+            None => match self.run_expr(mu, initial) {
+                ExprResult::Success(v) => v,
+                ExprResult::Failure(_) => return None,
+            },
+        };
+
+        let step_value = path_value_to_value(new_edge);
+
+        // 2. Compute next accumulator value: acc_value = reduction(acc_value, step_value)
+        self.comprehension_scope
+            .borrow_mut()
+            .push((acc_name.clone(), acc_value));
+        self.comprehension_scope
+            .borrow_mut()
+            .push((step_var.clone(), step_value.clone()));
+        let next_acc_res = self.run_expr(mu, reduction);
+        self.comprehension_scope.borrow_mut().pop();
+        self.comprehension_scope.borrow_mut().pop();
+
+        let next_acc = match next_acc_res {
+            ExprResult::Success(v) => v,
+            ExprResult::Failure(_) => return None,
+        };
+
+        // 3. Evaluate predicate on the next accumulator: predicate(next_acc, step_value)
+        self.comprehension_scope
+            .borrow_mut()
+            .push((acc_name.clone(), next_acc.clone()));
+        self.comprehension_scope
+            .borrow_mut()
+            .push((step_var.clone(), step_value));
+        let pred_res = self.run_expr(mu, predicate);
+        self.comprehension_scope.borrow_mut().pop();
+        self.comprehension_scope.borrow_mut().pop();
+
+        let ok = match pred_res {
+            ExprResult::Success(Value::Bool(b)) => b,
+            _ => false,
+        };
+
+        Some((next_acc, ok))
+    }
+
+    fn run_concat_pattern_step(
+        &self,
+        ir: &IntermediateResult,
+        anon_edge_pat: &PathPattern,
+        limit: usize,
+    ) -> IntermediateResult {
+        let mut res = match anon_edge_pat {
+            PathPattern::EdgeRight(desc) => {
+                self.concat_with_directed_edge(ir, desc.as_ref(), true, limit)
+            }
+            PathPattern::EdgeLeft(desc) => {
+                self.concat_with_directed_edge(ir, desc.as_ref(), false, limit)
+            }
+            PathPattern::EdgeUndirected(desc) => {
+                self.concat_with_undirected_edge(ir, desc.as_ref(), limit)
+            }
+            PathPattern::EdgeAnyDirection(desc) => {
+                let right = self.concat_with_directed_edge(ir, desc.as_ref(), true, limit);
+                if limit > 0 && right.rows.len() >= limit {
+                    return right;
+                }
+                let remaining = if limit > 0 { limit - right.rows.len() } else { 0 };
+                let left = self.concat_with_directed_edge(ir, desc.as_ref(), false, remaining);
+                let mut combined = right.union(left);
+                combined.ensure_flat();
+                if limit > 0 && combined.rows.len() >= limit {
+                    return combined;
+                }
+                let remaining = if limit > 0 { limit - combined.rows.len() } else { 0 };
+                let und = self.concat_with_undirected_edge(ir, desc.as_ref(), remaining);
+                let mut final_res = combined.union(und);
+                final_res.ensure_flat();
+                final_res
+            }
+            _ => unreachable!(),
+        };
+        res.ensure_flat();
+        res
+    }
+
+    fn get_last_edge(path: &Path) -> PathValue {
+        path.0[path.0.len() - 2].clone()
     }
 
     fn run_repetition_pattern(&self, p: &PathPattern, n: usize) -> IntermediateResult {
@@ -2443,9 +2698,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             return None;
         }
         let (edge_desc, dir) = single_edge_dir(inner)?;
-        if edge_desc.and_then(|d| d.var.as_deref()).is_some() {
-            return None;
-        }
+        let edge_var = edge_desc.and_then(|d| d.var.clone());
         // Validate both endpoints are node patterns; evaluate the full
         // (Filter-wrapped) sub-patterns so endpoint value predicates run.
         node_endpoint(src)?;
@@ -2487,9 +2740,17 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 if !a.assignment.can_unify(&b.assignment) {
                     continue;
                 }
+                let mut mu = a.assignment.unify(&b.assignment);
+                if let Some(ref name) = edge_var {
+                    let group_pv = PathValue::Group(vec![]);
+                    if !mu.can_unify(&Assignment::from_optional(Some(name), group_pv.clone())) {
+                        continue;
+                    }
+                    mu.extend(name.clone(), group_pv);
+                }
                 rows.push(ResultRow::with_paths(
                     vec![Path(vec![PathValue::Node(id)])],
-                    a.assignment.unify(&b.assignment),
+                    mu,
                 ));
             }
         } else if !self_ids.is_empty() {
@@ -2501,7 +2762,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             if dir == BfsEdgeDir::Undirected {
                 for &id in &self_ids {
                     self.emit_undirected_self_cycles(
-                        id, edge_desc, ub, groups, &src_end, &tgt_end, &mut rows,
+                        id, edge_desc, &edge_var, ub, groups, &src_end, &tgt_end, &mut rows,
                     );
                 }
             } else {
@@ -2537,6 +2798,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             self.bfs_from_source(
                 s,
                 edge_desc,
+                &edge_var,
                 dir,
                 reverse,
                 ub,
@@ -2571,6 +2833,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         &self,
         n: Id,
         edge_desc: Option<&Descriptor>,
+        edge_var: &Option<String>,
         ub: Option<usize>,
         groups: bool,
         src_end: &BfsEndpoint,
@@ -2642,7 +2905,20 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             Vec::new()
         };
         for p in paths {
-            rows.push(ResultRow::with_paths(vec![p], mu.clone()));
+            let mut row_mu = mu.clone();
+            if let Some(ref name) = edge_var {
+                let edges: Vec<PathValue> = p.0.iter()
+                    .enumerate()
+                    .filter(|(idx, _)| idx % 2 == 1)
+                    .map(|(_, pv)| pv.clone())
+                    .collect();
+                let group_pv = PathValue::Group(edges);
+                if !row_mu.can_unify(&Assignment::from_optional(Some(name), group_pv.clone())) {
+                    continue;
+                }
+                row_mu.extend(name.clone(), group_pv);
+            }
+            rows.push(ResultRow::with_paths(vec![p], row_mu));
         }
     }
 
@@ -2655,6 +2931,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         &self,
         s: Id,
         edge_desc: Option<&Descriptor>,
+        edge_var: &Option<String>,
         dir: BfsEdgeDir,
         reverse: bool,
         ub: Option<usize>,
@@ -2740,9 +3017,22 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 if !a.assignment.can_unify(&b.assignment) {
                     continue;
                 }
+                let mut mu = a.assignment.unify(&b.assignment);
+                if let Some(ref name) = edge_var {
+                    let edges: Vec<PathValue> = oriented.iter()
+                        .enumerate()
+                        .filter(|(idx, _)| idx % 2 == 1)
+                        .map(|(_, pv)| pv.clone())
+                        .collect();
+                    let group_pv = PathValue::Group(edges);
+                    if !mu.can_unify(&Assignment::from_optional(Some(name), group_pv.clone())) {
+                        continue;
+                    }
+                    mu.extend(name.clone(), group_pv);
+                }
                 rows.push(ResultRow::with_paths(
                     vec![Path(oriented)],
-                    a.assignment.unify(&b.assignment),
+                    mu,
                 ));
                 if limit > 0 && rows.len() >= limit {
                     return;
@@ -2848,14 +3138,19 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         match desc {
             None => true,
             Some(d) => {
-                let raw_props = self.graph.node_props(id);
                 let actual_label = self.graph.node_labels(id);
-                let actual_props = Self::check_record(&raw_props);
-                let actual = DescriptorType::new(actual_label.clone(), actual_props);
-                if !DescriptorType::is_subtype(&actual, &d.dtype) {
+                if !LabelType::is_subtype(&actual_label, &d.dtype.label) {
                     return false;
                 }
-                check_value_preds(&d.value_preds, &raw_props)
+                if !matches!(&d.dtype.props, PropertyType::Open(m) if m.is_empty()) {
+                    let raw_props = self.graph.node_props(id);
+                    let actual_props = Self::check_record(&raw_props);
+                    let actual = DescriptorType::new(actual_label, actual_props);
+                    if !DescriptorType::is_subtype(&actual, &d.dtype) {
+                        return false;
+                    }
+                }
+                check_node_value_preds(self.graph, id, &d.value_preds)
             }
         }
     }
@@ -2864,14 +3159,19 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         match desc {
             None => true,
             Some(d) => {
-                let raw_props = self.graph.edge_props(id);
                 let actual_label = self.graph.edge_labels(id);
-                let actual_props = Self::check_record(&raw_props);
-                let actual = DescriptorType::new(actual_label.clone(), actual_props);
-                if !DescriptorType::is_subtype(&actual, &d.dtype) {
+                if !LabelType::is_subtype(&actual_label, &d.dtype.label) {
                     return false;
                 }
-                check_value_preds(&d.value_preds, &raw_props)
+                if !matches!(&d.dtype.props, PropertyType::Open(m) if m.is_empty()) {
+                    let raw_props = self.graph.edge_props(id);
+                    let actual_props = Self::check_record(&raw_props);
+                    let actual = DescriptorType::new(actual_label, actual_props);
+                    if !DescriptorType::is_subtype(&actual, &d.dtype) {
+                        return false;
+                    }
+                }
+                check_edge_value_preds(self.graph, id, &d.value_preds)
             }
         }
     }
@@ -2947,13 +3247,13 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             Some(id) => id,
             None => return ExprResult::Failure(format!("variable '{var}' has no id")),
         };
-        let props = if pv.is_node() {
-            self.graph.node_props(id)
+        let val_opt = if pv.is_node() {
+            self.graph.node_prop(id, attr)
         } else {
-            self.graph.edge_props(id)
+            self.graph.edge_prop(id, attr)
         };
-        match props.get(attr) {
-            Some(v) => ExprResult::Success(v.clone()),
+        match val_opt {
+            Some(v) => ExprResult::Success(v),
             None => ExprResult::Failure(format!("attribute '{attr}' not found")),
         }
     }
@@ -2963,12 +3263,12 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// attribute is null (3VL), consistent with `AttrLookup` on `mu`.
     fn attr_of_value(&self, v: &Value, attr: &str) -> ExprResult {
         match v {
-            Value::Node(id) => match self.graph.node_props(*id).get(attr) {
-                Some(v) => ExprResult::Success(v.clone()),
+            Value::Node(id) => match self.graph.node_prop(*id, attr) {
+                Some(v) => ExprResult::Success(v),
                 None => ExprResult::Success(Value::Null),
             },
-            Value::Edge(id) => match self.graph.edge_props(*id).get(attr) {
-                Some(v) => ExprResult::Success(v.clone()),
+            Value::Edge(id) => match self.graph.edge_prop(*id, attr) {
+                Some(v) => ExprResult::Success(v),
                 None => ExprResult::Success(Value::Null),
             },
             Value::Record(m) => match m.get(attr) {
@@ -3198,6 +3498,62 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     }
                 }
                 ExprResult::Success(Value::List(out))
+            }
+
+            Expr::AllReduce {
+                acc_name,
+                initial,
+                step_var,
+                list_expr,
+                reduction,
+                predicate,
+            } => {
+                let items = match self.run_expr(mu, list_expr) {
+                    ExprResult::Success(Value::List(items)) => items,
+                    ExprResult::Success(Value::Null) | ExprResult::Failure(_) => {
+                        return ExprResult::Success(Value::Bool(true));
+                    }
+                    ExprResult::Success(other) => {
+                        return ExprResult::Failure(format!(
+                            "allReduce list expression is not a list: {other}"
+                        ));
+                    }
+                };
+                let mut acc_value = match self.run_expr(mu, initial) {
+                    ExprResult::Success(v) => v,
+                    ExprResult::Failure(err) => return ExprResult::Failure(err),
+                };
+                for item in items {
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((acc_name.clone(), acc_value.clone()));
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((step_var.clone(), item.clone()));
+                    let next_acc = self.run_expr(mu, reduction);
+                    self.comprehension_scope.borrow_mut().pop();
+                    self.comprehension_scope.borrow_mut().pop();
+                    acc_value = match next_acc {
+                        ExprResult::Success(v) => v,
+                        ExprResult::Failure(err) => return ExprResult::Failure(err),
+                    };
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((acc_name.clone(), acc_value.clone()));
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((step_var.clone(), item.clone()));
+                    let pred_res = self.run_expr(mu, predicate);
+                    self.comprehension_scope.borrow_mut().pop();
+                    self.comprehension_scope.borrow_mut().pop();
+                    match pred_res {
+                        ExprResult::Success(Value::Bool(true)) => {}
+                        _ => {
+                            return ExprResult::Success(Value::Bool(false));
+                        }
+                    }
+                }
+                ExprResult::Success(Value::Bool(true))
             }
 
             Expr::Type(_) => ExprResult::Failure("bare type in expression".into()),
@@ -3945,101 +4301,102 @@ fn param_correlation(body: &Query, outer_keys: &HashSet<String>) -> Vec<String> 
 /// one match is OPTIONAL — all-Simple queries still go through the LTJ /
 /// hash-join path inside `run_path_pattern`.
 fn natural_join(
-    left: &IntermediateResult,
-    right: &IntermediateResult,
+    left: IntermediateResult,
+    right: IntermediateResult,
     limit: usize,
 ) -> IntermediateResult {
     let shared: Vec<String> = {
-        let lk: HashSet<String> = left
-            .rows
-            .first()
-            .map(|r| r.assignment.keys())
-            .unwrap_or_default();
-        let rk: HashSet<String> = right
-            .rows
-            .first()
-            .map(|r| r.assignment.keys())
-            .unwrap_or_default();
+        let lk = left.freevars();
+        let rk = right.freevars();
         lk.intersection(&rk).cloned().collect()
     };
 
     let join_var = shared.first();
-    let mut rows = Vec::new();
 
     if let Some(jv) = join_var {
-        let mut by_val: HashMap<&PathValue, Vec<usize>> = HashMap::new();
-        for (i, r) in right.rows.iter().enumerate() {
-            if let Some(pv) = r.assignment.get(jv) {
-                by_val.entry(pv).or_default().push(i);
+        let left_root = left.into_root();
+        let right_root = right.into_root();
+        let joined = left_root.join(right_root, jv);
+        let mut combined = IntermediateResult::from_node(joined);
+        if limit > 0 {
+            combined.ensure_flat();
+            if combined.rows.len() > limit {
+                combined.rows.truncate(limit);
             }
         }
-        'outer: for r1 in &left.rows {
-            let Some(pv) = r1.assignment.get(jv) else {
-                continue;
-            };
-            let Some(idxs) = by_val.get(pv) else {
-                continue;
-            };
-            for &idx in idxs {
-                let r2 = &right.rows[idx];
-                if r1.assignment.can_unify(&r2.assignment) {
-                    rows.push(ResultRow::join(r1, r2, r1.assignment.unify(&r2.assignment)));
-                    if limit > 0 && rows.len() >= limit {
-                        break 'outer;
-                    }
-                }
-            }
-        }
+        combined
     } else {
-        'outer2: for r1 in &left.rows {
-            for r2 in &right.rows {
-                rows.push(ResultRow::join(r1, r2, r1.assignment.unify(&r2.assignment)));
-                if limit > 0 && rows.len() >= limit {
-                    break 'outer2;
-                }
+        let factorized = FactorNode::Product(vec![
+            left.into_root(),
+            right.into_root(),
+        ]);
+        let mut combined = IntermediateResult::from_node(factorized);
+        if limit > 0 {
+            combined.ensure_flat();
+            if combined.rows.len() > limit {
+                combined.rows.truncate(limit);
             }
         }
+        combined
     }
-    IntermediateResult::new(rows)
 }
 
-/// Left outer join — runtime counterpart of `TypeEnvironment::outer_join`.
-///
-/// For each row in `left`, find unifying rows in `right` (same predicate as
-/// natural join). If at least one matches, emit all unified rows (success
-/// branch). If none match, emit the left row alone with every variable in
-/// `new_vars \ bound_vars` set to `PathValue::Nothing` (unsuccess branch).
-/// `Nothing` flows into projection as `Value::Null` because `pv.id()`
-/// returns `None`, which `AttrLookup` turns into `Failure`, which
-/// `eval_expr_item` maps to `Value::Null`.
 fn left_outer_join(
-    left: &IntermediateResult,
-    right: &IntermediateResult,
+    left: IntermediateResult,
+    right: IntermediateResult,
     bound_vars: &HashSet<String>,
     new_vars: &HashSet<String>,
 ) -> IntermediateResult {
     let pad_vars: Vec<String> = new_vars.difference(bound_vars).cloned().collect();
-    let mut rows = Vec::new();
+    let shared: Vec<String> = {
+        let lk = left.freevars();
+        let rk = right.freevars();
+        lk.intersection(&rk).cloned().collect()
+    };
 
-    for r1 in &left.rows {
-        let mut matched_any = false;
-        for r2 in &right.rows {
-            if r1.assignment.can_unify(&r2.assignment) {
-                matched_any = true;
-                rows.push(ResultRow::join(r1, r2, r1.assignment.unify(&r2.assignment)));
+    let join_var = shared.first();
+
+    if let Some(jv) = join_var {
+        let left_parts = left.into_root().partition(jv);
+        let right_parts = right.into_root().partition(jv);
+
+        let mut unions = Vec::new();
+        let mut sorted_keys: Vec<_> = left_parts.keys().collect();
+        sorted_keys.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+
+        let make_pad_node = || {
+            let mut assignment = Assignment::new();
+            for v in &pad_vars {
+                assignment.extend(v.clone(), PathValue::Nothing);
+            }
+            FactorNode::Flat(vec![ResultRow::with_paths(vec![], assignment)])
+        };
+
+        for val in sorted_keys {
+            if let Some(left_node) = left_parts.get(val) {
+                if let Some(right_node) = right_parts.get(val) {
+                    unions.push(FactorNode::Product(vec![left_node.clone(), right_node.clone()]));
+                } else {
+                    unions.push(FactorNode::Product(vec![left_node.clone(), make_pad_node()]));
+                }
             }
         }
-        if !matched_any {
-            let mut padded = r1.assignment.clone();
+        IntermediateResult::from_node(FactorNode::Union(unions))
+    } else {
+        if right.is_empty() {
+            let mut assignment = Assignment::new();
             for v in &pad_vars {
-                padded.extend(v.clone(), PathValue::Nothing);
+                assignment.extend(v.clone(), PathValue::Nothing);
             }
-            rows.push(ResultRow::with_paths(r1.paths.clone(), padded));
+            let pad_node = FactorNode::Flat(vec![ResultRow::with_paths(vec![], assignment)]);
+            let factorized = FactorNode::Product(vec![left.into_root(), pad_node]);
+            IntermediateResult::from_node(factorized)
+        } else {
+            let factorized = FactorNode::Product(vec![left.into_root(), right.into_root()]);
+            IntermediateResult::from_node(factorized)
         }
     }
-    IntermediateResult::new(rows)
 }
-
 // Aggregate reducers (ISO §20.9 GR 7a-iii..vi). Inputs already passed
 // null-elimination and optional DISTINCT in collect_aggregate_values.
 // Empty input → `Value::Null`.
@@ -4392,7 +4749,7 @@ impl BtreeMergeCursor {
     fn new<G: GraphAccess>(graph: &G, label: String, ids: Vec<Id>, attr: &str) -> Self {
         let head_value = ids
             .first()
-            .and_then(|&id| graph.node_props(id).get(attr).cloned());
+            .and_then(|&id| graph.node_prop(id, attr));
         Self {
             _label: label,
             ids,
@@ -4410,7 +4767,7 @@ impl BtreeMergeCursor {
         self.head_value = self
             .ids
             .get(self.pos)
-            .and_then(|&id| graph.node_props(id).get(attr).cloned());
+            .and_then(|&id| graph.node_prop(id, attr));
     }
 
     fn is_done(&self) -> bool {
@@ -4775,6 +5132,63 @@ fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         }),
         _ => None,
     }
+}
+
+fn find_all_reduce_for_var(expr: &Expr, var_name: &str) -> Vec<Expr> {
+    let mut results = Vec::new();
+    fn walk(e: &Expr, var_name: &str, results: &mut Vec<Expr>) {
+        match e {
+            Expr::AllReduce { list_expr, .. } => {
+                if let Expr::Var(ref name) = **list_expr {
+                    if name == var_name {
+                        results.push(e.clone());
+                    }
+                }
+            }
+            Expr::Binop { left, right, .. } => {
+                walk(left, var_name, results);
+                walk(right, var_name, results);
+            }
+            Expr::Unop { operand, .. } => {
+                walk(operand, var_name, results);
+            }
+            Expr::IsNull { operand, .. } => {
+                walk(operand, var_name, results);
+            }
+            Expr::FieldAccess { base, .. } => {
+                walk(base, var_name, results);
+            }
+            Expr::Coalesce(args) | Expr::Call { args, .. } => {
+                for a in args {
+                    walk(a, var_name, results);
+                }
+            }
+            Expr::Record { fields } => {
+                for (_, ex) in fields {
+                    walk(ex, var_name, results);
+                }
+            }
+            Expr::Case { branches, else_expr } => {
+                for (cond, value) in branches {
+                    walk(cond, var_name, results);
+                    walk(value, var_name, results);
+                }
+                if let Some(value) = else_expr {
+                    walk(value, var_name, results);
+                }
+            }
+            Expr::ListComprehension { source, filter, body, .. } => {
+                walk(source, var_name, results);
+                if let Some(f) = filter {
+                    walk(f, var_name, results);
+                }
+                walk(body, var_name, results);
+            }
+            _ => {}
+        }
+    }
+    walk(expr, var_name, &mut results);
+    results
 }
 
 #[cfg(test)]

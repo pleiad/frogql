@@ -460,6 +460,36 @@ impl super::graph_access::GraphAccess for MemoryGraphStore {
         apply_prop_mods(&mut base, overlay.mod_edge_props.get(&id));
         base
     }
+    fn node_prop(&self, id: Id, prop: &str) -> Option<Value> {
+        let overlay = self.overlay.borrow();
+        if let Some(n) = overlay.get_new_node(id) {
+            return n.props.get(prop).cloned();
+        }
+        if let Some(mods) = overlay.mod_node_props.get(&id) {
+            if let Some(op) = mods.set.get(prop) {
+                return op.clone();
+            }
+            if mods.cleared {
+                return None;
+            }
+        }
+        self.node_props[id as usize].get(prop).cloned()
+    }
+    fn edge_prop(&self, id: Id, prop: &str) -> Option<Value> {
+        let overlay = self.overlay.borrow();
+        if let Some(e) = overlay.get_new_edge(id) {
+            return e.props.get(prop).cloned();
+        }
+        if let Some(mods) = overlay.mod_edge_props.get(&id) {
+            if let Some(op) = mods.set.get(prop) {
+                return op.clone();
+            }
+            if mods.cleared {
+                return None;
+            }
+        }
+        self.edge_props[id as usize].get(prop).cloned()
+    }
     fn src(&self, edge_id: Id) -> Id {
         if let Some(e) = self.overlay.borrow().get_new_edge(edge_id) {
             return e.src;

@@ -479,8 +479,7 @@ impl<'a, G: GraphAccess> LtjRunner<'a, G> {
                 }
                 FilterKind::NodeProperty { var_id, prop } => {
                     if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
-                        let props = self.graph.node_props(node_id);
-                        if !props.contains_key(prop) {
+                        if self.graph.node_prop(node_id, prop).is_none() {
                             return false;
                         }
                     }
@@ -492,10 +491,9 @@ impl<'a, G: GraphAccess> LtjRunner<'a, G> {
                     value,
                 } => {
                     if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
-                        let props = self.graph.node_props(node_id);
-                        match props.get(attr) {
+                        match self.graph.node_prop(node_id, attr) {
                             Some(actual) => {
-                                if !cmp_values(actual, *op, value) {
+                                if !cmp_values(&actual, *op, value) {
                                     return false;
                                 }
                             }
