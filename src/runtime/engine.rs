@@ -1683,11 +1683,13 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         if let Some(result) = pattern_extract::try_ltj(self.graph, &join_pattern, &index, limit) {
             return result;
         }
-        // Pure any-direction join: run against the mirrored index.
-        if pattern_extract::is_pure_any_direction(&join_pattern) {
-            if let Some(result) = pattern_extract::try_ltj_anydir(
+        // Any-direction join (pure or mixed with directed): route each
+        // triple to the plain or mirrored index inside one LTJ.
+        if pattern_extract::has_any_direction(&join_pattern) {
+            if let Some(result) = pattern_extract::try_ltj_mixed(
                 self.graph,
                 &join_pattern,
+                &index,
                 &self.anydir_index(),
                 limit,
             ) {
@@ -1764,14 +1766,16 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         if let Some(result) = pattern_extract::try_ltj(self.graph, &concat_pattern, &index, limit) {
             return result;
         }
-        // Pure any-direction chain: run against the mirrored index. A
+        // Any-direction chain (pure or mixed with directed): route each
+        // triple to the plain or mirrored index inside one LTJ. A
         // repetition is not decomposable, so a chain containing `-[e]-{n,m}`
-        // still takes the seeded traversal below; this catches flat
-        // any-direction chains like `(a)-[]-(b)-[]-(c)`.
-        if pattern_extract::is_pure_any_direction(&concat_pattern) {
-            if let Some(result) = pattern_extract::try_ltj_anydir(
+        // still takes the seeded traversal below; this catches flat chains
+        // like `(a)-[]-(b)-[]-(c)` and `(a)-[:X]->(b)-[]-(c)`.
+        if pattern_extract::has_any_direction(&concat_pattern) {
+            if let Some(result) = pattern_extract::try_ltj_mixed(
                 self.graph,
                 &concat_pattern,
+                &index,
                 &self.anydir_index(),
                 limit,
             ) {

@@ -50,6 +50,12 @@ enum EdgeKind {
     Right,
     Left,
     Undirected,
+    /// Any-direction `-[e]-`. Extracted as a forward triple like `Right`,
+    /// but its iterator queries the **mirrored** any-direction index
+    /// (every edge stored both senses) instead of the plain one — this is
+    /// what lets a mixed directed+any-direction chain run as a single LTJ
+    /// with per-triple index routing (issue #71).
+    AnyDir,
 }
 
 #[derive(Debug)]
@@ -61,113 +67,62 @@ enum FlatElement<'a> {
 // ---- Main entry point ----
 
 /// Try to run LTJ on a PathPattern. Returns Some(result) if decomposable.
+/// This is the pure-directed / `~` entry: it bails when the pattern
+/// contains any-direction edges (those go through `try_ltj_mixed`, which
+/// supplies the mirrored index), so a pure-directed workload never builds
+/// the mirror.
 pub fn try_ltj<G: GraphAccess>(
     graph: &G,
     pattern: &PathPattern,
     index: &TripleIndex,
     limit: usize,
 ) -> Option<IntermediateResult> {
-    try_ltj_inner(graph, pattern, index, limit, &[])
+    if has_any_direction(pattern) {
+        return None;
+    }
+    try_ltj_inner(graph, pattern, index, None, limit, &[])
 }
 
-/// LTJ over any-direction edges, using the pre-mirrored any-direction
-/// index (`TripleIndex::from_graph_anydir`). Applies only to patterns
-/// whose edges are **all** any-direction (`-[e]-`); a single fixed-
-/// direction edge means the pattern would need per-triple index routing
-/// (mixed directed + any-direction), which is deferred — the caller falls
-/// back to the hash-join for those.
-///
-/// The transform is: rewrite every `EdgeAnyDirection` to `EdgeRight`, then
-/// decompose and run exactly as a directed pattern. Against the mirrored
-/// index a forward triple `(x, L, y)` matches an edge between `x` and `y`
-/// in either physical orientation, so the disjunction is absorbed by the
-/// data, not the iterator. Result reconstruction is unchanged:
-/// `edge_path_value(eid)` still tags each edge with its physical variant,
-/// and the base-case per-eid fan-out gives ISO bag multiplicity (issue
-/// #71). Disabled with `GQLITE_DISABLE_ANYDIR_LTJ=1`.
-pub fn try_ltj_anydir<G: GraphAccess>(
+/// LTJ for patterns that contain any-direction edges (`-[e]-`), **pure or
+/// mixed** with directed / `~` edges. Each triple is routed to the index
+/// its `EdgeKind` selects: an any-direction triple queries the mirrored
+/// index (`anydir_index`, every edge stored both senses), the rest query
+/// the plain `index`. Node ids are global and both indexes assign label ids
+/// in the same edge order, so the leapfrog intersection joins candidates
+/// across the two indexes transparently — a shared variable bound in a
+/// directed triple and an any-direction triple intersects correctly.
+/// Result reconstruction is unchanged: `edge_path_value(eid)` tags each
+/// edge with its physical variant, and the base-case per-eid fan-out gives
+/// ISO bag multiplicity (issue #71). Disabled with
+/// `GQLITE_DISABLE_ANYDIR_LTJ=1`.
+pub fn try_ltj_mixed<G: GraphAccess>(
     graph: &G,
     pattern: &PathPattern,
+    index: &TripleIndex,
     anydir_index: &TripleIndex,
     limit: usize,
 ) -> Option<IntermediateResult> {
     if std::env::var("GQLITE_DISABLE_ANYDIR_LTJ").is_ok() {
         return None;
     }
-    if !is_pure_any_direction(pattern) {
-        return None;
-    }
-    let rewritten = rewrite_anydir_to_right(pattern);
-    try_ltj_inner(graph, &rewritten, anydir_index, limit, &[])
+    try_ltj_inner(graph, pattern, index, Some(anydir_index), limit, &[])
 }
 
-/// True when the pattern contains at least one any-direction edge and no
-/// fixed-direction (`->`, `<-`, `~`) edge. Only then is running the whole
-/// decomposition against the mirrored index sound — a fixed-direction edge
-/// there would spuriously match its reverse.
-pub fn is_pure_any_direction(p: &PathPattern) -> bool {
-    fn walk(p: &PathPattern, saw_any: &mut bool, saw_fixed: &mut bool) {
-        match p {
-            PathPattern::EdgeAnyDirection(_) => *saw_any = true,
-            PathPattern::EdgeRight(_)
-            | PathPattern::EdgeLeft(_)
-            | PathPattern::EdgeUndirected(_) => *saw_fixed = true,
-            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
-                walk(a, saw_any, saw_fixed);
-                walk(b, saw_any, saw_fixed);
-            }
-            PathPattern::Filter(inner, _)
-            | PathPattern::Questioned(inner)
-            | PathPattern::Repeat { pattern: inner, .. }
-            | PathPattern::Selected { pattern: inner, .. }
-            | PathPattern::Named { pattern: inner, .. } => walk(inner, saw_any, saw_fixed),
-            PathPattern::Node(_) => {}
-        }
-    }
-    let mut saw_any = false;
-    let mut saw_fixed = false;
-    walk(p, &mut saw_any, &mut saw_fixed);
-    saw_any && !saw_fixed
-}
-
-/// Rewrite every `EdgeAnyDirection` to `EdgeRight`, preserving the
-/// descriptor. Structural recursion over every variant so nested shapes
-/// (which `decompose` may still reject) are transformed uniformly.
-fn rewrite_anydir_to_right(p: &PathPattern) -> PathPattern {
+/// True when the pattern contains at least one any-direction (`-[e]-`)
+/// edge. The caller uses this to decide between `try_ltj` (plain index
+/// only) and `try_ltj_mixed` (both indexes), keeping the mirror lazy.
+pub fn has_any_direction(p: &PathPattern) -> bool {
     match p {
-        PathPattern::EdgeAnyDirection(d) => PathPattern::EdgeRight(d.clone()),
-        PathPattern::Concat(a, b) => PathPattern::Concat(
-            Box::new(rewrite_anydir_to_right(a)),
-            Box::new(rewrite_anydir_to_right(b)),
-        ),
-        PathPattern::Union(a, b) => PathPattern::Union(
-            Box::new(rewrite_anydir_to_right(a)),
-            Box::new(rewrite_anydir_to_right(b)),
-        ),
-        PathPattern::Join(a, b) => PathPattern::Join(
-            Box::new(rewrite_anydir_to_right(a)),
-            Box::new(rewrite_anydir_to_right(b)),
-        ),
-        PathPattern::Filter(inner, e) => {
-            PathPattern::Filter(Box::new(rewrite_anydir_to_right(inner)), e.clone())
+        PathPattern::EdgeAnyDirection(_) => true,
+        PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+            has_any_direction(a) || has_any_direction(b)
         }
-        PathPattern::Questioned(inner) => {
-            PathPattern::Questioned(Box::new(rewrite_anydir_to_right(inner)))
-        }
-        PathPattern::Repeat { pattern, lb, ub } => PathPattern::Repeat {
-            pattern: Box::new(rewrite_anydir_to_right(pattern)),
-            lb: *lb,
-            ub: *ub,
-        },
-        PathPattern::Selected { prefix, pattern } => PathPattern::Selected {
-            prefix: *prefix,
-            pattern: Box::new(rewrite_anydir_to_right(pattern)),
-        },
-        PathPattern::Named { var, pattern } => PathPattern::Named {
-            var: var.clone(),
-            pattern: Box::new(rewrite_anydir_to_right(pattern)),
-        },
-        other => other.clone(),
+        PathPattern::Filter(inner, _)
+        | PathPattern::Questioned(inner)
+        | PathPattern::Repeat { pattern: inner, .. }
+        | PathPattern::Selected { pattern: inner, .. }
+        | PathPattern::Named { pattern: inner, .. } => has_any_direction(inner),
+        _ => false,
     }
 }
 
@@ -187,7 +142,13 @@ pub fn try_ltj_with_pin<G: GraphAccess>(
     pin_var: &str,
     pin_id: u32,
 ) -> Option<IntermediateResult> {
-    try_ltj_inner(graph, pattern, index, limit, &[(pin_var, pin_id)])
+    // The pinned paths (correlated EXISTS / OPTIONAL / value subquery) do
+    // not carry the mirrored index; an any-direction body bails to its
+    // non-pinned fallback, exactly as before this entry accepted `-[e]-`.
+    if has_any_direction(pattern) {
+        return None;
+    }
+    try_ltj_inner(graph, pattern, index, None, limit, &[(pin_var, pin_id)])
 }
 
 /// Multi-variable extension of `try_ltj_with_pin`. Each `(name, id)` pair
@@ -204,13 +165,17 @@ pub fn try_ltj_with_pins<G: GraphAccess>(
     limit: usize,
     pins: &[(&str, u32)],
 ) -> Option<IntermediateResult> {
-    try_ltj_inner(graph, pattern, index, limit, pins)
+    if has_any_direction(pattern) {
+        return None;
+    }
+    try_ltj_inner(graph, pattern, index, None, limit, pins)
 }
 
 fn try_ltj_inner<G: GraphAccess>(
     graph: &G,
     pattern: &PathPattern,
     index: &TripleIndex,
+    anydir_index: Option<&TripleIndex>,
     limit: usize,
     external_pins: &[(&str, u32)],
 ) -> Option<IntermediateResult> {
@@ -298,8 +263,17 @@ fn try_ltj_inner<G: GraphAccess>(
     let mut var_to_iterators: Vec<Vec<usize>> = vec![vec![]; num_vars];
     let mut var_to_positions: Vec<Vec<SpoPos>> = vec![vec![]; num_vars];
 
-    for triple in &decomp.triples {
-        let iter = LtjIterator::new(triple.clone(), index);
+    for (ti, triple) in decomp.triples.iter().enumerate() {
+        // Route each triple to its index: an any-direction edge queries the
+        // mirrored index, everything else the plain one. `triple_info` is
+        // parallel to `triples`. If a pattern has an any-direction triple
+        // but no mirror was supplied (shouldn't happen — `try_ltj` bails on
+        // any-direction), fall back to the plain index.
+        let triple_index = match decomp.triple_info.get(ti).map(|t| t.3) {
+            Some(EdgeKind::AnyDir) => anydir_index.unwrap_or(index),
+            _ => index,
+        };
+        let iter = LtjIterator::new(triple.clone(), triple_index);
         let iter_idx = iterators.len();
         iterators.push(iter);
 
@@ -627,8 +601,15 @@ fn flatten_concat<'a>(p: &'a PathPattern, out: &mut Vec<FlatElement<'a>>) -> boo
             out.push(FlatElement::Edge(EdgeKind::Undirected, d.as_ref()));
             true
         }
+        PathPattern::EdgeAnyDirection(d) => {
+            // Decomposable only through the mirrored index; the caller
+            // (`try_ltj_mixed`) supplies it. Pure-directed entry points
+            // guard on `has_any_direction` and never reach here.
+            out.push(FlatElement::Edge(EdgeKind::AnyDir, d.as_ref()));
+            true
+        }
         PathPattern::Concat(p1, p2) => flatten_concat(p1, out) && flatten_concat(p2, out),
-        _ => false, // Not decomposable (any-direction `-[]-`, unions, repetition, …)
+        _ => false, // Not decomposable (unions, repetition, …)
     }
 }
 
@@ -887,7 +868,7 @@ fn decompose_flat_chain(
         // `current`. Undirected schema entries are present in both senses
         // in the index, so a forward triple lookup catches them.
         let (src_var, tgt_var) = match kind {
-            EdgeKind::Right | EdgeKind::Undirected => (current_node, next_var),
+            EdgeKind::Right | EdgeKind::Undirected | EdgeKind::AnyDir => (current_node, next_var),
             EdgeKind::Left => (next_var, current_node),
         };
 
@@ -1061,7 +1042,7 @@ fn convert_results<G: GraphAccess>(
                     // TRAIL checks and corrupted SHORTEST lengths and named-path
                     // functions. `entry` is the boundary, `exit` is the new node.
                     let (entry, exit) = match kind {
-                        EdgeKind::Right | EdgeKind::Undirected => (src, tgt),
+                        EdgeKind::Right | EdgeKind::Undirected | EdgeKind::AnyDir => (src, tgt),
                         EdgeKind::Left => (tgt, src),
                     };
                     if path_elements.is_empty() {

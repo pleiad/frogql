@@ -452,7 +452,7 @@ engine.rs          Integration: run_join() and run_concat_pattern() call
 4. **Compact tries**: replace sorted Vec with LOUDS bitvectors for space
    efficiency on very large graphs (billions of edges).
 
-5. **Handle any-direction edges (`-[e]-`)**: **DONE** for pure
+5. **Handle any-direction edges (`-[e]-`)**: **DONE** — pure *and* mixed
    any-direction chains and comma-joins (issue #71). The team adopted ISO
    bag semantics; the LTJ base case now fans out one row per physical edge
    at the bound `(s, L, o)` unconditionally (fixing the directed
@@ -463,11 +463,15 @@ engine.rs          Integration: run_join() and run_concat_pattern() call
    `GQLITE_DISABLE_ANYDIR_LTJ`. Bounded unused-edge any-direction
    *repetitions* (`(a)-[]-{1,3}(b)`) also reach the mirror: `unroll_repeat`
    unrolls them into flat any-direction arms. Full rationale in
-   `anydir-ltj-plan.md`. All three any-direction paths (mirror LTJ, seeded
+   `anydir-ltj-plan.md`. All any-direction paths (mixed LTJ, seeded
    repetition, adjacency fallback) are ISO bag-consistent — verified by
-   `tests/anydir_path_consistency_test.rs`. *Remaining is performance
-   only:* mixed directed+any-direction chains run on the adjacency/hash-join
-   fallback (correct but not WCO); LTJ would need per-triple index routing.
+   `tests/anydir_path_consistency_test.rs`. **Mixed** directed+any-direction
+   chains also run through LTJ now (`try_ltj_mixed`, per-triple index
+   routing): each triple's iterator queries the plain or mirrored index by
+   its `EdgeKind`, and the leapfrog joins across both (global node ids,
+   shared label ids). Measured ~4.7× faster / ~2× less RSS than the fallback
+   on a fraud-DB mixed query. Nothing any-direction is left on the fallback
+   except Unions / non-unrollable repetitions.
 
 ### Caveat: the Ring's bidirectionality ≠ undirected edges
 

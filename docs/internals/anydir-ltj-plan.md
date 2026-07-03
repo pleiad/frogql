@@ -156,8 +156,8 @@ Union whose flat any-direction arms each run through `try_ltj_anydir`
 `(a)-[e]-{1,3}(b)` with `e` unprojected now takes the mirror-LTJ path
 rather than the seeded adjacency traversal.
 
-**Correctness is complete; what remains is performance.** A cross-path
-differential (`tests/anydir_path_consistency_test.rs`) confirms all three
+**Correctness is complete; performance is complete too.** A cross-path
+differential (`tests/anydir_path_consistency_test.rs`) confirms all
 any-direction paths agree on the ISO bag multiset across single-hop,
 multi-hop, comma-join, unused- and used-edge repetition, and mixed
 direction: the seeded traversal (`try_concat_with_edge_repetition`) and the
@@ -167,12 +167,19 @@ were never affected by the LTJ trie collapse and already produce ISO counts
 here claimed the seeded/fallback paths were non-ISO; that was measured on
 the pre-fan-out-fix prototype and is wrong.)
 
-Still open, **performance only**:
-
-- **Mixed directed + any-direction chains** (`(a)-[:X]->(b)-[e]-(c)`) run on
-  the adjacency/hash-join fallback rather than LTJ — correct, but not
-  worst-case-optimal. LTJ would need per-triple index routing (some triples
-  against the plain index, some against the mirror). Deferred.
+**Mixed directed + any-direction — DONE (per-triple index routing).**
+`try_ltj_mixed` decomposes a mixed pattern with a per-triple
+`EdgeKind::AnyDir` tag and builds each `LtjIterator` against the index its
+edge kind selects — any-direction triples against the mirror, the rest
+against the plain index. The leapfrog intersection joins across the two
+transparently because node ids are global and both indexes assign label ids
+in the same edge iteration order (so a label constant resolves identically
+in either). `try_ltj` bails on any-direction via `has_any_direction`, so a
+pure-directed workload never builds the mirror. Measured WCO win on the
+fraud DB: `(t1)-[:USED_DEVICE]->(d)-[]-(t2)` runs ~4.7× faster / ~2× less
+RSS than the fallback (which materializes the intermediate). Nothing
+any-direction remains on the fallback except Unions and non-unrollable
+repetitions, which are LTJ non-shapes for directed edges too.
 
 ## Acceptance criteria
 

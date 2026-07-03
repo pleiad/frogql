@@ -95,9 +95,46 @@ fn agree_unused_edge_repetition() {
 
 #[test]
 fn agree_mixed_direction() {
-    // Mixed directed+any-direction: falls back on both toggle settings, but
-    // pins that the fallback is self-consistent and ISO (per-edge).
+    // Mixed directed+any-direction: LTJ-on routes through `try_ltj_mixed`
+    // (per-triple index routing), LTJ-off through the fallback; both ISO.
     assert_paths_agree("MATCH (x:N)-[:R]->(y:N)-[]-(z:N) RETURN x.id, z.id");
+}
+
+/// Hand-anchored mixed pattern: `(x)-[:R]->(y)-[]-(z)` on a=0,b=1,c=2 with
+/// directed R edges a→b and c→b. Directed step: (x,y) ∈ {(a,b),(c,b)}.
+/// Any-direction step from y=b reaches z ∈ {a (via a→b backward), c (via
+/// c→b backward)}. So 4 rows: (0,0),(0,2),(2,0),(2,2). Runs through
+/// `try_ltj_mixed` with LTJ on (verified it fires) and the fallback with
+/// LTJ off — both must give this.
+#[test]
+fn mixed_direction_iso_count() {
+    let json = r#"{
+      "nodes": [
+        {"id": "a", "labels": ["N"], "props": {"id": 0}},
+        {"id": "b", "labels": ["N"], "props": {"id": 1}},
+        {"id": "c", "labels": ["N"], "props": {"id": 2}}
+      ],
+      "edges": [
+        {"id": "ab", "labels": ["R"], "props": {}, "endpoints": ["a", "b"], "directionality": "->"},
+        {"id": "cb", "labels": ["R"], "props": {}, "endpoints": ["c", "b"], "directionality": "->"}
+      ]
+    }"#;
+    let g = MemoryGraphStore::from_json_str(json).unwrap();
+    let q = "MATCH (x:N)-[:R]->(y:N)-[]-(z:N) RETURN x.id, z.id";
+    for ltj in [true, false] {
+        let mut got: Vec<String> = run(&g, q, ltj);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "[Int(0), Int(0)]",
+                "[Int(0), Int(2)]",
+                "[Int(2), Int(0)]",
+                "[Int(2), Int(2)]",
+            ],
+            "mixed pattern, ltj={ltj}"
+        );
+    }
 }
 
 /// Seeded traversal (used-edge repetition, forced by naming `r`) produces
