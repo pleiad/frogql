@@ -11,26 +11,19 @@ The crate package is still named `gqlrust` for legacy reasons; the user-facing b
 ## Commands
 
 ```bash
-# Full integration test sweep (skip bench_test which has pre-existing failures)
-cargo test --lib
-cargo test --test parser_test --test runtime_test --test store_runtime_test \
-           --test text2gql_test --test parse_and_run_test --test count_test \
-           --test null_test --test record_test --test list_test \
-           --test compile_diagnostics --test elaborate_test --test float_test \
-           --test graph_type_test --test typecheck_smoke --test typecheck_test \
-           --test optional_match_test --test multi_match_test \
-           --test aggregates_proptest --test lattice_proptest --test multi_match_proptest \
-           --test exists_fold_test --test exists_runtime_test \
-           --test parser_dm_test --test lazy_mut_test --test dm_runtime_test \
-           --test dm_persistence_test --test dm_schema_test --test dm_default_test \
-           --test dump_test --test dm_set_test --test dm_remove_test \
-           --test dm_label_test --test dm_delete_expr_test --test memory_mut_test \
-           --test path_prefix_test --test shortest_bfs_test \
-           --test seeded_repetition_test --test iso_multiplicity_test \
-           --test anydir_iso_test --test anydir_path_consistency_test
+# Full test sweep — lib unit tests + every integration target. Use the
+# unqualified form so the set never drifts as tests are added:
+cargo test                       # everything (lib + all tests/*.rs)
+cargo test --lib                 # just the in-crate unit tests (fast)
+# `bench_test` is the slow target (~1 min; it opens the committed example
+# .gdb files and measures memory). It currently passes but dominates the
+# wall-clock, so during tight iteration run the specific targets you touched
+# instead, e.g.:
+cargo test --test runtime_test --test typecheck_test --test parser_test
 
-# Single test
+# Single test / single file
 cargo test --test runtime_test test_join_star_any_label -- --exact
+cargo test --test parallel_edge_test          # one integration file
 
 # Strict clippy (run before every commit)
 cargo clippy --workspace --all-targets -- -D clippy::all
@@ -55,6 +48,25 @@ cargo build -p frogql-wasm --target wasm32-unknown-unknown
 # Generate the publishable npm package (web target); release-wasm.yml runs the same:
 cargo install wasm-pack && wasm-pack build wasm --target web --out-dir pkg
 ```
+
+### Diagnostic env vars
+
+Runtime/store toggles for A/B testing and tracing (all read at query/open time; set to `1` unless noted). Each optimization has a kill switch so a differential test can pin "optimized ≡ baseline":
+
+| Var | Effect |
+|---|---|
+| `GQLITE_DISABLE_ANYDIR_LTJ` | force the hash-join fallback for any-direction (`-[e]-`) patterns instead of the mirrored-index LTJ (`try_ltj_mixed`) |
+| `GQLITE_DISABLE_SEEDED_REPEAT` | force the legacy global repetition path instead of the seeded adjacency traversal |
+| `GQLITE_DISABLE_REPEAT_UNROLL` | keep bounded `{n,m}` repetitions as `Repeat` instead of unrolling to a Union |
+| `GQLITE_DISABLE_SHORTEST_BFS` | force the generic k-shortest-walk enumerator instead of the BFS fast-path |
+| `GQLITE_DISABLE_INDEX_FOLD` | skip the LTJ secondary-index constant-folding / range-folding pre-pass |
+| `GQLITE_DISABLE_OPTIONAL_PUSHDOWN` | evaluate OPTIONAL MATCH globally + left-join instead of per-row bind-pushdown |
+| `GQLITE_DISABLE_EXISTS_PIN` | force materialise-once for correlated EXISTS instead of pinned LTJ probes |
+| `GQLITE_DISABLE_VALUE_SUBQUERY_PIN` | force materialise-once for `VALUE { … }` subqueries |
+| `GQLITE_DISABLE_AUTO_INDEXES` | skip the secondary-index auto-build at open |
+| `GQLITE_ORDERBY_FORCE=pdqsort\|topk` | force one ORDER BY strategy (bypass the btree-LTJ-real top-k) |
+| `GQLITE_DEBUG_INDEXES` | print auto-built indexes + pinned variables |
+| `GQLITE_TRACE_OPEN` | print per-phase open latency (see *Open-time performance*) |
 
 ### Pre-commit checklist for Rust changes (non-negotiable)
 
@@ -258,7 +270,7 @@ Primary strategy for joins and concatenations of directed/undirected edges. Wors
 **In-loop filters** (`FilterKind`): `NodeLabel`, `NodeProperty`, `NodeAttrCmp` (`=`, `!=`, `<`, `<=`, `>`, `>=`), `NodeInSet` (btree-resolved range). Placed at the VEO level where all dependencies are bound; pushed down by the optimizer from WHERE conjuncts.
 
 **Current limits**:
-1. Repetitions `{n,m}`: unrolled by `optimizer::unroll_repeat` for bounded ranges with no named inner variables and a single-edge inner of **any orientation** (directed, `~`-undirected, or any-direction `-[]-` — the last routes each unrolled arm through the mirrored index via `try_ltj_anydir`, issue #71). Shapes that can't unroll (named edge/node vars, range > `MAX_UNROLL = 8`, `lb = 0`) stay on the repetition path; when such a repetition is the right operand of a concat with a seed on the left (`(a)-[e]-{1,3}(b)` with `e` **projected**), `run_concat_pattern`'s `try_concat_with_edge_repetition` expands it level-by-level from the already-filtered left rows instead of materializing the whole graph's walk set (the issue-#57 OOM fix; `GQLITE_DISABLE_SEEDED_REPEAT=1` forces the legacy global path; differential coverage in `tests/seeded_repetition_test.rs`). The seeded traversal is ISO bag-correct — the adjacency evaluators iterate physical edge ids, so it agrees with the unrolled-LTJ path (`tests/anydir_path_consistency_test.rs`). Unbounded repetition (`*`/`+`/`{n,}`) is not an LTJ shape; it requires a §16.6 prefix and runs through the dedicated finite searches (`run_repetition_shortest` / `run_repetition_unbounded_mode`, see *Path-pattern prefixes*).
+1. Repetitions `{n,m}`: unrolled by `optimizer::unroll_repeat` for bounded ranges with no named inner variables and a single-edge inner of **any orientation** (directed, `~`-undirected, or any-direction `-[]-` — the last routes each unrolled arm through the mirrored index via `try_ltj_mixed`, issue #71). Shapes that can't unroll (named edge/node vars, range > `MAX_UNROLL = 8`, `lb = 0`) stay on the repetition path; when such a repetition is the right operand of a concat with a seed on the left (`(a)-[e]-{1,3}(b)` with `e` **projected**), `run_concat_pattern`'s `try_concat_with_edge_repetition` expands it level-by-level from the already-filtered left rows instead of materializing the whole graph's walk set (the issue-#57 OOM fix; `GQLITE_DISABLE_SEEDED_REPEAT=1` forces the legacy global path; differential coverage in `tests/seeded_repetition_test.rs`). The seeded traversal is ISO bag-correct — the adjacency evaluators iterate physical edge ids, so it agrees with the unrolled-LTJ path (`tests/anydir_path_consistency_test.rs`). Unbounded repetition (`*`/`+`/`{n,}`) is not an LTJ shape; it requires a §16.6 prefix and runs through the dedicated finite searches (`run_repetition_shortest` / `run_repetition_unbounded_mode`, see *Path-pattern prefixes*).
 2. Any-direction edges (without tilde): pure **and mixed** directed+any-direction chains / joins are LTJ-eligible via per-triple index routing (`try_ltj_mixed`, see *Activation*), and bounded unused-edge any-direction **repetitions** unroll into mirror-LTJ arms (limit 1). All any-direction paths — mixed LTJ, the seeded adjacency traversal, and the plain adjacency/hash-join fallback — are ISO bag-consistent (`tests/anydir_path_consistency_test.rs`). Mixed LTJ is a real WCO win: `(t1)-[:USED_DEVICE]->(d)-[]-(t2)` on the fraud DB runs ~4.7× faster / ~2× less RSS than the fallback. Full status in `docs/internals/anydir-ltj-plan.md`.
 3. WHERE: label and pushed value predicates run inside the loop; arbitrary WHERE post-filters. Var-vs-var predicates (`a <> b`) are not pushed into the LTJ filter set yet — they evaluate post-pattern via `PathPattern::Filter`.
 4. TripleIndex not persisted: cached on `Runtime` via `RefCell<Option<Arc<TripleIndex>>>`, built once per Runtime (eagerly at REPL/Connection open via `warm_triple_index()`).
@@ -394,7 +406,7 @@ Passes the runtime relies on (each one-line summary; flags + file refs are the o
 - **Selected-path boundary pushdown** (`pushdown.rs`, ISO §16.6) — into a `Selected` pattern, a mode-only prefix (`PathSearch::All`, e.g. `ACYCLIC`) admits *all* constraints, but a selective prefix (`ANY`/`SHORTEST`) admits **only boundary (endpoint) variable** constraints; interior-node predicates stay as a post-selection `Filter`. Sound because selection partitions per `(source, target)` pair: restricting endpoints before the search equals filtering after, whereas filtering an interior node before would change which paths are shortest. `Constraints::retain_vars` keeps only the boundary vars; `walk_kinds` and `merge_constraints` carry the split.
 - **Index-driven constant folding** — `Eq` predicates that hit a hash index pre-bind the variable and drop it from VEO; empty hit short-circuits to zero rows. `pattern_extract::fold_indexed_constants`.
 - **Range index folding** — `<` / `<=` / `>` / `>=` predicates that hit a btree precompute the matching set and replace `NodeAttrCmp` with `FilterKind::NodeInSet`. `pattern_extract::fold_range_filters`.
-- **Repeat unrolling** (`unroll_repeat.rs`) — `(P){lb, ub}` → `Union(P^lb..P^ub)` for bounded ranges with a single-edge inner and empty freevars, of **any orientation** (directed / `~`-undirected / any-direction; any-direction arms route to the mirrored index via `try_ltj_anydir`, issue #71 — before that index existed they were excluded because they fell to the global hash-join, the issue-#57 OOM). Inserts anonymous `Node(None)` boundaries and distributes Union over Concat. `MAX_UNROLL = 8` (covers `{1,8}` and tighter). Fixed-length `lb == ub` short-circuits to a single flat concat with no Union envelope. `GQLITE_DISABLE_REPEAT_UNROLL=1`.
+- **Repeat unrolling** (`unroll_repeat.rs`) — `(P){lb, ub}` → `Union(P^lb..P^ub)` for bounded ranges with a single-edge inner and empty freevars, of **any orientation** (directed / `~`-undirected / any-direction; any-direction arms route to the mirrored index via `try_ltj_mixed`, issue #71 — before that index existed they were excluded because they fell to the global hash-join, the issue-#57 OOM). Inserts anonymous `Node(None)` boundaries and distributes Union over Concat. `MAX_UNROLL = 8` (covers `{1,8}` and tighter). Fixed-length `lb == ub` short-circuits to a single flat concat with no Union envelope. `GQLITE_DISABLE_REPEAT_UNROLL=1`.
 - **Seeded repetition traversal** (`engine.rs::try_concat_with_edge_repetition`, runtime side) — for `Concat(left, (edge){lb,ub})` where the inner is a single edge and `ub` is bounded, expands level-by-level from the filtered `left` rows via the adjacency `concat_with_*` steps, binding a named edge var as `PathValue::Group` (legacy `to_group`/`concat_group` semantics). Avoids `run_repetition_range`'s global materialization when the left side is selective. `GQLITE_DISABLE_SEEDED_REPEAT=1`; differential suite `tests/seeded_repetition_test.rs`.
 - **ORDER BY alias resolution** (`order_by_alias.rs`) — `SortKey::Column(idx)` → `SortKey::Expr(AttrLookup)` when the alias is a pure attr lookup. All-or-nothing: aggregates / `GROUP BY` / non-resolvable specs bail.
 - **OPTIONAL MATCH bind-pushdown** (`engine.rs::optional_via_bind_pushdown`, runtime side) — per outer row, pin shared Node-typed vars via `try_ltj_with_pins` instead of evaluating the inner globally then left-outer-joining. SQLite-style correlated nested-loop. `GQLITE_DISABLE_OPTIONAL_PUSHDOWN=1`. Cuts LDBC IS5 ~93× on SF0.1.
@@ -439,7 +451,7 @@ Run + chart: `bench_setup` (downloads LDBC SF0.1) → `install_python_deps.sh` �
 ## Conventions
 
 - Labels in patterns require the `:` prefix: `-[:Transfer]->`, not `-[Transfer]->`.
-- The `bench_test` integration target has pre-existing failures — exclude it from regular runs.
+- The `bench_test` integration target is slow (~1 min — it opens the committed example `.gdb` files and measures RSS). It currently passes; skip it during tight iteration, but `cargo test` (the full sweep) does include it.
 - `bench/data/` is gitignored (large datasets, downloaded via `cargo run --bin bench_setup`).
 - Example databases in `examples/*.gdb` ARE committed (small, useful for testing).
 - Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6); changing the order is a breaking on-disk format change.
