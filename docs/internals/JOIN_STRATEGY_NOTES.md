@@ -463,11 +463,11 @@ engine.rs          Integration: run_join() and run_concat_pattern() call
    `GQLITE_DISABLE_ANYDIR_LTJ`. Bounded unused-edge any-direction
    *repetitions* (`(a)-[]-{1,3}(b)`) also reach the mirror: `unroll_repeat`
    unrolls them into flat any-direction arms. Full rationale in
-   `anydir-ltj-plan.md`. *Remaining:* the seeded adjacency traversal
-   (any-direction repetitions that bind an edge var, or `lb = 0`, or exceed
-   `MAX_UNROLL`) and the scan fallback (mixed direction) are not yet aligned
-   to ISO bag multiplicity; mixed directed+any-direction chains still need
-   per-triple index routing.
+   `anydir-ltj-plan.md`. All three any-direction paths (mirror LTJ, seeded
+   repetition, adjacency fallback) are ISO bag-consistent — verified by
+   `tests/anydir_path_consistency_test.rs`. *Remaining is performance
+   only:* mixed directed+any-direction chains run on the adjacency/hash-join
+   fallback (correct but not WCO); LTJ would need per-triple index routing.
 
 ### Caveat: the Ring's bidirectionality ≠ undirected edges
 

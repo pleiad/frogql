@@ -156,16 +156,23 @@ Union whose flat any-direction arms each run through `try_ltj_anydir`
 `(a)-[e]-{1,3}(b)` with `e` unprojected now takes the mirror-LTJ path
 rather than the seeded adjacency traversal.
 
-Still open (documented, not blocking):
+**Correctness is complete; what remains is performance.** A cross-path
+differential (`tests/anydir_path_consistency_test.rs`) confirms all three
+any-direction paths agree on the ISO bag multiset across single-hop,
+multi-hop, comma-join, unused- and used-edge repetition, and mixed
+direction: the seeded traversal (`try_concat_with_edge_repetition`) and the
+plain adjacency/hash-join fallback both iterate physical edge ids, so they
+were never affected by the LTJ trie collapse and already produce ISO counts
+— the fan-out fix simply brought LTJ into line with them. (An earlier note
+here claimed the seeded/fallback paths were non-ISO; that was measured on
+the pre-fan-out-fix prototype and is wrong.)
 
-- **The seeded adjacency traversal** (`try_concat_with_edge_repetition`) —
-  used for any-direction repetitions that *bind* an edge variable (LTJ
-  cannot carry a `PathValue::Group` across a variable-length repeat), have
-  `lb = 0`, or exceed `MAX_UNROLL` — is correct but not yet ISO
-  bag-aligned; it needs per-edge fan-out in `concat_with_*`.
-- **The scan/hash-join fallback** for mixed directed+any-direction patterns
-  likewise retains its own multiplicity.
-- **Mixed-direction LTJ** (per-triple index routing) is deferred.
+Still open, **performance only**:
+
+- **Mixed directed + any-direction chains** (`(a)-[:X]->(b)-[e]-(c)`) run on
+  the adjacency/hash-join fallback rather than LTJ — correct, but not
+  worst-case-optimal. LTJ would need per-triple index routing (some triples
+  against the plain index, some against the mirror). Deferred.
 
 ## Acceptance criteria
 
