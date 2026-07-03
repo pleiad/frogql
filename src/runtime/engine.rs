@@ -334,6 +334,9 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// comprehension element (a `Value`, which `Assignment` cannot hold)
     /// resolves correctly. Pushed/popped per element during evaluation.
     comprehension_scope: RefCell<Vec<(String, Value)>>,
+    /// Active query Filters at the parent level, used to extract allReduce
+    /// predicates for early path pruning during repetition traversals.
+    active_filters: RefCell<Vec<Expr>>,
     /// Outer bindings made visible inside a *parameter-correlated* subquery
     /// body — outer variables referenced in the body's WHERE/RETURN but not
     /// bound by the body's own pattern. `Expr::Var` / `Expr::AttrLookup`
@@ -400,6 +403,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
             comprehension_scope: RefCell::new(Vec::new()),
+            active_filters: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
         }
     }
@@ -416,6 +420,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
             comprehension_scope: RefCell::new(Vec::new()),
+            active_filters: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
         }
     }
@@ -856,7 +861,10 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 Some(IntermediateResult::new(rows))
             }
             PathPattern::Filter(inner, expr) => {
-                let ir = self.pinned_run(inner, index, var, id)?;
+                self.active_filters.borrow_mut().push(expr.clone());
+                let ir = self.pinned_run(inner, index, var, id);
+                self.active_filters.borrow_mut().pop();
+                let ir = ir?;
                 let filtered: Vec<ResultRow> = ir
                     .rows
                     .into_iter()
@@ -892,7 +900,10 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 Some(IntermediateResult::new(rows))
             }
             PathPattern::Filter(inner, expr) => {
-                let ir = self.pinned_run_multi(inner, index, pins, 0)?;
+                self.active_filters.borrow_mut().push(expr.clone());
+                let ir = self.pinned_run_multi(inner, index, pins, 0);
+                self.active_filters.borrow_mut().pop();
+                let ir = ir?;
                 let filtered: Vec<ResultRow> = ir
                     .rows
                     .into_iter()
@@ -1428,7 +1439,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             PathPattern::Filter(inner, expr) => {
                 // For filters, we can't know how many pre-filter results we need,
                 // so pass 0 (unlimited) to inner and filter+truncate after.
+                self.active_filters.borrow_mut().push(expr.clone());
                 let ir = self.run_path_pattern(inner, 0);
+                self.active_filters.borrow_mut().pop();
                 let mut rows = Vec::new();
                 for r in ir.rows {
                     if self.run_expr(&r.assignment, expr).get_bool() {
@@ -1769,6 +1782,13 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     return optimized;
                 }
             }
+            PathPattern::Repeat { pattern, lb, ub } => {
+                if let Some(optimized) =
+                    self.try_concat_with_edge_repetition(&ir1, pattern, *lb, *ub, limit)
+                {
+                    return optimized;
+                }
+            }
             _ => {}
         }
 
@@ -1963,6 +1983,266 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             }
         }
         IntermediateResult::new(rows)
+    }
+
+    fn try_concat_with_edge_repetition(
+        &self,
+        ir1: &IntermediateResult,
+        edge_pat: &PathPattern,
+        lb: usize,
+        ub: Option<usize>,
+        limit: usize,
+    ) -> Option<IntermediateResult> {
+        let ub_val = ub?;
+        if !matches!(
+            edge_pat,
+            PathPattern::EdgeRight(_)
+                | PathPattern::EdgeLeft(_)
+                | PathPattern::EdgeUndirected(_)
+                | PathPattern::EdgeAnyDirection(_)
+        ) {
+            return None;
+        }
+
+        let mut anon_edge_pat = edge_pat.clone();
+        let var_name = match &mut anon_edge_pat {
+            PathPattern::EdgeRight(Some(d))
+            | PathPattern::EdgeLeft(Some(d))
+            | PathPattern::EdgeUndirected(Some(d))
+            | PathPattern::EdgeAnyDirection(Some(d)) => d.var.take(),
+            _ => None,
+        };
+
+        let mut active_reduces = Vec::new();
+        if let Some(ref name) = var_name {
+            for filter_expr in self.active_filters.borrow().iter() {
+                active_reduces.extend(find_all_reduce_for_var(filter_expr, name));
+            }
+        }
+
+        let freevars = edge_pat.freevars();
+        let mut accumulated_rows = Vec::new();
+
+        if lb == 0 {
+            for r in &ir1.rows {
+                let mut row = r.clone();
+                row.assignment.fill_empty_list(&freevars);
+                accumulated_rows.push(row);
+                if limit > 0 && accumulated_rows.len() >= limit {
+                    accumulated_rows.truncate(limit);
+                    return Some(IntermediateResult::new(accumulated_rows));
+                }
+            }
+        }
+
+        let mut acc_cache: HashMap<(usize, Path), Value> = HashMap::new();
+
+        let mut level_ir = self.run_concat_pattern_step(ir1, &anon_edge_pat, 0);
+        if let Some(ref name) = var_name {
+            for row in &mut level_ir.rows {
+                let edge_val = Self::get_last_edge(row.path());
+                row.assignment.extend(name.clone(), PathValue::Group(vec![edge_val]));
+            }
+            if !active_reduces.is_empty() {
+                let mut cache_inserts = Vec::new();
+                level_ir.rows.retain(|row| {
+                    let mut ok = true;
+                    let edge_val = Self::get_last_edge(row.path());
+                    for (idx, expr) in active_reduces.iter().enumerate() {
+                        if let Some((next_acc, match_ok)) = self.eval_all_reduce_incremental(
+                            &row.assignment,
+                            expr,
+                            &edge_val,
+                            None,
+                        ) {
+                            if match_ok {
+                                cache_inserts.push(((idx, row.path().clone()), next_acc));
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    ok
+                });
+                for (key, val) in cache_inserts {
+                    acc_cache.insert(key, val);
+                }
+            }
+        }
+        if lb <= 1 {
+            for r in &level_ir.rows {
+                accumulated_rows.push(r.clone());
+                if limit > 0 && accumulated_rows.len() >= limit {
+                    accumulated_rows.truncate(limit);
+                    return Some(IntermediateResult::new(accumulated_rows));
+                }
+            }
+        }
+
+        for k in 2..=ub_val {
+            let next_ir = self.run_concat_pattern_step(&level_ir, &anon_edge_pat, 0);
+            level_ir = next_ir;
+            if let Some(ref name) = var_name {
+                for row in &mut level_ir.rows {
+                    let edge_val = Self::get_last_edge(row.path());
+                    if let Some(PathValue::Group(prev_group)) = row.assignment.get(name) {
+                        let mut new_group = prev_group.clone();
+                        new_group.push(edge_val);
+                        row.assignment.extend(name.clone(), PathValue::Group(new_group));
+                    }
+                }
+                if !active_reduces.is_empty() {
+                    let mut cache_inserts = Vec::new();
+                    level_ir.rows.retain(|row| {
+                        let mut ok = true;
+                        let path_len = row.path().0.len();
+                        let parent_path = Path(row.path().0[..path_len - 2].to_vec());
+                        let edge_val = Self::get_last_edge(row.path());
+                        for (idx, expr) in active_reduces.iter().enumerate() {
+                            let prev_acc = acc_cache.get(&(idx, parent_path.clone())).cloned();
+                            if let Some((next_acc, match_ok)) = self.eval_all_reduce_incremental(
+                                &row.assignment,
+                                expr,
+                                &edge_val,
+                                prev_acc,
+                            ) {
+                                if match_ok {
+                                    cache_inserts.push(((idx, row.path().clone()), next_acc));
+                                } else {
+                                    ok = false;
+                                    break;
+                                }
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        ok
+                    });
+                    for (key, val) in cache_inserts {
+                        acc_cache.insert(key, val);
+                    }
+                }
+            }
+            if k >= lb {
+                for r in &level_ir.rows {
+                    accumulated_rows.push(r.clone());
+                    if limit > 0 && accumulated_rows.len() >= limit {
+                        accumulated_rows.truncate(limit);
+                        return Some(IntermediateResult::new(accumulated_rows));
+                    }
+                }
+            }
+        }
+
+        Some(IntermediateResult::new(accumulated_rows))
+    }
+
+    fn eval_all_reduce_incremental(
+        &self,
+        mu: &Assignment,
+        expr: &Expr,
+        new_edge: &PathValue,
+        prev_acc: Option<Value>,
+    ) -> Option<(Value, bool)> {
+        let Expr::AllReduce {
+            acc_name,
+            initial,
+            step_var,
+            list_expr: _,
+            reduction,
+            predicate,
+        } = expr else {
+            return None;
+        };
+
+        // 1. Get previous/initial accumulator value
+        let acc_value = match prev_acc {
+            Some(v) => v,
+            None => match self.run_expr(mu, initial) {
+                ExprResult::Success(v) => v,
+                ExprResult::Failure(_) => return None,
+            },
+        };
+
+        let step_value = path_value_to_value(new_edge);
+
+        // 2. Compute next accumulator value: acc_value = reduction(acc_value, step_value)
+        self.comprehension_scope
+            .borrow_mut()
+            .push((acc_name.clone(), acc_value));
+        self.comprehension_scope
+            .borrow_mut()
+            .push((step_var.clone(), step_value.clone()));
+        let next_acc_res = self.run_expr(mu, reduction);
+        self.comprehension_scope.borrow_mut().pop();
+        self.comprehension_scope.borrow_mut().pop();
+
+        let next_acc = match next_acc_res {
+            ExprResult::Success(v) => v,
+            ExprResult::Failure(_) => return None,
+        };
+
+        // 3. Evaluate predicate on the next accumulator: predicate(next_acc, step_value)
+        self.comprehension_scope
+            .borrow_mut()
+            .push((acc_name.clone(), next_acc.clone()));
+        self.comprehension_scope
+            .borrow_mut()
+            .push((step_var.clone(), step_value));
+        let pred_res = self.run_expr(mu, predicate);
+        self.comprehension_scope.borrow_mut().pop();
+        self.comprehension_scope.borrow_mut().pop();
+
+        let ok = match pred_res {
+            ExprResult::Success(Value::Bool(b)) => b,
+            _ => false,
+        };
+
+        Some((next_acc, ok))
+    }
+
+    fn run_concat_pattern_step(
+        &self,
+        ir: &IntermediateResult,
+        anon_edge_pat: &PathPattern,
+        limit: usize,
+    ) -> IntermediateResult {
+        match anon_edge_pat {
+            PathPattern::EdgeRight(desc) => {
+                self.concat_with_directed_edge(ir, desc.as_ref(), true, limit)
+            }
+            PathPattern::EdgeLeft(desc) => {
+                self.concat_with_directed_edge(ir, desc.as_ref(), false, limit)
+            }
+            PathPattern::EdgeUndirected(desc) => {
+                self.concat_with_undirected_edge(ir, desc.as_ref(), limit)
+            }
+            PathPattern::EdgeAnyDirection(desc) => {
+                let right = self.concat_with_directed_edge(ir, desc.as_ref(), true, limit);
+                if limit > 0 && right.rows.len() >= limit {
+                    return right;
+                }
+                let remaining = if limit > 0 { limit - right.rows.len() } else { 0 };
+                let left = self.concat_with_directed_edge(ir, desc.as_ref(), false, remaining);
+                let combined = right.union(left);
+                if limit > 0 && combined.rows.len() >= limit {
+                    return combined;
+                }
+                let remaining = if limit > 0 { limit - combined.rows.len() } else { 0 };
+                let und = self.concat_with_undirected_edge(ir, desc.as_ref(), remaining);
+                combined.union(und)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn get_last_edge(path: &Path) -> PathValue {
+        path.0[path.0.len() - 2].clone()
     }
 
     /// Hash-join on the concatenation key (last node of ir1 = first node of ir2).
@@ -2443,9 +2723,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             return None;
         }
         let (edge_desc, dir) = single_edge_dir(inner)?;
-        if edge_desc.and_then(|d| d.var.as_deref()).is_some() {
-            return None;
-        }
+        let edge_var = edge_desc.and_then(|d| d.var.clone());
         // Validate both endpoints are node patterns; evaluate the full
         // (Filter-wrapped) sub-patterns so endpoint value predicates run.
         node_endpoint(src)?;
@@ -2487,9 +2765,17 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 if !a.assignment.can_unify(&b.assignment) {
                     continue;
                 }
+                let mut mu = a.assignment.unify(&b.assignment);
+                if let Some(ref name) = edge_var {
+                    let group_pv = PathValue::Group(vec![]);
+                    if !mu.can_unify(&Assignment::from_optional(Some(name), group_pv.clone())) {
+                        continue;
+                    }
+                    mu.extend(name.clone(), group_pv);
+                }
                 rows.push(ResultRow::with_paths(
                     vec![Path(vec![PathValue::Node(id)])],
-                    a.assignment.unify(&b.assignment),
+                    mu,
                 ));
             }
         } else if !self_ids.is_empty() {
@@ -2501,7 +2787,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             if dir == BfsEdgeDir::Undirected {
                 for &id in &self_ids {
                     self.emit_undirected_self_cycles(
-                        id, edge_desc, ub, groups, &src_end, &tgt_end, &mut rows,
+                        id, edge_desc, &edge_var, ub, groups, &src_end, &tgt_end, &mut rows,
                     );
                 }
             } else {
@@ -2537,6 +2823,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             self.bfs_from_source(
                 s,
                 edge_desc,
+                &edge_var,
                 dir,
                 reverse,
                 ub,
@@ -2571,6 +2858,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         &self,
         n: Id,
         edge_desc: Option<&Descriptor>,
+        edge_var: &Option<String>,
         ub: Option<usize>,
         groups: bool,
         src_end: &BfsEndpoint,
@@ -2642,7 +2930,20 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             Vec::new()
         };
         for p in paths {
-            rows.push(ResultRow::with_paths(vec![p], mu.clone()));
+            let mut row_mu = mu.clone();
+            if let Some(ref name) = edge_var {
+                let edges: Vec<PathValue> = p.0.iter()
+                    .enumerate()
+                    .filter(|(idx, _)| idx % 2 == 1)
+                    .map(|(_, pv)| pv.clone())
+                    .collect();
+                let group_pv = PathValue::Group(edges);
+                if !row_mu.can_unify(&Assignment::from_optional(Some(name), group_pv.clone())) {
+                    continue;
+                }
+                row_mu.extend(name.clone(), group_pv);
+            }
+            rows.push(ResultRow::with_paths(vec![p], row_mu));
         }
     }
 
@@ -2655,6 +2956,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         &self,
         s: Id,
         edge_desc: Option<&Descriptor>,
+        edge_var: &Option<String>,
         dir: BfsEdgeDir,
         reverse: bool,
         ub: Option<usize>,
@@ -2740,9 +3042,22 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 if !a.assignment.can_unify(&b.assignment) {
                     continue;
                 }
+                let mut mu = a.assignment.unify(&b.assignment);
+                if let Some(ref name) = edge_var {
+                    let edges: Vec<PathValue> = oriented.iter()
+                        .enumerate()
+                        .filter(|(idx, _)| idx % 2 == 1)
+                        .map(|(_, pv)| pv.clone())
+                        .collect();
+                    let group_pv = PathValue::Group(edges);
+                    if !mu.can_unify(&Assignment::from_optional(Some(name), group_pv.clone())) {
+                        continue;
+                    }
+                    mu.extend(name.clone(), group_pv);
+                }
                 rows.push(ResultRow::with_paths(
                     vec![Path(oriented)],
-                    a.assignment.unify(&b.assignment),
+                    mu,
                 ));
                 if limit > 0 && rows.len() >= limit {
                     return;
@@ -3198,6 +3513,62 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     }
                 }
                 ExprResult::Success(Value::List(out))
+            }
+
+            Expr::AllReduce {
+                acc_name,
+                initial,
+                step_var,
+                list_expr,
+                reduction,
+                predicate,
+            } => {
+                let items = match self.run_expr(mu, list_expr) {
+                    ExprResult::Success(Value::List(items)) => items,
+                    ExprResult::Success(Value::Null) | ExprResult::Failure(_) => {
+                        return ExprResult::Success(Value::Bool(true));
+                    }
+                    ExprResult::Success(other) => {
+                        return ExprResult::Failure(format!(
+                            "allReduce list expression is not a list: {other}"
+                        ));
+                    }
+                };
+                let mut acc_value = match self.run_expr(mu, initial) {
+                    ExprResult::Success(v) => v,
+                    ExprResult::Failure(err) => return ExprResult::Failure(err),
+                };
+                for item in items {
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((acc_name.clone(), acc_value.clone()));
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((step_var.clone(), item.clone()));
+                    let next_acc = self.run_expr(mu, reduction);
+                    self.comprehension_scope.borrow_mut().pop();
+                    self.comprehension_scope.borrow_mut().pop();
+                    acc_value = match next_acc {
+                        ExprResult::Success(v) => v,
+                        ExprResult::Failure(err) => return ExprResult::Failure(err),
+                    };
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((acc_name.clone(), acc_value.clone()));
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((step_var.clone(), item.clone()));
+                    let pred_res = self.run_expr(mu, predicate);
+                    self.comprehension_scope.borrow_mut().pop();
+                    self.comprehension_scope.borrow_mut().pop();
+                    match pred_res {
+                        ExprResult::Success(Value::Bool(true)) => {}
+                        _ => {
+                            return ExprResult::Success(Value::Bool(false));
+                        }
+                    }
+                }
+                ExprResult::Success(Value::Bool(true))
             }
 
             Expr::Type(_) => ExprResult::Failure("bare type in expression".into()),
@@ -4775,6 +5146,63 @@ fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         }),
         _ => None,
     }
+}
+
+fn find_all_reduce_for_var(expr: &Expr, var_name: &str) -> Vec<Expr> {
+    let mut results = Vec::new();
+    fn walk(e: &Expr, var_name: &str, results: &mut Vec<Expr>) {
+        match e {
+            Expr::AllReduce { list_expr, .. } => {
+                if let Expr::Var(ref name) = **list_expr {
+                    if name == var_name {
+                        results.push(e.clone());
+                    }
+                }
+            }
+            Expr::Binop { left, right, .. } => {
+                walk(left, var_name, results);
+                walk(right, var_name, results);
+            }
+            Expr::Unop { operand, .. } => {
+                walk(operand, var_name, results);
+            }
+            Expr::IsNull { operand, .. } => {
+                walk(operand, var_name, results);
+            }
+            Expr::FieldAccess { base, .. } => {
+                walk(base, var_name, results);
+            }
+            Expr::Coalesce(args) | Expr::Call { args, .. } => {
+                for a in args {
+                    walk(a, var_name, results);
+                }
+            }
+            Expr::Record { fields } => {
+                for (_, ex) in fields {
+                    walk(ex, var_name, results);
+                }
+            }
+            Expr::Case { branches, else_expr } => {
+                for (cond, value) in branches {
+                    walk(cond, var_name, results);
+                    walk(value, var_name, results);
+                }
+                if let Some(value) = else_expr {
+                    walk(value, var_name, results);
+                }
+            }
+            Expr::ListComprehension { source, filter, body, .. } => {
+                walk(source, var_name, results);
+                if let Some(f) = filter {
+                    walk(f, var_name, results);
+                }
+                walk(body, var_name, results);
+            }
+            _ => {}
+        }
+    }
+    walk(expr, var_name, &mut results);
+    results
 }
 
 #[cfg(test)]

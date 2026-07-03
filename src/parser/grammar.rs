@@ -1954,6 +1954,10 @@ impl Parser {
                     body: Box::new(body),
                 })
             }
+            Token::AllReduce => {
+                self.advance();
+                self.parse_all_reduce()
+            }
             _ => Err(format!("expected expression, got {:?}", self.peek())),
         }
     }
@@ -2036,6 +2040,36 @@ impl Parser {
             op: BinOp::Mod,
             left: Box::new(left),
             right: Box::new(right),
+        })
+    }
+
+    fn parse_all_reduce(&mut self) -> Result<Expr, String> {
+        self.expect(&Token::LParen)?;
+        let acc_name = match self.advance() {
+            Token::Name(n) => n,
+            t => return Err(format!("allReduce: expected accumulator variable name, got {t:?}")),
+        };
+        self.expect(&Token::Eq)?;
+        let initial = self.expr()?;
+        self.expect(&Token::Comma)?;
+        let step_var = match self.advance() {
+            Token::Name(n) => n,
+            t => return Err(format!("allReduce: expected step variable name, got {t:?}")),
+        };
+        self.expect(&Token::In)?;
+        let list_expr = self.expr()?;
+        self.expect(&Token::Pipe)?;
+        let reduction = self.expr()?;
+        self.expect(&Token::Comma)?;
+        let predicate = self.expr()?;
+        self.expect(&Token::RParen)?;
+        Ok(Expr::AllReduce {
+            acc_name,
+            initial: Box::new(initial),
+            step_var,
+            list_expr: Box::new(list_expr),
+            reduction: Box::new(reduction),
+            predicate: Box::new(predicate),
         })
     }
 

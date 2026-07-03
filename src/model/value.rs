@@ -130,7 +130,7 @@ impl fmt::Display for PathValue {
 }
 
 /// A path is a sequence of alternating nodes and edges: [n1, e1, n2, e2, n3, ...].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Path(pub Vec<PathValue>);
 
 impl Path {
