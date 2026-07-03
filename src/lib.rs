@@ -9,12 +9,248 @@ pub mod syntax;
 pub mod typing;
 
 use syntax::path_pattern::PathPattern;
-use syntax::query::{MatchStatement, Query};
+use syntax::query::{MatchStatement, Query, ReturnItem, Aggregator, SortKey};
+use syntax::expr::Expr;
 use typing::checker::Typechecker;
 use typing::variable_type::Schema;
+use std::collections::{HashSet, HashMap};
+
+fn collect_expr_vars(expr: &Expr, acc: &mut HashSet<String>) {
+    match expr {
+        Expr::Var(name) => {
+            acc.insert(name.clone());
+        }
+        Expr::AttrLookup { var, .. } => {
+            acc.insert(var.clone());
+        }
+        Expr::FieldAccess { base, .. } => {
+            collect_expr_vars(base, acc);
+        }
+        Expr::Binop { left, right, .. } => {
+            collect_expr_vars(left, acc);
+            collect_expr_vars(right, acc);
+        }
+        Expr::Unop { operand, .. } | Expr::IsNull { operand, .. } => {
+            collect_expr_vars(operand, acc);
+        }
+        Expr::Coalesce(args) | Expr::Call { args, .. } => {
+            for a in args {
+                collect_expr_vars(a, acc);
+            }
+        }
+        Expr::Record { fields } => {
+            for (_, e) in fields {
+                collect_expr_vars(e, acc);
+            }
+        }
+        Expr::ValueSubquery { body } | Expr::Exists { body } | Expr::NotExists { body } => {
+            collect_query_vars(body, acc);
+        }
+        Expr::Case { branches, else_expr } => {
+            for (cond, value) in branches {
+                collect_expr_vars(cond, acc);
+                collect_expr_vars(value, acc);
+            }
+            if let Some(value) = else_expr {
+                collect_expr_vars(value, acc);
+            }
+        }
+        Expr::ListComprehension { var, source, filter, body } => {
+            collect_expr_vars(source, acc);
+            let mut inner = HashSet::new();
+            if let Some(f) = filter {
+                collect_expr_vars(f, &mut inner);
+            }
+            collect_expr_vars(body, &mut inner);
+            inner.remove(var);
+            acc.extend(inner);
+        }
+        Expr::AllReduce {
+            acc_name,
+            initial,
+            step_var,
+            list_expr,
+            reduction,
+            predicate,
+        } => {
+            collect_expr_vars(initial, acc);
+            collect_expr_vars(list_expr, acc);
+            let mut inner = HashSet::new();
+            collect_expr_vars(reduction, &mut inner);
+            collect_expr_vars(predicate, &mut inner);
+            inner.remove(acc_name);
+            inner.remove(step_var);
+            acc.extend(inner);
+        }
+        Expr::Agg(agg) => match agg.as_ref() {
+            Aggregator::CountStar => {}
+            Aggregator::GeneralSet { expr, .. } => {
+                collect_expr_vars(expr, acc);
+            }
+        },
+        Expr::Const(_) | Expr::Type(_) => {}
+    }
+}
+
+fn collect_query_vars(q: &Query, acc: &mut HashSet<String>) {
+    if let Some(returns) = &q.returns {
+        for item in returns {
+            match item {
+                ReturnItem::Expr { expr, .. } => {
+                    collect_expr_vars(expr, acc);
+                }
+                ReturnItem::Aggregate { agg, .. } => match agg {
+                    Aggregator::CountStar => {}
+                    Aggregator::GeneralSet { expr, .. } => {
+                        collect_expr_vars(expr, acc);
+                    }
+                },
+            }
+        }
+    } else {
+        for m in &q.matches {
+            acc.extend(m.pattern().freevars());
+        }
+    }
+    if let Some(gb) = &q.group_by {
+        for e in gb {
+            collect_expr_vars(e, acc);
+        }
+    }
+    if let Some(ob) = &q.order_by {
+        for spec in ob {
+            if let SortKey::Expr(expr) = &spec.key {
+                collect_expr_vars(expr, acc);
+            }
+        }
+    }
+    let mut var_counts = HashMap::new();
+    for m in &q.matches {
+        for v in m.pattern().freevars() {
+            *var_counts.entry(v).or_insert(0) += 1;
+        }
+    }
+    for (v, count) in var_counts {
+        if count > 1 {
+            acc.insert(v);
+        }
+    }
+    for m in &q.matches {
+        collect_pattern_filter_vars(m.pattern(), acc);
+    }
+}
+
+fn collect_pattern_filter_vars(p: &PathPattern, acc: &mut HashSet<String>) {
+    match p {
+        PathPattern::Filter(inner, expr) => {
+            collect_expr_vars(expr, acc);
+            collect_pattern_filter_vars(inner, acc);
+        }
+        PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+            collect_pattern_filter_vars(a, acc);
+            collect_pattern_filter_vars(b, acc);
+        }
+        PathPattern::Repeat { pattern, .. } | PathPattern::Questioned(pattern)
+        | PathPattern::Selected { pattern, .. } | PathPattern::Named { pattern, .. } => {
+            collect_pattern_filter_vars(pattern, acc);
+        }
+        _ => {}
+    }
+}
+
+fn remove_unused_pattern_vars(p: PathPattern, used: &HashSet<String>) -> PathPattern {
+    match p {
+        PathPattern::Node(Some(mut d)) => {
+            if let Some(ref var) = d.var {
+                if !used.contains(var) {
+                    d.var = None;
+                }
+            }
+            PathPattern::Node(Some(d))
+        }
+        PathPattern::EdgeRight(Some(mut d)) => {
+            if let Some(ref var) = d.var {
+                if !used.contains(var) {
+                    d.var = None;
+                }
+            }
+            PathPattern::EdgeRight(Some(d))
+        }
+        PathPattern::EdgeLeft(Some(mut d)) => {
+            if let Some(ref var) = d.var {
+                if !used.contains(var) {
+                    d.var = None;
+                }
+            }
+            PathPattern::EdgeLeft(Some(d))
+        }
+        PathPattern::EdgeUndirected(Some(mut d)) => {
+            if let Some(ref var) = d.var {
+                if !used.contains(var) {
+                    d.var = None;
+                }
+            }
+            PathPattern::EdgeUndirected(Some(d))
+        }
+        PathPattern::EdgeAnyDirection(Some(mut d)) => {
+            if let Some(ref var) = d.var {
+                if !used.contains(var) {
+                    d.var = None;
+                }
+            }
+            PathPattern::EdgeAnyDirection(Some(d))
+        }
+        PathPattern::Concat(a, b) => PathPattern::Concat(
+            Box::new(remove_unused_pattern_vars(*a, used)),
+            Box::new(remove_unused_pattern_vars(*b, used)),
+        ),
+        PathPattern::Union(a, b) => PathPattern::Union(
+            Box::new(remove_unused_pattern_vars(*a, used)),
+            Box::new(remove_unused_pattern_vars(*b, used)),
+        ),
+        PathPattern::Join(a, b) => PathPattern::Join(
+            Box::new(remove_unused_pattern_vars(*a, used)),
+            Box::new(remove_unused_pattern_vars(*b, used)),
+        ),
+        PathPattern::Filter(inner, expr) => PathPattern::Filter(
+            Box::new(remove_unused_pattern_vars(*inner, used)),
+            expr,
+        ),
+        PathPattern::Repeat { pattern, lb, ub } => PathPattern::Repeat {
+            pattern: Box::new(remove_unused_pattern_vars(*pattern, used)),
+            lb,
+            ub,
+        },
+        PathPattern::Questioned(inner) => {
+            PathPattern::Questioned(Box::new(remove_unused_pattern_vars(*inner, used)))
+        }
+        PathPattern::Selected { prefix, pattern } => PathPattern::Selected {
+            prefix,
+            pattern: Box::new(remove_unused_pattern_vars(*pattern, used)),
+        },
+        PathPattern::Named { var, pattern } => PathPattern::Named {
+            var,
+            pattern: Box::new(remove_unused_pattern_vars(*pattern, used)),
+        },
+        other => other,
+    }
+}
 
 /// Optimize the query while preserving OPTIONAL and §16.6 prefix boundaries.
-fn optimize_query(q: Query, schema: &Schema) -> Query {
+fn optimize_query(mut q: Query, schema: &Schema) -> Query {
+    let mut used_vars = HashSet::new();
+    collect_query_vars(&q, &mut used_vars);
+    for m in &mut q.matches {
+        match m {
+            MatchStatement::Simple { pattern } => {
+                *pattern = remove_unused_pattern_vars(std::mem::replace(pattern, PathPattern::Node(None)), &used_vars);
+            }
+            MatchStatement::Optional { pattern } => {
+                *pattern = remove_unused_pattern_vars(std::mem::replace(pattern, PathPattern::Node(None)), &used_vars);
+            }
+        }
+    }
+
     // Selected patterns are evaluated in isolation; do not collapse across them.
     let mut q = if !q.has_any_optional() && !q.has_any_selected() {
         let pattern = optimizer::compile(q.collapsed_pattern());

@@ -210,6 +210,14 @@ pub enum Expr {
         filter: Option<Box<Expr>>,
         body: Box<Expr>,
     },
+    AllReduce {
+        acc_name: String,
+        initial: Box<Expr>,
+        step_var: String,
+        list_expr: Box<Expr>,
+        reduction: Box<Expr>,
+        predicate: Box<Expr>,
+    },
     /// Right-hand side of `is`/`as` operators — a type, not a value.
     Type(SimpleType),
     /// `EXISTS { <body> }` — Boolean predicate over a subquery body.
@@ -268,6 +276,18 @@ impl Expr {
                     || filter.as_deref().is_some_and(Expr::contains_agg)
                     || body.contains_agg()
             }
+            Expr::AllReduce {
+                initial,
+                list_expr,
+                reduction,
+                predicate,
+                ..
+            } => {
+                initial.contains_agg()
+                    || list_expr.contains_agg()
+                    || reduction.contains_agg()
+                    || predicate.contains_agg()
+            }
             Expr::Const(_)
             | Expr::Var(_)
             | Expr::AttrLookup { .. }
@@ -316,6 +336,18 @@ impl Expr {
                 source.contains_subquery()
                     || filter.as_deref().is_some_and(Expr::contains_subquery)
                     || body.contains_subquery()
+            }
+            Expr::AllReduce {
+                initial,
+                list_expr,
+                reduction,
+                predicate,
+                ..
+            } => {
+                initial.contains_subquery()
+                    || list_expr.contains_subquery()
+                    || reduction.contains_subquery()
+                    || predicate.contains_subquery()
             }
             Expr::Const(_)
             | Expr::Var(_)
@@ -386,6 +418,23 @@ impl Expr {
                 }
                 body.referenced_vars(&mut inner);
                 inner.remove(var);
+                acc.extend(inner);
+            }
+            Expr::AllReduce {
+                acc_name,
+                initial,
+                step_var,
+                list_expr,
+                reduction,
+                predicate,
+            } => {
+                initial.referenced_vars(acc);
+                list_expr.referenced_vars(acc);
+                let mut inner = std::collections::BTreeSet::new();
+                reduction.referenced_vars(&mut inner);
+                predicate.referenced_vars(&mut inner);
+                inner.remove(acc_name);
+                inner.remove(step_var);
                 acc.extend(inner);
             }
             // Subqueries are handled via `contains_subquery`; their
@@ -490,6 +539,19 @@ impl fmt::Display for Expr {
                 Some(cond) => write!(f, "[{var} IN {source} WHERE {cond} | {body}]"),
                 None => write!(f, "[{var} IN {source} | {body}]"),
             },
+            Expr::AllReduce {
+                acc_name,
+                initial,
+                step_var,
+                list_expr,
+                reduction,
+                predicate,
+            } => {
+                write!(
+                    f,
+                    "allReduce({acc_name} = {initial}, {step_var} IN {list_expr} | {reduction}, {predicate})"
+                )
+            }
             Expr::Type(t) => write!(f, "{t}"),
             Expr::Exists { body } => write!(f, "EXISTS {{ {} }}", display_subquery(body)),
             Expr::NotExists { body } => write!(f, "NOT EXISTS {{ {} }}", display_subquery(body)),

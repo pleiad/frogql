@@ -363,15 +363,16 @@ fn merge_constraints(p: PathPattern, c: &Constraints) -> PathPattern {
 fn boundary_node_vars(p: &PathPattern) -> [Option<String>; 2] {
     let mut vars = Vec::new();
     collect_top_node_vars(p, &mut vars);
-    [vars.first().cloned(), vars.last().cloned()]
+    [
+        vars.first().cloned().flatten(),
+        vars.last().cloned().flatten(),
+    ]
 }
 
-fn collect_top_node_vars(p: &PathPattern, out: &mut Vec<String>) {
+fn collect_top_node_vars(p: &PathPattern, out: &mut Vec<Option<String>>) {
     match p {
         PathPattern::Node(desc) => {
-            if let Some(var) = desc.as_ref().and_then(|d| d.var.clone()) {
-                out.push(var);
-            }
+            out.push(desc.as_ref().and_then(|d| d.var.clone()));
         }
         PathPattern::Concat(a, b) => {
             collect_top_node_vars(a, out);

@@ -334,6 +334,9 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// comprehension element (a `Value`, which `Assignment` cannot hold)
     /// resolves correctly. Pushed/popped per element during evaluation.
     comprehension_scope: RefCell<Vec<(String, Value)>>,
+    /// Active query Filters at the parent level, used to extract allReduce
+    /// predicates for early path pruning during repetition traversals.
+    active_filters: RefCell<Vec<Expr>>,
     /// Outer bindings made visible inside a *parameter-correlated* subquery
     /// body — outer variables referenced in the body's WHERE/RETURN but not
     /// bound by the body's own pattern. `Expr::Var` / `Expr::AttrLookup`
@@ -400,6 +403,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
             comprehension_scope: RefCell::new(Vec::new()),
+            active_filters: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
         }
     }
@@ -416,6 +420,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
             comprehension_scope: RefCell::new(Vec::new()),
+            active_filters: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
         }
     }
@@ -856,7 +861,10 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 Some(IntermediateResult::new(rows))
             }
             PathPattern::Filter(inner, expr) => {
-                let ir = self.pinned_run(inner, index, var, id)?;
+                self.active_filters.borrow_mut().push(expr.clone());
+                let ir = self.pinned_run(inner, index, var, id);
+                self.active_filters.borrow_mut().pop();
+                let ir = ir?;
                 let filtered: Vec<ResultRow> = ir
                     .rows
                     .into_iter()
@@ -892,7 +900,10 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 Some(IntermediateResult::new(rows))
             }
             PathPattern::Filter(inner, expr) => {
-                let ir = self.pinned_run_multi(inner, index, pins, 0)?;
+                self.active_filters.borrow_mut().push(expr.clone());
+                let ir = self.pinned_run_multi(inner, index, pins, 0);
+                self.active_filters.borrow_mut().pop();
+                let ir = ir?;
                 let filtered: Vec<ResultRow> = ir
                     .rows
                     .into_iter()
@@ -1428,7 +1439,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             PathPattern::Filter(inner, expr) => {
                 // For filters, we can't know how many pre-filter results we need,
                 // so pass 0 (unlimited) to inner and filter+truncate after.
+                self.active_filters.borrow_mut().push(expr.clone());
                 let ir = self.run_path_pattern(inner, 0);
+                self.active_filters.borrow_mut().pop();
                 let mut rows = Vec::new();
                 for r in ir.rows {
                     if self.run_expr(&r.assignment, expr).get_bool() {
@@ -1769,6 +1782,13 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     return optimized;
                 }
             }
+            PathPattern::Repeat { pattern, lb, ub } => {
+                if let Some(optimized) =
+                    self.try_concat_with_edge_repetition(&ir1, pattern, *lb, *ub, limit)
+                {
+                    return optimized;
+                }
+            }
             _ => {}
         }
 
@@ -1963,6 +1983,161 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             }
         }
         IntermediateResult::new(rows)
+    }
+
+    fn try_concat_with_edge_repetition(
+        &self,
+        ir1: &IntermediateResult,
+        edge_pat: &PathPattern,
+        lb: usize,
+        ub: Option<usize>,
+        limit: usize,
+    ) -> Option<IntermediateResult> {
+        let Some(ub_val) = ub else {
+            return None;
+        };
+        if !matches!(
+            edge_pat,
+            PathPattern::EdgeRight(_)
+                | PathPattern::EdgeLeft(_)
+                | PathPattern::EdgeUndirected(_)
+                | PathPattern::EdgeAnyDirection(_)
+        ) {
+            return None;
+        }
+
+        let mut anon_edge_pat = edge_pat.clone();
+        let var_name = match &mut anon_edge_pat {
+            PathPattern::EdgeRight(Some(d))
+            | PathPattern::EdgeLeft(Some(d))
+            | PathPattern::EdgeUndirected(Some(d))
+            | PathPattern::EdgeAnyDirection(Some(d)) => d.var.take(),
+            _ => None,
+        };
+
+        let mut active_reduces = Vec::new();
+        if let Some(ref name) = var_name {
+            for filter_expr in self.active_filters.borrow().iter() {
+                active_reduces.extend(find_all_reduce_for_var(filter_expr, name));
+            }
+        }
+
+        let freevars = edge_pat.freevars();
+        let mut accumulated_rows = Vec::new();
+
+        if lb == 0 {
+            for r in &ir1.rows {
+                let mut row = r.clone();
+                row.assignment.fill_empty_list(&freevars);
+                accumulated_rows.push(row);
+                if limit > 0 && accumulated_rows.len() >= limit {
+                    accumulated_rows.truncate(limit);
+                    return Some(IntermediateResult::new(accumulated_rows));
+                }
+            }
+        }
+
+        let mut level_ir = self.run_concat_pattern_step(ir1, &anon_edge_pat, 0);
+        if let Some(ref name) = var_name {
+            for row in &mut level_ir.rows {
+                let edge_val = Self::get_last_edge(row.path());
+                row.assignment.extend(name.clone(), PathValue::Group(vec![edge_val]));
+            }
+            if !active_reduces.is_empty() {
+                level_ir.rows.retain(|row| {
+                    active_reduces.iter().all(|expr| {
+                        matches!(
+                            self.run_expr(&row.assignment, expr),
+                            ExprResult::Success(Value::Bool(true))
+                        )
+                    })
+                });
+            }
+        }
+        if lb <= 1 {
+            for r in &level_ir.rows {
+                accumulated_rows.push(r.clone());
+                if limit > 0 && accumulated_rows.len() >= limit {
+                    accumulated_rows.truncate(limit);
+                    return Some(IntermediateResult::new(accumulated_rows));
+                }
+            }
+        }
+
+        for k in 2..=ub_val {
+            let next_ir = self.run_concat_pattern_step(&level_ir, &anon_edge_pat, 0);
+            level_ir = next_ir;
+            if let Some(ref name) = var_name {
+                for row in &mut level_ir.rows {
+                    let edge_val = Self::get_last_edge(row.path());
+                    if let Some(PathValue::Group(prev_group)) = row.assignment.get(name) {
+                        let mut new_group = prev_group.clone();
+                        new_group.push(edge_val);
+                        row.assignment.extend(name.clone(), PathValue::Group(new_group));
+                    }
+                }
+                if !active_reduces.is_empty() {
+                    level_ir.rows.retain(|row| {
+                        active_reduces.iter().all(|expr| {
+                            matches!(
+                                self.run_expr(&row.assignment, expr),
+                                ExprResult::Success(Value::Bool(true))
+                            )
+                        })
+                    });
+                }
+            }
+            if k >= lb {
+                for r in &level_ir.rows {
+                    accumulated_rows.push(r.clone());
+                    if limit > 0 && accumulated_rows.len() >= limit {
+                        accumulated_rows.truncate(limit);
+                        return Some(IntermediateResult::new(accumulated_rows));
+                    }
+                }
+            }
+        }
+
+        Some(IntermediateResult::new(accumulated_rows))
+    }
+
+    fn run_concat_pattern_step(
+        &self,
+        ir: &IntermediateResult,
+        anon_edge_pat: &PathPattern,
+        limit: usize,
+    ) -> IntermediateResult {
+        match anon_edge_pat {
+            PathPattern::EdgeRight(desc) => {
+                self.concat_with_directed_edge(ir, desc.as_ref(), true, limit)
+            }
+            PathPattern::EdgeLeft(desc) => {
+                self.concat_with_directed_edge(ir, desc.as_ref(), false, limit)
+            }
+            PathPattern::EdgeUndirected(desc) => {
+                self.concat_with_undirected_edge(ir, desc.as_ref(), limit)
+            }
+            PathPattern::EdgeAnyDirection(desc) => {
+                let right = self.concat_with_directed_edge(ir, desc.as_ref(), true, limit);
+                if limit > 0 && right.rows.len() >= limit {
+                    return right;
+                }
+                let remaining = if limit > 0 { limit - right.rows.len() } else { 0 };
+                let left = self.concat_with_directed_edge(ir, desc.as_ref(), false, remaining);
+                let combined = right.union(left);
+                if limit > 0 && combined.rows.len() >= limit {
+                    return combined;
+                }
+                let remaining = if limit > 0 { limit - combined.rows.len() } else { 0 };
+                let und = self.concat_with_undirected_edge(ir, desc.as_ref(), remaining);
+                combined.union(und)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn get_last_edge(path: &Path) -> PathValue {
+        path.0[path.0.len() - 2].clone()
     }
 
     /// Hash-join on the concatenation key (last node of ir1 = first node of ir2).
@@ -3198,6 +3373,62 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     }
                 }
                 ExprResult::Success(Value::List(out))
+            }
+
+            Expr::AllReduce {
+                acc_name,
+                initial,
+                step_var,
+                list_expr,
+                reduction,
+                predicate,
+            } => {
+                let items = match self.run_expr(mu, list_expr) {
+                    ExprResult::Success(Value::List(items)) => items,
+                    ExprResult::Success(Value::Null) | ExprResult::Failure(_) => {
+                        return ExprResult::Success(Value::Bool(true));
+                    }
+                    ExprResult::Success(other) => {
+                        return ExprResult::Failure(format!(
+                            "allReduce list expression is not a list: {other}"
+                        ));
+                    }
+                };
+                let mut acc_value = match self.run_expr(mu, initial) {
+                    ExprResult::Success(v) => v,
+                    ExprResult::Failure(err) => return ExprResult::Failure(err),
+                };
+                for item in items {
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((acc_name.clone(), acc_value.clone()));
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((step_var.clone(), item.clone()));
+                    let next_acc = self.run_expr(mu, reduction);
+                    self.comprehension_scope.borrow_mut().pop();
+                    self.comprehension_scope.borrow_mut().pop();
+                    acc_value = match next_acc {
+                        ExprResult::Success(v) => v,
+                        ExprResult::Failure(err) => return ExprResult::Failure(err),
+                    };
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((acc_name.clone(), acc_value.clone()));
+                    self.comprehension_scope
+                        .borrow_mut()
+                        .push((step_var.clone(), item.clone()));
+                    let pred_res = self.run_expr(mu, predicate);
+                    self.comprehension_scope.borrow_mut().pop();
+                    self.comprehension_scope.borrow_mut().pop();
+                    match pred_res {
+                        ExprResult::Success(Value::Bool(true)) => {}
+                        _ => {
+                            return ExprResult::Success(Value::Bool(false));
+                        }
+                    }
+                }
+                ExprResult::Success(Value::Bool(true))
             }
 
             Expr::Type(_) => ExprResult::Failure("bare type in expression".into()),
@@ -4775,6 +5006,63 @@ fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         }),
         _ => None,
     }
+}
+
+fn find_all_reduce_for_var(expr: &Expr, var_name: &str) -> Vec<Expr> {
+    let mut results = Vec::new();
+    fn walk(e: &Expr, var_name: &str, results: &mut Vec<Expr>) {
+        match e {
+            Expr::AllReduce { list_expr, .. } => {
+                if let Expr::Var(ref name) = **list_expr {
+                    if name == var_name {
+                        results.push(e.clone());
+                    }
+                }
+            }
+            Expr::Binop { left, right, .. } => {
+                walk(left, var_name, results);
+                walk(right, var_name, results);
+            }
+            Expr::Unop { operand, .. } => {
+                walk(operand, var_name, results);
+            }
+            Expr::IsNull { operand, .. } => {
+                walk(operand, var_name, results);
+            }
+            Expr::FieldAccess { base, .. } => {
+                walk(base, var_name, results);
+            }
+            Expr::Coalesce(args) | Expr::Call { args, .. } => {
+                for a in args {
+                    walk(a, var_name, results);
+                }
+            }
+            Expr::Record { fields } => {
+                for (_, ex) in fields {
+                    walk(ex, var_name, results);
+                }
+            }
+            Expr::Case { branches, else_expr } => {
+                for (cond, value) in branches {
+                    walk(cond, var_name, results);
+                    walk(value, var_name, results);
+                }
+                if let Some(value) = else_expr {
+                    walk(value, var_name, results);
+                }
+            }
+            Expr::ListComprehension { source, filter, body, .. } => {
+                walk(source, var_name, results);
+                if let Some(f) = filter {
+                    walk(f, var_name, results);
+                }
+                walk(body, var_name, results);
+            }
+            _ => {}
+        }
+    }
+    walk(expr, var_name, &mut results);
+    results
 }
 
 #[cfg(test)]
