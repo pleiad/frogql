@@ -11,6 +11,15 @@ The crate package is still named `gqlrust` for legacy reasons; the user-facing b
 ## Commands
 
 ```bash
+# Local dev shortcuts (see `justfile`; these wrap the commands below).
+# `just` with no args lists every recipe.
+just lint        # fmt --check + cargo check + clippy -D warnings (CI parity)
+just lint-fix    # rewrite formatting + apply machine-applicable clippy fixes
+just fmt         # format only, no compile
+just test        # full sweep: cargo test (lib + all tests/*.rs)
+just repl movies.gdb [--import-csv dir/ | --no-typecheck]   # rebuild + open REPL
+
+# Underlying commands (what the recipes wrap):
 # Full test sweep — lib unit tests + every integration target. Use the
 # unqualified form so the set never drifts as tests are added:
 cargo test                       # everything (lib + all tests/*.rs)
@@ -71,9 +80,9 @@ Runtime/store toggles for A/B testing and tracing (all read at query/open time; 
 
 ### Pre-commit checklist for Rust changes (non-negotiable)
 
-1. `cargo fmt --all`
-2. `cargo clippy --workspace --all-targets -- -D clippy::all`
-3. **`cargo test`** — run the full sweep above. Skipping this has burned commits before, e.g. a `--` line-comment lexer change broke `-->` edge sugar across three test suites. fmt + clippy alone do not catch lexer/grammar regressions.
+1. `just fmt` (or `just lint-fix` to also apply clippy fixes)
+2. `just lint` — fmt-check + `cargo check` + clippy `-D warnings`
+3. **`just test`** — run the full sweep. Skipping this has burned commits before, e.g. a `--` line-comment lexer change broke `-->` edge sugar across three test suites. fmt + clippy alone do not catch lexer/grammar regressions.
 4. Stage + commit.
 
 ## Workspace layout
