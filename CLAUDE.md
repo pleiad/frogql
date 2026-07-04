@@ -11,21 +11,20 @@ The crate package is still named `gqlrust` for legacy reasons; the user-facing b
 ## Commands
 
 ```bash
-# Full integration test sweep (skip bench_test which has pre-existing failures)
-cargo test --lib
-cargo test --test parser_test --test runtime_test --test store_runtime_test \
-           --test text2gql_test --test parse_and_run_test --test count_test \
-           --test null_test --test record_test --test list_test \
-           --test compile_diagnostics --test elaborate_test --test float_test \
-           --test graph_type_test --test typecheck_smoke --test typecheck_test \
-           --test optional_match_test --test multi_match_test \
-           --test aggregates_proptest --test lattice_proptest --test multi_match_proptest \
-           --test exists_fold_test --test exists_runtime_test \
-           --test parser_dm_test --test lazy_mut_test --test dm_runtime_test \
-           --test dm_persistence_test --test dm_schema_test --test dm_default_test \
-           --test dump_test --test dm_set_test --test dm_remove_test \
-           --test dm_label_test --test dm_delete_expr_test --test memory_mut_test \
-           --test path_prefix_test --test shortest_bfs_test
+# Local dev shortcuts (see `justfile`; these mirror CI). `just` with no args
+# lists every recipe.
+just lint        # fmt --check + cargo check + clippy -D warnings (CI parity)
+just lint-fix    # rewrite formatting + apply machine-applicable clippy fixes
+just fmt         # format only, no compile
+just test        # lib tests + auto-discovered integration tests (skips bench_test)
+just repl movies.gdb [--import-csv dir/ | --no-typecheck]   # rebuild + open REPL
+
+# Underlying commands, if you don't have `just`:
+# Full integration test sweep — auto-discovered, skips bench_test (pre-existing
+# failures). Identical to CI's test job and `just test`.
+cargo test --workspace --lib
+cargo test $(ls tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' \
+    | grep -v '^bench_test$' | awk '{print "--test " $0}' | tr '\n' ' ')
 
 # Single test
 cargo test --test runtime_test test_join_star_any_label -- --exact
@@ -56,9 +55,9 @@ cargo install wasm-pack && wasm-pack build wasm --target web --out-dir pkg
 
 ### Pre-commit checklist for Rust changes (non-negotiable)
 
-1. `cargo fmt --all`
-2. `cargo clippy --workspace --all-targets -- -D clippy::all`
-3. **`cargo test`** — run the full sweep above. Skipping this has burned commits before, e.g. a `--` line-comment lexer change broke `-->` edge sugar across three test suites. fmt + clippy alone do not catch lexer/grammar regressions.
+1. `just fmt` (or `just lint-fix` to also apply clippy fixes)
+2. `just lint` — fmt-check + `cargo check` + clippy `-D warnings`
+3. **`just test`** — run the full sweep. Skipping this has burned commits before, e.g. a `--` line-comment lexer change broke `-->` edge sugar across three test suites. fmt + clippy alone do not catch lexer/grammar regressions.
 4. Stage + commit.
 
 ## Workspace layout
