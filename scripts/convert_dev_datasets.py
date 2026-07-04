@@ -23,7 +23,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 BASE_DIR = REPO / "bench" / "data" / "text2gql" / "dataset" / "dataset"
 EXAMPLES_DIR = REPO / "examples"
-GQLITE = REPO / "target" / "release" / "gqlite"
+GQLITE = REPO / "target" / "release" / "frogql"
 
 
 # ---------------------------------------------------------------------------

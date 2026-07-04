@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "frogql"
-version = "0.2.5"
+version = "0.2.7"
 dependencies = [
  "proptest",
  "rustyline",
@@ -306,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "frogql-node"
-version = "0.2.5"
+version = "0.2.7"
 dependencies = [
  "frogql",
  "napi",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "frogql-py"
-version = "0.2.5"
+version = "0.2.7"
 dependencies = [
  "frogql",
  "pyo3",
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "frogql-wasm"
-version = "0.2.5"
+version = "0.2.7"
 dependencies = [
  "console_error_panic_hook",
  "frogql",

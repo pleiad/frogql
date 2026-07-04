@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::compact::CompactTripleIndex;
 use crate::model::graph_access::GraphAccess;
 
 /// Which of the 6 SPO orderings to use.
@@ -17,24 +18,65 @@ pub enum TrieOrder {
 /// The meaning of each component depends on the TrieOrder.
 pub type IndexEntry = (u32, u32, u32, u32);
 
+/// Physical representation of the six orderings. `Array` is the original
+/// simplified implementation (six fully-materialized sorted tuple arrays);
+/// `Compact` is the CLTJ port (six LOUDS succinct tries + an eid side table,
+/// issue #66). Selected at build time via `GQLITE_LTJ_COMPACT=1`.
+enum IndexRepr {
+    Array([Vec<IndexEntry>; 6]),
+    Compact(Box<CompactTripleIndex>),
+}
+
 /// Index of all directed edges as (src, label_id, tgt) triples, stored in 6 sorted orderings.
 /// Each entry also carries the original edge_id for result reconstruction.
 pub struct TripleIndex {
-    orderings: [Vec<IndexEntry>; 6],
+    repr: IndexRepr,
     pub label_to_id: HashMap<String, u32>,
     pub id_to_label: Vec<String>,
 }
 
 impl TripleIndex {
-    /// Build the index from a graph.
-    /// Iterates all directed edges, extracts labels, assigns numeric label IDs,
-    /// and builds 6 sorted orderings.
+    /// Build the standard index from a graph: directed edges in their
+    /// physical sense only, undirected edges in both senses. This is the
+    /// index for directed / `~`-undirected / leftward pattern edges.
     pub fn from_graph<G: GraphAccess>(graph: &G) -> Self {
+        Self::from_graph_impl(graph, false)
+    }
+
+    /// Build the **any-direction** index: *every* physical edge — directed
+    /// and undirected alike — is stored in both senses, sharing one eid.
+    /// A pattern edge `-[e]-` decomposes to a single forward triple
+    /// `(x, L, y)` run against this index, which then matches an edge
+    /// between `x` and `y` regardless of physical orientation, in one LTJ
+    /// pass — no per-edge `2^k` branch enumeration, no reverse-view
+    /// intricacy in the iterator. Combined with the base-case per-eid
+    /// fan-out (issue #71), this reproduces ISO bag multiplicity: a
+    /// directed edge `a→b` yields two matches under `-[e]-` (`x=a,y=b` and
+    /// `x=b,y=a`), a reciprocal pair yields two per endpoint binding, etc.
+    /// Roughly doubles the directed-triple count vs `from_graph`; built
+    /// lazily, only when a query actually contains an any-direction edge.
+    pub fn from_graph_anydir<G: GraphAccess>(graph: &G) -> Self {
+        Self::from_graph_impl(graph, true)
+    }
+
+    fn from_graph_impl<G: GraphAccess>(graph: &G, mirror_directed: bool) -> Self {
         let mut label_to_id: HashMap<String, u32> = HashMap::new();
         let mut id_to_label: Vec<String> = Vec::new();
 
         // Collect all triples: (src, label_id, tgt, edge_id)
         let mut raw_triples: Vec<(u32, u32, u32, u32)> = Vec::new();
+
+        // In the any-direction index, mirror directed edges too, so a
+        // forward triple lookup finds them from either endpoint. Self-loops
+        // are pushed twice (matching the fallback's `right` + `left`
+        // solutions); parallel edges keep their multiplicity (build_ordering
+        // does not dedup, and the base case fans out per eid).
+        let push_directed = |raw: &mut Vec<(u32, u32, u32, u32)>, s, lid, o, e| {
+            raw.push((s, lid, o, e));
+            if mirror_directed {
+                raw.push((o, lid, s, e));
+            }
+        };
 
         for eid in graph.edges_directed() {
             let src = graph.src(eid);
@@ -45,12 +87,12 @@ impl TripleIndex {
             if label_strings.is_empty() {
                 // Edge with no label — use a special "no label" ID
                 let lid = Self::get_or_insert_label(&mut label_to_id, &mut id_to_label, "");
-                raw_triples.push((src, lid, tgt, eid));
+                push_directed(&mut raw_triples, src, lid, tgt, eid);
             } else {
                 // One triple per label
                 for ls in label_strings {
                     let lid = Self::get_or_insert_label(&mut label_to_id, &mut id_to_label, ls);
-                    raw_triples.push((src, lid, tgt, eid));
+                    push_directed(&mut raw_triples, src, lid, tgt, eid);
                 }
             }
         }
@@ -84,18 +126,56 @@ impl TripleIndex {
             }
         }
 
-        // Build 6 orderings
-        let spo = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (s, p, o, e));
-        let sop = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (s, o, p, e));
-        let pos = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (p, o, s, e));
-        let pso = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (p, s, o, e));
-        let osp = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (o, s, p, e));
-        let ops = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (o, p, s, e));
+        let repr = if Self::compact_selected() {
+            IndexRepr::Compact(Box::new(CompactTripleIndex::from_raw(&raw_triples)))
+        } else {
+            // Build 6 orderings
+            let spo = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (s, p, o, e));
+            let sop = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (s, o, p, e));
+            let pos = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (p, o, s, e));
+            let pso = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (p, s, o, e));
+            let osp = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (o, s, p, e));
+            let ops = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (o, p, s, e));
+            IndexRepr::Array([spo, sop, pos, pso, osp, ops])
+        };
 
         TripleIndex {
-            orderings: [spo, sop, pos, pso, osp, ops],
+            repr,
             label_to_id,
             id_to_label,
+        }
+    }
+
+    /// `GQLITE_LTJ_COMPACT=1` selects the compact CLTJ representation at
+    /// build time; default stays on the array implementation.
+    fn compact_selected() -> bool {
+        std::env::var("GQLITE_LTJ_COMPACT").is_ok_and(|v| v == "1")
+    }
+
+    /// The array orderings, when this index was built in array mode.
+    pub(super) fn array(&self) -> Option<&[Vec<IndexEntry>; 6]> {
+        match &self.repr {
+            IndexRepr::Array(o) => Some(o),
+            IndexRepr::Compact(_) => None,
+        }
+    }
+
+    /// The compact index, when this index was built in compact mode.
+    pub(super) fn compact(&self) -> Option<&CompactTripleIndex> {
+        match &self.repr {
+            IndexRepr::Array(_) => None,
+            IndexRepr::Compact(c) => Some(c),
+        }
+    }
+
+    /// Approximate heap footprint of the index payload (excludes label maps).
+    pub fn heap_bytes(&self) -> usize {
+        match &self.repr {
+            IndexRepr::Array(orderings) => orderings
+                .iter()
+                .map(|o| o.len() * std::mem::size_of::<IndexEntry>())
+                .sum(),
+            IndexRepr::Compact(c) => c.heap_bytes(),
         }
     }
 
@@ -123,9 +203,13 @@ impl TripleIndex {
         v
     }
 
-    /// Get the sorted array for a given ordering.
+    /// Get the sorted array for a given ordering. Panics on a compact-mode
+    /// index — the array navigation path never runs against one (the
+    /// iterator dispatches on the representation first).
     pub fn get_ordering(&self, order: TrieOrder) -> &[IndexEntry] {
-        &self.orderings[order as usize]
+        &self
+            .array()
+            .expect("get_ordering called on a compact TripleIndex")[order as usize]
     }
 
     /// Binary search within a range [begin, end) at a given depth (0, 1, or 2).
@@ -215,13 +299,16 @@ impl TripleIndex {
         entry.3
     }
 
-    /// Total number of triples in the index.
+    /// Total number of triples in the index (duplicates included).
     pub fn len(&self) -> usize {
-        self.orderings[0].len()
+        match &self.repr {
+            IndexRepr::Array(orderings) => orderings[0].len(),
+            IndexRepr::Compact(c) => c.len(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.orderings[0].is_empty()
+        self.len() == 0
     }
 }
 
@@ -239,8 +326,9 @@ mod tests {
 
         // All 6 orderings have the same length
         let n = idx.len();
-        for i in 0..6 {
-            assert_eq!(idx.orderings[i].len(), n);
+        let orderings = idx.array().expect("default build is array mode");
+        for ordering in orderings {
+            assert_eq!(ordering.len(), n);
         }
 
         // SPO ordering is sorted

@@ -119,10 +119,27 @@ pub fn load_from_csv_dir(dir: &Path) -> io::Result<MemoryGraphStore> {
             .map(|(k, v)| (k.as_str(), v.as_str().unwrap_or("STRING")))
             .collect();
 
+        // Resolve which columns carry the endpoints. Prefer SRC_ID / DST_ID by
+        // name; fall back to the first two columns positionally when the actual
+        // header doesn't use those names. Some Spanner exports label edge
+        // endpoints by node type (e.g. `Customer,PaymentTransaction`) while the
+        // config still declares SRC_ID/DST_ID — reading by literal name there
+        // dropped every edge and produced zero-relationship databases (#58).
+        let header = read_csv_header(&csv_path)?;
+        let has_src = header.iter().any(|h| h.eq_ignore_ascii_case("SRC_ID"));
+        let has_dst = header.iter().any(|h| h.eq_ignore_ascii_case("DST_ID"));
+        let (src_col, dst_col) = if has_src && has_dst {
+            ("SRC_ID".to_string(), "DST_ID".to_string())
+        } else if header.len() >= 2 {
+            (header[0].clone(), header[1].clone())
+        } else {
+            continue; // no resolvable endpoints — skip this edge file
+        };
+
         let rows = read_csv(&csv_path)?;
         for row in &rows {
-            let src_name = get_ci(row, "SRC_ID").unwrap_or_default();
-            let dst_name = get_ci(row, "DST_ID").unwrap_or_default();
+            let src_name = get_ci(row, &src_col).unwrap_or_default();
+            let dst_name = get_ci(row, &dst_col).unwrap_or_default();
             let eid_name = get_ci(row, "vid").unwrap_or_else(|| format!("e{}", edge_names.len()));
 
             let src_id = match node_name_to_id.get(&src_name) {
@@ -302,6 +319,18 @@ fn extract_props(row: &HashMap<String, String>, prop_cols: &[(&str, &str)]) -> P
         }
     }
     props
+}
+
+/// Read only the header row of a CSV (comma-delimited), preserving column
+/// order. Used to resolve edge endpoint columns positionally.
+fn read_csv_header(path: &Path) -> io::Result<Vec<String>> {
+    let file = fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    let header_line = reader
+        .lines()
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty CSV"))??;
+    Ok(parse_csv_line(&header_line, ','))
 }
 
 fn read_csv(path: &Path) -> io::Result<Vec<HashMap<String, String>>> {

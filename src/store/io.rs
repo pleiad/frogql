@@ -144,35 +144,27 @@ pub fn save_graph(graph: &MemoryGraphStore, db_path: &Path) -> io::Result<()> {
     let node_label_root = disk_index::write_label_index(&mut pager, &node_label_entries)?;
     let edge_label_root = disk_index::write_label_index(&mut pager, &edge_label_entries)?;
 
-    // Adjacency: build CSR (offsets + flat per direction) AND the legacy
-    // per-node format. Old readers see `adjacency_root`; new readers prefer
-    // `csr_adjacency_root`. Both consume the same source data, so they stay
-    // in sync.
+    // Adjacency: CSR layout only (offsets + flat per direction). The legacy
+    // per-node chain format (`write_adjacency_index`) is no longer written —
+    // it spent one 4KB page per node, almost all of it empty (~93% of the
+    // file at SF0.1), and the CSR layout supersedes it. Readers still handle
+    // a legacy `adjacency_root` for .gdb files written before this change.
     let node_count = graph.node_names.len();
     let mut out_pairs: Vec<(u32, u32)> = Vec::new();
     let mut in_pairs: Vec<(u32, u32)> = Vec::new();
     let mut und_pairs: Vec<(u32, u32)> = Vec::new();
-    let mut adj: HashMap<u32, Vec<(u32, u32, u8)>> = HashMap::new();
     for (eid, _) in graph.edge_names.iter().enumerate() {
         let eid32 = eid as u32;
         let src = graph.edge_src[eid];
         let tgt = graph.edge_tgt[eid];
         if graph.edge_directed[eid] {
-            adj.entry(src).or_default().push((eid32, tgt, 0));
-            adj.entry(tgt).or_default().push((eid32, src, 1));
             out_pairs.push((src, eid32));
             in_pairs.push((tgt, eid32));
         } else {
-            adj.entry(src).or_default().push((eid32, tgt, 2));
-            adj.entry(tgt).or_default().push((eid32, src, 2));
             und_pairs.push((src, eid32));
             und_pairs.push((tgt, eid32));
         }
     }
-    // Matches disk_index::write_adjacency_index's parameter shape (file format).
-    #[allow(clippy::type_complexity)]
-    let adj_entries: Vec<(u32, Vec<(u32, u32, u8)>)> = adj.into_iter().collect();
-    let adj_root = disk_index::write_adjacency_index(&mut pager, &adj_entries)?;
 
     // Build CSR offsets+flat arrays for each direction. Bucket-sort: count,
     // prefix-sum, then place using a cursor.
@@ -219,7 +211,7 @@ pub fn save_graph(graph: &MemoryGraphStore, db_path: &Path) -> io::Result<()> {
     pager.header.edge_count = graph.edge_names.len() as u32;
     pager.header.label_index_root = node_label_root;
     pager.header.edge_label_index_root = edge_label_root;
-    pager.header.adjacency_root = adj_root;
+    pager.header.adjacency_root = 0;
     pager.header.csr_adjacency_root = csr_adj_root;
     pager.header.string_table_root = st_root;
     pager.header.node_locs_root = node_locs_root;

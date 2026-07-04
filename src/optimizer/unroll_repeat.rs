@@ -30,6 +30,13 @@
 //!     a Node descriptor and is out of scope for the unroll pass.
 //!   - `ub` must be bounded (`Some(_)`); unbounded `{n,}` is a transitive
 //!     closure and stays on the existing fallback.
+//!   - The inner edge is a single edge of any orientation: directed,
+//!     `~`-undirected, or any-direction `-[]-`. Any-direction arms run
+//!     against the mirrored index via `try_ltj_anydir` (issue #71); before
+//!     that index existed they fell to the global hash-join (the issue-#57
+//!     OOM), which is why the runtime also keeps the seeded adjacency
+//!     traversal for repetitions that bind an edge variable and so cannot
+//!     unroll.
 //!
 //! Disable with `GQLITE_DISABLE_REPEAT_UNROLL=1`.
 
@@ -174,6 +181,18 @@ fn can_unroll(p: &PathPattern, lb: usize, ub: usize) -> bool {
     // `Node-Edge-Node` repeats) the join boundary insertion would be
     // ambiguous and could produce illegal `Node Node` adjacencies; bail
     // out and let the runtime keep its hash-join repetition.
+    //
+    // Any-direction `-[]-` is included now that the mirrored index exists
+    // (`TripleIndex::from_graph_anydir`, issue #71): each unrolled arm is a
+    // pure any-direction flat chain that `try_ltj_anydir` runs in a single
+    // LTJ pass seeded by the boundary filter, ISO-correct via the base-case
+    // per-edge fan-out. Before the mirror the arms fell to the global
+    // hash-join (the issue-#57 OOM), so this was excluded; the mirror is
+    // exactly the "merged forward+reverse iterator" that precondition
+    // wanted. A repetition that *binds* an edge variable has non-empty
+    // freevars, stays a `Repeat`, and routes to the seeded adjacency
+    // traversal — LTJ cannot bind a `Group` across a variable-length
+    // repetition.
     matches!(
         p,
         PathPattern::EdgeRight(_)
@@ -306,6 +325,19 @@ mod tests {
             ub: Some(2),
         };
         assert!(matches!(optimize(p), PathPattern::Repeat { .. }));
+    }
+
+    #[test]
+    fn unrolls_any_direction_inner() {
+        // `-[]-{1,2}`: with the mirrored index, the unrolled any-direction
+        // arms are LTJ-decomposable (`try_ltj_anydir`), so the repetition
+        // unrolls into a Union like the directed / `~` cases (issue #71).
+        let p = PathPattern::Repeat {
+            pattern: Box::new(PathPattern::EdgeAnyDirection(None)),
+            lb: 1,
+            ub: Some(2),
+        };
+        assert!(matches!(optimize(p), PathPattern::Union(_, _)));
     }
 
     #[test]

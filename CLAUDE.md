@@ -11,23 +11,28 @@ The crate package is still named `gqlrust` for legacy reasons; the user-facing b
 ## Commands
 
 ```bash
-# Local dev shortcuts (see `justfile`; these mirror CI). `just` with no args
-# lists every recipe.
+# Local dev shortcuts (see `justfile`; these wrap the commands below).
+# `just` with no args lists every recipe.
 just lint        # fmt --check + cargo check + clippy -D warnings (CI parity)
 just lint-fix    # rewrite formatting + apply machine-applicable clippy fixes
 just fmt         # format only, no compile
-just test        # lib tests + auto-discovered integration tests (skips bench_test)
+just test        # full sweep: cargo test (lib + all tests/*.rs)
 just repl movies.gdb [--import-csv dir/ | --no-typecheck]   # rebuild + open REPL
 
-# Underlying commands, if you don't have `just`:
-# Full integration test sweep — auto-discovered, skips bench_test (pre-existing
-# failures). Identical to CI's test job and `just test`.
-cargo test --workspace --lib
-cargo test $(ls tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' \
-    | grep -v '^bench_test$' | awk '{print "--test " $0}' | tr '\n' ' ')
+# Underlying commands (what the recipes wrap):
+# Full test sweep — lib unit tests + every integration target. Use the
+# unqualified form so the set never drifts as tests are added:
+cargo test                       # everything (lib + all tests/*.rs)
+cargo test --lib                 # just the in-crate unit tests (fast)
+# `bench_test` is the slow target (~1 min; it opens the committed example
+# .gdb files and measures memory). It currently passes but dominates the
+# wall-clock, so during tight iteration run the specific targets you touched
+# instead, e.g.:
+cargo test --test runtime_test --test typecheck_test --test parser_test
 
-# Single test
+# Single test / single file
 cargo test --test runtime_test test_join_star_any_label -- --exact
+cargo test --test parallel_edge_test          # one integration file
 
 # Strict clippy (run before every commit)
 cargo clippy --workspace --all-targets -- -D clippy::all
@@ -52,6 +57,26 @@ cargo build -p frogql-wasm --target wasm32-unknown-unknown
 # Generate the publishable npm package (web target); release-wasm.yml runs the same:
 cargo install wasm-pack && wasm-pack build wasm --target web --out-dir pkg
 ```
+
+### Diagnostic env vars
+
+Runtime/store toggles for A/B testing and tracing (all read at query/open time; set to `1` unless noted). Each optimization has a kill switch so a differential test can pin "optimized ≡ baseline":
+
+| Var | Effect |
+|---|---|
+| `GQLITE_LTJ_COMPACT` | build the LTJ `TripleIndex` as compact CLTJ (six LOUDS succinct tries, issue #66) instead of the default six sorted arrays — ~2.9× smaller, 1.4–2.1× slower on IC latency (IC11 faster); differential suite `tests/compact_ltj_test.rs`, size/build stats via the `ltj_index_stats` bin |
+| `GQLITE_DISABLE_ANYDIR_LTJ` | force the hash-join fallback for any-direction (`-[e]-`) patterns instead of the mirrored-index LTJ (`try_ltj_mixed`) |
+| `GQLITE_DISABLE_SEEDED_REPEAT` | force the legacy global repetition path instead of the seeded adjacency traversal |
+| `GQLITE_DISABLE_REPEAT_UNROLL` | keep bounded `{n,m}` repetitions as `Repeat` instead of unrolling to a Union |
+| `GQLITE_DISABLE_SHORTEST_BFS` | force the generic k-shortest-walk enumerator instead of the BFS fast-path |
+| `GQLITE_DISABLE_INDEX_FOLD` | skip the LTJ secondary-index constant-folding / range-folding pre-pass |
+| `GQLITE_DISABLE_OPTIONAL_PUSHDOWN` | evaluate OPTIONAL MATCH globally + left-join instead of per-row bind-pushdown |
+| `GQLITE_DISABLE_EXISTS_PIN` | force materialise-once for correlated EXISTS instead of pinned LTJ probes |
+| `GQLITE_DISABLE_VALUE_SUBQUERY_PIN` | force materialise-once for `VALUE { … }` subqueries |
+| `GQLITE_DISABLE_AUTO_INDEXES` | skip the secondary-index auto-build at open |
+| `GQLITE_ORDERBY_FORCE=pdqsort\|topk` | force one ORDER BY strategy (bypass the btree-LTJ-real top-k) |
+| `GQLITE_DEBUG_INDEXES` | print auto-built indexes + pinned variables |
+| `GQLITE_TRACE_OPEN` | print per-phase open latency (see *Open-time performance*) |
 
 ### Pre-commit checklist for Rust changes (non-negotiable)
 
@@ -244,17 +269,23 @@ The `refine` operation (the `S ⊢ T ▷ T'` judgment) is `VariableType::refine(
 
 ### Join strategy: Leapfrog Triejoin (LTJ)
 
-Primary strategy for joins and concatenations of directed/undirected edges. Worst-case-optimal multi-way join: each directed edge is a triple `(src, label, tgt)` indexed in six sorted orderings (`TripleIndex`: SPO, SOP, POS, PSO, OSP, OPS); LTJ binds variables one at a time by leapfrog-intersecting candidate lists across triples, no intermediate materialisation. CompactLTJ paper (Arroyuelo et al., VLDBJ 2025). Module structure: `runtime/ltj/{triple_index, iterator, veo, algorithm, pattern_extract}.rs`. Full algorithm walkthrough, examples, and benchmark numbers in `docs/internals/JOIN_STRATEGY_NOTES.md`.
+Primary strategy for joins and concatenations of directed/undirected edges. Worst-case-optimal multi-way join: each directed edge is a triple `(src, label, tgt)` indexed in six sorted orderings (`TripleIndex`: SPO, SOP, POS, PSO, OSP, OPS); LTJ binds variables one at a time by leapfrog-intersecting candidate lists across triples, no intermediate materialisation. CompactLTJ paper (Arroyuelo et al., VLDBJ 2025). Module structure: `runtime/ltj/{triple_index, compact, iterator, veo, algorithm, pattern_extract}.rs`. Full algorithm walkthrough, examples, and benchmark numbers in `docs/internals/JOIN_STRATEGY_NOTES.md`.
 
-**Activation** (`run_join`, `run_concat_pattern`): kicks in automatically when the pattern decomposes into triples — chains / comma-joins of directed (`-[]->`), reverse (`<-[]-`), and undirected (`~[e]~`) edges, with or without labels. Falls back to pairwise hash-join for any-direction edges (`-[e]-` without tilde), Unions, and Repeats not handled by the unroll optimiser.
+**Two physical representations** (issue #66), selected at index-build time; both drive the same `LtjAlgorithm` through the `LtjIterator` enum:
+- **Array** (default): six fully-materialized sorted `Vec<(u32,u32,u32,u32)>`. The iterator recomputes its range from scratch per call (simple, cache-friendly).
+- **Compact CLTJ** (`GQLITE_LTJ_COMPACT=1`): a port of the reference `cltj_index_spo_basic` — six LOUDS succinct tries (`compact.rs`: topology bitvector with sampled select-0 + bit-packed symbol sequence), navigated by a stateful handle-stack iterator (`CompactLtjIterator`, ported from `ltj_iterator_basic.hpp`). Property-graph divergence from the RDF reference: parallel edges collapse into one trie leaf, so the index keeps an SPO-ordered eid side table (`leaf_offsets`/`leaf_eids`) that the base case consults for ISO bag multiplicity. At SF0.1 (1.49 M triples): 47.6 MiB vs 136.6 MiB (**2.87× smaller**), build 1.13 s vs 0.92 s, IC medians 1.4–2.1× slower (succinct-navigation trade-off; IC11 runs 1.5× *faster* compact). Equivalence pinned by `tests/compact_ltj_test.rs`; per-repr size/build stats via the `ltj_index_stats` bin. The metatrie tier (root-sharing across ordering pairs) and the paper's RDF/BGP benchmark remain open in #66.
+
+**Activation** (`run_join`, `run_concat_pattern`): kicks in automatically when the pattern decomposes into triples — chains / comma-joins of directed (`-[]->`), reverse (`<-[]-`), and undirected (`~[e]~`) edges, with or without labels. **Any-direction** (`-[e]-`) chains / comma-joins also run through LTJ — pure *and* mixed with directed / `~` edges. `try_ltj_mixed` decomposes with a per-triple `EdgeKind::AnyDir` tag and routes each iterator to the index its edge kind selects: any-direction triples query a separate mirrored index (`TripleIndex::from_graph_anydir`, every edge stored in both senses), the rest the plain index. The leapfrog intersection joins candidates across the two indexes transparently (node ids are global; both indexes assign label ids in the same edge order). `has_any_direction` gates the choice between `try_ltj` (plain only, mirror stays lazy) and `try_ltj_mixed`; `GQLITE_DISABLE_ANYDIR_LTJ=1` forces the fallback. Falls back to pairwise hash-join only for Unions and Repeats not handled by the unroll optimiser.
+
+**ISO bag multiplicity** (issue #71): the base case (`algorithm.rs`) emits one result row per physical edge at the bound `(s, p, o)` — parallel edges sharing `(src, label, tgt)` are distinct matches even when the edge variable is not projected, and a directed edge yields two matches under `-[e]-` (one per endpoint binding). `RETURN DISTINCT` is the way to set-dedup. Oracles: `tests/{iso_multiplicity,anydir_iso}_test.rs`. The scan/hash-join and seeded-repetition paths iterate physical edge ids and are ISO-consistent with LTJ across shapes (`tests/anydir_path_consistency_test.rs`).
 
 **`decompose_flat_chain` accepts adjacent / trailing edges**: when two edges sit adjacent (`~[:knows]~~[:knows]~`, written by users or produced by the unroll pass) it synthesises a fresh anonymous variable as the boundary, mirroring the runtime `Concat` evaluator's `last_node_id` / `first_node_id` path-merge. Without this, two consecutive edges fell off the LTJ path entirely — 270× regression on `(person)~[:knows]~~[:knows]~(other)<-[:hasCreator]-(msg)` style chains.
 
 **In-loop filters** (`FilterKind`): `NodeLabel`, `NodeProperty`, `NodeAttrCmp` (`=`, `!=`, `<`, `<=`, `>`, `>=`), `NodeInSet` (btree-resolved range). Placed at the VEO level where all dependencies are bound; pushed down by the optimizer from WHERE conjuncts.
 
 **Current limits**:
-1. Repetitions `{n,m}`: unrolled by `optimizer::unroll_repeat` for bounded ranges with no named inner variables and single-edge inner. Other bounded shapes (named edge/node vars, range > `MAX_UNROLL = 8`) stay on the hash-join repetition path. Unbounded repetition (`*`/`+`/`{n,}`) is not an LTJ shape; it requires a §16.6 prefix and runs through the dedicated finite searches (`run_repetition_shortest` / `run_repetition_unbounded_mode`, see *Path-pattern prefixes*).
-2. Any-direction edges (without tilde): not modelled as triples.
+1. Repetitions `{n,m}`: unrolled by `optimizer::unroll_repeat` for bounded ranges with no named inner variables and a single-edge inner of **any orientation** (directed, `~`-undirected, or any-direction `-[]-` — the last routes each unrolled arm through the mirrored index via `try_ltj_mixed`, issue #71). Shapes that can't unroll (named edge/node vars, range > `MAX_UNROLL = 8`, `lb = 0`) stay on the repetition path; when such a repetition is the right operand of a concat with a seed on the left (`(a)-[e]-{1,3}(b)` with `e` **projected**), `run_concat_pattern`'s `try_concat_with_edge_repetition` expands it level-by-level from the already-filtered left rows instead of materializing the whole graph's walk set (the issue-#57 OOM fix; `GQLITE_DISABLE_SEEDED_REPEAT=1` forces the legacy global path; differential coverage in `tests/seeded_repetition_test.rs`). The seeded traversal is ISO bag-correct — the adjacency evaluators iterate physical edge ids, so it agrees with the unrolled-LTJ path (`tests/anydir_path_consistency_test.rs`). Unbounded repetition (`*`/`+`/`{n,}`) is not an LTJ shape; it requires a §16.6 prefix and runs through the dedicated finite searches (`run_repetition_shortest` / `run_repetition_unbounded_mode`, see *Path-pattern prefixes*).
+2. Any-direction edges (without tilde): pure **and mixed** directed+any-direction chains / joins are LTJ-eligible via per-triple index routing (`try_ltj_mixed`, see *Activation*), and bounded unused-edge any-direction **repetitions** unroll into mirror-LTJ arms (limit 1). All any-direction paths — mixed LTJ, the seeded adjacency traversal, and the plain adjacency/hash-join fallback — are ISO bag-consistent (`tests/anydir_path_consistency_test.rs`). Mixed LTJ is a real WCO win: `(t1)-[:USED_DEVICE]->(d)-[]-(t2)` on the fraud DB runs ~4.7× faster / ~2× less RSS than the fallback. Full status in `docs/internals/anydir-ltj-plan.md`.
 3. WHERE: label and pushed value predicates run inside the loop; arbitrary WHERE post-filters. Var-vs-var predicates (`a <> b`) are not pushed into the LTJ filter set yet — they evaluate post-pattern via `PathPattern::Filter`.
 4. TripleIndex not persisted: cached on `Runtime` via `RefCell<Option<Arc<TripleIndex>>>`, built once per Runtime (eagerly at REPL/Connection open via `warm_triple_index()`).
 5. Static VEO: variable order is fixed before search. With secondary indexes, `Eq` predicates on indexed `(label, prop)` are point lookups via constant-folding; vars without an index scan their position.
@@ -350,10 +381,10 @@ Tests in `tests/named_path_test.rs`. Full ISO context + roadmap in `docs/interna
 
 4 KB pages, slotted-page layout for variable-length records. Header page 0 stores root pointers to string table, label indexes, adjacency index, and (since recently) a CSR adjacency root. Node/edge records reference strings by string table ID. Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6).
 
-Adjacency has two on-disk representations and the loader prefers whichever is present:
+Adjacency has two on-disk representations. The current writer emits **only CSR**; the legacy format is read-only-supported for backward compat:
 
-- **CSR (preferred, header `csr_adjacency_root`)** — six `Vec<u32>` page chains: `[out_offsets, out_flat, in_offsets, in_flat, und_offsets, und_flat]`. Loaded in O(N + E) total via six big sequential reads; node `n`'s edges are `flat[offsets[n]..offsets[n+1]]`. Stored in memory as three `AdjCsr { offsets: Vec<u32>, flat: Vec<u32> }` on `LazyGraphStore`. Built and written by every `save_graph` call after the format was added (commit `34d97c0`).
-- **Legacy per-node chains (header `adjacency_root`)** — one small page chain per node listing `(edge_id, other_node, kind)` triples (kind 0=out, 1=in, 2=und). The loader still understands this format and rebuilds CSR in memory at open via bucket-sort; legacy `.gdb` files keep working but pay ~30× more time on the topology phase (~5s vs ~0.1s for SF0.1) until they're re-saved into the new format.
+- **CSR (written, header `csr_adjacency_root`)** — six `Vec<u32>` page chains: `[out_offsets, out_flat, in_offsets, in_flat, und_offsets, und_flat]`. Loaded in O(N + E) total via six big sequential reads; node `n`'s edges are `flat[offsets[n]..offsets[n+1]]`. Stored in memory as three `AdjCsr { offsets: Vec<u32>, flat: Vec<u32> }` on `LazyGraphStore`. Built and written by every `save_graph` call (added commit `34d97c0`).
+- **Legacy per-node chains (header `adjacency_root`)** — one page chain per node listing `(edge_id, other_node, kind)` triples (kind 0=out, 1=in, 2=und). **No longer written**: it spent one 4KB page per node, ~93% of them near-empty (1.33 GiB of 1.42 GiB at SF0.1). Dropping it took the SF0.1 `.gdb` from 1.39 GiB to 136 MiB (~10.5×), comparable to the 89 MiB source CSV. `LazyGraphStore` still reads it (rebuilding CSR via bucket-sort) for pre-CSR files; `DiskGraphStore` now builds adjacency in RAM from the edge-topology arrays it already loads, so it ignores both on-disk adjacency roots. Re-save old files to shrink them.
 
 See `docs/internals/storage-architecture.md` for the full spec.
 
@@ -389,7 +420,8 @@ Passes the runtime relies on (each one-line summary; flags + file refs are the o
 - **Selected-path boundary pushdown** (`pushdown.rs`, ISO §16.6) — into a `Selected` pattern, a mode-only prefix (`PathSearch::All`, e.g. `ACYCLIC`) admits *all* constraints, but a selective prefix (`ANY`/`SHORTEST`) admits **only boundary (endpoint) variable** constraints; interior-node predicates stay as a post-selection `Filter`. Sound because selection partitions per `(source, target)` pair: restricting endpoints before the search equals filtering after, whereas filtering an interior node before would change which paths are shortest. `Constraints::retain_vars` keeps only the boundary vars; `walk_kinds` and `merge_constraints` carry the split.
 - **Index-driven constant folding** — `Eq` predicates that hit a hash index pre-bind the variable and drop it from VEO; empty hit short-circuits to zero rows. `pattern_extract::fold_indexed_constants`.
 - **Range index folding** — `<` / `<=` / `>` / `>=` predicates that hit a btree precompute the matching set and replace `NodeAttrCmp` with `FilterKind::NodeInSet`. `pattern_extract::fold_range_filters`.
-- **Repeat unrolling** (`unroll_repeat.rs`) — `(P){lb, ub}` → `Union(P^lb..P^ub)` for bounded ranges with single-edge inner and empty freevars; inserts anonymous `Node(None)` boundaries and distributes Union over Concat. `MAX_UNROLL = 8` (covers `{1,8}` and tighter). Fixed-length `lb == ub` short-circuits to a single flat concat with no Union envelope. `GQLITE_DISABLE_REPEAT_UNROLL=1`.
+- **Repeat unrolling** (`unroll_repeat.rs`) — `(P){lb, ub}` → `Union(P^lb..P^ub)` for bounded ranges with a single-edge inner and empty freevars, of **any orientation** (directed / `~`-undirected / any-direction; any-direction arms route to the mirrored index via `try_ltj_mixed`, issue #71 — before that index existed they were excluded because they fell to the global hash-join, the issue-#57 OOM). Inserts anonymous `Node(None)` boundaries and distributes Union over Concat. `MAX_UNROLL = 8` (covers `{1,8}` and tighter). Fixed-length `lb == ub` short-circuits to a single flat concat with no Union envelope. `GQLITE_DISABLE_REPEAT_UNROLL=1`.
+- **Seeded repetition traversal** (`engine.rs::try_concat_with_edge_repetition`, runtime side) — for `Concat(left, (edge){lb,ub})` where the inner is a single edge and `ub` is bounded, expands level-by-level from the filtered `left` rows via the adjacency `concat_with_*` steps, binding a named edge var as `PathValue::Group` (legacy `to_group`/`concat_group` semantics). Avoids `run_repetition_range`'s global materialization when the left side is selective. `GQLITE_DISABLE_SEEDED_REPEAT=1`; differential suite `tests/seeded_repetition_test.rs`.
 - **ORDER BY alias resolution** (`order_by_alias.rs`) — `SortKey::Column(idx)` → `SortKey::Expr(AttrLookup)` when the alias is a pure attr lookup. All-or-nothing: aggregates / `GROUP BY` / non-resolvable specs bail.
 - **OPTIONAL MATCH bind-pushdown** (`engine.rs::optional_via_bind_pushdown`, runtime side) — per outer row, pin shared Node-typed vars via `try_ltj_with_pins` instead of evaluating the inner globally then left-outer-joining. SQLite-style correlated nested-loop. `GQLITE_DISABLE_OPTIONAL_PUSHDOWN=1`. Cuts LDBC IS5 ~93× on SF0.1.
 - **BTree-LTJ-real top-k** (`engine.rs::try_btree_ltj_real`, runtime side) — drive the sort variable from a btree, run `pinned_run` per id (handles Union/Filter wrappers), early-exit at `LIMIT k` (single-spec) or first cohort boundary past `k` (multi-spec). For `Or`-of-leaves descriptors (`Comment|Post`), `or_candidate_labels_for_var` + `BtreeMergeCursor` k-way-merge per-label btrees in interleaved key order. The pin retains `NodeAttrCmp` / `NodeInSet` filters (pin fixes the NodeId, not the property value). `GQLITE_ORDERBY_FORCE=pdqsort|topk` forces it off.
@@ -433,7 +465,7 @@ Run + chart: `bench_setup` (downloads LDBC SF0.1) → `install_python_deps.sh` �
 ## Conventions
 
 - Labels in patterns require the `:` prefix: `-[:Transfer]->`, not `-[Transfer]->`.
-- The `bench_test` integration target has pre-existing failures — exclude it from regular runs.
+- The `bench_test` integration target is slow (~1 min — it opens the committed example `.gdb` files and measures RSS). It currently passes; skip it during tight iteration, but `cargo test` (the full sweep) does include it.
 - `bench/data/` is gitignored (large datasets, downloaded via `cargo run --bin bench_setup`).
 - Example databases in `examples/*.gdb` ARE committed (small, useful for testing).
 - Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6); changing the order is a breaking on-disk format change.

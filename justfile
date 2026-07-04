@@ -32,13 +32,11 @@ lint-fix:
 
 # --- Tests -------------------------------------------------------------------
 
-# Lib unit tests + every integration test under tests/, auto-discovered and
-# excluding bench_test (pre-existing failures). Same shim CI's test job uses,
-# so new tests/*.rs files are picked up the moment they land.
+# Full sweep: lib unit tests + every integration target. Unqualified so the
+# set never drifts as tests are added. Includes the slow bench_test (~1 min);
+# during tight iteration name the targets you touched instead, or `just fmt`.
 test:
-    cargo test --workspace --lib
-    cargo test $(ls tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' \
-        | grep -v '^bench_test$' | awk '{print "--test " $0}' | tr '\n' ' ')
+    cargo test
 
 # --- REPL --------------------------------------------------------------------
 

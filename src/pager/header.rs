@@ -46,6 +46,10 @@ pub struct FileHeader {
     pub node_data_first: u32,
     pub edge_data_first: u32,
     pub label_index_root: u32, // node labels
+    /// Root of the legacy per-node adjacency chain. **No longer written**
+    /// (always 0 in files saved by the current writer) — it cost one 4KB
+    /// page per node, almost all empty. Kept as a read fallback for `.gdb`
+    /// files written before the CSR layout; superseded by `csr_adjacency_root`.
     pub adjacency_root: u32,
     pub edge_label_index_root: u32,
     /// Root page for node record locations index (0 = not present, legacy file).

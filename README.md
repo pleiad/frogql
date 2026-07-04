@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://crates.io/crates/frogql"><img alt="crates.io" src="https://img.shields.io/crates/v/frogql?logo=rust&logoColor=white&label=crates.io&color=2c8a3e"></a>
   <a href="https://pypi.org/project/frogql/"><img alt="PyPI" src="https://img.shields.io/pypi/v/frogql?logo=pypi&logoColor=white&label=PyPI&color=2c8a3e"></a>
   <a href="https://www.npmjs.com/package/frogql"><img alt="npm" src="https://img.shields.io/npm/v/frogql?logo=npm&label=npm&color=2c8a3e"></a>
   <a href="https://www.npmjs.com/package/frogql-wasm"><img alt="npm (wasm)" src="https://img.shields.io/npm/v/frogql-wasm?logo=webassembly&logoColor=white&label=wasm&color=2c8a3e"></a>

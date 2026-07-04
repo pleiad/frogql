@@ -105,13 +105,6 @@ pub struct LtjAlgorithm<'a> {
     /// search starts. These slots are pre-populated in the result tuple and
     /// never written to by the search loop.
     pinned: Vec<(u8, u32)>,
-    /// Parallel to `iterators`: `true` when the triple binds an edge
-    /// variable, so the base case has to fan out one tuple per physical
-    /// parallel edge (same src/label/tgt, distinct eid). When `false`,
-    /// the canonical first eid is enough — the LTJ trie collapses the
-    /// parallel siblings, which is the right behavior for joins on
-    /// vertex variables but loses them when the user binds the edge.
-    triple_has_edge_var: Vec<bool>,
 }
 
 impl<'a> LtjAlgorithm<'a> {
@@ -124,9 +117,7 @@ impl<'a> LtjAlgorithm<'a> {
         filters_at_level: Vec<Vec<PlacedFilter>>,
         num_vars: usize,
         pinned: Vec<(u8, u32)>,
-        triple_has_edge_var: Vec<bool>,
     ) -> Self {
-        debug_assert_eq!(triple_has_edge_var.len(), iterators.len());
         LtjAlgorithm {
             iterators,
             var_to_iterators,
@@ -135,7 +126,6 @@ impl<'a> LtjAlgorithm<'a> {
             filters_at_level,
             num_vars,
             pinned,
-            triple_has_edge_var,
         }
     }
 
@@ -217,26 +207,24 @@ impl<'a> LtjAlgorithm<'a> {
             return false;
         }
 
-        // Base case: all variables bound. Triples with an edge variable
-        // fan out one tuple per parallel entry sharing the bound (s,p,o);
-        // others contribute a single canonical eid. The cartesian product
-        // across triples preserves multi-triple joins — typically all but
-        // one factor is a singleton, so this stays O(rows) in practice.
+        // Base case: all variables bound. Every triple fans out one tuple
+        // per parallel entry sharing the bound (s,p,o), whether or not the
+        // edge variable is projected — GQL binding tables are bags, so two
+        // parallel edges with the same (src, label, tgt) are two matches
+        // (issue #71). The cartesian product across triples preserves
+        // multi-triple joins — typically all but one factor is a singleton,
+        // so this stays O(rows) in practice. Users who want set semantics
+        // ask for `RETURN DISTINCT`.
         if j >= self.veo.size() {
             let eid_lists: Vec<Vec<u32>> = self
                 .iterators
                 .iter()
-                .enumerate()
-                .map(|(i, it)| {
-                    if self.triple_has_edge_var[i] {
-                        let eids = it.current_eids_all();
-                        if eids.is_empty() {
-                            vec![u32::MAX]
-                        } else {
-                            eids
-                        }
+                .map(|it| {
+                    let eids = it.current_eids_all();
+                    if eids.is_empty() {
+                        vec![u32::MAX]
                     } else {
-                        vec![it.current_eid().unwrap_or(u32::MAX)]
+                        eids
                     }
                 })
                 .collect();
@@ -372,26 +360,21 @@ impl<'a, G: GraphAccess> LtjRunner<'a, G> {
         }
 
         if j >= self.algorithm.veo.size() {
-            // Same fan-out logic as `LtjAlgorithm::search`: a triple that
-            // binds an edge variable emits one row per parallel entry
-            // sharing the (s, p, o) prefix, others contribute a single
-            // canonical eid. The product accommodates joins where one
-            // triple has parallels and the others do not.
+            // Same ISO-bag fan-out as `LtjAlgorithm::search`: one row per
+            // parallel entry sharing the bound (s, p, o) prefix, whether or
+            // not the edge variable is projected (issue #71). The product
+            // accommodates joins where one triple has parallels and the
+            // others do not.
             let eid_lists: Vec<Vec<u32>> = self
                 .algorithm
                 .iterators
                 .iter()
-                .enumerate()
-                .map(|(i, it)| {
-                    if self.algorithm.triple_has_edge_var[i] {
-                        let eids = it.current_eids_all();
-                        if eids.is_empty() {
-                            vec![u32::MAX]
-                        } else {
-                            eids
-                        }
+                .map(|it| {
+                    let eids = it.current_eids_all();
+                    if eids.is_empty() {
+                        vec![u32::MAX]
                     } else {
-                        vec![it.current_eid().unwrap_or(u32::MAX)]
+                        eids
                     }
                 })
                 .collect();

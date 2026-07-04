@@ -452,6 +452,37 @@ engine.rs          Integration: run_join() and run_concat_pattern() call
 4. **Compact tries**: replace sorted Vec with LOUDS bitvectors for space
    efficiency on very large graphs (billions of edges).
 
-5. **Handle any-direction edges (`-[e]-`)**: currently the only edge form
-   that still falls back to hash-join. Could be modelled as a union of
-   forward/reverse triples at extraction time.
+5. **Handle any-direction edges (`-[e]-`)**: **DONE** — pure *and* mixed
+   any-direction chains and comma-joins (issue #71). The team adopted ISO
+   bag semantics; the LTJ base case now fans out one row per physical edge
+   at the bound `(s, L, o)` unconditionally (fixing the directed
+   parallel-edge collapse too), and a mirrored index (`from_graph_anydir`)
+   stores every edge in both senses so a single forward triple matches
+   either orientation in one LTJ pass. Verified against a hand-computed ISO
+   oracle (`tests/{iso_multiplicity,anydir_iso}_test.rs`), behind
+   `GQLITE_DISABLE_ANYDIR_LTJ`. Bounded unused-edge any-direction
+   *repetitions* (`(a)-[]-{1,3}(b)`) also reach the mirror: `unroll_repeat`
+   unrolls them into flat any-direction arms. Full rationale in
+   `anydir-ltj-plan.md`. All any-direction paths (mixed LTJ, seeded
+   repetition, adjacency fallback) are ISO bag-consistent — verified by
+   `tests/anydir_path_consistency_test.rs`. **Mixed** directed+any-direction
+   chains also run through LTJ now (`try_ltj_mixed`, per-triple index
+   routing): each triple's iterator queries the plain or mirrored index by
+   its `EdgeKind`, and the leapfrog joins across both (global node ids,
+   shared label ids). Measured ~4.7× faster / ~2× less RSS than the fallback
+   on a fraud-DB mixed query. Nothing any-direction is left on the fallback
+   except Unions / non-unrollable repetitions.
+
+### Caveat: the Ring's bidirectionality ≠ undirected edges
+
+A recurring slip when reading the Ring / CLTJ papers: the ring lets you
+traverse the *attributes* `s/p/o` in either order (which you bind first in
+the variable elimination), so one compact structure serves all 6 orderings.
+That is **access-order** bidirectionality — it is *not* the same as an
+edge's semantic orientation. The stored triples stay directed: a directed
+edge `a→b` is the single fact `(a, L, b)`, reachable via OSP by binding `b`
+first, but the reverse *fact* `(b, L, a)` is never manufactured by re-
+ordering. Only genuinely undirected edges are stored in both senses
+(`triple_index.rs`, `push_both`). So the ring buys cheap reverse *access*,
+never any-direction *matching*; conflating the two is how `-[e]-` looks
+"already supported" when it is not.

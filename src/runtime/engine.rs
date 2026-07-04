@@ -54,6 +54,15 @@ fn path_edge_len(path: &Path) -> usize {
     path.0.iter().filter(|pv| pv.is_edge()).count()
 }
 
+/// The most recently appended edge of a path (paths alternate
+/// `Node Edge Node ...`, so this is `path.0[len - 2]` when the path has
+/// at least one edge). Used by the seeded repetition traversal to grow
+/// the Group binding one hop at a time without indexing past a
+/// node-only path.
+fn last_edge_of(path: &Path) -> Option<PathValue> {
+    path.0.iter().rev().find(|pv| pv.is_edge()).cloned()
+}
+
 /// The three edge orientations the SHORTEST BFS fast-path understands.
 /// `EdgeAnyDirection` is deliberately excluded (it is a union of the
 /// three and would need separate adjacency walks per direction).
@@ -304,6 +313,12 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// RefCell so internal lazy initialization stays an immutable-self
     /// API for callers.
     triple_index: RefCell<Option<Arc<TripleIndex>>>,
+    /// Shared LTJ index for **any-direction** edges (`-[e]-`): every edge
+    /// mirrored both senses (see `TripleIndex::from_graph_anydir`). Built
+    /// lazily and separately from `triple_index` — only queries that
+    /// actually contain an any-direction edge pay for it, and directed /
+    /// `~` queries keep using the un-mirrored `triple_index`.
+    anydir_index: RefCell<Option<Arc<TripleIndex>>>,
     /// Memoization for `EXISTS` / `NOT EXISTS` predicates. Keyed by
     /// the body's `Box<Query>` heap address, which stays stable while
     /// the compiled AST is alive. Across queries the address is *not*
@@ -396,6 +411,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         Self {
             graph,
             triple_index: RefCell::new(None),
+            anydir_index: RefCell::new(None),
             exists_cache: RefCell::new(HashMap::new()),
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
@@ -412,6 +428,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         Self {
             graph,
             triple_index: RefCell::new(Some(idx)),
+            anydir_index: RefCell::new(None),
             exists_cache: RefCell::new(HashMap::new()),
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
@@ -434,6 +451,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// reads see the post-mutation state.
     pub fn invalidate_caches(&self) {
         *self.triple_index.borrow_mut() = None;
+        *self.anydir_index.borrow_mut() = None;
         self.exists_cache.borrow_mut().clear();
         self.value_subquery_cache.borrow_mut().clear();
     }
@@ -451,6 +469,20 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             .borrow()
             .clone()
             .expect("triple index just built")
+    }
+
+    /// Lazily build (or return) the cached any-direction LTJ index. Only
+    /// called when a query actually contains an any-direction edge, so a
+    /// workload without `-[e]-` never pays the mirror-build cost.
+    fn anydir_index(&self) -> Arc<TripleIndex> {
+        if self.anydir_index.borrow().is_none() {
+            let idx = Arc::new(TripleIndex::from_graph_anydir(self.graph));
+            *self.anydir_index.borrow_mut() = Some(idx);
+        }
+        self.anydir_index
+            .borrow()
+            .clone()
+            .expect("anydir index just built")
     }
 
     pub fn run(&self, pattern: &PathPattern) -> IntermediateResult {
@@ -1651,6 +1683,19 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         if let Some(result) = pattern_extract::try_ltj(self.graph, &join_pattern, &index, limit) {
             return result;
         }
+        // Any-direction join (pure or mixed with directed): route each
+        // triple to the plain or mirrored index inside one LTJ.
+        if pattern_extract::has_any_direction(&join_pattern) {
+            if let Some(result) = pattern_extract::try_ltj_mixed(
+                self.graph,
+                &join_pattern,
+                &index,
+                &self.anydir_index(),
+                limit,
+            ) {
+                return result;
+            }
+        }
 
         // Fallback to pairwise hash-join
         let ir1 = self.run_path_pattern(q1, 0);
@@ -1721,6 +1766,22 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         if let Some(result) = pattern_extract::try_ltj(self.graph, &concat_pattern, &index, limit) {
             return result;
         }
+        // Any-direction chain (pure or mixed with directed): route each
+        // triple to the plain or mirrored index inside one LTJ. A
+        // repetition is not decomposable, so a chain containing `-[e]-{n,m}`
+        // still takes the seeded traversal below; this catches flat chains
+        // like `(a)-[]-(b)-[]-(c)` and `(a)-[:X]->(b)-[]-(c)`.
+        if pattern_extract::has_any_direction(&concat_pattern) {
+            if let Some(result) = pattern_extract::try_ltj_mixed(
+                self.graph,
+                &concat_pattern,
+                &index,
+                &self.anydir_index(),
+                limit,
+            ) {
+                return result;
+            }
+        }
 
         let ir1 = self.run_path_pattern(p1, 0);
 
@@ -1769,12 +1830,176 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     return optimized;
                 }
             }
+            // Bounded single-edge repetition: expand level-by-level from
+            // the already-filtered left rows instead of materializing the
+            // repetition globally (issue #57).
+            PathPattern::Repeat { pattern, lb, ub } => {
+                if let Some(seeded) =
+                    self.try_concat_with_edge_repetition(&ir1, pattern, *lb, *ub, limit)
+                {
+                    return seeded;
+                }
+            }
             _ => {}
         }
 
         // Fallback: cross-product for complex right-side patterns
         let ir2 = self.run_path_pattern(p2, 0);
         Self::hash_join(&ir1, &ir2, limit)
+    }
+
+    /// Seeded repetition traversal: evaluate `Concat(left, (edge){lb,ub})`
+    /// by stepping the adjacency one level at a time from the left rows,
+    /// instead of the legacy route (`run_repetition_range` materializes
+    /// every length-`lb..=ub` walk in the whole graph, then `hash_join`
+    /// keeps the ones whose first node matches). When the left side is
+    /// selective (`WHERE n1.account_number = ...`), the legacy route's
+    /// global enumeration is the issue-#57 OOM; the seeded walk touches
+    /// only the neighborhood actually reachable from the seeds.
+    ///
+    /// Semantics mirror the legacy path exactly:
+    ///   - a named edge variable binds to a `PathValue::Group` of the
+    ///     `k` traversed edges (legacy: `to_group` + `concat_group`);
+    ///   - `lb == 0` contributes each seed row unchanged with an empty
+    ///     Group binding (legacy: the `run_repetition_pattern(p, 0)`
+    ///     all-nodes baseline, join-filtered back to the seeds);
+    ///   - levels expand with no limit — a row absent from the output at
+    ///     level `k` is still a live frontier for level `k+1`; the caller
+    ///     limit truncates accumulated output only.
+    ///
+    /// Bails out (`None` → legacy path) on: unbounded `ub` (that shape is
+    /// §16.6-gated and routed to the finite searches), a non-single-edge
+    /// inner (one step must append exactly one edge), or an edge variable
+    /// already bound by the left side (Group-vs-flat unification is the
+    /// legacy join's concern). Differential coverage against the legacy
+    /// route lives in `tests/seeded_repetition_test.rs`; disable with
+    /// `GQLITE_DISABLE_SEEDED_REPEAT=1`.
+    fn try_concat_with_edge_repetition(
+        &self,
+        ir1: &IntermediateResult,
+        edge_pat: &PathPattern,
+        lb: usize,
+        ub: Option<usize>,
+        limit: usize,
+    ) -> Option<IntermediateResult> {
+        if std::env::var("GQLITE_DISABLE_SEEDED_REPEAT").is_ok() {
+            return None;
+        }
+        let ub = ub?;
+        if !matches!(
+            edge_pat,
+            PathPattern::EdgeRight(_)
+                | PathPattern::EdgeLeft(_)
+                | PathPattern::EdgeUndirected(_)
+                | PathPattern::EdgeAnyDirection(_)
+        ) {
+            return None;
+        }
+        if lb > ub {
+            return Some(IntermediateResult::empty());
+        }
+
+        // The step evaluators bind a *flat* edge value per hop, but
+        // repetition semantics bind the variable to a Group of all hops:
+        // strip the var for the step calls and rebuild the Group from the
+        // path suffix after each level.
+        let mut step_pat = edge_pat.clone();
+        let var_name = match &mut step_pat {
+            PathPattern::EdgeRight(Some(d))
+            | PathPattern::EdgeLeft(Some(d))
+            | PathPattern::EdgeUndirected(Some(d))
+            | PathPattern::EdgeAnyDirection(Some(d)) => d.var.take(),
+            _ => None,
+        };
+        if let Some(ref name) = var_name {
+            // Left side already binds the same name: the legacy join's
+            // unification semantics apply; stay on that path.
+            if ir1.rows.iter().any(|r| r.assignment.get(name).is_some()) {
+                return None;
+            }
+        }
+
+        let mut out: Vec<ResultRow> = Vec::new();
+
+        // Level 0 (lb == 0 only): zero hops, empty Group binding.
+        if lb == 0 {
+            let dom = edge_pat.freevars();
+            for r in &ir1.rows {
+                let mut row = r.clone();
+                row.assignment.fill_empty_list(&dom);
+                out.push(row);
+            }
+            if limit > 0 && out.len() >= limit {
+                out.truncate(limit);
+                return Some(IntermediateResult::new(out));
+            }
+        }
+
+        // Levels 1..=ub, each seeded by the previous one.
+        let mut frontier: Option<IntermediateResult> = None;
+        for k in 1..=ub {
+            let seeds = frontier.as_ref().unwrap_or(ir1);
+            let mut next = self.run_edge_step(seeds, &step_pat);
+            if let Some(ref name) = var_name {
+                for row in &mut next.rows {
+                    // The step appended exactly [edge, node]; the group
+                    // grows by that edge.
+                    let Some(edge) = last_edge_of(row.path()) else {
+                        continue;
+                    };
+                    let group = match row.assignment.get(name) {
+                        Some(PathValue::Group(g)) => {
+                            let mut g = g.clone();
+                            g.push(edge);
+                            g
+                        }
+                        _ => vec![edge],
+                    };
+                    row.assignment.extend(name.clone(), PathValue::Group(group));
+                }
+            }
+            if k >= lb {
+                out.extend(next.rows.iter().cloned());
+                if limit > 0 && out.len() >= limit {
+                    out.truncate(limit);
+                    return Some(IntermediateResult::new(out));
+                }
+            }
+            if next.rows.is_empty() {
+                break;
+            }
+            frontier = Some(next);
+        }
+
+        Some(IntermediateResult::new(out))
+    }
+
+    /// One repetition level: append a single edge to every seed row via
+    /// the adjacency-driven concat evaluators. `step_pat` must be one of
+    /// the four single-edge variants (guaranteed by the caller's guard).
+    fn run_edge_step(
+        &self,
+        seeds: &IntermediateResult,
+        step_pat: &PathPattern,
+    ) -> IntermediateResult {
+        match step_pat {
+            PathPattern::EdgeRight(desc) => {
+                self.concat_with_directed_edge(seeds, desc.as_ref(), true, 0)
+            }
+            PathPattern::EdgeLeft(desc) => {
+                self.concat_with_directed_edge(seeds, desc.as_ref(), false, 0)
+            }
+            PathPattern::EdgeUndirected(desc) => {
+                self.concat_with_undirected_edge(seeds, desc.as_ref(), 0)
+            }
+            PathPattern::EdgeAnyDirection(desc) => {
+                let r = self.concat_with_directed_edge(seeds, desc.as_ref(), true, 0);
+                let l = self.concat_with_directed_edge(seeds, desc.as_ref(), false, 0);
+                let u = self.concat_with_undirected_edge(seeds, desc.as_ref(), 0);
+                r.union(l).union(u)
+            }
+            _ => unreachable!("guarded by try_concat_with_edge_repetition"),
+        }
     }
 
     /// Adjacency-driven concat: left results → outgoing/incoming edges → target nodes.
