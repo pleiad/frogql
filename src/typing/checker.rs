@@ -740,9 +740,23 @@ impl Typechecker {
                 let t2 = self.check_expr(right, env);
                 let (expected_t1, expected_t2, result_t) = op.delta(&t1, &t2);
 
-                if SimpleType::meet(&t1, &expected_t1) != SimpleType::Zero
-                    && SimpleType::meet(&t2, &expected_t2) != SimpleType::Zero
-                {
+                let ok1 = SimpleType::meet(&t1, &expected_t1) != SimpleType::Zero;
+                let ok2 = SimpleType::meet(&t2, &expected_t2) != SimpleType::Zero;
+
+                // c̃od override for the short-circuit connectives (OR/AND):
+                // degrade to ⊥ only when BOTH operands are incompatible with
+                // the expected type. A single ⊥/null operand beside a valid
+                // Bool still types as Bool (e.g. `⊥ OR B : B`) — a deliberate
+                // under-approximation so a dynamically-valid branch is not
+                // falsely pruned as empty. Non-short-circuit ops (arithmetic,
+                // comparisons) keep the default: any ⊥ operand degrades.
+                let defined = if matches!(op, BinOp::And | BinOp::Or) {
+                    ok1 || ok2
+                } else {
+                    ok1 && ok2
+                };
+
+                if defined {
                     result_t
                 } else {
                     self.warnings.push(format!(
