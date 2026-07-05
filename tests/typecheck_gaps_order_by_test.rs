@@ -308,11 +308,9 @@ fn typecheck_rejects_list_aggregate_in_sort_key() {
     );
 }
 
-// ISO §22.14: a record is not orderable (no Feature GA04). A *constant*
-// record folds to `Star` via `simple_type_of_value` (the phase-1 punt),
-// which would launder it past the comparability check. `order_key_type`
-// types it as `Record` locally to ORDER BY so it is rejected, without
-// touching the global constant typing.
+// ISO §22.14: a record is not orderable (no Feature GA04). A constant
+// record used to launder to `Star` and slip past the comparability
+// check; regression for the `order_key_type` hardening.
 #[test]
 fn typecheck_rejects_const_record_in_sort_key() {
     let r = compile_query("MATCH (x) RETURN RECORD { name: 'Alice' } AS r ORDER BY r");
@@ -339,9 +337,8 @@ fn typecheck_accepts_record_scalar_field_in_sort_key() {
     assert!(r.is_ok(), "got: {:?}", r.err());
 }
 
-// A repetition-group variable (bound by `{n,m}`) is not a base type and
-// is not orderable. `variable_type_to_simple_type` launders `Group` to
-// `Star`; `order_key_type` types it as `Group` so ORDER BY rejects it.
+// A repetition-group variable (bound by `{n,m}`) is not a base type
+// and is not orderable; regression for the `order_key_type` hardening.
 #[test]
 fn typecheck_rejects_group_variable_in_sort_key() {
     let r = compile_query("MATCH (a)-[e]->{1,2}(b) RETURN a, b ORDER BY e");

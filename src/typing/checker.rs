@@ -214,24 +214,17 @@ impl Typechecker {
         }
     }
 
-    /// Type of an ORDER BY sort-key expression, hardened against the
-    /// `simple_type_of_value` punt that launders a constant record to
-    /// `Star` (which is reserved for base types in the gradual design). A
-    /// record literal is not a base type and is not orderable without
-    /// Feature GA04, so type it as `Record` here — locally to ORDER BY —
-    /// so the §22.14 check below rejects it. The global constant typing
-    /// (`Expr::Const`) is left unchanged, keeping the blast radius to sort
-    /// keys (RETURN/WHERE/COALESCE still see a constant record as `Star`).
+    /// Type of an ORDER BY sort-key expression. `Star` is reserved for
+    /// base types in the gradual design, but two non-base values reach
+    /// sort keys laundered to `Star`: a constant record (via the
+    /// `simple_type_of_value` punt) and a repetition-group variable (via
+    /// `variable_type_to_simple_type`). Neither is orderable without
+    /// Feature GA04, so type them precisely here — locally to ORDER BY —
+    /// and let the §22.14 comparability check reject them. The global
+    /// typing keeps the punt (RETURN/WHERE still see them as `Star`).
     fn order_key_type(&mut self, e: &Expr, env: &TypeEnvironment) -> SimpleType {
         match e {
-            // A constant record (possibly nested) folds to `Value::Record`
-            // and is laundered to `Star` by `simple_type_of_value`; type it
-            // precisely so the comparability check rejects it.
             Expr::Const(v) => const_order_type(v),
-            // A repetition-group variable is not a base type either;
-            // `variable_type_to_simple_type` launders `Group` to `Star`.
-            // Type it as `Group` here so the check rejects it (ordering by a
-            // group of matched edges/nodes is not a comparable value).
             Expr::Var(name) => match env.get(name) {
                 Some(VariableType::Group(_)) => SimpleType::Group(Box::new(SimpleType::Star)),
                 _ => self.check_expr(e, env),
@@ -1154,16 +1147,10 @@ fn create_context(desc: &Option<Descriptor>, t: VariableType) -> TypeEnvironment
     }
 }
 
-/// Map a literal `Value` to its `SimpleType`.
-///
-/// List and Record values get a deliberately loose type — the precise
-/// element/field types would require recursive typing of values, which
-/// fppc doesn't do (it has no list literals). Documented in
-/// `docs/internals/typechecker_migration.md` as a phase-1 punt.
-/// Like `simple_type_of_value`, but does not launder a record to `Star`:
-/// a constant record (possibly nested) types as `Record` so the ORDER BY
-/// comparability check (§22.14) rejects it. Used only for sort keys, via
-/// `order_key_type`; the global constant typing keeps the `Star` punt.
+/// Like `simple_type_of_value`, but a constant record (possibly nested)
+/// types as `Record` instead of the `Star` punt, so the ORDER BY
+/// comparability check (§22.14) can reject it. Sort keys only, via
+/// `order_key_type`.
 fn const_order_type(v: &Value) -> SimpleType {
     match v {
         Value::Record(fields) => SimpleType::Record(
@@ -1176,6 +1163,12 @@ fn const_order_type(v: &Value) -> SimpleType {
     }
 }
 
+/// Map a literal `Value` to its `SimpleType`.
+///
+/// List and Record values get a deliberately loose type — the precise
+/// element/field types would require recursive typing of values, which
+/// fppc doesn't do (it has no list literals). Documented in
+/// `docs/internals/typechecker_migration.md` as a phase-1 punt.
 fn simple_type_of_value(v: &Value) -> SimpleType {
     match v {
         // Null literal is the SQL untyped null: it inhabits every type for
