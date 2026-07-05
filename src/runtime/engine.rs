@@ -4121,7 +4121,10 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             BinOp::Eq => ExprResult::Success(Value::Bool(lv == rv)),
             BinOp::Ne => ExprResult::Success(Value::Bool(lv != rv)),
             // 3VL membership: `null IN xs` -> null; found -> true; not found but
-            // the list carries a null -> null (unknown); else false.
+            // the list carries a null -> null (unknown); else false. NB: `IN` as
+            // a membership predicate is a froGQL extension — neither ISO GQL nor
+            // FPPC has it; this matches the SQL `x=a OR x=b OR …` expansion. See
+            // docs/internals/iso-gql-gaps.md §3.4.
             BinOp::In => match rv {
                 Value::List(items) => {
                     if lv.is_null() {
