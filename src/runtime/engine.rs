@@ -3179,7 +3179,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         };
         match props.get(attr) {
             Some(v) => ExprResult::Success(v.clone()),
-            None => ExprResult::Failure(format!("attribute '{attr}' not found")),
+            // FPPC rule (Ra): reading an absent property on a bound element is
+            // `ok null`, not a stuck/error state. Missing key -> null so 3VL in
+            // the connectives/comparisons sees a value, not a Failure (which is
+            // reserved for genuine errors that must empty the path).
+            None => ExprResult::Success(Value::Null),
         }
     }
 
@@ -3248,10 +3252,20 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             }
 
             Expr::FieldAccess { base, field } => match self.run_expr(mu, base) {
-                ExprResult::Success(Value::Record(m)) => match m.get(field) {
-                    Some(v) => ExprResult::Success(v.clone()),
-                    None => ExprResult::Failure(format!("field '{field}' not found")),
-                },
+                // Missing record key -> null. Records/nested field access are a
+                // froGQL extension beyond FPPC's flat property model; this
+                // follows ISO §20.11 <property reference> for an OPEN,
+                // nullable-by-default site. (A closed type would reject the key
+                // at prep time; a NOT NULL site would raise 22G12 — both are the
+                // tracked closed-schema / material-type gaps.)
+                ExprResult::Success(Value::Record(m)) => {
+                    ExprResult::Success(m.get(field).cloned().unwrap_or(Value::Null))
+                }
+                // Field access on a null base -> null (ISO §20.11: reading
+                // through a null source yields null when the destination is
+                // nullable — froGQL's default; mirrors FPPC Ra's null-bound
+                // variable case).
+                ExprResult::Success(Value::Null) => ExprResult::Success(Value::Null),
                 ExprResult::Success(other) => {
                     ExprResult::Failure(format!("field access on non-record value: {other}"))
                 }
@@ -3272,6 +3286,14 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 BinOp::As => {
                     let l = self.run_expr(mu, left);
                     match (&l, right.as_ref()) {
+                        // null inhabits every type: `null AS T` is null,
+                        // regardless of target. A *failed* cast of a non-null
+                        // value stays a Failure (error) below — the runtime
+                        // relaxation lets null reach the 3VL logic without
+                        // turning genuine cast errors into null.
+                        (ExprResult::Success(Value::Null), Expr::Type(_)) => {
+                            ExprResult::Success(Value::Null)
+                        }
                         (ExprResult::Success(val), Expr::Type(ty)) => {
                             if Expr::value_is_type(val, ty) {
                                 ExprResult::Success(val.clone())
@@ -3320,10 +3342,16 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                         UnOp::Neg => match val {
                             Value::Int(n) => ExprResult::Success(Value::Int(-n)),
                             Value::Float(x) => ExprResult::Success(Value::Float(-x)),
+                            // 3VL: -null = null.
+                            Value::Null => ExprResult::Success(Value::Null),
                             _ => ExprResult::Failure("neg requires int or float".into()),
                         },
                         UnOp::Not => match val {
                             Value::Bool(b) => ExprResult::Success(Value::Bool(!b)),
+                            // 3VL: NOT null = null. NOT has no short-circuit; a
+                            // bottom (error) operand still propagates as Failure
+                            // via the arm below.
+                            Value::Null => ExprResult::Success(Value::Null),
                             _ => ExprResult::Failure("not requires bool".into()),
                         },
                     },
@@ -4001,6 +4029,26 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             }
         }
         match op {
+            // Classic 3VL: arithmetic and comparison operators propagate null —
+            // any null operand yields null (unknown). Errors do NOT reach here:
+            // the operand-cast wrapper propagates a Failure before eval_binop,
+            // so only genuine values (including null) arrive. Logical AND/OR are
+            // handled below (null is absorbing-aware, not blanket-propagated).
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::Mod
+            | BinOp::Gt
+            | BinOp::Lt
+            | BinOp::Ge
+            | BinOp::Le
+            | BinOp::Eq
+            | BinOp::Ne
+                if lv.is_null() || rv.is_null() =>
+            {
+                ExprResult::Success(Value::Null)
+            }
             BinOp::Add => match as_num_pair(lv, rv) {
                 Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Int(a + b)),
                 Some((Value::Float(a), Value::Float(b))) => {
@@ -4068,20 +4116,50 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 }
                 _ => ExprResult::Failure("<= requires numeric operands".into()),
             },
+            // Non-null Eq/Ne are structural (the null cases were handled by the
+            // 3VL guard above: `null = x` / `x = null` -> null).
             BinOp::Eq => ExprResult::Success(Value::Bool(lv == rv)),
             BinOp::Ne => ExprResult::Success(Value::Bool(lv != rv)),
+            // 3VL membership: `null IN xs` -> null; found -> true; not found but
+            // the list carries a null -> null (unknown); else false.
             BinOp::In => match rv {
                 Value::List(items) => {
-                    ExprResult::Success(Value::Bool(items.iter().any(|x| x == lv)))
+                    if lv.is_null() {
+                        ExprResult::Success(Value::Null)
+                    } else if items.iter().any(|x| x == lv) {
+                        ExprResult::Success(Value::Bool(true))
+                    } else if items.iter().any(Value::is_null) {
+                        ExprResult::Success(Value::Null)
+                    } else {
+                        ExprResult::Success(Value::Bool(false))
+                    }
                 }
+                Value::Null => ExprResult::Success(Value::Null),
                 _ => ExprResult::Failure("'in' requires a list on the right".into()),
             },
+            // Classic 3VL for the short-circuit connectives. `false` is
+            // absorbing for AND, `true` for OR (so `false AND null = false`,
+            // `true OR null = true`); otherwise a null operand yields null.
+            // A non-bool, non-null operand is an error (a Failure never reaches
+            // here — the wrapper empties the path first).
             BinOp::And => match (lv, rv) {
-                (Value::Bool(a), Value::Bool(b)) => ExprResult::Success(Value::Bool(*a && *b)),
+                (Value::Bool(false), _) | (_, Value::Bool(false)) => {
+                    ExprResult::Success(Value::Bool(false))
+                }
+                (Value::Bool(true), Value::Bool(true)) => ExprResult::Success(Value::Bool(true)),
+                (Value::Bool(true) | Value::Null, Value::Bool(true) | Value::Null) => {
+                    ExprResult::Success(Value::Null)
+                }
                 _ => ExprResult::Failure("and requires bools".into()),
             },
             BinOp::Or => match (lv, rv) {
-                (Value::Bool(a), Value::Bool(b)) => ExprResult::Success(Value::Bool(*a || *b)),
+                (Value::Bool(true), _) | (_, Value::Bool(true)) => {
+                    ExprResult::Success(Value::Bool(true))
+                }
+                (Value::Bool(false), Value::Bool(false)) => ExprResult::Success(Value::Bool(false)),
+                (Value::Bool(false) | Value::Null, Value::Bool(false) | Value::Null) => {
+                    ExprResult::Success(Value::Null)
+                }
                 _ => ExprResult::Failure("or requires bools".into()),
             },
             _ => ExprResult::Failure(format!("unexpected op {op} in eval_binop")),
