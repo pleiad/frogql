@@ -383,6 +383,15 @@ fn value_to_prop(v: &Value, st: &mut StringTable, pager: &mut Pager) -> io::Resu
                 "node / edge reference values cannot be stored as properties",
             ));
         }
+        // Temporal values are query-time only in this phase; persisting
+        // them as properties (with their own VALUE_TYPE_* tags) is the
+        // documented next step of the temporal roadmap.
+        Value::Date(_) | Value::LocalDatetime(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "temporal values cannot be stored as properties yet",
+            ));
+        }
     })
 }
 

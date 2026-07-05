@@ -41,6 +41,14 @@ pub enum SimpleType {
     /// itself, never carries structure, and never appears in a persisted
     /// schema (a path cannot be a property value).
     Path,
+    /// ISO §4.16.6 DATE temporal type (§20.27 `DATE(...)`). A base type:
+    /// totally ordered, so it is a valid ORDER BY key. Query-time only in
+    /// this phase (never a persisted property type).
+    Date,
+    /// ISO §4.16.6 LOCAL DATETIME temporal type (§20.27
+    /// `LOCAL_DATETIME(...)`). A base type, totally ordered. Query-time
+    /// only in this phase, like `Date`.
+    LocalDatetime,
 }
 
 impl SimpleType {
@@ -154,6 +162,8 @@ impl fmt::Display for SimpleType {
             SimpleType::Node => write!(f, "node"),
             SimpleType::Edge => write!(f, "edge"),
             SimpleType::Path => write!(f, "path"),
+            SimpleType::Date => write!(f, "date"),
+            SimpleType::LocalDatetime => write!(f, "local datetime"),
         }
     }
 }

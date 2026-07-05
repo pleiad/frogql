@@ -671,6 +671,10 @@ fn value_to_json(store: &LazyGraphStore, v: &Value) -> JsonValue {
         Value::Float(x) => json!(*x),
         Value::Str(s) => JsonValue::String(s.clone()),
         Value::Bool(b) => JsonValue::Bool(*b),
+        Value::Date(d) => JsonValue::String(frogql_core::model::value::format_date(*d)),
+        Value::LocalDatetime(ms) => {
+            JsonValue::String(frogql_core::model::value::format_datetime(*ms))
+        }
         Value::List(items) => {
             JsonValue::Array(items.iter().map(|v| value_to_json(store, v)).collect())
         }

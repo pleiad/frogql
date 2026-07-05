@@ -21,6 +21,34 @@ pub fn cmp_values(lhs: &Value, op: BinOp, rhs: &Value) -> bool {
     if lhs.is_null() || rhs.is_null() {
         return false;
     }
+    // Temporal values (§4.16.6) are totally ordered within their own
+    // type; a DATE and a LOCAL DATETIME are distinct types and never
+    // compare (false for every operator, like any cross-type pair).
+    match (lhs, rhs) {
+        (Value::Date(x), Value::Date(y)) => {
+            return match op {
+                BinOp::Eq => x == y,
+                BinOp::Ne => x != y,
+                BinOp::Lt => x < y,
+                BinOp::Le => x <= y,
+                BinOp::Gt => x > y,
+                BinOp::Ge => x >= y,
+                _ => false,
+            };
+        }
+        (Value::LocalDatetime(x), Value::LocalDatetime(y)) => {
+            return match op {
+                BinOp::Eq => x == y,
+                BinOp::Ne => x != y,
+                BinOp::Lt => x < y,
+                BinOp::Le => x <= y,
+                BinOp::Gt => x > y,
+                BinOp::Ge => x >= y,
+                _ => false,
+            };
+        }
+        _ => {}
+    }
     // Composite values: structural equality via the derived `PartialEq`.
     // Ordering is undefined and yields false for `<`, `<=`, `>`, `>=`.
     match (lhs, rhs) {

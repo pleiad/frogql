@@ -1804,6 +1804,20 @@ impl Parser {
                             args: vec![arg],
                         });
                     }
+                    // ISO §20.27 temporal constructors, same soft-keyword
+                    // discipline: only the call form is special, so DATE
+                    // stays usable as a variable or label elsewhere. Zero
+                    // args (`DATE()` = CURRENT_DATE per SR 1) or one arg (a
+                    // <date string> or a field record).
+                    if let Some(canon) = temporal_function_name(&name) {
+                        self.advance(); // consume '('
+                        let mut args = Vec::new();
+                        if !matches!(self.peek(), Token::RParen) {
+                            args.push(self.expr()?);
+                        }
+                        self.expect(&Token::RParen)?;
+                        return Ok(Expr::Call { name: canon, args });
+                    }
                 }
                 // First dot: variable-to-property. Subsequent dots: field access
                 // on the previous value (for nested records).
@@ -2741,6 +2755,17 @@ impl Parser {
 /// `PATH_LENGTH` / `CARDINALITY` are ISO; `NODES` / `EDGES` are the
 /// non-standard translation helpers (documented as a divergence). Returns
 /// `None` for any other name so it stays a plain variable reference.
+/// Canonical name for the §20.27 temporal constructors, matched
+/// case-insensitively in call position only.
+fn temporal_function_name(name: &str) -> Option<String> {
+    for canon in ["DATE", "LOCAL_DATETIME"] {
+        if name.eq_ignore_ascii_case(canon) {
+            return Some(canon.to_string());
+        }
+    }
+    None
+}
+
 fn path_function_name(name: &str) -> Option<String> {
     let upper = name.to_ascii_uppercase();
     matches!(

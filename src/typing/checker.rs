@@ -795,6 +795,27 @@ impl Typechecker {
                 match name.as_str() {
                     // FLOOR(numeric) → Float (the runtime narrows via CAST).
                     "FLOOR" => SimpleType::F,
+                    // ISO §20.27 temporal constructors. Zero args = current
+                    // date/datetime; one arg = a <date/datetime string> or a
+                    // field record. A provably wrong argument type is a hard
+                    // error; `Star` is tolerated per the gradual rule.
+                    "DATE" | "LOCAL_DATETIME" => {
+                        if let Some(arg_t) = arg_types.first() {
+                            let stringish = !SimpleType::meet(arg_t, &SimpleType::S).is_empty();
+                            let recordish =
+                                matches!(arg_t, SimpleType::Record(_) | SimpleType::Star);
+                            if !stringish && !recordish {
+                                self.errors.push(format!(
+                                    "{name} expects a string or a field record, got {arg_t}"
+                                ));
+                            }
+                        }
+                        if name == "DATE" {
+                            SimpleType::Date
+                        } else {
+                            SimpleType::LocalDatetime
+                        }
+                    }
                     // CAST(operand AS <value type>) → the target type, which
                     // the parser carries as `Expr::Type` in args[1].
                     "CAST" => match args.get(1) {
@@ -1148,6 +1169,8 @@ fn simple_type_of_value(v: &Value) -> SimpleType {
         Value::Node(_) => SimpleType::Node,
         Value::Edge(_) => SimpleType::Edge,
         Value::Path(_) => SimpleType::Path,
+        Value::Date(_) => SimpleType::Date,
+        Value::LocalDatetime(_) => SimpleType::LocalDatetime,
     }
 }
 
@@ -1319,7 +1342,13 @@ fn short_var_type(t: &VariableType) -> String {
 /// would need Feature GA04.
 fn is_orderable_per_iso_22_14(t: &SimpleType) -> bool {
     match t {
-        SimpleType::Z | SimpleType::F | SimpleType::B | SimpleType::S | SimpleType::Star => true,
+        SimpleType::Z
+        | SimpleType::F
+        | SimpleType::B
+        | SimpleType::S
+        | SimpleType::Star
+        | SimpleType::Date
+        | SimpleType::LocalDatetime => true,
         SimpleType::Zero => false,
         SimpleType::Union(a, b) => is_orderable_per_iso_22_14(a) && is_orderable_per_iso_22_14(b),
         // ISO §4.4.4 says reference values of the same base type are

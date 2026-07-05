@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use crate::model::graph::Props;
 use crate::model::graph_access::GraphAccess;
-use crate::model::value::{Id, Path, PathValue, Value};
+use crate::model::value::{
+    days_from_civil, parse_date_str, parse_datetime_str, Id, Path, PathValue, Value,
+};
 use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
@@ -3118,6 +3120,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             Value::Float(_) => SimpleType::F,
             Value::Str(_) => SimpleType::S,
             Value::Bool(_) => SimpleType::B,
+            Value::Date(_) => SimpleType::Date,
+            Value::LocalDatetime(_) => SimpleType::LocalDatetime,
             Value::List(items) => {
                 if items.is_empty() {
                     SimpleType::List(Box::new(SimpleType::Star))
@@ -3284,26 +3288,30 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     }
                 }
                 _ => {
-                    let (ty_l, _, _) = op.delta(&SimpleType::Star, &SimpleType::Star);
-                    let cast_left = Expr::Binop {
-                        op: BinOp::As,
-                        left: left.clone(),
-                        right: Box::new(Expr::Type(ty_l.clone())),
+                    let l = self.run_expr(mu, left);
+                    let r = self.run_expr(mu, right);
+                    let (lv, rv) = match (&l, &r) {
+                        (ExprResult::Success(lv), ExprResult::Success(rv)) => (lv, rv),
+                        (ExprResult::Failure(_), _) => return l,
+                        (_, ExprResult::Failure(_)) => return r,
                     };
-                    let cast_right = Expr::Binop {
-                        op: BinOp::As,
-                        left: right.clone(),
-                        right: Box::new(Expr::Type(ty_l)),
-                    };
-                    let l = self.run_expr(mu, &cast_left);
-                    let r = self.run_expr(mu, &cast_right);
-                    match (&l, &r) {
-                        (ExprResult::Success(lv), ExprResult::Success(rv)) => {
-                            Self::eval_binop(op, lv, rv)
-                        }
-                        (ExprResult::Failure(_), _) => l,
-                        (_, ExprResult::Failure(_)) => r,
+                    // Temporal operands bypass the numeric-cast coercion
+                    // below: the §22.14 comparisons and the §20.26 datetime
+                    // arithmetic are typed directly in `eval_binop`.
+                    if temporal_binop_applies(op, lv, rv) {
+                        return Self::eval_binop(op, lv, rv);
                     }
+                    // Delta-driven coercion, inlined with the same
+                    // `value_is_type` semantics the old `AS`-wrapping had,
+                    // without re-evaluating the operands.
+                    let (ty_l, _, _) = op.delta(&SimpleType::Star, &SimpleType::Star);
+                    if !Expr::value_is_type(lv, &ty_l) {
+                        return ExprResult::Failure(format!("cannot cast {lv} to {ty_l}"));
+                    }
+                    if !Expr::value_is_type(rv, &ty_l) {
+                        return ExprResult::Failure(format!("cannot cast {rv} to {ty_l}"));
+                    }
+                    Self::eval_binop(op, lv, rv)
                 }
             },
 
@@ -3527,6 +3535,56 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     _ => unreachable!("guarded by the outer match arm"),
                 }
             }
+            // ISO §20.27 temporal constructors. `DATE()` /
+            // `LOCAL_DATETIME()` with no argument are the CURRENT_DATE /
+            // LOCAL_TIMESTAMP equivalents (SR 1-3); with one argument they
+            // accept a <date/datetime string> or a field record. A
+            // malformed string or record fails (→ Null under 3VL), the
+            // same failure-as-null convention as CAST.
+            "DATE" => match args.first() {
+                None => ExprResult::Success(Value::Date(now_epoch_days())),
+                Some(a) => match self.run_expr(mu, a) {
+                    ExprResult::Success(Value::Str(s)) => match parse_date_str(&s) {
+                        Some(d) => ExprResult::Success(Value::Date(d)),
+                        None => ExprResult::Failure(format!("malformed date string '{s}'")),
+                    },
+                    ExprResult::Success(Value::Record(fields)) => match date_from_record(&fields) {
+                        Some(d) => ExprResult::Success(Value::Date(d)),
+                        None => ExprResult::Failure(
+                            "DATE record needs integer year/month/day fields".into(),
+                        ),
+                    },
+                    ExprResult::Success(Value::Null) => ExprResult::Success(Value::Null),
+                    ExprResult::Success(_) => {
+                        ExprResult::Failure("DATE expects a string or a field record".into())
+                    }
+                    e @ ExprResult::Failure(_) => e,
+                },
+            },
+            "LOCAL_DATETIME" => match args.first() {
+                None => ExprResult::Success(Value::LocalDatetime(now_epoch_millis())),
+                Some(a) => match self.run_expr(mu, a) {
+                    ExprResult::Success(Value::Str(s)) => match parse_datetime_str(&s) {
+                        Some(ms) => ExprResult::Success(Value::LocalDatetime(ms)),
+                        None => ExprResult::Failure(format!("malformed datetime string '{s}'")),
+                    },
+                    ExprResult::Success(Value::Record(fields)) => {
+                        match datetime_from_record(&fields) {
+                            Some(ms) => ExprResult::Success(Value::LocalDatetime(ms)),
+                            None => ExprResult::Failure(
+                                "LOCAL_DATETIME record needs integer year/month/day \
+                                 (and optional hour/minute/second/millisecond) fields"
+                                    .into(),
+                            ),
+                        }
+                    }
+                    ExprResult::Success(Value::Null) => ExprResult::Success(Value::Null),
+                    ExprResult::Success(_) => ExprResult::Failure(
+                        "LOCAL_DATETIME expects a string or a field record".into(),
+                    ),
+                    e @ ExprResult::Failure(_) => e,
+                },
+            },
             other => ExprResult::Failure(format!("unknown built-in function `{other}`")),
         }
     }
@@ -4001,6 +4059,32 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             }
         }
         match op {
+            // §20.26 datetime arithmetic, MVP form: a LOCAL DATETIME plus /
+            // minus an integer count of milliseconds (the form the
+            // DURATION({...}) desugaring produces). DATE arithmetic and
+            // typed durations are future work.
+            BinOp::Add
+                if matches!(
+                    (lv, rv),
+                    (Value::LocalDatetime(_), Value::Int(_))
+                        | (Value::Int(_), Value::LocalDatetime(_))
+                ) =>
+            {
+                let (ms, delta) = match (lv, rv) {
+                    (Value::LocalDatetime(ms), Value::Int(n))
+                    | (Value::Int(n), Value::LocalDatetime(ms)) => (*ms, *n),
+                    _ => unreachable!("guarded above"),
+                };
+                ExprResult::Success(Value::LocalDatetime(ms.saturating_add(delta)))
+            }
+            BinOp::Sub if matches!((lv, rv), (Value::LocalDatetime(_), Value::Int(_))) => {
+                match (lv, rv) {
+                    (Value::LocalDatetime(ms), Value::Int(n)) => {
+                        ExprResult::Success(Value::LocalDatetime(ms.saturating_sub(*n)))
+                    }
+                    _ => unreachable!("guarded above"),
+                }
+            }
             BinOp::Add => match as_num_pair(lv, rv) {
                 Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Int(a + b)),
                 Some((Value::Float(a), Value::Float(b))) => {
@@ -4044,6 +4128,16 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 },
                 _ => ExprResult::Failure("MOD requires integer operands".into()),
             },
+            // §22.14 ordering comparisons for same-type temporal values.
+            BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le
+                if matches!(
+                    (lv, rv),
+                    (Value::Date(_), Value::Date(_))
+                        | (Value::LocalDatetime(_), Value::LocalDatetime(_))
+                ) =>
+            {
+                ExprResult::Success(Value::Bool(cmp_values(lv, *op, rv)))
+            }
             BinOp::Gt => match as_num_pair(lv, rv) {
                 Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a > b)),
                 Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Bool(a > b)),
@@ -4409,6 +4503,79 @@ fn dedup_preserving_order(rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
 #[derive(Debug, Clone)]
 struct GroupKey(Vec<Value>);
 
+/// Whether a binary operator over these operand values is one of the
+/// temporal forms that `eval_binop` types directly: same-type §22.14
+/// comparisons, cross-type temporal equality (defined, always false),
+/// and §20.26 datetime ± integer-millis arithmetic.
+fn temporal_binop_applies(op: &BinOp, lv: &Value, rv: &Value) -> bool {
+    let cmp = matches!(
+        op,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+    );
+    match (lv, rv) {
+        (Value::Date(_), Value::Date(_))
+        | (Value::LocalDatetime(_), Value::LocalDatetime(_))
+        | (Value::Date(_), Value::LocalDatetime(_))
+        | (Value::LocalDatetime(_), Value::Date(_)) => cmp,
+        (Value::LocalDatetime(_), Value::Int(_)) => matches!(op, BinOp::Add | BinOp::Sub),
+        (Value::Int(_), Value::LocalDatetime(_)) => matches!(op, BinOp::Add),
+        _ => false,
+    }
+}
+
+/// Days since 1970-01-01 for the current UTC instant (`DATE()` — the
+/// CURRENT_DATE equivalent, §20.27 SR 1).
+fn now_epoch_days() -> i32 {
+    (now_epoch_millis() / 86_400_000) as i32
+}
+
+/// Milliseconds since 1970-01-01T00:00:00 UTC (`LOCAL_DATETIME()`).
+fn now_epoch_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Read an integer field from a §20.27 constructor record.
+fn record_int(fields: &std::collections::BTreeMap<String, Value>, key: &str) -> Option<i64> {
+    match fields.get(key) {
+        Some(Value::Int(n)) => Some(*n),
+        _ => None,
+    }
+}
+
+/// `DATE({year:, month:, day:})` — all three fields required.
+fn date_from_record(fields: &std::collections::BTreeMap<String, Value>) -> Option<i32> {
+    let (y, m, d) = (
+        record_int(fields, "year")?,
+        record_int(fields, "month")?,
+        record_int(fields, "day")?,
+    );
+    if !crate::model::value::valid_civil(y, u32::try_from(m).ok()?, u32::try_from(d).ok()?) {
+        return None;
+    }
+    i32::try_from(days_from_civil(y, m as u32, d as u32)).ok()
+}
+
+/// `LOCAL_DATETIME({year:, month:, day:, ...})` — date fields required,
+/// time fields default to zero.
+fn datetime_from_record(fields: &std::collections::BTreeMap<String, Value>) -> Option<i64> {
+    let days = date_from_record(fields)? as i64;
+    let h = record_int(fields, "hour").unwrap_or(0);
+    let mi = record_int(fields, "minute").unwrap_or(0);
+    let sec = record_int(fields, "second").unwrap_or(0);
+    let ms = record_int(fields, "millisecond").unwrap_or(0);
+    if !(0..24).contains(&h)
+        || !(0..60).contains(&mi)
+        || !(0..60).contains(&sec)
+        || !(0..1000).contains(&ms)
+    {
+        return None;
+    }
+    Some(days * 86_400_000 + h * 3_600_000 + mi * 60_000 + sec * 1000 + ms)
+}
+
 fn hash_value<H: Hasher>(v: &Value, state: &mut H) {
     std::mem::discriminant(v).hash(state);
     match v {
@@ -4431,6 +4598,8 @@ fn hash_value<H: Hasher>(v: &Value, state: &mut H) {
             }
         }
         Value::Node(id) | Value::Edge(id) => id.hash(state),
+        Value::Date(d) => d.hash(state),
+        Value::LocalDatetime(ms) => ms.hash(state),
         Value::Path(items) => {
             items.len().hash(state);
             for item in items {
@@ -4443,6 +4612,8 @@ fn hash_value<H: Hasher>(v: &Value, state: &mut H) {
 fn eq_value(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Date(x), Value::Date(y)) => x == y,
+        (Value::LocalDatetime(x), Value::LocalDatetime(y)) => x == y,
         (Value::Float(x), Value::Float(y)) => normalize_float_bits(*x) == normalize_float_bits(*y),
         (Value::Str(x), Value::Str(y)) => x == y,
         (Value::Bool(x), Value::Bool(y)) => x == y,
@@ -4993,6 +5164,8 @@ fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y),
         (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)),
         (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
+        (Value::Date(x), Value::Date(y)) => Some(x.cmp(y)),
+        (Value::LocalDatetime(x), Value::LocalDatetime(y)) => Some(x.cmp(y)),
         (Value::Bool(x), Value::Bool(y)) => Some(match (x, y) {
             (false, true) => Ordering::Less,
             (true, false) => Ordering::Greater,
