@@ -3,7 +3,11 @@
 # of truth for what actually runs (four parallel jobs); this file is for
 # ergonomics, not for driving CI.
 #
-# Recipes use bash pipelines (ls | sed | awk), so force bash even on Windows.
+# Install the `just` runner:  cargo install just
+#   (Windows, skip the from-source build:  winget install Casey.Just)
+#
+# Pin bash for deterministic behaviour on Windows (Git Bash) rather than
+# relying on just's default shell resolution.
 set shell := ["bash", "-cu"]
 
 # Default: list recipes.

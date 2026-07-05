@@ -12,6 +12,7 @@ The crate package is still named `gqlrust` for legacy reasons; the user-facing b
 
 ```bash
 # Local dev shortcuts (see `justfile`; these wrap the commands below).
+# Install the runner once: `cargo install just` (or `winget install Casey.Just`).
 # `just` with no args lists every recipe.
 just lint        # fmt --check + cargo check + clippy -D warnings (CI parity)
 just lint-fix    # rewrite formatting + apply machine-applicable clippy fixes
