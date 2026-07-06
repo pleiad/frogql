@@ -3323,17 +3323,24 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     if temporal_binop_applies(op, lv, rv) {
                         return Self::eval_binop(op, lv, rv);
                     }
-                    // Delta-driven coercion, inlined with the same
-                    // `value_is_type` semantics the old `AS`-wrapping had,
-                    // without re-evaluating the operands.
+                    // Delta-driven coercion, inlined with the same semantics as
+                    // the old `AS`-wrapping without re-evaluating the operands.
+                    // The 3VL relaxation is preserved: null inhabits every type,
+                    // so a null operand flows through to `eval_binop`'s 3VL
+                    // logic; only a non-null value that fails the cast is an
+                    // error.
                     let (ty_l, _, _) = op.delta(&SimpleType::Star, &SimpleType::Star);
-                    if !Expr::value_is_type(lv, &ty_l) {
-                        return ExprResult::Failure(format!("cannot cast {lv} to {ty_l}"));
+                    let coerce = |v: &Value| -> Result<Value, String> {
+                        if v.is_null() || Expr::value_is_type(v, &ty_l) {
+                            Ok(v.clone())
+                        } else {
+                            Err(format!("cannot cast {v} to {ty_l}"))
+                        }
+                    };
+                    match (coerce(lv), coerce(rv)) {
+                        (Ok(lc), Ok(rc)) => Self::eval_binop(op, &lc, &rc),
+                        (Err(e), _) | (_, Err(e)) => ExprResult::Failure(e),
                     }
-                    if !Expr::value_is_type(rv, &ty_l) {
-                        return ExprResult::Failure(format!("cannot cast {rv} to {ty_l}"));
-                    }
-                    Self::eval_binop(op, lv, rv)
                 }
             },
 
