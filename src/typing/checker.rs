@@ -144,11 +144,13 @@ impl Typechecker {
 
         for spec in specs {
             let t = match &spec.key {
-                SortKey::Expr(e) => self.check_expr(e, env),
+                SortKey::Expr(e) => self.order_key_type(e, env),
                 SortKey::Column(idx) => match returns.and_then(|rs| rs.get(*idx)) {
-                    Some(ReturnItem::Expr { expr, .. }) => self.check_expr(expr, env),
-                    // Aggregate output typing is a separate gap; pass-through.
-                    Some(ReturnItem::Aggregate { .. }) => SimpleType::Star,
+                    Some(ReturnItem::Expr { expr, .. }) => self.order_key_type(expr, env),
+                    // Type the aggregate by its result type so a non-orderable
+                    // result (e.g. COLLECT_LIST -> List) is rejected below instead
+                    // of being laundered through Star (reserved for base types).
+                    Some(ReturnItem::Aggregate { agg, .. }) => self.check_aggregator(agg, env),
                     None => {
                         self.errors.push(format!(
                             "ORDER BY column reference #{idx} is out of bounds for the \
@@ -172,8 +174,8 @@ impl Typechecker {
                 SortKey::ColumnField { col, path } => {
                     // Type the projected column, then walk the record path.
                     let mut t = match returns.and_then(|rs| rs.get(*col)) {
-                        Some(ReturnItem::Expr { expr, .. }) => self.check_expr(expr, env),
-                        Some(ReturnItem::Aggregate { .. }) => SimpleType::Star,
+                        Some(ReturnItem::Expr { expr, .. }) => self.order_key_type(expr, env),
+                        Some(ReturnItem::Aggregate { agg, .. }) => self.check_aggregator(agg, env),
                         None => {
                             self.errors.push(format!(
                                 "ORDER BY column reference #{col} is out of bounds for the \
@@ -209,6 +211,25 @@ impl Typechecker {
                     spec.key, t,
                 ));
             }
+        }
+    }
+
+    /// Type of an ORDER BY sort-key expression. `Star` is reserved for
+    /// base types in the gradual design, but two non-base values reach
+    /// sort keys laundered to `Star`: a constant record (via the
+    /// `simple_type_of_value` punt) and a repetition-group variable (via
+    /// `variable_type_to_simple_type`). Neither is orderable without
+    /// Feature GA04, so type them precisely here — locally to ORDER BY —
+    /// and let the §22.14 comparability check reject them. The global
+    /// typing keeps the punt (RETURN/WHERE still see them as `Star`).
+    fn order_key_type(&mut self, e: &Expr, env: &TypeEnvironment) -> SimpleType {
+        match e {
+            Expr::Const(v) => const_order_type(v),
+            Expr::Var(name) => match env.get(name) {
+                Some(VariableType::Group(_)) => SimpleType::Group(Box::new(SimpleType::Star)),
+                _ => self.check_expr(e, env),
+            },
+            _ => self.check_expr(e, env),
         }
     }
 
@@ -1137,6 +1158,22 @@ fn create_context(desc: &Option<Descriptor>, t: VariableType) -> TypeEnvironment
     match desc {
         Some(d) => TypeEnvironment::create_context(d, t),
         None => TypeEnvironment::new(),
+    }
+}
+
+/// Like `simple_type_of_value`, but a constant record (possibly nested)
+/// types as `Record` instead of the `Star` punt, so the ORDER BY
+/// comparability check (§22.14) can reject it. Sort keys only, via
+/// `order_key_type`.
+fn const_order_type(v: &Value) -> SimpleType {
+    match v {
+        Value::Record(fields) => SimpleType::Record(
+            fields
+                .iter()
+                .map(|(k, vv)| (k.clone(), const_order_type(vv)))
+                .collect(),
+        ),
+        other => simple_type_of_value(other),
     }
 }
 

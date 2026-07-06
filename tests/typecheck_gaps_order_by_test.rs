@@ -290,3 +290,74 @@ fn runtime_treats_list_sort_key_as_equal_so_input_order_preserved() {
         _ => panic!("expected projected"),
     }
 }
+
+// ISO §22.14: an aggregate whose result type is non-orderable (a List from
+// COLLECT_LIST) must be rejected as a sort key, not laundered through Star and
+// silently treated as Equal at runtime. Regression for the ORDER BY-over-Star
+// soundness gap (Star is reserved for base types).
+#[test]
+fn typecheck_rejects_list_aggregate_in_sort_key() {
+    let r = compile_query(
+        "MATCH (x: User) RETURN x.city, COLLECT_LIST(x.name) GROUP BY x.city \
+         ORDER BY COLLECT_LIST(x.name)",
+    );
+    let err = r.expect_err("ORDER BY over a list-valued aggregate must be rejected");
+    assert!(
+        err.contains("comparable") || err.contains("22.14") || err.contains("GA04"),
+        "got: {err}"
+    );
+}
+
+// ISO §22.14: a record is not orderable (no Feature GA04). A constant
+// record used to launder to `Star` and slip past the comparability
+// check; regression for the `order_key_type` hardening.
+#[test]
+fn typecheck_rejects_const_record_in_sort_key() {
+    let r = compile_query("MATCH (x) RETURN RECORD { name: 'Alice' } AS r ORDER BY r");
+    let err = r.expect_err("ORDER BY over a record must be rejected");
+    assert!(
+        err.contains("comparable") || err.contains("22.14") || err.contains("GA04"),
+        "got: {err}"
+    );
+}
+
+// The fix is local to ORDER BY: projecting a constant record in RETURN
+// must keep working (it was typed as Star globally and still is).
+#[test]
+fn typecheck_accepts_const_record_in_return() {
+    let r = compile_query("MATCH (x) RETURN RECORD { name: 'Alice' } AS r");
+    assert!(r.is_ok(), "got: {:?}", r.err());
+}
+
+// Drilling into a *scalar* field of a record is fine: `r.name` is a
+// string, which is orderable.
+#[test]
+fn typecheck_accepts_record_scalar_field_in_sort_key() {
+    let r = compile_query("MATCH (x) RETURN RECORD { name: 'Alice' } AS r ORDER BY r.name");
+    assert!(r.is_ok(), "got: {:?}", r.err());
+}
+
+// A repetition-group variable (bound by `{n,m}`) is not a base type
+// and is not orderable; regression for the `order_key_type` hardening.
+#[test]
+fn typecheck_rejects_group_variable_in_sort_key() {
+    let r = compile_query("MATCH (a)-[e]->{1,2}(b) RETURN a, b ORDER BY e");
+    let err = r.expect_err("ORDER BY over a repetition group must be rejected");
+    assert!(
+        err.contains("comparable") || err.contains("22.14") || err.contains("GA04"),
+        "got: {err}"
+    );
+}
+
+// Drilling into a field that is itself a record stays non-orderable.
+#[test]
+fn typecheck_rejects_record_nested_record_field_in_sort_key() {
+    let r = compile_query(
+        "MATCH (x) RETURN RECORD { inner: RECORD { name: 'Alice' } } AS r ORDER BY r.inner",
+    );
+    let err = r.expect_err("ORDER BY over a nested record field must be rejected");
+    assert!(
+        err.contains("comparable") || err.contains("22.14") || err.contains("GA04"),
+        "got: {err}"
+    );
+}
