@@ -483,3 +483,52 @@ fn test_cod_override_keeps_vacuity_sound_under_closed_schema() {
     };
     assert_eq!(rows, 3, "runtime keeps all rows: null OR true = true");
 }
+
+#[test]
+fn test_cod_override_keeps_vacuity_sound_for_and_under_closed_schema() {
+    use frogql::typing::descriptor_type::DescriptorType;
+    use frogql::typing::label_type::LabelType;
+    use frogql::typing::property_type::PropertyType;
+    use frogql::typing::simple_type::SimpleType;
+    use frogql::typing::variable_type::{Schema, VariableType};
+    use std::collections::BTreeMap;
+
+    // Same closed type N { n: Int } — `status` is unknown, so it types to bottom.
+    let mut props = BTreeMap::new();
+    props.insert("n".to_string(), SimpleType::Z);
+    let schema = Schema::from_parts(
+        vec![VariableType::Node(DescriptorType::new(
+            LabelType::Label("N".into()),
+            PropertyType::Closed(props),
+        ))],
+        vec![],
+    );
+
+    // AND's override is load-bearing too, and this is the witness that proves it.
+    // `false` is the absorbing element of AND, so `x.status AND false` is *defined*
+    // (= false) at runtime even though `x.status` reads as null. Wrapping it in a
+    // NOT surfaces that: `NOT (null AND false) = NOT false = true`, keeping every
+    // row. WITHOUT the AND cod override, `x.status AND false : ⊥` (strict cod), then
+    // `NOT ⊥ : ⊥` → the pattern is pruned as guaranteed_empty while the runtime
+    // returns all rows — unsound. The override types the AND as Bool, so `NOT Bool`
+    // stays Bool and the pattern is not pruned. (Delete the `BinOp::And` arm from the
+    // checker's cod override and this test fails: guaranteed_empty flips to true.)
+    let res = frogql::compile_query_with_diagnostics_with(
+        &schema,
+        "MATCH (x:N) WHERE NOT (x.status AND false) RETURN x.name",
+    )
+    .expect("compile");
+    assert!(
+        !res.guaranteed_empty,
+        "cod override must keep `NOT (bottom AND false)` non-empty to stay sound",
+    );
+    let g = active_graph();
+    let rows = match Runtime::new(&g).run_query(&res.query, 0) {
+        QueryResult::Projected(r) => r.len(),
+        _ => 0,
+    };
+    assert_eq!(
+        rows, 3,
+        "runtime keeps all rows: NOT (null AND false) = NOT false = true"
+    );
+}
