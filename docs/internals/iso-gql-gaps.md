@@ -140,6 +140,16 @@ Hoy `.save` es la única primitiva de "commit"; entre saves la sesión acumula R
 
 Cuando hay overlay no vacío, `lookup_node_eq` y `lookup_node_range` retornan `None` y el caller hace scan. Mantener hash y btree incrementales durante DML cuesta O(log N) por mutación; cabe en MVP-2.
 
+#### 3.4 Excepciones de datos ISO (hard-fail) vs modelo empty-output
+
+froGQL realiza un **error de tipo** como *salida vacía* (fila descartada en `WHERE`, celda null en `RETURN`) — el modelo FPPC "type errors yield empty outputs". ISO/IEC 39075 exige, en casos concretos, una **`data exception` que aborta el request** (ejecución "unsuccessful", sin efecto), no un vaciado silencioso. Es una divergencia pre-existente en todo el motor, no algo del trabajo de 3VL (que la *reduce*: al leer propiedades ausentes como null, menos cosas caen a la ruta de error). Un solo *workstream* futuro, en orden de leverage:
+
+1. **Error de tipo *esencial* → hard-abort (`22G12`)**. Hoy un mismatch de operador (`x.age + 'a'`, `false OR <string>`) es un *warning* del typechecker (no bloquea) y a runtime vacía. Escalar esos warnings a *errores* haría que la ruta con typecheck falle en compilación (conforme ISO), dejando `--no-typecheck` como escape. Entrada más barata; ojo con el override de `cod` de OR/AND que suprime el warning cuando un lado es Bool.
+2. **Tipos materiales (`NOT NULL`)**. Leer una propiedad declarada material cuyo valor es null → `22G12`; `null AS T NOT NULL` → `22G03`. Requiere trackear nulabilidad en el esquema; hoy todo es nullable-by-default (ver *Null semantics* en `CLAUDE.md`).
+3. **Validación de propiedad en grafo cerrado**. Un nombre de propiedad desconocido sobre un tipo cerrado (`x.eml`) debería ser error en *preparación* (ISO); hoy tipa lenientemente.
+
+Nota relacionada — **`IN` es una extensión de froGQL**: ISO GQL no tiene predicado de membresía `x IN [lista]` (usa `IN` solo para `FOR v IN …` / `LET … IN …`); FPPC omite listas por completo. La 3VL de `IN` en `eval_binop` es consistente con la expansión SQL `x=a OR x=b OR …` (`null IN […] → null`; encontrado → true; no-encontrado con null en la lista → null), pero es no-estándar, como `NODES`/`EDGES`.
+
 ## Cobertura LDBC Interactive Complex (IC)
 
 Estado de los 14 IC del benchmark cross-system (`bench/ldbc-queries/ic*.toml`). "Implementado" = el query corre por el motor y produce filas; la verificación de equivalencia de filas vive en `bench/cross-system/`.

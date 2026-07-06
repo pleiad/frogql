@@ -16,6 +16,20 @@ use crate::syntax::expr::BinOp;
 /// `Eq`/`Ne` only — ordering on composite values is not defined here and
 /// returns false. Shared between the LTJ filter loop and the standard
 /// node/edge scan.
+///
+/// This returns a bare keep/drop `bool`, NOT the 3VL value the interpreter's
+/// `eval_binop` returns (`Null` for a null operand). That is sound because the
+/// value-predicate pushdown only lifts top-level positive `attr op literal`
+/// AND-conjuncts, where a null operand means "drop" under both (`false` here;
+/// `Null` → `get_bool` false there) — so they never disagree on which rows
+/// survive. Pushing a conjunct out of an `OR` / under a `NOT` is already
+/// forbidden (wrong for non-null rows too), and those keep-despite-null shapes
+/// stay on the residual 3VL path. Pinned by `tests/pushdown_null_test.rs`.
+///
+/// UNIFY TRIGGER: if a pushed comparison's *value* is ever consumed as
+/// something other than keep/drop (e.g. a future computed-column pushdown that
+/// feeds a projection / `CASE`), replace this with a shared 3VL core —
+/// `cmp_3vl(..) -> Value` — and make this a `matches!(.., Bool(true))` wrapper.
 pub fn cmp_values(lhs: &Value, op: BinOp, rhs: &Value) -> bool {
     use std::cmp::Ordering;
     if lhs.is_null() || rhs.is_null() {

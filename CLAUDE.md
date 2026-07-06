@@ -12,6 +12,7 @@ The crate package is still named `gqlrust` for legacy reasons; the user-facing b
 
 ```bash
 # Local dev shortcuts (see `justfile`; these wrap the commands below).
+# Install the runner once: `cargo install just` (or `winget install Casey.Just`).
 # `just` with no args lists every recipe.
 just lint        # fmt --check + cargo check + clippy -D warnings (CI parity)
 just lint-fix    # rewrite formatting + apply machine-applicable clippy fixes
@@ -366,12 +367,13 @@ Tests in `tests/named_path_test.rs`. Full ISO context + roadmap in `docs/interna
 
 ### Null semantics
 
-`Value::Null` is a first-class variant. Properties that are absent from a node/edge map are treated as null at query time, and explicit nulls round-trip through the on-disk format.
+`Value::Null` is a first-class variant, and the 3VL *unknown* truth value **is** the null value (ISO: no separate `Unknown`). A missing property/record key on a bound element reads as `Success(Value::Null)` — FPPC rule `Ra` "ok null" — so 3VL sees a null (lenient), while a genuine type error stays a `Failure`. Explicit nulls round-trip through the on-disk format.
 
-- **3VL in `cmp_values`** (`runtime/mod.rs`): null on either side yields `false`, so a predicate involving null is dropped from the result. Used by both the LTJ filter loop (`NodeAttrCmp`) and the standard scan (`filter_node`/`filter_edge`).
+- **Residual `WHERE` / general expressions** (`engine.rs` `run_expr` / `eval_binop`): classic 3VL. Arithmetic / comparison / `IN` propagate null (any null operand → null); `AND`/`OR` use the SQL truth tables (`false` absorbing for `AND`, `true` for `OR`; else null); `NOT null → null`; `null AS T → null` for any (nullable-by-default) target. A genuine **type error** (non-bool in boolean position, failed non-null cast, div-by-zero) is a `Failure` and **empties the path** — dropped in `WHERE`, null cell in `RETURN` — regardless of essential/inessential position (the strict subset of ISO `UA004`; we never short-circuit-suppress an inessential error). The typechecker's `cod` override for `OR`/`AND` (result `Bool` unless *both* operands meet ⊥ against `Bool`) keeps the static emptiness judgment an under-approximation. Known ISO gap: an *essential* type error and a `NOT NULL`-site null should raise a hard data exception (`22G12`/`22G03`); froGQL empties instead (FPPC "type errors yield empty outputs") — tracked as a future *ISO data-exceptions* workstream in `docs/internals/iso-gql-gaps.md`.
+- **3VL in `cmp_values`** (`runtime/mod.rs`): null on either side yields `false`, so a *pushed-down* predicate involving null is dropped from the result. Used by the LTJ filter loop (`NodeAttrCmp`) and the standard scan (`filter_node`/`filter_edge`); the residual-`WHERE` path above yields `null` (which likewise drops the row via `get_bool`), so the two agree on the keep/drop decision.
 - **Aggregate null elimination** (`engine.rs` `collect_aggregate_values`): both `ExprResult::Failure` and `Success(Value::Null)` are dropped before the reducer runs. Empty aggregates emit `Value::Null`.
 - **Wire format**: `PropValue::Null` carries tag byte 6 (no payload). Nested nulls inside lists / records survive the round-trip. Top-level nulls are encoded as key absence — the property is omitted from the on-disk record.
-- **Surface syntax**: the lexer accepts `null` / `NULL`. The parser emits `Expr::Const(Value::Null)`. The typechecker maps the literal to `SimpleType::Star` so `WHERE x = null` does not collapse the surrounding type derivation. `IS NULL` and `IS NOT NULL` (parsed via `try_is_null` lookahead) produce an `Expr::IsNull { operand, negated }` that returns `Value::Bool` regardless of operand type; missing-attribute and unbound-variable failures are treated as null.
+- **Surface syntax**: the lexer accepts `null` / `NULL`. The parser emits `Expr::Const(Value::Null)`. The typechecker maps the literal to `SimpleType::Star` so `WHERE x = null` does not collapse the surrounding type derivation. `IS NULL` and `IS NOT NULL` (parsed via `try_is_null` lookahead) produce an `Expr::IsNull { operand, negated }` that returns `Value::Bool` regardless of operand type; a missing attribute reads as `Value::Null` (so `IS NULL` matches it), and an unbound-variable `Failure` is likewise treated as null for the test.
 
 ### CSV loader
 
