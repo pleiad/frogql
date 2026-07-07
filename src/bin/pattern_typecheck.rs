@@ -1,23 +1,18 @@
-//! pattern_compare — times the type checker on the reduced LDBC path-pattern
-//! cases and, optionally, compares against a reference CSV.
+//! pattern_typecheck — times the type checker on the internal-bench cases
+//! reduced to the FPPC path-pattern surface (MATCH/RETURN dropped, a
+//! query-level WHERE inlined into the descriptor). Isolated from the runtime,
+//! with a reused checker and WARMUP + ITERS iterations.
 //!
-//! Each case is an internal-bench query reduced to the FPPC path-pattern surface
-//! (MATCH / RETURN dropped, a query-level WHERE inlined into the descriptor).
-//! Rust times `check_query` on the reduced pattern — i.e. the path-pattern
-//! typecheck only — isolated (no runtime), with a reused checker and
-//! WARMUP + ITERS iterations.
+//!   cargo run --release --bin pattern_typecheck -- [path.gdb] [out.csv]
 //!
-//!   cargo run --release --bin pattern_compare -- [reference.csv] [path.gdb]
-//!
-//! With no reference CSV it prints the Rust timings and the emptiness verdicts.
-//! Given a reference CSV (header
-//! `case,expected,got,parse_med_ns,parse_min_ns,check_med_ns,...`) it also prints
-//! the per-case ratio and geomean. `got` must match `exp` — a sanity check that
-//! the type checker classifies each case the same way as the reference.
+//! Emits per-case check medians to `results_rust_typecheck.csv` and asserts each
+//! verdict (valid / empty / invalid) matches the expected classification. It
+//! measures only Rust: any comparison against another checker is a separate step
+//! that joins this CSV with the other's — this bench does not read either.
 
-use std::collections::HashMap;
-use std::fs;
+use std::fs::File;
 use std::hint::black_box;
+use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
@@ -28,36 +23,17 @@ const WARMUP: usize = 1000;
 const ITERS: usize = 10000;
 const DEFAULT_GDB: &str = "bench/data/ldbc-sf0.1.gdb";
 
-fn median_us(mut v: Vec<u128>) -> f64 {
+fn median_min_ns(mut v: Vec<u128>) -> (u128, u128) {
     v.sort_unstable();
-    v[v.len() / 2] as f64 / 1000.0
-}
-
-/// case -> check_med (us), read from the reference CSV.
-fn read_reference_csv(path: &str) -> HashMap<String, f64> {
-    let mut m = HashMap::new();
-    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
-    for line in text.lines().skip(1) {
-        let f: Vec<&str> = line.split(',').collect();
-        if f.len() < 6 {
-            continue;
-        }
-        if let Ok(ns) = f[5].parse::<f64>() {
-            m.insert(f[0].to_string(), ns / 1000.0);
-        }
-    }
-    m
+    (v[v.len() / 2], v[0])
 }
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let ref_csv = args.next();
     let gdb = args.next().unwrap_or_else(|| DEFAULT_GDB.to_string());
-
-    let reference: HashMap<String, f64> = ref_csv
-        .as_deref()
-        .map(read_reference_csv)
-        .unwrap_or_default();
+    let out = args
+        .next()
+        .unwrap_or_else(|| "results_rust_typecheck.csv".to_string());
 
     let lazy = LazyGraphStore::open(Path::new(&gdb)).unwrap_or_else(|e| panic!("open {gdb}: {e}"));
     let schema = lazy.catalog().active_schema();
@@ -134,12 +110,11 @@ fn main() {
     ];
 
     println!(
-        "\n{:<26}{:>6}{:>9}{:>12}{:>11}{:>10}",
-        "case", "exp", "got", "rust_med", "ref(us)", "ref/rust"
+        "\n{:<26}{:>7}{:>9}{:>15}",
+        "case", "exp", "got", "check_med_us"
     );
-    println!("{}", "-".repeat(76));
-    let mut logsum = 0.0f64;
-    let mut n = 0usize;
+    println!("{}", "-".repeat(57));
+    let mut rows: Vec<(String, String, String, u128, u128, bool)> = Vec::new();
     let mut mismatches = 0usize;
     for (id, expected, q) in cases {
         let parsed = frogql::parser::parse_query(q).expect("parse");
@@ -162,42 +137,49 @@ fn main() {
             black_box(tc.check_query(black_box(&elaborated)));
             samples.push(t.elapsed().as_nanos());
         }
-        let rust_med = median_us(samples);
-        let bad = if got != *expected {
+        let (med, min) = median_min_ns(samples);
+        let ok = got == *expected;
+        if !ok {
             mismatches += 1;
-            " <-- VERDICT MISMATCH"
-        } else {
-            ""
-        };
-        match reference.get(*id) {
-            Some(reference_us) => {
-                let ratio = reference_us / rust_med;
-                println!(
-                    "{:<26}{:>6}{:>9}{:>12.2}{:>11.2}{:>10.2}{}",
-                    id, expected, got, rust_med, reference_us, ratio, bad
-                );
-                logsum += ratio.ln();
-                n += 1;
-            }
-            None => println!(
-                "{:<26}{:>6}{:>9}{:>12.2}{:>11}{:>10}{}",
-                id, expected, got, rust_med, "-", "-", bad
-            ),
         }
-    }
-    println!("{}", "-".repeat(76));
-    if n > 0 {
         println!(
-            "geomean ref/rust over {n} cases = {:.2}x   (reference slower => rust faster)",
-            (logsum / n as f64).exp()
+            "{:<26}{:>7}{:>9}{:>15.3}{}",
+            id,
+            expected,
+            got,
+            med as f64 / 1000.0,
+            if ok { "" } else { "  <-- VERDICT MISMATCH" }
+        );
+        rows.push((
+            id.to_string(),
+            expected.to_string(),
+            got.to_string(),
+            med,
+            min,
+            ok,
+        ));
+    }
+    println!("{}", "-".repeat(57));
+
+    let mut f = File::create(&out).unwrap_or_else(|e| panic!("create {out}: {e}"));
+    writeln!(f, "case,expected,got,check_med_ns,check_min_ns,status").unwrap();
+    for (id, exp, got, med, min, ok) in &rows {
+        writeln!(
+            f,
+            "{id},{exp},{got},{med},{min},{}",
+            if *ok { "PASS" } else { "FAIL" }
+        )
+        .unwrap();
+    }
+    println!("wrote {out}");
+    if mismatches == 0 {
+        println!(
+            "SANITY OK: rust matched the expected verdict on all {} cases.",
+            rows.len()
+        );
+    } else {
+        println!(
+            "WARNING: {mismatches} verdict mismatch(es) -- investigate before trusting timings."
         );
     }
-    println!(
-        "{}",
-        if mismatches == 0 {
-            "SANITY OK: rust matched the expected verdict on every case."
-        } else {
-            "WARNING: verdict mismatch -- investigate before trusting the timings."
-        }
-    );
 }
