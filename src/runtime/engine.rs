@@ -774,10 +774,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                         return None;
                     }
                 };
-                let label_total = match self.graph.nodes_with_label(&l) {
-                    Some(v) => v.len(),
-                    None => return None,
-                };
+                let label_total = self.graph.nodes_with_label(&l)?.len();
                 if std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
                     eprintln!(
                         "btree-ltj-real:   {} ids={} label_total={}",
