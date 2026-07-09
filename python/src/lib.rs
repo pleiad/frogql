@@ -549,9 +549,12 @@ fn ddl_response(py: Python<'_>, message: &str) -> PyResult<PyObject> {
     Ok(d.into_py(py))
 }
 
+/// Open or create a `.gdb` database. SQLite-style (like `sqlite3.connect`):
+/// if `path` does not exist, an empty database is created there (zero
+/// nodes/edges, DEFAULT graph type active), ready for `INSERT` + `save()`.
 #[pyfunction]
 fn open(path: &str) -> PyResult<Connection> {
-    let store = LazyGraphStore::open(Path::new(path))
+    let store = LazyGraphStore::open_or_create(Path::new(path))
         .map_err(|e| PyRuntimeError::new_err(format!("open failed: {e}")))?;
     // Eagerly build the LTJ TripleIndex so the first user `execute()` runs
     // at warm-cache speed instead of paying the ~700ms cold build. The

@@ -45,9 +45,11 @@ jobs:
             build: npx napi build --platform --release --target x86_64-unknown-linux-gnu
           - host: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
-            # aarch64 linux needs cross-compile. napi-cli v2 ships `--zig`
-            # for zig-as-cc which avoids needing the gcc-aarch64 toolchain.
-            build: npx napi build --platform --release --target aarch64-unknown-linux-gnu --zig
+            # aarch64 linux needs cross-compile. napi-cli 3.x replaced the
+            # 2.x `--zig` flag with `--use-napi-cross`, which pulls
+            # @napi-rs/cross-toolchain to cross-build Linux gnu targets
+            # without a manual zig / gcc-aarch64 setup.
+            build: npx napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross
           - host: windows-2022
             target: x86_64-pc-windows-msvc
             build: npx napi build --platform --release --target x86_64-pc-windows-msvc
@@ -66,14 +68,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.settings.target }}
-
-      # Only the aarch64-linux job needs zig as cross-cc. Other matrix
-      # cells build natively on their host.
-      - name: Setup Zig (aarch64 linux cross)
-        if: matrix.settings.target == 'aarch64-unknown-linux-gnu'
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.11.0
 
       - name: Install dependencies
         working-directory: ${{ env.NAPI_WORKDIR }}
@@ -132,17 +126,22 @@ jobs:
         with:
           path: ${{ env.NAPI_WORKDIR }}/artifacts
 
-      # napi-cli v2 needs the per-target dirs (`npm/<triple>/`) populated
+      # napi-cli 3.x needs the per-target dirs (`npm/<triple>/`) populated
       # with their own package.json before `napi artifacts` can move the
-      # .node files in. `create-npm-dir` reads `napi.triples.additional`
-      # from package.json and scaffolds each subdir.
+      # .node files in. `create-npm-dirs` (renamed from 2.x's
+      # `create-npm-dir`) reads `napi.targets` from package.json and
+      # scaffolds each subdir under the default `npm/` dir.
       - name: Create per-platform npm dirs
         working-directory: ${{ env.NAPI_WORKDIR }}
-        run: npx napi create-npm-dir -t .
+        run: npx napi create-npm-dirs
 
+      # 3.x `artifacts` takes explicit dirs: `--output-dir` is where
+      # download-artifact@v4 dropped the per-target `.node` files (nested
+      # under `artifacts/bindings-<target>/`), `--npm-dir` is the scaffold
+      # from the previous step.
       - name: Move artifacts to npm/<target>/ subdirs
         working-directory: ${{ env.NAPI_WORKDIR }}
-        run: npx napi artifacts
+        run: npx napi artifacts --output-dir artifacts --npm-dir npm
 
       - name: List packages to publish
         working-directory: ${{ env.NAPI_WORKDIR }}
@@ -211,9 +210,10 @@ jobs:
           else
             echo "::group::${host_name}@${host_version}"
             # `--ignore-scripts` is essential here: a `prepublishOnly`
-            # hook would invoke `napi prepublish` which tries to
-            # re-publish every platform sub-package and crashes the
-            # workflow once any one of them is already on npm.
+            # hook would invoke `napi pre-publish` (renamed from 2.x's
+            # `prepublish`) which tries to re-publish every platform
+            # sub-package and crashes the workflow once any one of them
+            # is already on npm.
             npm publish --tag "${DIST_TAG}" --access public --provenance --ignore-scripts
             echo "::endgroup::"
           fi

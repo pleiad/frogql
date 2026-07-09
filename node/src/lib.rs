@@ -771,13 +771,15 @@ fn pathvalue_to_json(store: &LazyGraphStore, pv: &PathValue) -> JsonValue {
     }
 }
 
-/// Open or create a `.gdb` database. Eagerly warms the LTJ TripleIndex
-/// so the first `execute()` on the returned Connection runs at warm
-/// cache speed.
+/// Open or create a `.gdb` database. SQLite-style: if `path` does not
+/// exist, an empty database is created there (zero nodes/edges, DEFAULT
+/// graph type active), ready for `INSERT` + `save()`. Eagerly warms the
+/// LTJ TripleIndex so the first `execute()` on the returned Connection
+/// runs at warm cache speed.
 #[napi]
 pub fn open(path: String) -> napi::Result<Connection> {
-    let store =
-        LazyGraphStore::open(Path::new(&path)).map_err(|e| err(format!("open failed: {e}")))?;
+    let store = LazyGraphStore::open_or_create(Path::new(&path))
+        .map_err(|e| err(format!("open failed: {e}")))?;
     let index = {
         let scratch = Runtime::new(&store);
         scratch.warm_triple_index()

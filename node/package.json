@@ -1,6 +1,6 @@
 {
   "name": "frogql",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "froGQL — embedded GQL graph database with ISO GQL path patterns (Rust core, Node.js bindings via napi-rs)",
   "main": "index.js",
   "types": "index.d.ts",
@@ -27,17 +27,14 @@
     "node": ">= 16"
   },
   "napi": {
-    "name": "frogql",
-    "triples": {
-      "defaults": false,
-      "additional": [
-        "x86_64-apple-darwin",
-        "aarch64-apple-darwin",
-        "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-pc-windows-msvc"
-      ]
-    }
+    "binaryName": "frogql",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
   },
   "scripts": {
     "artifacts": "napi artifacts",
@@ -48,7 +45,7 @@
     "version": "napi version"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.0",
+    "@napi-rs/cli": "^3.7.2",
     "@types/node": "^20.0.0",
     "typescript": "^5.4.0"
   },
@@ -65,10 +62,10 @@
     "provenance": true
   },
   "optionalDependencies": {
-    "frogql-darwin-x64": "0.2.7",
-    "frogql-darwin-arm64": "0.2.7",
-    "frogql-linux-x64-gnu": "0.2.7",
-    "frogql-linux-arm64-gnu": "0.2.7",
-    "frogql-win32-x64-msvc": "0.2.7"
+    "frogql-darwin-arm64": "0.2.8",
+    "frogql-darwin-x64": "0.2.8",
+    "frogql-linux-arm64-gnu": "0.2.8",
+    "frogql-linux-x64-gnu": "0.2.8",
+    "frogql-win32-x64-msvc": "0.2.8"
   }
 }
