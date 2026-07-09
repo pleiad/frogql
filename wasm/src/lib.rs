@@ -266,6 +266,8 @@ fn value_to_json(store: &MemoryGraphStore, v: &Value) -> Json {
             .map(Json::Number)
             .unwrap_or(Json::Null),
         Value::Str(s) => json!(s),
+        Value::Date(d) => json!(frogql_core::model::value::format_date(*d)),
+        Value::LocalDatetime(ms) => json!(frogql_core::model::value::format_datetime(*ms)),
         Value::Bool(b) => json!(b),
         Value::List(items) => {
             Json::Array(items.iter().map(|it| value_to_json(store, it)).collect())

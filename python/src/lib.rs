@@ -595,6 +595,8 @@ fn value_to_py<'py>(py: Python<'py>, store: &LazyGraphStore, v: &Value) -> PyRes
         Value::Float(x) => x.into_py(py),
         Value::Str(s) => s.into_py(py),
         Value::Bool(b) => b.into_py(py),
+        Value::Date(d) => frogql_core::model::value::format_date(*d).into_py(py),
+        Value::LocalDatetime(ms) => frogql_core::model::value::format_datetime(*ms).into_py(py),
         Value::List(items) => {
             let lst = PyList::empty_bound(py);
             for it in items {

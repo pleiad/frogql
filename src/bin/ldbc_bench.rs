@@ -62,6 +62,8 @@ fn shape_of_value(v: &Value) -> &'static str {
         Value::Str(_) => "s",
         Value::Bool(_) => "b",
         Value::Float(_) => "f",
+        Value::Date(_) => "d",
+        Value::LocalDatetime(_) => "t",
         Value::List(_) => "l",
         Value::Record(_) => "r",
         Value::Node(_) => "N",

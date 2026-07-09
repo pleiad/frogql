@@ -172,6 +172,8 @@ fn format_simple_type(t: &SimpleType) -> String {
         SimpleType::Node => "NODE".to_string(),
         SimpleType::Edge => "EDGE".to_string(),
         SimpleType::Path => "PATH".to_string(),
+        SimpleType::Date => "DATE".to_string(),
+        SimpleType::LocalDatetime => "LOCAL DATETIME".to_string(),
     }
 }
 

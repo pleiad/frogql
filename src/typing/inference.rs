@@ -50,6 +50,10 @@ fn value_to_simple_type(v: &Value) -> SimpleType {
         Value::Float(_) => SimpleType::F,
         Value::Bool(_) => SimpleType::B,
         Value::Str(_) => SimpleType::S,
+        // Temporal values are query-time only in this phase; they never
+        // occur in stored properties, but the mapping is total anyway.
+        Value::Date(_) => SimpleType::Date,
+        Value::LocalDatetime(_) => SimpleType::LocalDatetime,
         Value::List(items) => {
             if items.is_empty() {
                 SimpleType::List(Box::new(SimpleType::Star))

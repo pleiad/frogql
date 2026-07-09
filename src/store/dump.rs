@@ -94,6 +94,10 @@ fn props_to_json(props: &Props) -> Json {
 fn value_to_json(v: &Value) -> Json {
     match v {
         Value::Null => Json::Null,
+        // Temporal values never occur in stored properties (query-time
+        // only), but the mapping is total: ISO-8601 strings.
+        Value::Date(d) => Json::String(crate::model::value::format_date(*d)),
+        Value::LocalDatetime(ms) => Json::String(crate::model::value::format_datetime(*ms)),
         Value::Int(n) => Json::Number((*n).into()),
         Value::Float(x) => serde_json::Number::from_f64(*x)
             .map(Json::Number)
@@ -266,6 +270,14 @@ fn format_descriptor(labels: &[String], props: &Props) -> Result<String, String>
 fn format_gql_value(v: &Value) -> Result<String, String> {
     Ok(match v {
         Value::Null => "NULL".to_string(),
+        // Round-trippable constructor syntax (§20.27).
+        Value::Date(d) => format!("DATE('{}')", crate::model::value::format_date(*d)),
+        Value::LocalDatetime(ms) => {
+            format!(
+                "LOCAL_DATETIME('{}')",
+                crate::model::value::format_datetime(*ms)
+            )
+        }
         Value::Int(n) => n.to_string(),
         Value::Float(x) => {
             if x.is_finite() && x.fract() == 0.0 {
