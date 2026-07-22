@@ -452,6 +452,8 @@ Two benches, deliberately split (full operational doc in `bench/cross-system/REA
 - **Internal bench** (`internal_bench` bin, `bench/INTERNAL_BENCHMARK.md`) — gqlite's own components in isolation (typechecker on/off, lazy/disk backend, RSS). Engine diagnostics, not cross-engine comparisons.
 - **External / cross-system bench** (`bench/cross-system/`) — gqlite vs other graph databases on LDBC SNB Interactive Complex (IC) query latency. The headline numbers.
 
+**Rebuild the `.gdb` with the binary under measurement** (`bench_setup --rebuild --skip-download`, ~10 s) before any run whose numbers matter. A `.gdb` built by an older binary keeps its old persisted DEFAULT schema in the catalog, and a stale schema can degrade compile-time numbers with no visible error — a 2026-07 run against a stale file measured `compile_chk` at 129 ms on a case that typechecks in 41 µs against a freshly built file (~3000×). Same reason the harness scripts must be preceded by `cargo build --release` after every pull (they only compile if the binary is *missing*, not stale).
+
 ### Cross-system harness (`bench/cross-system/`)
 
 `run_all.sh` orchestrates **systems on the outer loop, ICs on the inner**: per system, set up once (load full LDBC SF0.1 into its native format), run each requested IC, then exit (per-system memory reclaimed at process exit). Output lands in `results/<timestamp>/` — per-(system,IC) CSV (`query;backend;params;row;iter;result_count;elapsed_ns`), `comparison.txt`, `setup_times.txt`, `run_info.txt`.

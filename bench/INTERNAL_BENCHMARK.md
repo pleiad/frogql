@@ -27,6 +27,14 @@ cleanly if `bench/data/ldbc-sf0.3.gdb` is missing.
 
 ## Run
 
+> **Before any run whose numbers matter**: `cargo build --release` (the
+> scripts only compile if the binary is *missing*, not stale) and
+> `cargo run --release --bin bench_setup -- --rebuild --skip-download`
+> (~10 s). A `.gdb` built by an older binary keeps its old persisted
+> DEFAULT schema, and a stale schema can silently degrade compile-time
+> numbers — a stale file measured `compile_chk` at 129 ms on a case
+> that typechecks in 41 µs against a fresh one.
+
 ```bash
 # Default: 5 iters per case, 1 warmup, SF0.1, both backends (~40 min wall).
 ./target/release/internal_bench
