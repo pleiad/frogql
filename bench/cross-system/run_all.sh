@@ -248,6 +248,10 @@ echo ""
 #              latency. Not a knock-out ablation like the no-* modes —
 #              it is the memory-for-latency trade-off point, so read it
 #              against memory.csv, not just the latency chart.
+#   disk       not an ablation: the DISK storage backend as its own
+#              mode, so `--ablate` covers the full gqlite matrix and
+#              `--backends disk` is no longer silently ignored when
+#              ablating (it used to be).
 declare -A ABLATION_LABELS=(
     [baseline]="lazy-baseline"
     [no-fold]="lazy-no-fold"
@@ -255,6 +259,7 @@ declare -A ABLATION_LABELS=(
     [no-pin]="lazy-no-pin"
     [no-bfs]="lazy-no-bfs"
     [compact]="lazy-compact"
+    [disk]="disk-baseline"
 )
 declare -A ABLATION_ENV=(
     [baseline]=""
@@ -263,6 +268,7 @@ declare -A ABLATION_ENV=(
     [no-pin]="GQLITE_DISABLE_EXISTS_PIN=1 GQLITE_DISABLE_VALUE_SUBQUERY_PIN=1"
     [no-bfs]="GQLITE_DISABLE_SHORTEST_BFS=1"
     [compact]="GQLITE_LTJ_COMPACT=1"
+    [disk]=""
 )
 declare -A ABLATION_ARGS=(
     [baseline]=""
@@ -271,8 +277,9 @@ declare -A ABLATION_ARGS=(
     [no-pin]=""
     [no-bfs]=""
     [compact]=""
+    [disk]="--backend disk"
 )
-ABLATION_MODES=(baseline no-fold no-unroll no-pin no-bfs compact)
+ABLATION_MODES=(baseline no-fold no-unroll no-pin no-bfs compact disk)
 
 # --ablate-modes a,b,c narrows the ablation to a subset (implies
 # --ablate). Lets a follow-up run fill in one new mode (e.g. compact)
