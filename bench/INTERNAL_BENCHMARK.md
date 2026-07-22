@@ -91,6 +91,11 @@ disk;bench/data/ldbc-sf0.1.gdb;valid;v_ic2_spec;compile_chk;0;...
 | `ns` (column 7) | wall time of the call, in **nanoseconds** |
 | `flags` | empty / `skipped` / `rows=N` / `timeout` (budget exceeded; run aborted after this row) |
 
+Additionally, one `rss_after_case` row per (backend, case) carries the
+process RSS in **bytes** in the `ns` column, sampled right after the
+case's iterations — attributes the per-backend `peak_rss_loop` to the
+case that produced it.
+
 `phase` ∈ three values per case per iter (same as before; just
 reused across backends). The typechecker is backend-independent, so
 `compile_chk`/`compile_unchk` rows on the disk pass measure the

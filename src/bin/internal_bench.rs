@@ -564,8 +564,19 @@ fn bench_db<G: GraphAccess>(
             warned_count += 1;
         }
         // Sample RSS per case (cheap; once per ~iters runs). Tracks
-        // the high-water mark for the per-backend peak emit.
+        // the high-water mark for the per-backend peak emit, and emits
+        // a per-case CSV row so the peak can be attributed to the case
+        // that produced it (value rides the ns column as bytes).
         let cur = rss_mb(sys);
+        csv_row(
+            backend,
+            path_str,
+            case,
+            "rss_after_case",
+            0,
+            (cur * 1024.0 * 1024.0) as u128,
+            "",
+        );
         if cur > *peak_rss {
             *peak_rss = cur;
         }
