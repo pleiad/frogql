@@ -28,7 +28,7 @@ cleanly if `bench/data/ldbc-sf0.3.gdb` is missing.
 ## Run
 
 ```bash
-# Default: 3 iters per case, 1 warmup, SF0.1, both backends (~30 min wall).
+# Default: 5 iters per case, 1 warmup, SF0.1, both backends (~40 min wall).
 ./target/release/internal_bench
 
 # Capture the streams separately:
@@ -45,9 +45,10 @@ cleanly if `bench/data/ldbc-sf0.3.gdb` is missing.
 
 | flag | default | meaning |
 |---|---|---|
-| `--iters N` | `3` | Measured iterations per case |
+| `--iters N` | `5` | Measured iterations per case |
 | `--warmup N` | `1` | Extra iters per case before measurement; their times are discarded |
 | `--sf 0.1\|0.3` | `0.1` | Scale factor — picks `bench/data/ldbc-sf{N}.gdb` |
+| `--timeout-secs N` | `3600` | Wall-clock budget per unchecked runtime call; `0` disables. The runtime has no cancellation hook, so on breach a watchdog emits a `timeout`-flagged `rt_unchk` CSV row (ns = budget) and aborts the whole run with exit 124 — the paper's manual "abort at the 60-minute budget" methodology, automated. Rows already printed remain valid. |
 
 The bench runs **both backends in one invocation**: a lazy pass
 (`LazyGraphStore`, with secondary indexes + LRU page cache) and a
@@ -80,7 +81,7 @@ disk;bench/data/ldbc-sf0.1.gdb;valid;v_ic2_spec;compile_chk;0;...
 | `phase` | `compile_chk` / `compile_unchk` / `rt_unchk` |
 | `iter` | 0-indexed iteration after warmup is dropped |
 | `ns` (column 7) | wall time of the call, in **nanoseconds** |
-| `flags` | empty / `skipped` / `rows=N` |
+| `flags` | empty / `skipped` / `rows=N` / `timeout` (budget exceeded; run aborted after this row) |
 
 `phase` ∈ three values per case per iter (same as before; just
 reused across backends). The typechecker is backend-independent, so

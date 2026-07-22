@@ -13,17 +13,29 @@
 //!     ./target/release/bench_setup       # one-time: download + build .gdb
 //!     ./target/release/internal_bench    # run the bench
 //!
-//! Flags: `--iters N` (default 3), `--warmup N` (default 1), and
-//! `--sf 0.1|0.3` (default 0.1). No dataset path arg — opens
+//! Flags: `--iters N` (default 5), `--warmup N` (default 1),
+//! `--sf 0.1|0.3` (default 0.1), and `--timeout-secs N` (default 3600;
+//! 0 disables). No dataset path arg — opens
 //! `bench/data/ldbc-sf<SF>.gdb` from a hardcoded path; case set
 //! references LDBC labels by name.
+//!
+//! Timeout semantics: the runtime has no cancellation hook, so a
+//! runaway unchecked execution (e.g. `i_unbound_in_where_chain` on
+//! SF0.3 Disk, which never finished a single iteration) cannot be
+//! stopped in-process. When one rt_unchk call exceeds the budget, a
+//! watchdog thread emits a `timeout`-flagged CSV row plus a stderr
+//! diagnostic and aborts the whole process with exit code 124 — the
+//! same "abort at the budget" methodology the paper applied manually.
+//! Rows already printed are safe (Rust stdout is line-buffered).
 //!
 //! See `bench/INTERNAL_BENCHMARK.md` for output format, case set
 //! details, and stream cross-checking.
 
 use std::env;
 use std::path::Path;
-use std::time::Instant;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
@@ -47,6 +59,9 @@ const DEFAULT_ITERS: usize = 5;
 const DEFAULT_WARMUP: usize = 1;
 // Result-row cap per runtime call.
 const LIMIT: usize = 100;
+// Per-rt_unchk-call wall-clock budget. 3600 s reproduces the paper's
+// manual "aborted at the 60-minute budget" methodology. 0 disables.
+const DEFAULT_TIMEOUT_SECS: u64 = 3600;
 
 // CSV stdout: backend;db;category;case;phase;iter;ns;flags
 // See bench/INTERNAL_BENCHMARK.md "Output" for the column and
@@ -330,12 +345,17 @@ fn ensure_dataset() {
 
 fn print_usage(prog: &str) {
     eprintln!(
-        "Usage: {prog} [--iters N] [--warmup N] [--sf 0.1|0.3]\n\
+        "Usage: {prog} [--iters N] [--warmup N] [--sf 0.1|0.3] [--timeout-secs N]\n\
          \n\
-         Defaults: --iters {DEFAULT_ITERS}  --warmup {DEFAULT_WARMUP}  --sf 0.1\n\
+         Defaults: --iters {DEFAULT_ITERS}  --warmup {DEFAULT_WARMUP}  --sf 0.1  \
+         --timeout-secs {DEFAULT_TIMEOUT_SECS}\n\
+         \n\
+         --timeout-secs bounds each unchecked runtime call; on breach the\n\
+         run aborts (exit 124) with a `timeout`-flagged CSV row, since the\n\
+         runtime has no cancellation hook. 0 disables the watchdog.\n\
          \n\
          Datasets: bench/data/ldbc-sf{{0.1,0.3}}.gdb. SF0.1 is auto-built\n\
-         by bench_setup; SF0.3 must be built separately."
+         by bench_setup; SF0.3 via `bench_setup --sf 0.3`."
     );
 }
 
@@ -344,6 +364,7 @@ fn main() {
     let mut iters = DEFAULT_ITERS;
     let mut warmup = DEFAULT_WARMUP;
     let mut sf = "0.1".to_string();
+    let mut timeout_secs = DEFAULT_TIMEOUT_SECS;
     let mut i = 1;
     let need_value = |i: usize, flag: &str| -> &str {
         if i + 1 >= args.len() {
@@ -372,6 +393,13 @@ fn main() {
                 sf = need_value(i, "--sf").to_string();
                 i += 2;
             }
+            "--timeout-secs" => {
+                timeout_secs = need_value(i, "--timeout-secs").parse().unwrap_or_else(|e| {
+                    eprintln!("invalid --timeout-secs: {e}");
+                    std::process::exit(1);
+                });
+                i += 2;
+            }
             "-h" | "--help" => {
                 print_usage(&args[0]);
                 return;
@@ -387,6 +415,7 @@ fn main() {
         eprintln!("--iters must be >= 1");
         std::process::exit(1);
     }
+    let timeout = (timeout_secs > 0).then(|| Duration::from_secs(timeout_secs));
 
     let gdb_path: &str = match sf.as_str() {
         "0.1" => SF01_GDB,
@@ -448,6 +477,7 @@ fn main() {
         &rt_lazy,
         iters,
         warmup,
+        timeout,
         &mut sys,
         &mut peak_rss_lazy,
     );
@@ -483,6 +513,7 @@ fn main() {
         &rt_disk,
         iters,
         warmup,
+        timeout,
         &mut sys,
         &mut peak_rss_disk,
     );
@@ -501,7 +532,7 @@ fn rss_mb(sys: &mut System) -> f64 {
         .unwrap_or(0.0)
 }
 
-// Threading 8 args is fine here: this fn has one call site (per-backend
+// Threading 9 args is fine here: this fn has one call site (per-backend
 // dispatch in main) and lifting them into a struct adds ceremony
 // without clarity. Bench-internal only.
 #[allow(clippy::too_many_arguments)]
@@ -512,6 +543,7 @@ fn bench_db<G: GraphAccess>(
     rt: &Runtime<'_, G>,
     iters: usize,
     warmup: usize,
+    timeout: Option<Duration>,
     sys: &mut System,
     peak_rss: &mut f64,
 ) {
@@ -528,7 +560,7 @@ fn bench_db<G: GraphAccess>(
 
     let mut warned_count = 0usize;
     for case in CASES {
-        if run_case(backend, path_str, active, rt, case, iters, warmup) {
+        if run_case(backend, path_str, active, rt, case, iters, warmup, timeout) {
             warned_count += 1;
         }
         // Sample RSS per case (cheap; once per ~iters runs). Tracks
@@ -562,6 +594,7 @@ fn bench_db<G: GraphAccess>(
 /// a soundness warning (outcome ≠ expected, OR `Outcome::Empty` with a
 /// non-zero rt_unchk row count). Caller tallies these for the per-DB
 /// summary line at the bottom of the table.
+#[allow(clippy::too_many_arguments)]
 fn run_case<G: GraphAccess>(
     backend: &str,
     db_path: &str,
@@ -570,6 +603,7 @@ fn run_case<G: GraphAccess>(
     case: &Case,
     iters: usize,
     warmup: usize,
+    timeout: Option<Duration>,
 ) -> bool {
     // Times two compile-pipeline calls + one runtime call per iter.
     // The runtime is only invoked on the unchecked path: on the
@@ -648,6 +682,9 @@ fn run_case<G: GraphAccess>(
         // soundness check.
         let (rt_unchk_ns, flag, rows) = match unchk_compile {
             Ok(q) => {
+                let _watchdog = timeout.map(|budget| {
+                    Watchdog::arm(backend, db_path, case, n.saturating_sub(warmup), budget)
+                });
                 let t = Instant::now();
                 let result = rt.run_query(&q, LIMIT);
                 let ns = t.elapsed().as_nanos();
@@ -767,6 +804,66 @@ fn run_case<G: GraphAccess>(
     }
 
     outcome_mismatch || empty_unsound
+}
+
+/// Wall-clock budget enforcer for one `rt_unchk` call. The runtime is
+/// synchronous with no cancellation hook, so on breach the watchdog
+/// thread emits a `timeout`-flagged CSV row + stderr diagnostic and
+/// aborts the process (exit 124) — a leaked runaway thread would keep
+/// eating CPU/RAM and pollute every later measurement, so a clean,
+/// recorded abort is the only honest outcome. Disarm is via Drop: the
+/// main thread sends on the channel and joins.
+struct Watchdog {
+    disarm: Option<mpsc::Sender<()>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    fn arm(backend: &str, db: &str, case: &Case, iter: usize, budget: Duration) -> Watchdog {
+        let (tx, rx) = mpsc::channel::<()>();
+        let backend = backend.to_string();
+        let db = db.to_string();
+        let category = case.category.label();
+        let case_id = case.id;
+        let handle = thread::spawn(move || {
+            if rx.recv_timeout(budget).is_err() {
+                // Mirror csv_row's schema; ns = the budget actually spent.
+                println!(
+                    "{};{};{};{};rt_unchk;{};{};timeout",
+                    backend,
+                    db,
+                    category,
+                    case_id,
+                    iter,
+                    budget.as_nanos(),
+                );
+                eprintln!(
+                    "\n[TIMEOUT] {backend}/{case_id}: rt_unchk exceeded {}s — aborting run \
+                     (exit 124). The runtime has no cancellation hook; rows printed so far \
+                     are valid. Re-run with a larger --timeout-secs to push further.",
+                    budget.as_secs(),
+                );
+                std::process::exit(124);
+            }
+        });
+        Watchdog {
+            disarm: Some(tx),
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        // Send can only fail if the watchdog already fired, and then the
+        // process is exiting anyway.
+        if let Some(tx) = self.disarm.take() {
+            let _ = tx.send(());
+        }
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
 }
 
 fn csv_row(backend: &str, db: &str, case: &Case, phase: &str, iter: usize, ns: u128, flag: &str) {
