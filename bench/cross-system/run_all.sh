@@ -28,6 +28,8 @@
 #       [--sample-ms MS]              # default: 50. memrun RSS sampling period.
 #       [--rebuild-setup]             # force per-system setup re-run
 #                                     # (default: skip setup if DB exists)
+#       [--ablate-modes m1,m2]        # subset of ablation modes (implies
+#                                     # --ablate), e.g. --ablate-modes compact
 #       [--ablate]                    # run gqlite in 5 modes: baseline
 #                                     # (all opts on), no-fold, no-unroll,
 #                                     # no-pin, no-bfs — one optimization
@@ -97,6 +99,7 @@ while [[ $# -gt 0 ]]; do
         --backends)         BACKENDS_ARG="$2"; shift 2 ;;
         --rebuild-setup)    REBUILD=1; shift ;;
         --ablate)           ABLATE=1; shift ;;
+        --ablate-modes)     ABLATE=1; ABLATE_MODES_ARG="$2"; shift 2 ;;
         --mem-limit-gb)     MEM_LIMIT_GB="$2"; shift 2 ;;
         --sample-ms)        SAMPLE_MS="$2"; shift 2 ;;
         --timeout-s)        TIMEOUT_S="$2"; shift 2 ;;
@@ -270,6 +273,20 @@ declare -A ABLATION_ARGS=(
     [compact]=""
 )
 ABLATION_MODES=(baseline no-fold no-unroll no-pin no-bfs compact)
+
+# --ablate-modes a,b,c narrows the ablation to a subset (implies
+# --ablate). Lets a follow-up run fill in one new mode (e.g. compact)
+# without repeating the whole matrix; merge the resulting CSVs across
+# results dirs when plotting.
+if [[ -n "${ABLATE_MODES_ARG:-}" ]]; then
+    IFS=',' read -ra ABLATION_MODES <<< "$ABLATE_MODES_ARG"
+    for m in "${ABLATION_MODES[@]}"; do
+        if [[ -z "${ABLATION_LABELS[$m]:-}" ]]; then
+            echo "unknown --ablate-modes entry: $m (valid: ${!ABLATION_LABELS[*]})" >&2
+            exit 1
+        fi
+    done
+fi
 
 # ---- Per-system loop ------------------------------------------------
 
