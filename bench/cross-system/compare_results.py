@@ -395,6 +395,7 @@ def main() -> int:
                     "lazy-no-unroll",
                     "lazy-no-pin",
                     "lazy-no-bfs",
+                    "lazy-compact",
                     "disk",
                     "disk-baseline",
                     "memory",
@@ -403,6 +404,7 @@ def main() -> int:
                     "gqlite-no-unroll",
                     "gqlite-no-pin",
                     "gqlite-no-bfs",
+                    "gqlite-compact",
                     "gqlite-lazy",
                     "gqlite-disk",
                 ):

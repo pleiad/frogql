@@ -239,12 +239,19 @@ echo ""
 #              body globally instead of probing per outer row (IC4/IC7).
 #   no-bfs     GQLITE_DISABLE_SHORTEST_BFS — single-edge SHORTEST falls
 #              back to the generic length-ordered heap (IC1/IC13).
+#   compact    GQLITE_LTJ_COMPACT — the TripleIndex is built as compact
+#              CLTJ (six LOUDS succinct tries, issue #66) instead of six
+#              sorted arrays: ~2.9× smaller index for 1.4–2.1× IC
+#              latency. Not a knock-out ablation like the no-* modes —
+#              it is the memory-for-latency trade-off point, so read it
+#              against memory.csv, not just the latency chart.
 declare -A ABLATION_LABELS=(
     [baseline]="lazy-baseline"
     [no-fold]="lazy-no-fold"
     [no-unroll]="lazy-no-unroll"
     [no-pin]="lazy-no-pin"
     [no-bfs]="lazy-no-bfs"
+    [compact]="lazy-compact"
 )
 declare -A ABLATION_ENV=(
     [baseline]=""
@@ -252,6 +259,7 @@ declare -A ABLATION_ENV=(
     [no-unroll]="GQLITE_DISABLE_REPEAT_UNROLL=1"
     [no-pin]="GQLITE_DISABLE_EXISTS_PIN=1 GQLITE_DISABLE_VALUE_SUBQUERY_PIN=1"
     [no-bfs]="GQLITE_DISABLE_SHORTEST_BFS=1"
+    [compact]="GQLITE_LTJ_COMPACT=1"
 )
 declare -A ABLATION_ARGS=(
     [baseline]=""
@@ -259,8 +267,9 @@ declare -A ABLATION_ARGS=(
     [no-unroll]=""
     [no-pin]=""
     [no-bfs]=""
+    [compact]=""
 )
-ABLATION_MODES=(baseline no-fold no-unroll no-pin no-bfs)
+ABLATION_MODES=(baseline no-fold no-unroll no-pin no-bfs compact)
 
 # ---- Per-system loop ------------------------------------------------
 
