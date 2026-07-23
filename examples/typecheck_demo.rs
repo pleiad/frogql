@@ -14,7 +14,7 @@ fn main() {
     println!("ok       = {}", r.ok);
     println!("empty    = {}", r.empty);
     println!("path     = {:?}", r.path);
-    println!("env keys = {:?}", r.env.keys());
+    println!("env keys = {:?}", r.env.keys().collect::<Vec<_>>());
     println!("errors   = {:?}", tc.errors);
     println!("warnings = {:?}", tc.warnings);
 }

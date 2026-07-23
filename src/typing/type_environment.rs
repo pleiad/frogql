@@ -40,8 +40,20 @@ impl TypeEnvironment {
         self.bindings.get(key).map(Rc::as_ref)
     }
 
-    pub fn keys(&self) -> Vec<&String> {
-        self.bindings.keys().collect()
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.bindings.keys()
+    }
+
+    /// Iterate `(name, binding)` pairs. The `Rc` is exposed so callers
+    /// merging environments can share bindings instead of deep-cloning
+    /// the descriptor trees.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Rc<VariableType>)> {
+        self.bindings.iter()
+    }
+
+    /// Insert an already-shared binding without cloning the inner type.
+    pub fn set_shared(&mut self, key: &str, value: Rc<VariableType>) {
+        self.bindings.insert(key.to_string(), value);
     }
 
     /// Pointwise join (least upper bound) of two environments.
@@ -236,7 +248,7 @@ mod tests {
         a.set("x", nstar());
         let r = TypeEnvironment::outer_join(&Schema::star(), &a, &TypeEnvironment::new());
         assert_eq!(r.get("x"), Some(&nstar()));
-        assert_eq!(r.keys().len(), 1);
+        assert_eq!(r.keys().count(), 1);
     }
 
     /// New variable in the optional side gets `T_k ⊔ Null` per TLEFTJOIN:
