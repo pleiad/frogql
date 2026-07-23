@@ -138,6 +138,7 @@ impl PathType {
     /// uses the schema to refine the descriptors at each shared node
     /// position.
     pub fn meet(schema: &Schema, p1: &PathType, p2: &PathType) -> PathType {
+        super::stats::record_pathtype_meet();
         match (p1, p2) {
             (PathType::Zero, _) | (_, PathType::Zero) => PathType::Zero,
 

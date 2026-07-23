@@ -21,6 +21,24 @@ use super::simple_type::SimpleType;
 use super::type_environment::TypeEnvironment;
 use super::variable_type::{Schema, VariableType};
 
+/// Per-phase wall-time split of one `check_query` call, in nanoseconds.
+/// Populated only when profiling is enabled via
+/// [`Typechecker::enable_profiling`]; the phases mirror the sequential
+/// sections of `check_query`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PhaseProfile {
+    /// Pattern / match-chain walk (includes `collapsed_pattern` when taken).
+    pub pattern_ns: u128,
+    /// Unbounded-repetition + selective-isolation checks.
+    pub rep_checks_ns: u128,
+    /// GROUP BY key checking.
+    pub group_by_ns: u128,
+    /// RETURN item checking (incl. group-by matching).
+    pub returns_ns: u128,
+    /// ORDER BY spec checking.
+    pub order_by_ns: u128,
+}
+
 /// Result of type-checking a path pattern or query.
 #[derive(Clone, Debug)]
 pub struct TypecheckResult {
@@ -58,6 +76,9 @@ pub struct Typechecker {
     /// support nesting. Empty outside subquery bodies, so a top-level
     /// per-clause WHERE keeps its strict pattern-local scope.
     ambient_env: Vec<TypeEnvironment>,
+    /// Per-phase timing of the last `check_query` call. `None` (the default)
+    /// costs one branch per phase; benches opt in via `enable_profiling`.
+    profile: Option<Box<PhaseProfile>>,
 }
 
 impl Typechecker {
@@ -68,7 +89,20 @@ impl Typechecker {
             warnings: Vec::new(),
             comprehension_scope: Vec::new(),
             ambient_env: Vec::new(),
+            profile: None,
         }
+    }
+
+    /// Record per-phase wall times for subsequent `check_query` calls.
+    /// Each call overwrites the previous profile; read it with
+    /// [`Typechecker::last_profile`].
+    pub fn enable_profiling(&mut self) {
+        self.profile = Some(Box::default());
+    }
+
+    /// The phase split of the most recent `check_query`, if profiling is on.
+    pub fn last_profile(&self) -> Option<&PhaseProfile> {
+        self.profile.as_deref()
     }
 
     /// Permissive checker — `Schema::star()`.
@@ -86,20 +120,31 @@ impl Typechecker {
     pub fn check_query(&mut self, q: &Query) -> TypecheckResult {
         self.errors.clear();
         self.warnings.clear();
+        if let Some(p) = self.profile.as_deref_mut() {
+            *p = PhaseProfile::default();
+        }
 
+        let t = self.phase_start();
         let mut r = if q.has_any_optional() {
             self.check_match_chain(&q.matches)
         } else {
             self.check_path_pattern(&q.collapsed_pattern())
         };
         r.empty = r.path.is_unsatisfiable() || r.env.is_empty();
+        self.phase_end(t, |p| &mut p.pattern_ns);
 
+        let t = self.phase_start();
         self.check_unbounded_repetition(q);
         self.check_selective_isolation(q);
+        self.phase_end(t, |p| &mut p.rep_checks_ns);
 
+        let t = self.phase_start();
         if let Some(group_by) = &q.group_by {
             self.check_group_by(group_by, &r.env);
         }
+        self.phase_end(t, |p| &mut p.group_by_ns);
+
+        let t = self.phase_start();
         if let Some(returns) = &q.returns {
             self.check_returns(returns, &r.env);
             match &q.group_by {
@@ -107,14 +152,36 @@ impl Typechecker {
                 None => self.check_no_implicit_group_by(returns),
             }
         }
+        self.phase_end(t, |p| &mut p.returns_ns);
+
+        let t = self.phase_start();
         if let Some(specs) = &q.order_by {
             self.check_order_by(specs, q.returns.as_deref(), &r.env);
         }
+        self.phase_end(t, |p| &mut p.order_by_ns);
 
         if !self.errors.is_empty() {
             r.ok = false;
         }
         r
+    }
+
+    /// Start a phase timer — `None` (free) unless profiling is enabled.
+    #[inline]
+    fn phase_start(&self) -> Option<std::time::Instant> {
+        self.profile.is_some().then(std::time::Instant::now)
+    }
+
+    /// Store an elapsed phase time into the profile slot selected by `slot`.
+    #[inline]
+    fn phase_end(
+        &mut self,
+        start: Option<std::time::Instant>,
+        slot: fn(&mut PhaseProfile) -> &mut u128,
+    ) {
+        if let (Some(t), Some(p)) = (start, self.profile.as_deref_mut()) {
+            *slot(p) = t.elapsed().as_nanos();
+        }
     }
 
     /// ISO §16.17 + §22.14: enforce comparable-value-type per CR 1
