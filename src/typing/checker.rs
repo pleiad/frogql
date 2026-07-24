@@ -578,7 +578,7 @@ impl Typechecker {
         match node {
             PathPattern::Node(desc) => {
                 let t = self.refine_pattern_node(desc);
-                let p = PathSummary::from_variable(&t, EdgeDir::Any);
+                let p = PathSummary::from_variable(&self.schema, &t, EdgeDir::Any);
                 let env = create_context(desc, t);
                 TypecheckResult::new(p, env)
             }
@@ -732,7 +732,7 @@ impl Typechecker {
 
     fn check_edge(&mut self, dir: EdgeDir, desc: &Option<Descriptor>) -> TypecheckResult {
         let t = self.refine_pattern_edge(dir, desc);
-        let p = PathSummary::from_variable(&t, dir);
+        let p = PathSummary::from_variable(&self.schema, &t, dir);
         let env = create_context(desc, t);
         TypecheckResult::new(p, env)
     }

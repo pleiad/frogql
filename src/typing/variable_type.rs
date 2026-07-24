@@ -443,23 +443,33 @@ pub struct Schema {
     /// kill switch).
     #[serde(skip, default)]
     refine_cache: Rc<std::cell::RefCell<std::collections::HashMap<VariableType, Rc<VariableType>>>>,
-    /// Memo for `PathSummary::meet`'s junction refinement: for a boundary
-    /// pair `(last, first)` the satisfiable refined junction node
-    /// descriptors, i.e. `refine_to_nodes(meet(last, first))` flattened to
-    /// descriptors. Nested map so lookups need no key clones. Same
-    /// lifetime/invalidation story as `refine_cache`; cross-query AND
-    /// cross-hop (chains reuse the same junction at every position).
-    /// `GQLITE_DISABLE_TC_JUNCTION_CACHE=1` bypasses it.
+    /// Descriptor interner: hash-conses `DescriptorType`s into dense `u32`
+    /// ids for the lifetime of this Schema. `PathSummary` and the junction
+    /// cache operate on ids, so their dedup/equality/hash work is integer
+    /// arithmetic instead of walks over label trees and property maps —
+    /// each distinct descriptor pays one hash at intern time. Ids are
+    /// never recycled (no cap: growth is bounded by distinct descriptors
+    /// seen against this schema, and DDL/inference replace the Schema).
     #[serde(skip, default)]
-    #[allow(clippy::type_complexity)]
-    junction_cache: Rc<
-        std::cell::RefCell<
-            std::collections::HashMap<
-                DescriptorType,
-                std::collections::HashMap<DescriptorType, Rc<Vec<DescriptorType>>>,
-            >,
-        >,
-    >,
+    interner: Rc<std::cell::RefCell<DescInterner>>,
+    /// Memo for `PathSummary::meet`'s junction refinement: for a boundary
+    /// id pair `(last, first)` the satisfiable refined junction node
+    /// descriptors as interned ids. Same lifetime/invalidation story as
+    /// `refine_cache`; cross-query AND cross-hop (chains reuse one
+    /// junction at every position). `GQLITE_DISABLE_TC_JUNCTION_CACHE=1`
+    /// bypasses it.
+    #[serde(skip, default)]
+    junction_cache: Rc<std::cell::RefCell<JunctionCache>>,
+}
+
+/// Junction memo: boundary id pair → refined junction descriptor ids.
+type JunctionCache = std::collections::HashMap<(u32, u32), Rc<Vec<u32>>>;
+
+/// Backing store for [`Schema`]'s descriptor interner.
+#[derive(Debug, Default)]
+struct DescInterner {
+    ids: std::collections::HashMap<DescriptorType, u32>,
+    descs: Vec<Rc<DescriptorType>>,
 }
 
 /// Safety valve for adversarial/degenerate sessions: the cache resets when
@@ -477,6 +487,7 @@ impl Schema {
                 VariableType::edge_non_directional(DescriptorType::star()),
             ]),
             refine_cache: Rc::default(),
+            interner: Rc::default(),
             junction_cache: Rc::default(),
         }
     }
@@ -487,8 +498,26 @@ impl Schema {
             nodes: Rc::new(nodes),
             edges: Rc::new(edges),
             refine_cache: Rc::default(),
+            interner: Rc::default(),
             junction_cache: Rc::default(),
         }
+    }
+
+    /// Intern a descriptor, returning its dense id for this Schema.
+    pub(crate) fn intern_desc(&self, d: &DescriptorType) -> u32 {
+        let mut i = self.interner.borrow_mut();
+        if let Some(&id) = i.ids.get(d) {
+            return id;
+        }
+        let id = i.descs.len() as u32;
+        i.descs.push(Rc::new(d.clone()));
+        i.ids.insert(d.clone(), id);
+        id
+    }
+
+    /// Resolve an interned descriptor id back to the descriptor.
+    pub(crate) fn desc_of(&self, id: u32) -> Rc<DescriptorType> {
+        Rc::clone(&self.interner.borrow().descs[id as usize])
     }
 
     fn refine_cache_get(&self, key: &VariableType) -> Option<Rc<VariableType>> {
@@ -503,31 +532,24 @@ impl Schema {
         m.insert(key, value);
     }
 
-    /// The satisfiable refined junction descriptors for a boundary pair —
-    /// `refine_to_nodes(meet(last, first))` flattened to descriptors,
-    /// memoized per schema (see `junction_cache`).
-    pub(crate) fn junction_nodes(
-        &self,
-        last: &DescriptorType,
-        first: &DescriptorType,
-    ) -> Rc<Vec<DescriptorType>> {
+    /// The satisfiable refined junction descriptors for a boundary id
+    /// pair — `refine_to_nodes(meet(last, first))` flattened to interned
+    /// ids, memoized per schema (see `junction_cache`).
+    pub(crate) fn junction_ids(&self, last: u32, first: u32) -> Rc<Vec<u32>> {
         let cache_on = !junction_cache_disabled();
         if cache_on {
-            if let Some(hit) = self
-                .junction_cache
-                .borrow()
-                .get(last)
-                .and_then(|m| m.get(first))
-            {
+            if let Some(hit) = self.junction_cache.borrow().get(&(last, first)) {
                 return Rc::clone(hit);
             }
         }
-        let met = VariableType::Node(DescriptorType::meet(last, first));
-        let rs: Rc<Vec<DescriptorType>> = Rc::new(
+        let last_d = self.desc_of(last);
+        let first_d = self.desc_of(first);
+        let met = VariableType::Node(DescriptorType::meet(&last_d, &first_d));
+        let rs: Rc<Vec<u32>> = Rc::new(
             VariableType::refine_to_nodes(self, &met)
                 .into_iter()
                 .filter_map(|v| match v {
-                    VariableType::Node(d) => Some(d),
+                    VariableType::Node(d) => Some(self.intern_desc(&d)),
                     _ => None,
                 })
                 .collect(),
@@ -537,9 +559,7 @@ impl Schema {
             if m.len() >= REFINE_CACHE_CAP {
                 m.clear();
             }
-            m.entry(last.clone())
-                .or_default()
-                .insert(first.clone(), Rc::clone(&rs));
+            m.insert((last, first), Rc::clone(&rs));
         }
         rs
     }
