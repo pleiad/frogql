@@ -1124,21 +1124,25 @@ impl Typechecker {
     // Refinement helpers
     // -----------------------------------------------
 
-    fn refine_pattern_node(&mut self, desc: &Option<Descriptor>) -> VariableType {
+    fn refine_pattern_node(&mut self, desc: &Option<Descriptor>) -> std::rc::Rc<VariableType> {
         let dtype = descriptor_type_of(desc);
         if let Some(d) = desc {
             self.assert_filters_drained(d);
         }
         let vt = VariableType::Node(dtype.clone());
-        let refined = VariableType::refine(&self.schema, &vt);
-        if matches!(refined, VariableType::Zero) {
+        let refined = VariableType::refine_rc(&self.schema, &vt);
+        if matches!(&*refined, VariableType::Zero) {
             self.warnings
                 .push(diagnose_node_mismatch(&self.schema, &dtype));
         }
         refined
     }
 
-    fn refine_pattern_edge(&mut self, dir: EdgeDir, desc: &Option<Descriptor>) -> VariableType {
+    fn refine_pattern_edge(
+        &mut self,
+        dir: EdgeDir,
+        desc: &Option<Descriptor>,
+    ) -> std::rc::Rc<VariableType> {
         let dtype = descriptor_type_of(desc);
         if let Some(d) = desc {
             self.assert_filters_drained(d);
@@ -1148,10 +1152,11 @@ impl Typechecker {
         // as directional silently drops every undirected schema entry — e.g.
         // `knows` in LDBC, which is registered as non-directional.
         let refined = match dir {
-            EdgeDir::Right | EdgeDir::Left => {
-                VariableType::refine(&self.schema, &VariableType::edge_directional(dtype.clone()))
-            }
-            EdgeDir::None => VariableType::refine(
+            EdgeDir::Right | EdgeDir::Left => VariableType::refine_rc(
+                &self.schema,
+                &VariableType::edge_directional(dtype.clone()),
+            ),
+            EdgeDir::None => VariableType::refine_rc(
                 &self.schema,
                 &VariableType::edge_non_directional(dtype.clone()),
             ),
@@ -1164,10 +1169,10 @@ impl Typechecker {
                     &self.schema,
                     &VariableType::edge_non_directional(dtype.clone()),
                 );
-                VariableType::join(t_fwd, t_und)
+                std::rc::Rc::new(VariableType::join(t_fwd, t_und))
             }
         };
-        if matches!(refined, VariableType::Zero) {
+        if matches!(&*refined, VariableType::Zero) {
             self.warnings
                 .push(diagnose_edge_mismatch(&self.schema, &dtype, dir));
         }
@@ -1249,9 +1254,9 @@ fn descriptor_type_of(desc: &Option<Descriptor>) -> DescriptorType {
 
 /// Build the binding environment for a pattern position. Anonymous patterns
 /// contribute no bindings.
-fn create_context(desc: &Option<Descriptor>, t: VariableType) -> TypeEnvironment {
+fn create_context(desc: &Option<Descriptor>, t: std::rc::Rc<VariableType>) -> TypeEnvironment {
     match desc {
-        Some(d) => TypeEnvironment::create_context(d, t),
+        Some(d) => TypeEnvironment::create_context_shared(d, t),
         None => TypeEnvironment::new(),
     }
 }

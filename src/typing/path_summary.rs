@@ -197,30 +197,11 @@ impl PathSummary {
     pub fn meet(schema: &Schema, a: &PathSummary, b: &PathSummary) -> PathSummary {
         super::stats::record_pathtype_meet();
         let mut out = PathSummary::zero();
-        // The junction only depends on (a.last, b.first). Memoized by
-        // pointer identity of the operand descriptors — w×w arm combos
-        // cost w distinct refinements; a value-equal miss just recomputes.
-        let mut junctions: Vec<(
-            *const DescriptorType,
-            *const DescriptorType,
-            Vec<DescriptorType>,
-        )> = Vec::new();
-        let mut junction = |l1: &DescriptorType, f2: &DescriptorType| -> Vec<DescriptorType> {
-            let key = (l1 as *const _, f2 as *const _);
-            if let Some((_, _, rs)) = junctions.iter().find(|(p1, p2, _)| (*p1, *p2) == key) {
-                return rs.clone();
-            }
-            let met = VariableType::Node(DescriptorType::meet(l1, f2));
-            let rs: Vec<DescriptorType> = VariableType::refine_to_nodes(schema, &met)
-                .into_iter()
-                .filter_map(|v| match v {
-                    VariableType::Node(d) => Some(d),
-                    _ => None,
-                })
-                .collect();
-            junctions.push((key.0, key.1, rs.clone()));
-            rs
-        };
+        // The junction only depends on (a.last, b.first) and is memoized
+        // on the Schema itself (`Schema::junction_nodes`) — cross-hop AND
+        // cross-query: a chain reuses one junction at every position, a
+        // REPL session across queries. A hit is an `Rc` bump.
+        let junction = |l1: &DescriptorType, f2: &DescriptorType| schema.junction_nodes(l1, f2);
 
         // pairs × pairs: junction interior, outer boundaries survive.
         for (f1, l1, len1) in &a.pairs {
@@ -234,16 +215,16 @@ impl PathSummary {
         // refined junction becomes the result's last boundary.
         for (f1, l1, len1) in &a.pairs {
             for d in &b.nodes {
-                for r in junction(l1, d) {
-                    out.insert_pair(f1.clone(), r, *len1);
+                for r in junction(l1, d).iter() {
+                    out.insert_pair(f1.clone(), r.clone(), *len1);
                 }
             }
         }
         // nodes × pairs: symmetric — refined junction becomes first.
         for d in &a.nodes {
             for (f2, l2, len2) in &b.pairs {
-                for r in junction(d, f2) {
-                    out.insert_pair(r, l2.clone(), *len2);
+                for r in junction(d, f2).iter() {
+                    out.insert_pair(r.clone(), l2.clone(), *len2);
                 }
             }
         }
@@ -251,8 +232,8 @@ impl PathSummary {
         // node itself.
         for d1 in &a.nodes {
             for d2 in &b.nodes {
-                for r in junction(d1, d2) {
-                    out.insert_node(r);
+                for r in junction(d1, d2).iter() {
+                    out.insert_node(r.clone());
                 }
             }
         }

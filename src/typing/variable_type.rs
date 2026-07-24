@@ -285,14 +285,18 @@ impl VariableType {
     /// `VariableType::refine_to_nodes` and is consumed by `PathType::meet`.
     pub fn refine_to_nodes(schema: &Schema, t: &VariableType) -> Vec<VariableType> {
         super::stats::record_refine_to_nodes();
+        // Borrow-walk the (possibly cache-shared) refined tree and clone
+        // only the matching Node leaves — a cache hit no longer deep-
+        // clones the whole refined union up front.
+        let refined = VariableType::refine_rc(schema, t);
         let mut out = Vec::new();
-        let mut stack = vec![VariableType::refine(schema, t)];
+        let mut stack: Vec<&VariableType> = vec![&refined];
         while let Some(curr) = stack.pop() {
             match curr {
-                VariableType::Node(_) => out.push(curr),
+                VariableType::Node(_) => out.push(curr.clone()),
                 VariableType::Union(t1, t2) => {
-                    stack.push(*t2);
-                    stack.push(*t1);
+                    stack.push(t2);
+                    stack.push(t1);
                 }
                 _ => {}
             }
@@ -302,7 +306,34 @@ impl VariableType {
 
     // --- Refine ---
 
+    /// By-value refine, kept for callers that need an owned result (and
+    /// for the reference models in `lattice_proptest`). The scan arms
+    /// delegate to [`VariableType::refine_rc`], so they share the memo.
     pub fn refine(schema: &Schema, node: &VariableType) -> VariableType {
+        match node {
+            VariableType::Node(_)
+            | VariableType::EdgeDirectional { .. }
+            | VariableType::EdgeNonDirectional { .. } => {
+                (*VariableType::refine_rc(schema, node)).clone()
+            }
+            VariableType::Union(t1, t2) => VariableType::join(
+                VariableType::refine(schema, t1),
+                VariableType::refine(schema, t2),
+            ),
+            VariableType::Group(t) => {
+                VariableType::Group(Box::new(VariableType::refine(schema, t)))
+            }
+            VariableType::Null => VariableType::Null,
+            VariableType::Path => VariableType::Path,
+            VariableType::Zero => VariableType::Zero,
+        }
+    }
+
+    /// `Rc`-valued refine: on the Node/Edge scan arms a memo hit is a
+    /// refcount bump instead of a deep clone of the refined tree. This is
+    /// the form the checker and the environment operators consume — they
+    /// store bindings as `Rc<VariableType>` anyway.
+    pub fn refine_rc(schema: &Schema, node: &VariableType) -> Rc<VariableType> {
         match node {
             VariableType::Node(_) => {
                 if !refine_cache_disabled() {
@@ -318,9 +349,9 @@ impl VariableType {
                     .filter(|n| VariableType::is_subtype(n, node))
                     .map(|n| VariableType::meet(n, node))
                     .collect();
-                let refined = VariableType::join_from_list(matches);
+                let refined = Rc::new(VariableType::join_from_list(matches));
                 if !refine_cache_disabled() {
-                    schema.refine_cache_put(node.clone(), refined.clone());
+                    schema.refine_cache_put(node.clone(), Rc::clone(&refined));
                 }
                 refined
             }
@@ -338,22 +369,13 @@ impl VariableType {
                     .filter(|e| VariableType::is_subtype(e, node))
                     .map(|e| VariableType::meet(e, node))
                     .collect();
-                let refined = VariableType::join_from_list(matches);
+                let refined = Rc::new(VariableType::join_from_list(matches));
                 if !refine_cache_disabled() {
-                    schema.refine_cache_put(node.clone(), refined.clone());
+                    schema.refine_cache_put(node.clone(), Rc::clone(&refined));
                 }
                 refined
             }
-            VariableType::Union(t1, t2) => VariableType::join(
-                VariableType::refine(schema, t1),
-                VariableType::refine(schema, t2),
-            ),
-            VariableType::Group(t) => {
-                VariableType::Group(Box::new(VariableType::refine(schema, t)))
-            }
-            VariableType::Null => VariableType::Null,
-            VariableType::Path => VariableType::Path,
-            VariableType::Zero => VariableType::Zero,
+            other => Rc::new(VariableType::refine(schema, other)),
         }
     }
 
@@ -415,10 +437,29 @@ pub struct Schema {
     /// cross-query for REPL/Connection lifetimes) and safely invalidated by
     /// construction: DDL and inference replace the whole `Schema`, never
     /// mutate one in place, so a cache can never outlive its entries.
-    /// Skipped by serde — a deserialized schema starts cold.
-    /// `GQLITE_DISABLE_TC_REFINE_CACHE=1` bypasses it (A/B kill switch).
+    /// Values are `Rc` so a hit is a refcount bump, not a deep clone of the
+    /// refined descriptor tree. Skipped by serde — a deserialized schema
+    /// starts cold. `GQLITE_DISABLE_TC_REFINE_CACHE=1` bypasses it (A/B
+    /// kill switch).
     #[serde(skip, default)]
-    refine_cache: Rc<std::cell::RefCell<std::collections::HashMap<VariableType, VariableType>>>,
+    refine_cache: Rc<std::cell::RefCell<std::collections::HashMap<VariableType, Rc<VariableType>>>>,
+    /// Memo for `PathSummary::meet`'s junction refinement: for a boundary
+    /// pair `(last, first)` the satisfiable refined junction node
+    /// descriptors, i.e. `refine_to_nodes(meet(last, first))` flattened to
+    /// descriptors. Nested map so lookups need no key clones. Same
+    /// lifetime/invalidation story as `refine_cache`; cross-query AND
+    /// cross-hop (chains reuse the same junction at every position).
+    /// `GQLITE_DISABLE_TC_JUNCTION_CACHE=1` bypasses it.
+    #[serde(skip, default)]
+    #[allow(clippy::type_complexity)]
+    junction_cache: Rc<
+        std::cell::RefCell<
+            std::collections::HashMap<
+                DescriptorType,
+                std::collections::HashMap<DescriptorType, Rc<Vec<DescriptorType>>>,
+            >,
+        >,
+    >,
 }
 
 /// Safety valve for adversarial/degenerate sessions: the cache resets when
@@ -436,6 +477,7 @@ impl Schema {
                 VariableType::edge_non_directional(DescriptorType::star()),
             ]),
             refine_cache: Rc::default(),
+            junction_cache: Rc::default(),
         }
     }
 
@@ -445,24 +487,70 @@ impl Schema {
             nodes: Rc::new(nodes),
             edges: Rc::new(edges),
             refine_cache: Rc::default(),
+            junction_cache: Rc::default(),
         }
     }
 
-    fn refine_cache_get(&self, key: &VariableType) -> Option<VariableType> {
-        self.refine_cache.borrow().get(key).cloned()
+    fn refine_cache_get(&self, key: &VariableType) -> Option<Rc<VariableType>> {
+        self.refine_cache.borrow().get(key).map(Rc::clone)
     }
 
-    fn refine_cache_put(&self, key: VariableType, value: VariableType) {
+    fn refine_cache_put(&self, key: VariableType, value: Rc<VariableType>) {
         let mut m = self.refine_cache.borrow_mut();
         if m.len() >= REFINE_CACHE_CAP {
             m.clear();
         }
         m.insert(key, value);
     }
+
+    /// The satisfiable refined junction descriptors for a boundary pair —
+    /// `refine_to_nodes(meet(last, first))` flattened to descriptors,
+    /// memoized per schema (see `junction_cache`).
+    pub(crate) fn junction_nodes(
+        &self,
+        last: &DescriptorType,
+        first: &DescriptorType,
+    ) -> Rc<Vec<DescriptorType>> {
+        let cache_on = !junction_cache_disabled();
+        if cache_on {
+            if let Some(hit) = self
+                .junction_cache
+                .borrow()
+                .get(last)
+                .and_then(|m| m.get(first))
+            {
+                return Rc::clone(hit);
+            }
+        }
+        let met = VariableType::Node(DescriptorType::meet(last, first));
+        let rs: Rc<Vec<DescriptorType>> = Rc::new(
+            VariableType::refine_to_nodes(self, &met)
+                .into_iter()
+                .filter_map(|v| match v {
+                    VariableType::Node(d) => Some(d),
+                    _ => None,
+                })
+                .collect(),
+        );
+        if cache_on {
+            let mut m = self.junction_cache.borrow_mut();
+            if m.len() >= REFINE_CACHE_CAP {
+                m.clear();
+            }
+            m.entry(last.clone())
+                .or_default()
+                .insert(first.clone(), Rc::clone(&rs));
+        }
+        rs
+    }
 }
 
 fn refine_cache_disabled() -> bool {
     std::env::var("GQLITE_DISABLE_TC_REFINE_CACHE").is_ok()
+}
+
+fn junction_cache_disabled() -> bool {
+    std::env::var("GQLITE_DISABLE_TC_JUNCTION_CACHE").is_ok()
 }
 
 #[cfg(test)]

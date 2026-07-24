@@ -25,9 +25,15 @@ impl TypeEnvironment {
     /// If the descriptor has a variable name, bind it to `t`.
     /// If not, return an empty environment.
     pub fn create_context(descriptor: &Descriptor, t: VariableType) -> Self {
+        TypeEnvironment::create_context_shared(descriptor, Rc::new(t))
+    }
+
+    /// `create_context` for an already-shared binding (refine-cache hits
+    /// arrive as `Rc`; re-wrapping would deep-clone for nothing).
+    pub fn create_context_shared(descriptor: &Descriptor, t: Rc<VariableType>) -> Self {
         let mut env = TypeEnvironment::new();
         if let Some(var) = &descriptor.var {
-            env.set(var, t);
+            env.set_shared(var, t);
         }
         env
     }
@@ -101,7 +107,7 @@ impl TypeEnvironment {
                             key, self_t, other
                         ));
                     }
-                    Rc::new(VariableType::refine(schema, &met))
+                    VariableType::refine_rc(schema, &met)
                 }
                 // Right-only key: keep the binding as-is.
                 None => Rc::clone(other),

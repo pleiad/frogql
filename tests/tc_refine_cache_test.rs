@@ -50,16 +50,37 @@ const QUERIES: &[&str] = &[
 
 fn assert_cache_transparent(schema: &Schema, label: &str) {
     for q in QUERIES {
-        // Cold + warm with the cache on (second run hits the memo).
+        // Cold + warm with both caches on (second run hits the memos).
         std::env::remove_var("GQLITE_DISABLE_TC_REFINE_CACHE");
+        std::env::remove_var("GQLITE_DISABLE_TC_JUNCTION_CACHE");
         let cold = verdict(schema, q);
         let warm = verdict(schema, q);
-        // Cache off.
+        // Each cache off individually, then both off.
         std::env::set_var("GQLITE_DISABLE_TC_REFINE_CACHE", "1");
-        let off = verdict(schema, q);
+        let refine_off = verdict(schema, q);
         std::env::remove_var("GQLITE_DISABLE_TC_REFINE_CACHE");
-        assert_eq!(cold, off, "[{label}] cache-on (cold) != cache-off for: {q}");
-        assert_eq!(warm, off, "[{label}] cache-on (warm) != cache-off for: {q}");
+        std::env::set_var("GQLITE_DISABLE_TC_JUNCTION_CACHE", "1");
+        let junction_off = verdict(schema, q);
+        std::env::set_var("GQLITE_DISABLE_TC_REFINE_CACHE", "1");
+        let both_off = verdict(schema, q);
+        std::env::remove_var("GQLITE_DISABLE_TC_REFINE_CACHE");
+        std::env::remove_var("GQLITE_DISABLE_TC_JUNCTION_CACHE");
+        assert_eq!(
+            cold, both_off,
+            "[{label}] caches-on (cold) != caches-off for: {q}"
+        );
+        assert_eq!(
+            warm, both_off,
+            "[{label}] caches-on (warm) != caches-off for: {q}"
+        );
+        assert_eq!(
+            refine_off, both_off,
+            "[{label}] refine-off != both-off for: {q}"
+        );
+        assert_eq!(
+            junction_off, both_off,
+            "[{label}] junction-off != both-off for: {q}"
+        );
     }
 }
 
