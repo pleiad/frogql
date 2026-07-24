@@ -15,7 +15,8 @@ use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem, SortKe
 
 use super::descriptor_type::DescriptorType;
 use super::label_type::LabelType;
-use super::path_type::{EdgeDir, PathType};
+use super::path_summary::PathSummary;
+use super::path_type::EdgeDir;
 use super::property_type::PropertyType;
 use super::simple_type::SimpleType;
 use super::type_environment::TypeEnvironment;
@@ -40,16 +41,20 @@ pub struct PhaseProfile {
 }
 
 /// Result of type-checking a path pattern or query.
+///
+/// `path` is the boundary-pair summary (`PathSummary`), the checker's
+/// evaluation form of the paper's inductive path type — see
+/// `path_summary.rs` for the correspondence.
 #[derive(Clone, Debug)]
 pub struct TypecheckResult {
-    pub path: PathType,
+    pub path: PathSummary,
     pub env: TypeEnvironment,
     pub ok: bool,
     pub empty: bool,
 }
 
 impl TypecheckResult {
-    fn new(path: PathType, env: TypeEnvironment) -> Self {
+    fn new(path: PathSummary, env: TypeEnvironment) -> Self {
         TypecheckResult {
             path,
             env,
@@ -573,7 +578,7 @@ impl Typechecker {
         match node {
             PathPattern::Node(desc) => {
                 let t = self.refine_pattern_node(desc);
-                let p = PathType::from_variable(&t, EdgeDir::Any);
+                let p = PathSummary::from_variable(&t, EdgeDir::Any);
                 let env = create_context(desc, t);
                 TypecheckResult::new(p, env)
             }
@@ -600,7 +605,7 @@ impl Typechecker {
 
                 self.warn_for_collapsed_bindings(&cm, &r1.env, &r2.env);
 
-                let p = PathType::meet(&self.schema, &r1.path, &r2.path);
+                let p = PathSummary::meet(&self.schema, &r1.path, &r2.path);
                 TypecheckResult::new(p, cm)
             }
 
@@ -625,7 +630,7 @@ impl Typechecker {
                 self.warn_for_collapsed_bindings(&cm, &r1.env, &r2.env);
 
                 let p = if r1.path.is_unsatisfiable() || r2.path.is_unsatisfiable() {
-                    PathType::Zero
+                    PathSummary::zero()
                 } else {
                     r1.path
                 };
@@ -654,7 +659,7 @@ impl Typechecker {
                         "Filter expression has type {}, which is not a boolean",
                         t
                     ));
-                    TypecheckResult::new(PathType::Zero, r.env)
+                    TypecheckResult::new(PathSummary::zero(), r.env)
                 } else {
                     r
                 }
@@ -664,7 +669,7 @@ impl Typechecker {
                 let r1 = self.check_path_pattern(p1);
                 let r2 = self.check_path_pattern(p2);
                 TypecheckResult::new(
-                    PathType::union(r1.path, r2.path),
+                    PathSummary::union(r1.path, r2.path),
                     TypeEnvironment::union(&r1.env, &r2.env),
                 )
             }
@@ -727,7 +732,7 @@ impl Typechecker {
 
     fn check_edge(&mut self, dir: EdgeDir, desc: &Option<Descriptor>) -> TypecheckResult {
         let t = self.refine_pattern_edge(dir, desc);
-        let p = PathType::from_variable(&t, dir);
+        let p = PathSummary::from_variable(&t, dir);
         let env = create_context(desc, t);
         TypecheckResult::new(p, env)
     }
@@ -1075,7 +1080,7 @@ impl Typechecker {
         // from `outer` directly, so the only up-front clone is the one
         // pushed onto the ambient stack.
         let mut env: Option<TypeEnvironment> = None;
-        let mut path: Option<PathType> = None;
+        let mut path: Option<PathSummary> = None;
         // Make the outer environment available to the body's `Filter`
         // predicates so a correlated WHERE (e.g. `WHERE x IN NODES(path)`)
         // can reference outer-bound variables. The runtime evaluates such a
@@ -1109,7 +1114,7 @@ impl Typechecker {
         }
         self.ambient_env.pop();
         let env = env.unwrap_or_else(|| outer.clone());
-        let path = path.unwrap_or(PathType::Zero);
+        let path = path.unwrap_or_else(PathSummary::zero);
         let mut r = TypecheckResult::new(path, env);
         r.empty = r.path.is_unsatisfiable() || r.env.is_empty();
         r
@@ -1228,12 +1233,8 @@ impl Typechecker {
     }
 
     /// p^0 = identity (default node path), p^1 = p, p^n = meet(p, p^(n-1)).
-    fn pow_path_type(&self, p: &PathType, n: u64) -> PathType {
-        match n {
-            0 => PathType::default(),
-            1 => p.clone(),
-            _ => PathType::meet(&self.schema, p, &self.pow_path_type(p, n - 1)),
-        }
+    fn pow_path_type(&self, p: &PathSummary, n: u64) -> PathSummary {
+        PathSummary::pow(&self.schema, p, n)
     }
 }
 

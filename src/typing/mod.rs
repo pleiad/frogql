@@ -3,6 +3,7 @@ pub mod descriptor_type;
 pub mod format;
 pub mod inference;
 pub mod label_type;
+pub mod path_summary;
 pub mod path_type;
 pub mod property_type;
 pub mod simple_type;
