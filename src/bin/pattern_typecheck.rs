@@ -51,6 +51,32 @@ fn median_min_ns(mut v: Vec<u128>) -> (u128, u128) {
     (v[v.len() / 2], v[0])
 }
 
+/// Cold-compile timing: every sample runs against a schema whose refine
+/// cache has never been used, so each check pays full misses (hash +
+/// key/result clones + insert on top of the scan). This is the regime a
+/// per-query cache would live in permanently — the honest upper bound on
+/// the cache's overhead. Code/branch/data caches stay warm (that part is
+/// shared with the steady-state protocol). Heavy cases are capped by the
+/// same per-case budget.
+fn time_case_cold(schema: &Schema, q: &Query) -> (u128, u128) {
+    let fresh = || Schema::from_parts((*schema.nodes).clone(), (*schema.edges).clone());
+    // Pilot on one fresh schema.
+    let t = Instant::now();
+    black_box(Typechecker::new(fresh()).check_query(black_box(q)));
+    let est = t.elapsed().as_nanos().max(1);
+    let iters = ((CASE_BUDGET_NS / est) as usize).clamp(3, 500);
+    // Pre-build outside the timed region.
+    let schemas: Vec<Schema> = (0..iters).map(|_| fresh()).collect();
+    let mut samples = Vec::with_capacity(iters);
+    for s in schemas {
+        let mut tc = Typechecker::new(s);
+        let t = Instant::now();
+        black_box(tc.check_query(black_box(q)));
+        samples.push(t.elapsed().as_nanos());
+    }
+    median_min_ns(samples)
+}
+
 /// Hot-loop timing with the established warmup + median protocol; falls
 /// back to batch timing when a case is too fast for per-call resolution.
 fn time_case(tc: &mut Typechecker, q: &Query) -> (u128, u128) {
@@ -84,6 +110,23 @@ fn time_case(tc: &mut Typechecker, q: &Query) -> (u128, u128) {
         samples.push(t.elapsed().as_nanos() / BATCH as u128);
     }
     median_min_ns(samples)
+}
+
+/// Median parse time of the case's query string — the north-star
+/// yardstick: a fully optimized check should cost no more than parsing
+/// the same input (both walk the same AST; parsing also allocates it).
+fn time_parse(q: &str) -> u128 {
+    const P_ITERS: usize = 512;
+    for _ in 0..32 {
+        black_box(frogql::parser::parse_query(black_box(q)).expect("parse"));
+    }
+    let mut samples = Vec::with_capacity(P_ITERS);
+    for _ in 0..P_ITERS {
+        let t = Instant::now();
+        black_box(frogql::parser::parse_query(black_box(q)).expect("parse"));
+        samples.push(t.elapsed().as_nanos());
+    }
+    median_min_ns(samples).0
 }
 
 // --- Generated scaling families (all expected `valid` on the LDBC schema) ---
@@ -150,9 +193,12 @@ fn main() {
     let mut gdb: Option<String> = None;
     let mut out: Option<String> = None;
     let mut star_schema = false;
+    let mut cold = false;
     for arg in std::env::args().skip(1) {
         if arg == "--star-schema" {
             star_schema = true;
+        } else if arg == "--cold" {
+            cold = true;
         } else if gdb.is_none() {
             gdb = Some(arg);
         } else if out.is_none() {
@@ -339,16 +385,25 @@ fn main() {
         got: String,
         med: u128,
         min: u128,
+        parse: u128,
         st: stats::TcStats,
         phases: [u128; 5],
         ok: bool,
     }
 
     println!(
-        "\n{:<26}{:<11}{:>7}{:>9}{:>13}{:>9}{:>7}{:>11}",
-        "case", "category", "exp", "got", "check_med_us", "refines", "hits", "edge_scan"
+        "\n{:<26}{:<11}{:>7}{:>9}{:>13}{:>10}{:>9}{:>7}{:>11}",
+        "case",
+        "category",
+        "exp",
+        "got",
+        "check_med_us",
+        "chk/parse",
+        "refines",
+        "hits",
+        "edge_scan"
     );
-    println!("{}", "-".repeat(93));
+    println!("{}", "-".repeat(103));
     let mut rows: Vec<Row> = Vec::new();
     let mut mismatches = 0usize;
     for (id, category, expected, q) in &cases {
@@ -364,7 +419,12 @@ fn main() {
             "valid"
         };
 
-        let (med, min) = time_case(&mut tc, &elaborated);
+        let (med, min) = if cold {
+            time_case_cold(&schema, &elaborated)
+        } else {
+            time_case(&mut tc, &elaborated)
+        };
+        let parse = time_parse(q);
 
         // One un-timed run for the counter shape, one profiled run for the
         // phase split. Both after the timed loop so they cannot pollute it.
@@ -387,12 +447,13 @@ fn main() {
             mismatches += 1;
         }
         println!(
-            "{:<26}{:<11}{:>7}{:>9}{:>13.3}{:>9}{:>7}{:>11}{}",
+            "{:<26}{:<11}{:>7}{:>9}{:>13.3}{:>10.2}{:>9}{:>7}{:>11}{}",
             id,
             category,
             expected,
             got,
             med as f64 / 1000.0,
+            med as f64 / parse.max(1) as f64,
             st.refine_calls,
             st.refine_cache_hits,
             st.edge_entries_scanned,
@@ -405,17 +466,18 @@ fn main() {
             got: got.to_string(),
             med,
             min,
+            parse,
             st,
             phases,
             ok,
         });
     }
-    println!("{}", "-".repeat(93));
+    println!("{}", "-".repeat(103));
 
     let mut f = File::create(&out).unwrap_or_else(|e| panic!("create {out}: {e}"));
     writeln!(
         f,
-        "case,category,expected,got,check_med_ns,check_min_ns,\
+        "case,category,expected,got,check_med_ns,check_min_ns,parse_med_ns,\
          refine_calls,refine_cache_hits,node_scanned,edge_scanned,refine_to_nodes,\
          env_meets,env_unions,env_outer_joins,env_to_groups,pt_meets,\
          phase_pattern_ns,phase_rep_ns,phase_group_by_ns,phase_returns_ns,phase_order_by_ns,\
@@ -425,13 +487,14 @@ fn main() {
     for r in &rows {
         writeln!(
             f,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             r.id,
             r.category,
             r.expected,
             r.got,
             r.med,
             r.min,
+            r.parse,
             r.st.refine_calls,
             r.st.refine_cache_hits,
             r.st.node_entries_scanned,
