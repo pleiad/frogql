@@ -283,6 +283,7 @@ impl VariableType {
     /// the concrete `Node` variants reachable. Mirrors fppc's
     /// `VariableType::refine_to_nodes` and is consumed by `PathType::meet`.
     pub fn refine_to_nodes(schema: &Schema, t: &VariableType) -> Vec<VariableType> {
+        super::stats::record_refine_to_nodes();
         let mut out = Vec::new();
         let mut stack = vec![VariableType::refine(schema, t)];
         while let Some(curr) = stack.pop() {
@@ -303,6 +304,7 @@ impl VariableType {
     pub fn refine(schema: &Schema, node: &VariableType) -> VariableType {
         match node {
             VariableType::Node(_) => {
+                super::stats::record_refine_node_scan(schema.nodes.len());
                 let matches: Vec<VariableType> = schema
                     .nodes
                     .iter()
@@ -312,6 +314,7 @@ impl VariableType {
                 VariableType::join_from_list(matches)
             }
             VariableType::EdgeDirectional { .. } | VariableType::EdgeNonDirectional { .. } => {
+                super::stats::record_refine_edge_scan(schema.edges.len());
                 let matches: Vec<VariableType> = schema
                     .edges
                     .iter()

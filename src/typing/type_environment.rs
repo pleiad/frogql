@@ -51,6 +51,7 @@ impl TypeEnvironment {
     /// joined with `Null` — the variable may be absent in the other branch.
     /// This matches the rule `Γ₁ ⊔ Γ₂` in the paper.
     pub fn union(a: &TypeEnvironment, b: &TypeEnvironment) -> TypeEnvironment {
+        super::stats::record_env_union();
         let keys: HashSet<&String> = a.bindings.keys().chain(b.bindings.keys()).collect();
         let mut result = HashMap::with_capacity(keys.len());
         for key in keys {
@@ -76,6 +77,7 @@ impl TypeEnvironment {
         a: &TypeEnvironment,
         b: &TypeEnvironment,
     ) -> Result<TypeEnvironment, String> {
+        super::stats::record_env_meet();
         let mut result = a.bindings.clone();
         for (key, other) in &b.bindings {
             let merged: Rc<VariableType> = match result.get(key) {
@@ -119,6 +121,7 @@ impl TypeEnvironment {
         a: &TypeEnvironment,
         b: &TypeEnvironment,
     ) -> TypeEnvironment {
+        super::stats::record_env_outer_join();
         let mut result: HashMap<String, Rc<VariableType>> = HashMap::new();
 
         // Shared keys (i) and left-only keys (j) start from `a`.
@@ -159,6 +162,7 @@ impl TypeEnvironment {
     /// patterns where variables become groups of values. (Mirrors fppc's
     /// `to_list` — gqlite uses `Group` for the same role.)
     pub fn to_group(&self) -> TypeEnvironment {
+        super::stats::record_env_to_group();
         TypeEnvironment {
             bindings: self
                 .bindings
