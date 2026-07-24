@@ -360,6 +360,38 @@ fn main() {
         "valid".into(),
         "(p: Person)~[:knows]~{2,4}(f: Person)".into(),
     ));
+    // Full-surface cases: the legacy `bench` set is patterns-only by
+    // design (it mirrors the Python reference checker, which supported
+    // only path patterns — right shape, but not the queries users type).
+    // These exercise RETURN typing, ORDER BY, aggregates, and the
+    // multi-MATCH collapse path.
+    cases.push((
+        "full_return_orderby".into(),
+        "full".into(),
+        "valid".into(),
+        "MATCH (p: Person)~[:knows]~(f: Person) WHERE p.id = 933 \
+         RETURN f.firstName ORDER BY f.firstName LIMIT 10"
+            .into(),
+    ));
+    cases.push((
+        "full_count".into(),
+        "full".into(),
+        "valid".into(),
+        "MATCH (m: Comment)-[:hasCreator]->(p: Person) RETURN COUNT(m)".into(),
+    ));
+    cases.push((
+        "full_multi_match".into(),
+        "full".into(),
+        "valid".into(),
+        "MATCH (p: Person)~[:knows]~(f: Person) MATCH (f)~[:knows]~(g: Person) RETURN g.id".into(),
+    ));
+    cases.push((
+        "full_alias_orderby".into(),
+        "full".into(),
+        "valid".into(),
+        "MATCH (p: Person)~[:knows]~(f: Person) RETURN f.firstName AS name ORDER BY name LIMIT 5"
+            .into(),
+    ));
     cases.push((
         "subq_exists".into(),
         "subq".into(),
