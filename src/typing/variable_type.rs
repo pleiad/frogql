@@ -462,10 +462,46 @@ pub struct Schema {
     /// bypasses it.
     #[serde(skip, default)]
     junction_cache: Rc<std::cell::RefCell<JunctionCache>>,
+    /// Interner for whole `VariableType`s (refined types, met results,
+    /// join results — the values environment bindings hold). Bindings
+    /// carry a lazily-computed id so the lattice memos below can key by
+    /// integer pair; each distinct type pays one hash at intern time.
+    /// Ids are never recycled (bounded by distinct types seen against
+    /// this schema; DDL/inference replace the whole Schema).
+    #[serde(skip, default)]
+    vt_interner: Rc<std::cell::RefCell<VtInterner>>,
+    /// Memo for the environment-meet step `refine(meet(a, b))` keyed by
+    /// interned type ids. `None` marks the collapse-error outcome (met
+    /// to Zero with both sides non-empty) so the error path is memoized
+    /// too — the message is regenerated from the operand types, which is
+    /// what the uncached path formats as well.
+    /// `GQLITE_DISABLE_TC_MEET_CACHE=1` bypasses both this and
+    /// `join_cache`.
+    #[serde(skip, default)]
+    meet_refine_cache: Rc<std::cell::RefCell<MeetRefineCache>>,
+    /// Memo for environment joins (`Γ₁ ⊔ Γ₂` arms and TLEFTJOIN's
+    /// `T ⊔ T'`), keyed by interned id pair (order-sensitive, matching
+    /// `join`'s structural asymmetry).
+    #[serde(skip, default)]
+    join_cache: Rc<std::cell::RefCell<JoinCache>>,
 }
 
 /// Junction memo: boundary id pair → refined junction descriptor ids.
 type JunctionCache = std::collections::HashMap<(u32, u32), Rc<Vec<u32>>>;
+
+/// Backing store for [`Schema`]'s variable-type interner.
+#[derive(Debug, Default)]
+struct VtInterner {
+    ids: std::collections::HashMap<VariableType, u32>,
+    vts: Vec<Rc<VariableType>>,
+}
+
+/// Env-meet memo: `(a, b)` ids → `refine(meet(a,b))` or the collapse
+/// marker.
+type MeetRefineCache = std::collections::HashMap<(u32, u32), Option<(u32, Rc<VariableType>)>>;
+
+/// Env-join memo: `(a, b)` ids → `join(a, b)`.
+type JoinCache = std::collections::HashMap<(u32, u32), (u32, Rc<VariableType>)>;
 
 /// Backing store for [`Schema`]'s descriptor interner.
 #[derive(Debug, Default)]
@@ -491,6 +527,9 @@ impl Schema {
             refine_cache: Rc::default(),
             interner: Rc::default(),
             junction_cache: Rc::default(),
+            vt_interner: Rc::default(),
+            meet_refine_cache: Rc::default(),
+            join_cache: Rc::default(),
         }
     }
 
@@ -502,7 +541,92 @@ impl Schema {
             refine_cache: Rc::default(),
             interner: Rc::default(),
             junction_cache: Rc::default(),
+            vt_interner: Rc::default(),
+            meet_refine_cache: Rc::default(),
+            join_cache: Rc::default(),
         }
+    }
+
+    /// Intern a shared variable type, returning its dense id. The first
+    /// `Rc` seen for a value becomes the canonical allocation handed back
+    /// by `vt_of`, which keeps downstream `Rc::ptr_eq` fast paths hitting.
+    pub(crate) fn intern_vt_rc(&self, t: &Rc<VariableType>) -> u32 {
+        let mut i = self.vt_interner.borrow_mut();
+        if let Some(&id) = i.ids.get(&**t) {
+            return id;
+        }
+        let id = i.vts.len() as u32;
+        i.vts.push(Rc::clone(t));
+        i.ids.insert((**t).clone(), id);
+        id
+    }
+
+    /// Resolve an interned variable-type id to its canonical `Rc`.
+    pub(crate) fn vt_of(&self, id: u32) -> Rc<VariableType> {
+        Rc::clone(&self.vt_interner.borrow().vts[id as usize])
+    }
+
+    /// The environment-meet step `refine(meet(a, b))`, memoized by id
+    /// pair. `None` is the collapse-error outcome (`met == Zero` with
+    /// both operands non-empty); callers format the same message the
+    /// uncached path did, from the operand types.
+    pub(crate) fn meet_refined(
+        &self,
+        ia: u32,
+        a: &Rc<VariableType>,
+        ib: u32,
+        b: &Rc<VariableType>,
+    ) -> Option<(u32, Rc<VariableType>)> {
+        let cache_on = !meet_cache_disabled();
+        if cache_on {
+            if let Some(hit) = self.meet_refine_cache.borrow().get(&(ia, ib)) {
+                return hit.clone();
+            }
+        }
+        let met = VariableType::meet(a, b);
+        let out = if met == VariableType::Zero && !a.is_empty() && !b.is_empty() {
+            None
+        } else {
+            let refined = VariableType::refine_rc(self, &met);
+            let rid = self.intern_vt_rc(&refined);
+            Some((rid, self.vt_of(rid)))
+        };
+        if cache_on {
+            let mut m = self.meet_refine_cache.borrow_mut();
+            if m.len() >= REFINE_CACHE_CAP {
+                m.clear();
+            }
+            m.insert((ia, ib), out.clone());
+        }
+        out
+    }
+
+    /// `join(a, b)` memoized by id pair (order-sensitive: `join` is
+    /// structurally asymmetric). Returns the canonical interned `Rc`.
+    pub(crate) fn join_interned(
+        &self,
+        ia: u32,
+        a: &Rc<VariableType>,
+        ib: u32,
+        b: &Rc<VariableType>,
+    ) -> (u32, Rc<VariableType>) {
+        let cache_on = !meet_cache_disabled();
+        if cache_on {
+            if let Some(hit) = self.join_cache.borrow().get(&(ia, ib)) {
+                return hit.clone();
+            }
+        }
+        let joined = Rc::new(VariableType::join((**a).clone(), (**b).clone()));
+        let jid = self.intern_vt_rc(&joined);
+        let out = (jid, self.vt_of(jid));
+        if cache_on {
+            let mut m = self.join_cache.borrow_mut();
+            if m.len() >= REFINE_CACHE_CAP {
+                m.clear();
+            }
+            m.insert((ia, ib), out.clone());
+        }
+        out
     }
 
     /// Intern a descriptor, returning its dense id for this Schema.
@@ -573,6 +697,10 @@ fn refine_cache_disabled() -> bool {
 
 fn junction_cache_disabled() -> bool {
     std::env::var("GQLITE_DISABLE_TC_JUNCTION_CACHE").is_ok()
+}
+
+fn meet_cache_disabled() -> bool {
+    std::env::var("GQLITE_DISABLE_TC_MEET_CACHE").is_ok()
 }
 
 #[cfg(test)]

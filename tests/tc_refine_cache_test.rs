@@ -62,9 +62,13 @@ fn assert_cache_transparent(schema: &Schema, label: &str) {
         std::env::set_var("GQLITE_DISABLE_TC_JUNCTION_CACHE", "1");
         let junction_off = verdict(schema, q);
         std::env::set_var("GQLITE_DISABLE_TC_REFINE_CACHE", "1");
+        std::env::set_var("GQLITE_DISABLE_TC_MEET_CACHE", "1");
         let both_off = verdict(schema, q);
         std::env::remove_var("GQLITE_DISABLE_TC_REFINE_CACHE");
         std::env::remove_var("GQLITE_DISABLE_TC_JUNCTION_CACHE");
+        let meet_off = verdict(schema, q);
+        std::env::remove_var("GQLITE_DISABLE_TC_MEET_CACHE");
+        assert_eq!(meet_off, both_off, "[{label}] meet-off != all-off for: {q}");
         assert_eq!(
             cold, both_off,
             "[{label}] caches-on (cold) != caches-off for: {q}"

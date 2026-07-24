@@ -5,6 +5,55 @@ use crate::syntax::descriptor::Descriptor;
 
 use super::variable_type::{Schema, VariableType};
 
+/// One environment binding: the shared type plus a lazily-computed
+/// interned id (`Schema::intern_vt_rc`). The id exists so the lattice
+/// memos (`meet_refined`/`join_interned`) can key by integer pair; it is
+/// a cache, not part of the value — equality compares the type only.
+#[derive(Debug, Clone)]
+struct Binding {
+    ty: Rc<VariableType>,
+    id: std::cell::Cell<Option<u32>>,
+}
+
+impl Binding {
+    fn new(ty: Rc<VariableType>) -> Self {
+        Binding {
+            ty,
+            id: std::cell::Cell::new(None),
+        }
+    }
+
+    fn with_id(ty: Rc<VariableType>, id: u32) -> Self {
+        Binding {
+            ty,
+            id: std::cell::Cell::new(Some(id)),
+        }
+    }
+
+    fn id(&self, schema: &Schema) -> u32 {
+        match self.id.get() {
+            Some(i) => i,
+            None => {
+                let i = schema.intern_vt_rc(&self.ty);
+                self.id.set(Some(i));
+                i
+            }
+        }
+    }
+}
+
+impl PartialEq for Binding {
+    fn eq(&self, other: &Self) -> bool {
+        self.ty == other.ty
+    }
+}
+impl Eq for Binding {}
+
+thread_local! {
+    /// Shared `Null` value for the one-sided join arms.
+    static NULL_VT: Rc<VariableType> = Rc::new(VariableType::Null);
+}
+
 /// A type environment mapping variable names to their inferred `VariableType`.
 ///
 /// Bindings are stored as `Rc<VariableType>` so cloning the environment —
@@ -12,7 +61,7 @@ use super::variable_type::{Schema, VariableType};
 /// instead of deep-cloning each binding's descriptor tree.
 #[derive(PartialEq, Eq, Clone, Debug, Default)]
 pub struct TypeEnvironment {
-    bindings: HashMap<String, Rc<VariableType>>,
+    bindings: HashMap<String, Binding>,
 }
 
 impl TypeEnvironment {
@@ -39,17 +88,18 @@ impl TypeEnvironment {
     }
 
     pub fn set(&mut self, key: &str, value: VariableType) {
-        self.bindings.insert(key.to_string(), Rc::new(value));
+        self.bindings
+            .insert(key.to_string(), Binding::new(Rc::new(value)));
     }
 
     pub fn get(&self, key: &str) -> Option<&VariableType> {
-        self.bindings.get(key).map(Rc::as_ref)
+        self.bindings.get(key).map(|b| b.ty.as_ref())
     }
 
     /// Like `get`, but exposes the shared binding for callers that need
     /// to retain it without deep-cloning.
     pub fn get_shared(&self, key: &str) -> Option<&Rc<VariableType>> {
-        self.bindings.get(key)
+        self.bindings.get(key).map(|b| &b.ty)
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &String> {
@@ -60,12 +110,12 @@ impl TypeEnvironment {
     /// merging environments can share bindings instead of deep-cloning
     /// the descriptor trees.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Rc<VariableType>)> {
-        self.bindings.iter()
+        self.bindings.iter().map(|(k, b)| (k, &b.ty))
     }
 
     /// Insert an already-shared binding without cloning the inner type.
     pub fn set_shared(&mut self, key: &str, value: Rc<VariableType>) {
-        self.bindings.insert(key.to_string(), value);
+        self.bindings.insert(key.to_string(), Binding::new(value));
     }
 
     /// Pointwise join (least upper bound) of two environments.
@@ -74,8 +124,10 @@ impl TypeEnvironment {
     /// types. For keys present in only one side, the result binds the type
     /// joined with `Null` — the variable may be absent in the other branch.
     /// This matches the rule `Γ₁ ⊔ Γ₂` in the paper.
-    pub fn union(a: &TypeEnvironment, b: &TypeEnvironment) -> TypeEnvironment {
+    pub fn union(schema: &Schema, a: &TypeEnvironment, b: &TypeEnvironment) -> TypeEnvironment {
         super::stats::record_env_union();
+        let null_rc = NULL_VT.with(Rc::clone);
+        let null_id = schema.intern_vt_rc(&null_rc);
         let keys: HashSet<&String> = a.bindings.keys().chain(b.bindings.keys()).collect();
         let mut result = HashMap::with_capacity(keys.len());
         for key in keys {
@@ -83,10 +135,20 @@ impl TypeEnvironment {
                 // Same shared binding on both sides (common: both arms
                 // hold the same refine-cache Rc): `join(v, v)` collapses
                 // to `v`, so share it without cloning or walking.
-                (Some(ta), Some(tb)) if Rc::ptr_eq(ta, tb) => Rc::clone(ta),
-                (Some(ta), Some(tb)) => Rc::new(VariableType::join((**ta).clone(), (**tb).clone())),
-                (Some(ta), None) => Rc::new(VariableType::join((**ta).clone(), VariableType::Null)),
-                (None, Some(tb)) => Rc::new(VariableType::join(VariableType::Null, (**tb).clone())),
+                (Some(ta), Some(tb)) if Rc::ptr_eq(&ta.ty, &tb.ty) => ta.clone(),
+                (Some(ta), Some(tb)) => {
+                    let (id, ty) =
+                        schema.join_interned(ta.id(schema), &ta.ty, tb.id(schema), &tb.ty);
+                    Binding::with_id(ty, id)
+                }
+                (Some(ta), None) => {
+                    let (id, ty) = schema.join_interned(ta.id(schema), &ta.ty, null_id, &null_rc);
+                    Binding::with_id(ty, id)
+                }
+                (None, Some(tb)) => {
+                    let (id, ty) = schema.join_interned(null_id, &null_rc, tb.id(schema), &tb.ty);
+                    Binding::with_id(ty, id)
+                }
                 (None, None) => unreachable!(),
             };
             result.insert(key.clone(), merged);
@@ -122,22 +184,30 @@ impl TypeEnvironment {
         b: &TypeEnvironment,
     ) -> Result<TypeEnvironment, (TypeEnvironment, String)> {
         super::stats::record_env_meet();
-        let mut merged: Vec<(&String, Rc<VariableType>)> = Vec::new();
+        let mut merged: Vec<(&String, Binding)> = Vec::new();
         for (key, other) in &b.bindings {
             match a.bindings.get(key) {
-                Some(self_t) => {
-                    let met = VariableType::meet(self_t, other);
-                    if met == VariableType::Zero && !self_t.is_empty() && !other.is_empty() {
-                        let msg = format!(
-                            "Cannot reconcile types for variable {}: {} and {}",
-                            key, self_t, other
-                        );
-                        return Err((a, msg));
+                Some(self_b) => {
+                    match schema.meet_refined(
+                        self_b.id(schema),
+                        &self_b.ty,
+                        other.id(schema),
+                        &other.ty,
+                    ) {
+                        Some((rid, refined)) => merged.push((key, Binding::with_id(refined, rid))),
+                        // Collapse marker: met to Zero with both sides
+                        // non-empty — same message the uncached path built.
+                        None => {
+                            let msg = format!(
+                                "Cannot reconcile types for variable {}: {} and {}",
+                                key, self_b.ty, other.ty
+                            );
+                            return Err((a, msg));
+                        }
                     }
-                    merged.push((key, VariableType::refine_rc(schema, &met)));
                 }
                 // Right-only key: keep the binding as-is.
-                None => merged.push((key, Rc::clone(other))),
+                None => merged.push((key, other.clone())),
             }
         }
         for (k, v) in merged {
@@ -169,20 +239,30 @@ impl TypeEnvironment {
         b: &TypeEnvironment,
     ) -> TypeEnvironment {
         super::stats::record_env_outer_join();
-        let mut result: HashMap<String, Rc<VariableType>> = HashMap::new();
+        let null_rc = NULL_VT.with(Rc::clone);
+        let null_id = schema.intern_vt_rc(&null_rc);
+        let mut result: HashMap<String, Binding> = HashMap::new();
 
         // Shared keys (i) and left-only keys (j) start from `a`.
         for (key, t1) in &a.bindings {
-            let merged: Rc<VariableType> = match b.bindings.get(key) {
+            let merged: Binding = match b.bindings.get(key) {
                 Some(t2) => {
                     // T'_i := refine(schema, meet(T_{i1}, T_{i2}))
-                    let met = VariableType::meet(t1, t2);
-                    let refined = VariableType::refine(schema, &met);
-                    // x_i ↦ T_{i1} ⊔ T'_i
-                    Rc::new(VariableType::join((**t1).clone(), refined))
+                    match schema.meet_refined(t1.id(schema), &t1.ty, t2.id(schema), &t2.ty) {
+                        // x_i ↦ T_{i1} ⊔ T'_i
+                        Some((rid, refined)) => {
+                            let (jid, joined) =
+                                schema.join_interned(t1.id(schema), &t1.ty, rid, &refined);
+                            Binding::with_id(joined, jid)
+                        }
+                        // Collapse marker ⇒ T'_i = Zero and
+                        // join(T_{i1}, Zero) = T_{i1}: keep the left
+                        // binding, as the uncached path did.
+                        None => t1.clone(),
+                    }
                 }
                 // x_j ↦ T_j (left-only, kept as-is).
-                None => Rc::clone(t1),
+                None => t1.clone(),
             };
             result.insert(key.clone(), merged);
         }
@@ -192,17 +272,15 @@ impl TypeEnvironment {
             if a.bindings.contains_key(key) {
                 continue;
             }
-            result.insert(
-                key.clone(),
-                Rc::new(VariableType::join((**t2).clone(), VariableType::Null)),
-            );
+            let (jid, joined) = schema.join_interned(t2.id(schema), &t2.ty, null_id, &null_rc);
+            result.insert(key.clone(), Binding::with_id(joined, jid));
         }
 
         TypeEnvironment { bindings: result }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.bindings.values().any(|v| v.is_empty())
+        self.bindings.values().any(|b| b.ty.is_empty())
     }
 
     /// Wrap each binding in `VariableType::Group`. Used for repeated/quantified
@@ -214,10 +292,12 @@ impl TypeEnvironment {
             bindings: self
                 .bindings
                 .iter()
-                .map(|(k, v)| {
+                .map(|(k, b)| {
                     (
                         k.clone(),
-                        Rc::new(VariableType::Group(Box::new(v.as_ref().clone()))),
+                        Binding::new(Rc::new(VariableType::Group(Box::new(
+                            b.ty.as_ref().clone(),
+                        )))),
                     )
                 })
                 .collect(),
@@ -239,7 +319,7 @@ mod tests {
         let mut b = TypeEnvironment::new();
         a.set("x", nstar());
         b.set("x", nstar());
-        let u = TypeEnvironment::union(&a, &b);
+        let u = TypeEnvironment::union(&Schema::star(), &a, &b);
         // Equal types collapse under join.
         assert_eq!(u.get("x"), Some(&nstar()));
     }
@@ -249,7 +329,7 @@ mod tests {
         let mut a = TypeEnvironment::new();
         let b = TypeEnvironment::new();
         a.set("x", nstar());
-        let u = TypeEnvironment::union(&a, &b);
+        let u = TypeEnvironment::union(&Schema::star(), &a, &b);
         assert_eq!(
             u.get("x"),
             Some(&VariableType::Union(
@@ -264,7 +344,7 @@ mod tests {
         let a = TypeEnvironment::new();
         let mut b = TypeEnvironment::new();
         b.set("y", nstar());
-        let u = TypeEnvironment::union(&a, &b);
+        let u = TypeEnvironment::union(&Schema::star(), &a, &b);
         assert_eq!(
             u.get("y"),
             Some(&VariableType::Union(

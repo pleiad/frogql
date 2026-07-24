@@ -678,7 +678,7 @@ impl Typechecker {
                 let r2 = self.check_path_pattern(p2);
                 TypecheckResult::new(
                     PathSummary::union(r1.path, r2.path),
-                    TypeEnvironment::union(&r1.env, &r2.env),
+                    TypeEnvironment::union(&self.schema, &r1.env, &r2.env),
                 )
             }
 
