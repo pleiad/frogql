@@ -114,6 +114,7 @@ impl VariableType {
     }
 
     pub fn meet(a: &VariableType, b: &VariableType) -> VariableType {
+        super::stats::record_vt_meet();
         match (a, b) {
             (VariableType::Group(ta), VariableType::Group(tb)) => {
                 VariableType::Group(Box::new(VariableType::meet(ta, tb)))
@@ -193,6 +194,7 @@ impl VariableType {
     // --- Join ---
 
     pub fn join(a: VariableType, b: VariableType) -> VariableType {
+        super::stats::record_vt_join();
         if a == VariableType::Zero {
             return b;
         }

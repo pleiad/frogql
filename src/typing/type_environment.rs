@@ -46,6 +46,12 @@ impl TypeEnvironment {
         self.bindings.get(key).map(Rc::as_ref)
     }
 
+    /// Like `get`, but exposes the shared binding for callers that need
+    /// to retain it without deep-cloning.
+    pub fn get_shared(&self, key: &str) -> Option<&Rc<VariableType>> {
+        self.bindings.get(key)
+    }
+
     pub fn keys(&self) -> impl Iterator<Item = &String> {
         self.bindings.keys()
     }
@@ -74,12 +80,16 @@ impl TypeEnvironment {
         let mut result = HashMap::with_capacity(keys.len());
         for key in keys {
             let merged = match (a.bindings.get(key), b.bindings.get(key)) {
-                (Some(ta), Some(tb)) => VariableType::join((**ta).clone(), (**tb).clone()),
-                (Some(ta), None) => VariableType::join((**ta).clone(), VariableType::Null),
-                (None, Some(tb)) => VariableType::join(VariableType::Null, (**tb).clone()),
+                // Same shared binding on both sides (common: both arms
+                // hold the same refine-cache Rc): `join(v, v)` collapses
+                // to `v`, so share it without cloning or walking.
+                (Some(ta), Some(tb)) if Rc::ptr_eq(ta, tb) => Rc::clone(ta),
+                (Some(ta), Some(tb)) => Rc::new(VariableType::join((**ta).clone(), (**tb).clone())),
+                (Some(ta), None) => Rc::new(VariableType::join((**ta).clone(), VariableType::Null)),
+                (None, Some(tb)) => Rc::new(VariableType::join(VariableType::Null, (**tb).clone())),
                 (None, None) => unreachable!(),
             };
-            result.insert(key.clone(), Rc::new(merged));
+            result.insert(key.clone(), merged);
         }
         TypeEnvironment { bindings: result }
     }
@@ -95,26 +105,45 @@ impl TypeEnvironment {
         a: &TypeEnvironment,
         b: &TypeEnvironment,
     ) -> Result<TypeEnvironment, String> {
+        super::stats::record_env_bindings_copied(a.bindings.len());
+        TypeEnvironment::meet_owned(schema, a.clone(), b).map_err(|(_, msg)| msg)
+    }
+
+    /// `meet` that consumes the left environment instead of cloning it —
+    /// the checker's Concat/Join/match-chain folds own their accumulator
+    /// and were paying O(vars) String-key clones per operator (quadratic
+    /// along a chain). Merged bindings are staged in a scratch `Vec` and
+    /// applied only on success, so the `Err` case hands `a` back
+    /// untouched (callers keep the pre-meet environment on error, exactly
+    /// as the cloning version behaved).
+    pub fn meet_owned(
+        schema: &Schema,
+        mut a: TypeEnvironment,
+        b: &TypeEnvironment,
+    ) -> Result<TypeEnvironment, (TypeEnvironment, String)> {
         super::stats::record_env_meet();
-        let mut result = a.bindings.clone();
+        let mut merged: Vec<(&String, Rc<VariableType>)> = Vec::new();
         for (key, other) in &b.bindings {
-            let merged: Rc<VariableType> = match result.get(key) {
+            match a.bindings.get(key) {
                 Some(self_t) => {
                     let met = VariableType::meet(self_t, other);
                     if met == VariableType::Zero && !self_t.is_empty() && !other.is_empty() {
-                        return Err(format!(
+                        let msg = format!(
                             "Cannot reconcile types for variable {}: {} and {}",
                             key, self_t, other
-                        ));
+                        );
+                        return Err((a, msg));
                     }
-                    VariableType::refine_rc(schema, &met)
+                    merged.push((key, VariableType::refine_rc(schema, &met)));
                 }
                 // Right-only key: keep the binding as-is.
-                None => Rc::clone(other),
-            };
-            result.insert(key.clone(), merged);
+                None => merged.push((key, Rc::clone(other))),
+            }
         }
-        Ok(TypeEnvironment { bindings: result })
+        for (k, v) in merged {
+            a.bindings.insert(k.clone(), v);
+        }
+        Ok(a)
     }
 
     /// Left outer join — the typing operator `Γ₁ ⟕ Γ₂` for OPTIONAL MATCH,

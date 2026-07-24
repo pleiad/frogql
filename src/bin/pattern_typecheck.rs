@@ -480,6 +480,7 @@ fn main() {
         "case,category,expected,got,check_med_ns,check_min_ns,parse_med_ns,\
          refine_calls,refine_cache_hits,node_scanned,edge_scanned,refine_to_nodes,\
          env_meets,env_unions,env_outer_joins,env_to_groups,pt_meets,\
+         vt_meets,vt_joins,env_copied,\
          phase_pattern_ns,phase_rep_ns,phase_group_by_ns,phase_returns_ns,phase_order_by_ns,\
          status"
     )
@@ -487,7 +488,7 @@ fn main() {
     for r in &rows {
         writeln!(
             f,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             r.id,
             r.category,
             r.expected,
@@ -505,6 +506,9 @@ fn main() {
             r.st.env_outer_join_calls,
             r.st.env_to_group_calls,
             r.st.pathtype_meet_calls,
+            r.st.vt_meet_calls,
+            r.st.vt_join_calls,
+            r.st.env_bindings_copied,
             r.phases[0],
             r.phases[1],
             r.phases[2],
