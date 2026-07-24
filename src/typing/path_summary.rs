@@ -21,14 +21,24 @@
 //!   `pairs` because zero-length arms concatenate differently: their node
 //!   IS the junction, so the refined junction becomes the exposed
 //!   boundary.
-//! * `pairs` — the edge-bearing arms as `(first, last) → min edge count`
-//!   (≥ 1). Arms sharing a boundary are interchangeable under every
+//! * `pairs` — the edge-bearing arms as `(first, last, min edge count)`
+//!   (count ≥ 1). Arms sharing a boundary are interchangeable under every
 //!   further operation except the length judgment, for which the minimum
 //!   is exactly what `len()` observes.
 //!
 //! Width is bounded by |schema.nodes|² + |schema.nodes| regardless of
 //! pattern length, so concatenation cost is independent of chain position
 //! and the exponential disappears.
+//!
+//! Representation note: arms live in flat `Vec`s deduplicated by linear
+//! equality scan, NOT hash sets. Queries users actually type summarize to
+//! 1–3 arms, where a hash structure loses twice: allocation/setup per
+//! operation, and hashing must walk the *entire* rich descriptor
+//! (label + property `BTreeMap`) on every insert and lookup, while an
+//! equality probe fails fast on the label. The linear scan is O(w²) in
+//! arm width, bounded by the schema as above; the synthetic unlabeled
+//! families are cliff guards, not tuning targets. Set semantics are
+//! preserved by a manual order-insensitive `PartialEq`.
 //!
 //! Correspondence with the spec type: `PathSummary` is the image of the
 //! abstraction `summarize : PathType → PathSummary`, and the lattice
@@ -49,20 +59,36 @@
 //! empty descriptors — unsatisfiability always surfaces as the absence of
 //! arms.
 
-use std::collections::{HashMap, HashSet};
-
 use super::descriptor_type::DescriptorType;
 use super::path_type::{EdgeDir, PathType};
 use super::variable_type::{Schema, VariableType};
 
 /// Boundary summary: zero-length arms as a node-descriptor set, edge-
-/// bearing arms as `(first, last) → min edge count`. Both empty ⇔ the
-/// path is unsatisfiable (`PathType::Zero`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// bearing arms as `(first, last, min edge count)`. Both empty ⇔ the
+/// path is unsatisfiable (`PathType::Zero`). Set semantics with `Vec`
+/// storage — see the module's representation note.
+#[derive(Debug, Clone, Default)]
 pub struct PathSummary {
-    nodes: HashSet<DescriptorType>,
-    pairs: HashMap<(DescriptorType, DescriptorType), usize>,
+    nodes: Vec<DescriptorType>,
+    pairs: Vec<(DescriptorType, DescriptorType, usize)>,
 }
+
+/// Order-insensitive set equality (arm order is an artifact of
+/// construction order, never meaningful).
+impl PartialEq for PathSummary {
+    fn eq(&self, other: &Self) -> bool {
+        self.nodes.len() == other.nodes.len()
+            && self.pairs.len() == other.pairs.len()
+            && self.nodes.iter().all(|d| other.nodes.contains(d))
+            && self.pairs.iter().all(|(f, l, n)| {
+                other
+                    .pairs
+                    .iter()
+                    .any(|(f2, l2, n2)| f == f2 && l == l2 && n == n2)
+            })
+    }
+}
+impl Eq for PathSummary {}
 
 impl PathSummary {
     /// Bottom — no satisfiable arm. Mirrors `PathType::Zero`.
@@ -72,11 +98,9 @@ impl PathSummary {
 
     /// A single-node path. Mirrors `PathType::Node`.
     pub fn node(desc: DescriptorType) -> Self {
-        let mut nodes = HashSet::with_capacity(1);
-        nodes.insert(desc);
         PathSummary {
-            nodes,
-            pairs: HashMap::new(),
+            nodes: vec![desc],
+            pairs: Vec::new(),
         }
     }
 
@@ -115,7 +139,7 @@ impl PathSummary {
         if !self.nodes.is_empty() {
             return 0;
         }
-        self.pairs.values().copied().min().unwrap_or(0)
+        self.pairs.iter().map(|&(_, _, n)| n).min().unwrap_or(0)
     }
 
     /// True when some live arm has no edges — or when there is no live
@@ -129,12 +153,21 @@ impl PathSummary {
         self.nodes.is_empty() && self.pairs.is_empty()
     }
 
-    fn insert_pair(&mut self, key: (DescriptorType, DescriptorType), len: usize) {
+    fn insert_node(&mut self, d: DescriptorType) {
+        if !self.nodes.contains(&d) {
+            self.nodes.push(d);
+        }
+    }
+
+    fn insert_pair(&mut self, f: DescriptorType, l: DescriptorType, len: usize) {
         debug_assert!(len >= 1, "edge-bearing pair with zero length");
-        self.pairs
-            .entry(key)
-            .and_modify(|l| *l = (*l).min(len))
-            .or_insert(len);
+        for (f2, l2, n) in self.pairs.iter_mut() {
+            if *f2 == f && *l2 == l {
+                *n = (*n).min(len);
+                return;
+            }
+        }
+        self.pairs.push((f, l, len));
     }
 
     /// Least upper bound: arm-set union (min length per edge boundary).
@@ -145,9 +178,11 @@ impl PathSummary {
         } else {
             (b, a)
         };
-        big.nodes.extend(small.nodes);
-        for (k, l) in small.pairs {
-            big.insert_pair(k, l);
+        for d in small.nodes {
+            big.insert_node(d);
+        }
+        for (f, l, n) in small.pairs {
+            big.insert_pair(f, l, n);
         }
         big
     }
@@ -162,48 +197,53 @@ impl PathSummary {
     pub fn meet(schema: &Schema, a: &PathSummary, b: &PathSummary) -> PathSummary {
         super::stats::record_pathtype_meet();
         let mut out = PathSummary::zero();
-        // The junction only depends on (a.last, b.first); memoize per
-        // call so w×w arm combos cost w distinct refinements.
-        let mut junctions: HashMap<(DescriptorType, DescriptorType), Vec<DescriptorType>> =
-            HashMap::new();
+        // The junction only depends on (a.last, b.first). Memoized by
+        // pointer identity of the operand descriptors — w×w arm combos
+        // cost w distinct refinements; a value-equal miss just recomputes.
+        let mut junctions: Vec<(
+            *const DescriptorType,
+            *const DescriptorType,
+            Vec<DescriptorType>,
+        )> = Vec::new();
         let mut junction = |l1: &DescriptorType, f2: &DescriptorType| -> Vec<DescriptorType> {
-            junctions
-                .entry((l1.clone(), f2.clone()))
-                .or_insert_with(|| {
-                    let met = VariableType::Node(DescriptorType::meet(l1, f2));
-                    VariableType::refine_to_nodes(schema, &met)
-                        .into_iter()
-                        .filter_map(|v| match v {
-                            VariableType::Node(d) => Some(d),
-                            _ => None,
-                        })
-                        .collect()
+            let key = (l1 as *const _, f2 as *const _);
+            if let Some((_, _, rs)) = junctions.iter().find(|(p1, p2, _)| (*p1, *p2) == key) {
+                return rs.clone();
+            }
+            let met = VariableType::Node(DescriptorType::meet(l1, f2));
+            let rs: Vec<DescriptorType> = VariableType::refine_to_nodes(schema, &met)
+                .into_iter()
+                .filter_map(|v| match v {
+                    VariableType::Node(d) => Some(d),
+                    _ => None,
                 })
-                .clone()
+                .collect();
+            junctions.push((key.0, key.1, rs.clone()));
+            rs
         };
 
         // pairs × pairs: junction interior, outer boundaries survive.
-        for ((f1, l1), &len1) in &a.pairs {
-            for ((f2, l2), &len2) in &b.pairs {
+        for (f1, l1, len1) in &a.pairs {
+            for (f2, l2, len2) in &b.pairs {
                 if !junction(l1, f2).is_empty() {
-                    out.insert_pair((f1.clone(), l2.clone()), len1 + len2);
+                    out.insert_pair(f1.clone(), l2.clone(), len1 + len2);
                 }
             }
         }
         // pairs × nodes: the zero-length right is the junction; the
         // refined junction becomes the result's last boundary.
-        for ((f1, l1), &len1) in &a.pairs {
+        for (f1, l1, len1) in &a.pairs {
             for d in &b.nodes {
                 for r in junction(l1, d) {
-                    out.insert_pair((f1.clone(), r), len1);
+                    out.insert_pair(f1.clone(), r, *len1);
                 }
             }
         }
         // nodes × pairs: symmetric — refined junction becomes first.
         for d in &a.nodes {
-            for ((f2, l2), &len2) in &b.pairs {
+            for (f2, l2, len2) in &b.pairs {
                 for r in junction(d, f2) {
-                    out.insert_pair((r, l2.clone()), len2);
+                    out.insert_pair(r, l2.clone(), *len2);
                 }
             }
         }
@@ -212,7 +252,7 @@ impl PathSummary {
         for d1 in &a.nodes {
             for d2 in &b.nodes {
                 for r in junction(d1, d2) {
-                    out.nodes.insert(r);
+                    out.insert_node(r);
                 }
             }
         }
@@ -251,10 +291,10 @@ impl PathSummary {
                 let prefix = PathSummary::summarize(&e.p1);
                 let mut out = PathSummary::zero();
                 for d in &prefix.nodes {
-                    out.insert_pair((d.clone(), e.n2.desc.clone()), 1);
+                    out.insert_pair(d.clone(), e.n2.desc.clone(), 1);
                 }
-                for ((f, _), &len) in &prefix.pairs {
-                    out.insert_pair((f.clone(), e.n2.desc.clone()), len + 1);
+                for (f, _, len) in &prefix.pairs {
+                    out.insert_pair(f.clone(), e.n2.desc.clone(), len + 1);
                 }
                 out
             }
@@ -273,10 +313,10 @@ fn directed_edge_pairs(left: &VariableType, right: &VariableType, dir: EdgeDir) 
     };
     let mut out = PathSummary::zero();
     if matches!(dir, EdgeDir::Right | EdgeDir::Any | EdgeDir::None) {
-        out.insert_pair((l.clone(), r.clone()), 1);
+        out.insert_pair(l.clone(), r.clone(), 1);
     }
     if matches!(dir, EdgeDir::Left | EdgeDir::Any | EdgeDir::None) {
-        out.insert_pair((r.clone(), l.clone()), 1);
+        out.insert_pair(r.clone(), l.clone(), 1);
     }
     out
 }
