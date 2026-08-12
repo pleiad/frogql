@@ -879,7 +879,7 @@ const input = $("pg-input"), output = $("pg-output"), status = $("pg-status");
 const EXAMPLES = [
   { label: "Actors of 1999", q: `MATCH (p:Person)-[:ACTED_IN]->(m:Movie)\nWHERE m.released = 1999\nRETURN p.name, m.title` },
   { label: "Directors", q: `MATCH (p:Person)-[:DIRECTED]->(m:Movie)\nRETURN m.title AS movie, p.name AS director` },
-  { label: "Keanu's co-stars", q: `MATCH (a:Person)-[:ACTED_IN]->(m:Movie),\n      (b:Person)-[:ACTED_IN]->(m)\nWHERE a.name = 'Keanu Reeves'\nRETURN b.name AS costar, m.title AS film` },
+  { label: "Keanu's co-stars", q: `MATCH (a:Person)-[:ACTED_IN]->(m:Movie),\n      (b:Person)-[:ACTED_IN]->(m)\nWHERE a.name = 'Keanu Reeves' AND b.name != 'Keanu Reeves'\nRETURN b.name AS costar, m.title AS film` },
   { label: "Reviews + ratings", q: `MATCH (p:Person)-[r:REVIEWED]->(m:Movie)\nRETURN m.title AS film, r.rating AS rating` },
   { label: "Count movies", q: `MATCH (m:Movie) RETURN count(m) AS movies` },
   { label: "Whole nodes", q: `MATCH (m:Movie) WHERE m.released > 2005 RETURN m` },
