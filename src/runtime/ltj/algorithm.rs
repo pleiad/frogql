@@ -230,32 +230,33 @@ impl<'a> LtjAlgorithm<'a> {
         // so this stays O(rows) in practice. Users who want set semantics
         // ask for `RETURN DISTINCT`.
         if j >= self.veo.size() {
-            let eid_lists: Vec<Vec<u32>> = self
-                .iterators
-                .iter()
-                .map(|it| {
-                    let eids = it.current_eids_all();
-                    if eids.is_empty() {
-                        vec![u32::MAX]
-                    } else {
-                        eids
-                    }
-                })
-                .collect();
+            // Every triple is fully bound here, so an iterator with no
+            // edge id means its triple does not exist and this tuple is
+            // not a match.
+            //
+            // The ordinary search can never see that: the leapfrog only
+            // descends into values the index actually holds, so by the
+            // base case every triple has at least one entry. It happens
+            // when *all* the variables were fixed before the search — the
+            // secondary-index constant fold plus caller-supplied pins —
+            // which bypasses the leapfrog entirely and leaves nothing to
+            // validate the combination. Emitting a row there invented an
+            // edge: `(a)-[:follows]->(b) WHERE a.id = 0 AND b.id = 3`
+            // returned a match whether or not that edge existed.
+            let mut eid_lists: Vec<Vec<u32>> = Vec::with_capacity(self.iterators.len());
+            for it in self.iterators.iter() {
+                let eids = it.current_eids_all();
+                if eids.is_empty() {
+                    return true;
+                }
+                eid_lists.push(eids);
+            }
             let var_bindings = tuple[..self.num_vars].to_vec();
-            let mut accepted_any = false;
             for combo in cartesian(&eid_lists) {
-                accepted_any = true;
                 results.push(ResultTuple::new(var_bindings.clone(), combo));
                 if limit > 0 && results.len() >= limit {
                     return false;
                 }
-            }
-            // Defensive: when no iterator could produce a triple_eid at
-            // all (degenerate empty index), still emit one row so callers
-            // see the variable bindings.
-            if !accepted_any {
-                results.push(ResultTuple::new(var_bindings, Vec::new()));
             }
             return true;
         }
