@@ -1818,11 +1818,12 @@ impl Parser {
                 let mut consts = Vec::with_capacity(items.len());
                 let mut all_const = true;
                 for e in &items {
-                    if let Expr::Const(v) = e {
-                        consts.push(v.clone());
-                    } else {
-                        all_const = false;
-                        break;
+                    match const_of(e) {
+                        Some(v) => consts.push(v),
+                        None => {
+                            all_const = false;
+                            break;
+                        }
                     }
                 }
                 if all_const {
@@ -2870,6 +2871,28 @@ fn temporal_function_name(name: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The constant value of `e`, if it has one.
+///
+/// A negated numeric literal parses as `Unop(Neg, Const(n))` rather than
+/// a negative constant, so without folding it here `[-0.5, 0.5]` is not a
+/// constant list. That matters: a query vector routinely has negative
+/// components, and rejecting them would make `NEAREST ... TO [...]`
+/// unusable for real embeddings.
+fn const_of(e: &Expr) -> Option<Value> {
+    match e {
+        Expr::Const(v) => Some(v.clone()),
+        Expr::Unop {
+            op: UnOp::Neg,
+            operand,
+        } => match const_of(operand)? {
+            Value::Int(n) => Some(Value::Int(-n)),
+            Value::Float(f) => Some(Value::Float(-f)),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn path_function_name(name: &str) -> Option<String> {

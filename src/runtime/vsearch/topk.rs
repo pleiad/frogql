@@ -226,6 +226,92 @@ impl TopK {
     }
 }
 
+/// The pruning half of `TopK`, carrying distances only.
+///
+/// The in-LTJ strategy needs the threshold *while* the join is still
+/// running, but at that point a match is a `ResultTuple` of raw variable
+/// bindings — the rows do not exist until the search returns and the
+/// tuples are converted. So the search tracks distances alone, and the
+/// assembled `TopK` does the final selection afterwards under the same
+/// rule.
+///
+/// The two agree by construction: both keep the `k` smallest keys and
+/// both refuse a tie once full, so the threshold reported here is the one
+/// `TopK` will settle on.
+pub struct DistThreshold {
+    k: usize,
+    mode: KMode,
+    /// Max-heap of the `k` smallest distances seen.
+    heap: std::collections::BinaryHeap<Entry<()>>,
+    /// `DistinctVar`: bindings already counted, so one cannot claim two
+    /// slots.
+    seen: HashMap<Id, f32>,
+    seq: u64,
+}
+
+impl DistThreshold {
+    pub fn new(k: usize, mode: KMode) -> DistThreshold {
+        DistThreshold {
+            k,
+            mode,
+            heap: std::collections::BinaryHeap::new(),
+            seen: HashMap::new(),
+            seq: 0,
+        }
+    }
+
+    /// Same contract as `TopK::threshold`: `+∞` until `k` are held, then
+    /// the worst held, never rising afterwards.
+    pub fn get(&self) -> f32 {
+        if self.k == 0 {
+            return f32::NEG_INFINITY;
+        }
+        if self.heap.len() < self.k {
+            f32::INFINITY
+        } else {
+            self.heap.peek().map(|e| e.dist).unwrap_or(f32::INFINITY)
+        }
+    }
+
+    /// Record an accepted result. `id` is the search variable's binding,
+    /// consulted only in `DistinctVar` mode.
+    pub fn accept(&mut self, id: Id, dist: f32) {
+        if self.k == 0 {
+            return;
+        }
+        if self.mode == KMode::DistinctVar {
+            if self.seen.contains_key(&id) {
+                return;
+            }
+            self.seen.insert(id, dist);
+        }
+        self.seq += 1;
+        let entry = Entry {
+            dist,
+            seq: self.seq,
+            payload: (),
+        };
+        if self.heap.len() < self.k {
+            self.heap.push(entry);
+            return;
+        }
+        let worse_than_incumbent = match self.heap.peek() {
+            Some(w) => cmp_dist(entry.dist, w.dist) != std::cmp::Ordering::Less,
+            None => false,
+        };
+        if worse_than_incumbent {
+            return;
+        }
+        self.heap.pop();
+        self.heap.push(entry);
+    }
+
+    /// Has this binding already been counted? `DistinctVar` only.
+    pub fn holds(&self, id: Id) -> bool {
+        self.seen.contains_key(&id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

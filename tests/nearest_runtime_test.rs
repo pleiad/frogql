@@ -143,6 +143,8 @@ fn exact_arms() -> Vec<(Strategy, bool)> {
         (Strategy::PostFilter, true),
         (Strategy::PreFilter, false),
         (Strategy::PreFilter, true),
+        (Strategy::InLtj, false),
+        (Strategy::InLtj, true),
     ]
 }
 
@@ -354,6 +356,8 @@ fn the_executed_arm_is_reported() {
         (Strategy::PostFilter, false, "post+brute"),
         (Strategy::PreFilter, true, "pre+index"),
         (Strategy::PreFilter, false, "pre+brute"),
+        (Strategy::InLtj, true, "inltj+index"),
+        (Strategy::InLtj, false, "inltj+brute"),
     ] {
         rt.set_vec_cfg(VecCfg {
             strategy,
@@ -363,17 +367,6 @@ fn the_executed_arm_is_reported() {
         let _ = rt.run_query(&query, 0);
         assert_eq!(rt.last_vec_stats().arm, expected);
     }
-
-    // in-LTJ is not implemented yet, so it must report the fallback
-    // rather than silently claiming to have run.
-    rt.set_vec_cfg(VecCfg {
-        strategy: Strategy::InLtj,
-        ..VecCfg::default()
-    });
-    let _ = rt.run_query(&query, 0);
-    let stats = rt.last_vec_stats();
-    assert!(stats.arm.starts_with("post"), "arm was {}", stats.arm);
-    assert!(stats.fallback_reason.is_some());
 }
 
 #[test]

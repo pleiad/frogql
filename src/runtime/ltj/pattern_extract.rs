@@ -8,10 +8,10 @@ use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::BinOp;
 use crate::syntax::path_pattern::PathPattern;
 
-use super::algorithm::{FilterKind, LtjAlgorithm, PlacedFilter, ResultTuple};
+use super::algorithm::{FilterKind, LtjAlgorithm, PlacedFilter, ResultTuple, VecCtx};
 use super::iterator::{LtjIterator, SpoPos, Term, TriplePattern};
 use super::triple_index::TripleIndex;
-use super::veo::{Veo, VeoSimple};
+use super::veo::{Veo, VeoOverride, VeoSimple};
 
 // ---- Decomposition result ----
 
@@ -80,7 +80,7 @@ pub fn try_ltj<G: GraphAccess>(
     if has_any_direction(pattern) {
         return None;
     }
-    try_ltj_inner(graph, pattern, index, None, limit, &[])
+    try_ltj_inner(graph, pattern, index, None, limit, &[], None)
 }
 
 /// LTJ for patterns that contain any-direction edges (`-[e]-`), **pure or
@@ -105,7 +105,7 @@ pub fn try_ltj_mixed<G: GraphAccess>(
     if anydir_ltj_disabled() {
         return None;
     }
-    try_ltj_inner(graph, pattern, index, Some(anydir_index), limit, &[])
+    try_ltj_inner(graph, pattern, index, Some(anydir_index), limit, &[], None)
 }
 
 /// True when `FROGQL_DISABLE_ANYDIR_LTJ=1` forces the hash-join fallback
@@ -161,7 +161,15 @@ pub fn try_ltj_with_pin<G: GraphAccess>(
     if has_any_direction(pattern) {
         return None;
     }
-    try_ltj_inner(graph, pattern, index, None, limit, &[(pin_var, pin_id)])
+    try_ltj_inner(
+        graph,
+        pattern,
+        index,
+        None,
+        limit,
+        &[(pin_var, pin_id)],
+        None,
+    )
 }
 
 /// Multi-variable extension of `try_ltj_with_pin`. Each `(name, id)` pair
@@ -181,7 +189,38 @@ pub fn try_ltj_with_pins<G: GraphAccess>(
     if has_any_direction(pattern) {
         return None;
     }
-    try_ltj_inner(graph, pattern, index, None, limit, pins)
+    try_ltj_inner(graph, pattern, index, None, limit, pins, None)
+}
+
+/// A vector-search level requested of the LTJ, plus the slot its
+/// per-row distances come back in.
+///
+/// Input and output in one struct so the change to `try_ltj_inner` is a
+/// single parameter. The distances cannot ride on the returned rows: the
+/// name to bind them under lives in the query's `NEAREST ... AS`, which
+/// this layer knows nothing about.
+pub struct NnPlan<'v, 'c> {
+    /// Name of the variable to drive from the neighbour stream.
+    pub var: &'c str,
+    /// Requested VEO level; clamped to a legal one.
+    pub level: usize,
+    pub ctx: &'c mut VecCtx<'v>,
+    /// Filled with one entry per returned row, in row order.
+    pub dists: &'c mut Vec<Option<f32>>,
+}
+
+/// LTJ with one variable bound from a nearest-neighbour stream instead of
+/// from the index order. `None` when the pattern does not decompose, or
+/// when the search variable was folded to a constant and so has no level
+/// to occupy.
+pub fn try_ltj_nearest<G: GraphAccess>(
+    graph: &G,
+    pattern: &PathPattern,
+    index: &TripleIndex,
+    plan: NnPlan<'_, '_>,
+) -> Option<IntermediateResult> {
+    // No limit: an arrival-order cut has nothing to do with distance.
+    try_ltj_inner(graph, pattern, index, None, 0, &[], Some(plan))
 }
 
 fn try_ltj_inner<G: GraphAccess>(
@@ -191,6 +230,7 @@ fn try_ltj_inner<G: GraphAccess>(
     anydir_index: Option<&TripleIndex>,
     limit: usize,
     external_pins: &[(&str, u32)],
+    nn: Option<NnPlan<'_, '_>>,
 ) -> Option<IntermediateResult> {
     let mut decomp = decompose(pattern, index)?;
 
@@ -325,7 +365,39 @@ fn try_ltj_inner<G: GraphAccess>(
         })
         .collect();
 
-    let veo = VeoSimple::new(var_info);
+    let base_veo = VeoSimple::new(var_info.clone());
+
+    // A vector-search level moves its variable in the order. This has to
+    // happen BEFORE filters are placed: placement resolves each filter to
+    // the level at which its last dependency binds, and reordering
+    // afterwards can leave a filter evaluating a variable that is not
+    // bound yet. That is silently wrong rather than merely slow —
+    // `check_filters` finds a binding by scanning the tuple for the var
+    // id, and the deeper slots still hold values from the previous
+    // sibling branch.
+    let mut nn_level: Option<(usize, u8)> = None;
+    let veo: Box<dyn Veo> = match &nn {
+        Some(plan) => {
+            // The variable can be gone: the secondary-index fold turns an
+            // `attr = literal` variable into a constant and drops it from
+            // the order, leaving no level to occupy. The caller degrades
+            // to post-filtering rather than answer a different question.
+            let var_id = decomp
+                .var_id_to_name
+                .iter()
+                .position(|n| n == plan.var)
+                .map(|i| i as u8)?;
+            if pinned_set.contains(&var_id) {
+                return None;
+            }
+            let capped = plan.level.min(VeoOverride::max_level(&var_info));
+            let over = VeoOverride::pin_at(&base_veo, var_id, capped)?;
+            // Read the real position back: the request is clamped.
+            nn_level = Some((over.level_of(var_id)?, var_id));
+            Box::new(over)
+        }
+        None => Box::new(base_veo),
+    };
 
     // Place filters
     let mut filters_at_level: Vec<Vec<PlacedFilter>> = vec![vec![]; veo.size()];
@@ -352,13 +424,25 @@ fn try_ltj_inner<G: GraphAccess>(
         iterators,
         var_to_iterators,
         var_to_positions,
-        Box::new(veo),
+        veo,
         filters_at_level,
         num_vars,
         pinned,
     );
 
-    let tuples = algorithm.run(graph, limit);
+    let tuples = match nn {
+        Some(plan) => {
+            let (level, var_id) = nn_level?;
+            algorithm = algorithm.with_nn_level(level, var_id);
+            let tuples = algorithm.run_nearest(graph, plan.ctx);
+            // One distance per tuple; `convert_results` emits one row per
+            // tuple in order, so the two line up positionally.
+            plan.dists.clear();
+            plan.dists.extend(tuples.iter().map(|t| t.dist));
+            tuples
+        }
+        None => algorithm.run(graph, limit),
+    };
 
     Some(convert_results(graph, &tuples, &decomp))
 }

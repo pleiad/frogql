@@ -5,6 +5,8 @@ use crate::syntax::expr::BinOp;
 
 use super::iterator::{LtjIterator, SpoPos};
 use super::veo::Veo;
+use crate::runtime::vsearch::topk::DistThreshold;
+use crate::vector::cursor::NnStream;
 
 /// Iterate every combination across `lists`. Empty `lists` yields one
 /// empty combo; a single empty inner vector kills the product. Used at
@@ -77,11 +79,59 @@ pub enum FilterKind {
 pub struct ResultTuple {
     pub vars: Vec<(u8, u32)>,
     pub triple_eids: Vec<u32>,
+    /// Distance from the vector-search query to this tuple's binding of
+    /// the search variable. `None` for every ordinary query. Carried here
+    /// because the search knows it and the row does not yet exist — rows
+    /// are built from tuples only after the search returns.
+    pub dist: Option<f32>,
 }
 
 impl ResultTuple {
     pub fn new(vars: Vec<(u8, u32)>, triple_eids: Vec<u32>) -> Self {
-        ResultTuple { vars, triple_eids }
+        ResultTuple {
+            vars,
+            triple_eids,
+            dist: None,
+        }
+    }
+}
+
+/// Live state for a vector-search level, threaded through the recursion.
+///
+/// It is a parameter rather than a field of `LtjAlgorithm` on purpose:
+/// `search` is `&mut self` and recurses on `self`, so a `&mut` borrow of
+/// a field held across the recursive call is an aliasing error, and a
+/// `RefCell` would turn that compile error into a runtime panic.
+pub struct VecCtx<'v> {
+    /// Neighbours, nearest first, shared across every visit to the level.
+    pub stream: NnStream<'v>,
+    /// The running top-k threshold, updated as matches are accepted.
+    pub cut: DistThreshold,
+    /// Slack on the threshold: an approximate cursor's order is only
+    /// approximately sorted, so an exact cut can drop a neighbour the
+    /// stream was about to reveal.
+    pub tau_eps: f32,
+    /// The candidate currently being descended into.
+    pub cur_id: u32,
+    pub cur_dist: f32,
+    /// Instrumentation.
+    pub visits: u64,
+    pub candidates_hashed: u64,
+    pub nn_pops: u64,
+}
+
+impl<'v> VecCtx<'v> {
+    pub fn new(stream: NnStream<'v>, cut: DistThreshold, tau_eps: f32) -> VecCtx<'v> {
+        VecCtx {
+            stream,
+            cut,
+            tau_eps,
+            cur_id: 0,
+            cur_dist: 0.0,
+            visits: 0,
+            candidates_hashed: 0,
+            nn_pops: 0,
+        }
     }
 }
 
@@ -105,6 +155,9 @@ pub struct LtjAlgorithm<'a> {
     /// search starts. These slots are pre-populated in the result tuple and
     /// never written to by the search loop.
     pinned: Vec<(u8, u32)>,
+    /// VEO level at which the vector-search variable binds, and the
+    /// variable itself. `None` for every ordinary query.
+    nn_level: Option<(usize, u8)>,
 }
 
 impl<'a> LtjAlgorithm<'a> {
@@ -126,7 +179,14 @@ impl<'a> LtjAlgorithm<'a> {
             filters_at_level,
             num_vars,
             pinned,
+            nn_level: None,
         }
+    }
+
+    /// Bind `var` to the neighbour stream at VEO level `level`.
+    pub fn with_nn_level(mut self, level: usize, var: u8) -> Self {
+        self.nn_level = Some((level, var));
+        self
     }
 
     /// Run the LTJ algorithm against `graph`. Returns result tuples.
@@ -155,7 +215,28 @@ impl<'a> LtjAlgorithm<'a> {
                 tuple[slot] = binding;
             }
         }
-        self.search(graph, 0, &mut tuple, &mut results, limit);
+        self.search(graph, 0, &mut tuple, &mut results, limit, None);
+        results
+    }
+
+    /// Run with the vector-search level active. Every returned tuple
+    /// carries the distance of its search-variable binding.
+    pub fn run_nearest<G: GraphAccess>(
+        &mut self,
+        graph: &G,
+        ctx: &mut VecCtx<'_>,
+    ) -> Vec<ResultTuple> {
+        let mut results = Vec::new();
+        let mut tuple = vec![(0u8, 0u32); self.num_vars];
+        for (i, &binding) in self.pinned.iter().enumerate() {
+            let slot = self.veo.size() + i;
+            if slot < tuple.len() {
+                tuple[slot] = binding;
+            }
+        }
+        // No limit: an arrival-order cut has nothing to do with distance.
+        // The threshold in `ctx.cut` is what bounds the work instead.
+        self.search(graph, 0, &mut tuple, &mut results, 0, Some(ctx));
         results
     }
 
@@ -207,6 +288,38 @@ impl<'a> LtjAlgorithm<'a> {
         }
     }
 
+    /// Every value the leapfrog would produce for `var_id` under the
+    /// current partial binding, materialised.
+    ///
+    /// The ordinary search consumes candidates one at a time and in
+    /// ascending order; the vector-search level needs the whole set up
+    /// front so it can visit them in distance order instead. That is
+    /// legal because `leap` is a pure query against state only
+    /// `down`/`up` mutate: draining the candidates leaves the iterators
+    /// exactly as it found them, and they may then be descended into in
+    /// any order.
+    fn collect_candidates(&mut self, var_id: u8) -> Vec<u32> {
+        let iters = &self.var_to_iterators[var_id as usize];
+        if iters.len() == 1 && self.iterators[iters[0]].in_last_level() {
+            let idx = iters[0];
+            let pos = self.var_to_positions[var_id as usize][0];
+            return self.iterators[idx].seek_all(pos);
+        }
+        let mut out = Vec::new();
+        let mut c = self.seek(var_id, None);
+        while let Some(v) = c {
+            out.push(v);
+            // The live loop below advances with a bare `val + 1`;
+            // u32::MAX is a real sentinel in this codebase (an unknown
+            // label folds to it), so guard the wrap here.
+            c = match v.checked_add(1) {
+                Some(next) => self.seek(var_id, Some(next)),
+                None => None,
+            };
+        }
+        out
+    }
+
     /// Recursive search: bind the variable at level `j`, evaluate the
     /// filters placed there, descend, backtrack.
     fn search<G: GraphAccess>(
@@ -216,6 +329,7 @@ impl<'a> LtjAlgorithm<'a> {
         tuple: &mut Vec<(u8, u32)>,
         results: &mut Vec<ResultTuple>,
         limit: usize,
+        mut ctx: Option<&mut VecCtx<'_>>,
     ) -> bool {
         if limit > 0 && results.len() >= limit {
             return false;
@@ -252,11 +366,22 @@ impl<'a> LtjAlgorithm<'a> {
                 eid_lists.push(eids);
             }
             let var_bindings = tuple[..self.num_vars].to_vec();
+            let dist = ctx.as_ref().map(|c| c.cur_dist);
             for combo in cartesian(&eid_lists) {
-                results.push(ResultTuple::new(var_bindings.clone(), combo));
+                let mut rt = ResultTuple::new(var_bindings.clone(), combo);
+                rt.dist = dist;
+                results.push(rt);
                 if limit > 0 && results.len() >= limit {
                     return false;
                 }
+            }
+            // Tighten the threshold as soon as a match exists, so the
+            // sibling candidates of this very visit are already pruned
+            // against it. Reading `cut` after the descent instead would
+            // waste the whole subtree's worth of narrowing.
+            if let Some(c) = ctx {
+                let (id, d) = (c.cur_id, c.cur_dist);
+                c.cut.accept(id, d);
             }
             return true;
         }
@@ -264,6 +389,67 @@ impl<'a> LtjAlgorithm<'a> {
         let var_id = self.veo.var_at(j);
         let iter_indices: Vec<usize> = self.var_to_iterators[var_id as usize].clone();
         let positions: Vec<SpoPos> = self.var_to_positions[var_id as usize].clone();
+
+        // Vector-search level: instead of enumerating this variable's
+        // candidates in index order, enumerate them nearest-first.
+        //
+        // The candidate set is already conditioned on the partial binding
+        // of everything above, so it is normally small; hashing it and
+        // walking the shared neighbour stream costs a membership test per
+        // neighbour and no distance computation at all.
+        //
+        // The threshold cut is what makes this cheap. Within one visit
+        // the stream is non-decreasing, so once a neighbour is past the
+        // running top-k threshold every later one is too, and the visit
+        // stops. It is re-read on every iteration rather than hoisted:
+        // the recursive descent between two iterations can accept matches
+        // and tighten it.
+        if self.nn_level == Some((j, var_id)) {
+            if let Some(vc) = ctx {
+                vc.visits += 1;
+                let candidates = self.collect_candidates(var_id);
+                if candidates.is_empty() {
+                    return true;
+                }
+                vc.candidates_hashed += candidates.len() as u64;
+                let hits: std::collections::HashSet<u32> = candidates.into_iter().collect();
+
+                let mut rank = 0usize;
+                loop {
+                    let tau = vc.cut.get();
+                    let Some((id, dist)) = vc.stream.at(rank) else {
+                        break;
+                    };
+                    rank += 1;
+                    vc.nn_pops += 1;
+                    if tau.is_finite() && dist > tau * (1.0 + vc.tau_eps) {
+                        break;
+                    }
+                    if !hits.contains(&id) {
+                        continue;
+                    }
+
+                    tuple[j] = (var_id, id);
+                    if !self.check_filters(graph, j, tuple) {
+                        continue;
+                    }
+                    vc.cur_id = id;
+                    vc.cur_dist = dist;
+
+                    for k in 0..iter_indices.len() {
+                        self.iterators[iter_indices[k]].down(positions[k], id);
+                    }
+                    let ok = self.search(graph, j + 1, tuple, results, limit, Some(vc));
+                    for k in 0..iter_indices.len() {
+                        self.iterators[iter_indices[k]].up(positions[k]);
+                    }
+                    if !ok {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
 
         // Optimization: lonely variable at last level — use seek_all
         if iter_indices.len() == 1 && self.iterators[iter_indices[0]].in_last_level() {
@@ -279,7 +465,7 @@ impl<'a> LtjAlgorithm<'a> {
                 }
 
                 self.iterators[idx].down(pos, val);
-                let ok = self.search(graph, j + 1, tuple, results, limit);
+                let ok = self.search(graph, j + 1, tuple, results, limit, ctx.as_deref_mut());
                 self.iterators[idx].up(pos);
 
                 if !ok {
@@ -301,7 +487,7 @@ impl<'a> LtjAlgorithm<'a> {
                     self.iterators[iter_indices[k]].down(positions[k], val);
                 }
 
-                let ok = self.search(graph, j + 1, tuple, results, limit);
+                let ok = self.search(graph, j + 1, tuple, results, limit, ctx.as_deref_mut());
 
                 // Ascend in all iterators
                 for k in 0..iter_indices.len() {
