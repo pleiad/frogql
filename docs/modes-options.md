@@ -210,24 +210,33 @@ checker rejects.
 
 ## Vector search
 
-`NEAREST` picks its evaluation strategy from the environment. Nothing here
-changes the *answer* under `FROGQL_VEC_INDEX=brute` — the three strategies
-are pinned equivalent there by `tests/vector_strategy_equiv_test.rs` — so
-these are cost knobs, not semantic ones.
+`NEAREST` has two orthogonal axes: which **strategy** evaluates it, and
+which **source** supplies the nearest-first ranking. Under either exact
+source every strategy returns the same answer — pinned by
+`tests/vector_strategy_equiv_test.rs` — so those are cost knobs, not
+semantic ones.
 
 | Var | Effect |
 |---|---|
 | `FROGQL_VEC_STRATEGY=post\|pre\|inltj` | which strategy runs (default `post`) |
-| `FROGQL_VEC_INDEX=hnsw\|brute` | metric index or exact brute force (default `hnsw`) |
+| `FROGQL_VEC_SOURCE=hnsw\|localsort\|globalsort` | where the ranking comes from (default `hnsw`) |
 | `FROGQL_VEC_LEVEL=<n>` | VEO position of the search variable; in-LTJ only |
 | `FROGQL_VEC_TAU_EPS=<f>` | relative slack on the top-k threshold cut |
 | `FROGQL_DISABLE_VECTORS` | ignore every sidecar |
 | `FROGQL_DEBUG_VEC` | print the executed arm and its counters |
 
-**`FROGQL_VEC_INDEX=hnsw` changes the answer, deliberately.** HNSW is
-approximate, and the three strategies walk its proximity graph
-differently, so their recall differs. That difference is a measurement,
-not a defect. Only `brute` is exact.
+**`FROGQL_VEC_SOURCE=hnsw` changes the answer, deliberately.** HNSW is
+approximate; `localsort` and `globalsort` are exact. Recall is a
+measurement, not a defect.
+
+**`hnsw` and `globalsort` are the same walk.** Both build a corpus-wide
+ranking and make every visit re-scan it from the top. Switching between
+them changes only what it costs to build that ranking — `nn_pops` is
+identical, `nn_expanded` is not. And HNSW evaluates ~32 neighbour
+distances per expansion, so on a small corpus it can end up doing *more*
+work than sorting everything: at 3 000 items, level 1, it expanded 1306
+nodes (~42 k distances) against a flat 3 000. `localsort` is the source
+that genuinely walks differently — it never leaves the level.
 
 **The strategy you ask for is not always the one that runs.** A shape an
 interleaving arm cannot hook into — an `OPTIONAL MATCH`, a §16.6 prefix, a

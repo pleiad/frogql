@@ -25,7 +25,10 @@ use crate::runtime::result::{IntermediateResult, ResultRow};
 use crate::syntax::query::{KMode, Query};
 use crate::vector::store::VectorSet;
 
-use super::{finish, row_node, NearestSpec, TopK, VecCfg, VecStats};
+use super::{
+    arm_label, effective_source, finish, row_node, NearestSpec, Strategy, TopK, VecCfg, VecSource,
+    VecStats,
+};
 
 pub fn run<G: GraphAccess>(
     rt: &Runtime<'_, G>,
@@ -35,11 +38,10 @@ pub fn run<G: GraphAccess>(
     set: &VectorSet,
     stats: &mut VecStats,
 ) -> IntermediateResult {
-    stats.arm = if cfg.use_index && set.has_index() {
-        "post+index"
-    } else {
-        "post+brute"
-    };
+    // A requested HNSW source with no graph built degrades to the exact
+    // global ranking; recording the requested source would misreport it.
+    let source = effective_source(cfg.source, set);
+    stats.arm = arm_label(Strategy::PostFilter, source);
 
     // The whole pattern, unlimited: a LIMIT here would cut in row-arrival
     // order, which has nothing to do with distance.
@@ -61,16 +63,22 @@ pub fn run<G: GraphAccess>(
         return finish(sink, spec, stats);
     }
 
-    if cfg.use_index && set.has_index() {
-        walk_index(set, spec, cfg, &mut buckets, &mut sink, stats);
-    } else {
-        walk_candidates(set, spec, &mut buckets, &mut sink, stats);
+    match source {
+        // Rank only what the pattern produced.
+        VecSource::LocalSort => walk_candidates(set, spec, &mut buckets, &mut sink, stats),
+        // Walk a corpus-wide ranking, testing membership. The two differ
+        // only in how that ranking is produced — lazily by the graph, or
+        // by sorting everything up front.
+        VecSource::Hnsw | VecSource::GlobalSort => {
+            walk_global(set, spec, source, &mut buckets, &mut sink, stats)
+        }
     }
 
     finish(sink, spec, stats)
 }
 
-/// Exact sub-mode: distance to every candidate, sorted.
+/// Local sub-mode: distance to every candidate the pattern produced,
+/// sorted. Never touches a node outside the match.
 fn walk_candidates(
     set: &VectorSet,
     spec: &NearestSpec,
@@ -89,18 +97,18 @@ fn walk_candidates(
     }
 }
 
-/// Index sub-mode: walk the corpus-wide neighbour stream, testing
+/// Corpus-wide sub-mode: walk the whole attribute's ranking, testing
 /// membership in the candidate hash, and stop as soon as the sink is
 /// satisfied.
-fn walk_index(
+fn walk_global(
     set: &VectorSet,
     spec: &NearestSpec,
-    cfg: &VecCfg,
+    source: VecSource,
     buckets: &mut HashMap<Id, Vec<ResultRow>>,
     sink: &mut TopK,
     stats: &mut VecStats,
 ) {
-    let mut cursor = set.cursor(&spec.q, cfg.use_index);
+    let mut cursor = set.cursor(&spec.q, source == VecSource::Hnsw);
     let mut remaining = buckets.len();
     while let Some((id, dist)) = cursor.next() {
         stats.nn_pops += 1;

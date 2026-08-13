@@ -8,7 +8,7 @@
 //! Output is CSV on stdout:
 //!
 //! ```text
-//! items,dim,k,mode,selectivity,strategy,index,level,median_ms,recall,nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,rows
+//! items,dim,k,mode,selectivity,strategy,source,level,median_ms,recall,nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,rows
 //! ```
 //!
 //! `recall` is measured against post-filter with the exact cursor, which
@@ -42,7 +42,7 @@ use frogql::model::graph_access::GraphAccess;
 use frogql::model::value::Value;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
-use frogql::runtime::vsearch::{Strategy, VecCfg};
+use frogql::runtime::vsearch::{Strategy, VecCfg, VecSource};
 use frogql::store::lazy::LazyGraphStore;
 use frogql::vector::hnsw::{Hnsw, HnswParams};
 use frogql::vector::metric::Metric;
@@ -265,7 +265,7 @@ fn main() {
     eprintln!("opened; LTJ index warm. Running…\n");
 
     println!(
-        "items,dim,k,mode,selectivity,strategy,index,level,median_ms,recall,\
+        "items,dim,k,mode,selectivity,strategy,source,level,median_ms,recall,\
          nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,rows"
     );
 
@@ -306,7 +306,7 @@ fn main() {
                 let rt = Runtime::with_triple_index(&store, index.clone());
                 rt.set_vec_cfg(VecCfg {
                     strategy: Strategy::PostFilter,
-                    use_index: false,
+                    source: VecSource::LocalSort,
                     ..VecCfg::default()
                 });
                 let truth = match rt.run_query(&parsed, 0) {
@@ -314,13 +314,18 @@ fn main() {
                     _ => HashSet::new(),
                 };
 
-                for (strategy, use_index) in [
-                    (Strategy::PostFilter, false),
-                    (Strategy::PostFilter, true),
-                    (Strategy::PreFilter, false),
-                    (Strategy::PreFilter, true),
-                    (Strategy::InLtj, false),
-                    (Strategy::InLtj, true),
+                // Every arm the engine can run. `PreFilter` has no
+                // per-visit candidate set, so `LocalSort` is not a
+                // distinct arm there.
+                for (strategy, source) in [
+                    (Strategy::PostFilter, VecSource::Hnsw),
+                    (Strategy::PostFilter, VecSource::LocalSort),
+                    (Strategy::PostFilter, VecSource::GlobalSort),
+                    (Strategy::PreFilter, VecSource::Hnsw),
+                    (Strategy::PreFilter, VecSource::GlobalSort),
+                    (Strategy::InLtj, VecSource::Hnsw),
+                    (Strategy::InLtj, VecSource::LocalSort),
+                    (Strategy::InLtj, VecSource::GlobalSort),
                 ] {
                     // The level axis only exists for in-LTJ.
                     let levels: Vec<usize> = if strategy == Strategy::InLtj {
@@ -332,7 +337,7 @@ fn main() {
                         let rt = Runtime::with_triple_index(&store, index.clone());
                         rt.set_vec_cfg(VecCfg {
                             strategy,
-                            use_index,
+                            source,
                             level,
                             ..VecCfg::default()
                         });
@@ -362,7 +367,7 @@ fn main() {
                             a.items,
                             a.dim,
                             strategy.name(),
-                            if use_index { "hnsw" } else { "brute" },
+                            source.name(),
                             median(times),
                             stats.nn_pops,
                             stats.nn_expanded,

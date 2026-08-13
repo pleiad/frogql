@@ -97,9 +97,12 @@ reason for a cursor: the in-LTJ and pre-filter strategies cannot know in
 advance how deep they must walk before enough candidates also satisfy the
 pattern.
 
-- `BruteForceCursor` — exact. The "no metric index" baseline, and the
-  oracle every approximate arm is scored against.
-- `HnswCursor` — approximate, an unbounded best-first traversal of layer 0.
+- `BruteForceCursor` — exact. The oracle every approximate arm is
+  scored against.
+- `HnswCursor` — approximate, an unbounded best-first traversal of layer
+  0. Note it is an *iterator*, not a top-k call: `next()` takes no `k`
+  and never stops, so a caller walks outward from `q` and decides for
+  itself when it has enough.
 
 **The HNSW cursor emits on a lookahead.** Before handing back the `i`-th
 neighbour it has expanded at least `i + ef` rows, so what it emits is the
@@ -124,6 +127,52 @@ the stream each time; rebuilding a cursor per visit would dominate every
 other cost. `replays` / `extends` are the counters that prove the cache
 is working.
 
+## Where the ranking comes from: `VecSource`
+
+Orthogonal to the strategy. Three values, not an index/no-index boolean,
+because "no index" hid two genuinely different algorithms:
+
+| source | how the ranking is produced | exact? |
+|---|---|---|
+| `Hnsw` | lazily, expanding the proximity graph on demand | no |
+| `GlobalSort` | sort the whole attribute once, up front | yes |
+| `LocalSort` | sort only the current visit's candidates | yes |
+
+**`Hnsw` and `GlobalSort` share their walk exactly.** Both hand the
+in-LTJ level a corpus-wide ranking, and both make every visit re-scan it
+from rank 0 testing membership in that visit's candidate set. They differ
+only in what it costs to *build* the ranking — and in exactness.
+
+The benchmark shows this directly: at a fixed level, `nn_pops` (the
+membership tests) is *identical* between them, while `nn_expanded` (the
+cost of producing the stream) is not. On 3 000 items, dim 16, k = 10:
+
+| source | level | `nn_pops` | `nn_expanded` |
+|---|---|---|---|
+| GlobalSort | 0 | 14 | 3000 |
+| Hnsw | 0 | 14 | **77** |
+| GlobalSort | 1 | 11804 | 3000 |
+| Hnsw | 1 | 11804 | **1306** |
+
+Watch the constant factor, though: each HNSW expansion evaluates ~`m0`
+(32) neighbour distances, so it only wins while the prefix it must
+materialise stays under roughly `n / m0`. At level 1 above, 1306
+expansions is ~42 k distance evaluations against a flat 3 000 — HNSW is
+doing *more* work. The crossover moves far out as `n` grows, but it is
+real and the benchmark should chart it rather than assume.
+
+**`LocalSort` is the one that walks differently.** It ranks only the
+candidates of the visit it is in, so it never touches a node outside the
+level and never re-scans anything. `O(|C| log |C|)` per visit, no shared
+prefix, no global structure. `tests/vector_strategy_equiv_test.rs` pins
+this: `local.nn_pops <= local.candidates_hashed`, while
+`global.nn_pops > local.nn_pops`.
+
+Not every strategy can honour every source. Pre-filter has no per-visit
+candidate set — its candidates are the whole corpus — so `LocalSort`
+there is the same walk as `GlobalSort`, and `stats.arm` reports
+`pre+globalsort` so a benchmark row cannot claim otherwise.
+
 ## The three strategies
 
 All three enter through `vsearch::run_nearest` and leave as an
@@ -132,14 +181,12 @@ downstream are identical across arms.
 
 ### 1. post-filter (`vsearch/post_filter.rs`)
 
-Run the pattern, then rank what it produced. Two sub-modes:
-
-- **no index** — distance to every binding, keep the best `k`. Linear in
-  *candidates*, not in the corpus.
-- **index** — hash the candidates, walk the global neighbour stream, stop
-  once `k` are hit. Costs whatever the index charges to reach the `k`-th
-  surviving candidate: small when the pattern is unselective,
-  catastrophic when it is selective.
+Run the pattern, then rank what it produced. Under `LocalSort` that is a
+distance to every binding the pattern produced — linear in *candidates*,
+not in the corpus. Under the two corpus-wide sources it hashes the
+candidates and walks the global ranking until `k` are hit, which costs
+whatever it takes to reach the `k`-th surviving candidate: small when the
+pattern is unselective, and deep when it is selective.
 
 Answers every query shape, so it is also the universal fallback.
 
@@ -215,7 +262,8 @@ comparing three different queries.
 
 Under HNSW recall genuinely differs by arm — that is a result, not a bug —
 so what is asserted there is only that no arm invents a row the pattern
-does not produce. The suite also checks the in-LTJ arm actually ran rather
+does not produce. Both exact sources are in the equivalence sweep, at
+every level. The suite also checks the in-LTJ arm actually ran rather
 than falling back, which would make the equivalence pass for the wrong
 reason.
 
@@ -224,7 +272,7 @@ reason.
 | Var | Effect |
 |---|---|
 | `FROGQL_VEC_STRATEGY=post\|pre\|inltj` | which strategy to run (default `post`) |
-| `FROGQL_VEC_INDEX=hnsw\|brute` | metric index or exact brute force (default `hnsw`) |
+| `FROGQL_VEC_SOURCE=hnsw\|localsort\|globalsort` | where the ranking comes from (default `hnsw`) |
 | `FROGQL_VEC_LEVEL=<n>` | VEO position of the search variable; in-LTJ only, clamped |
 | `FROGQL_VEC_TAU_EPS=<f>` | relative slack on the threshold cut (default 0) |
 | `FROGQL_DISABLE_VECTORS` | ignore every sidecar; queries see no vector attribute |

@@ -34,7 +34,10 @@ use crate::vector::cursor::NnStream;
 use crate::vector::store::VectorSet;
 
 use super::topk::DistThreshold;
-use super::{finish, row_node, NearestSpec, TopK, VecCfg, VecStats};
+use super::{
+    arm_label, effective_source, finish, row_node, NearestSpec, Strategy, TopK, VecCfg, VecSource,
+    VecStats,
+};
 
 pub fn run<G: GraphAccess>(
     rt: &Runtime<'_, G>,
@@ -47,10 +50,22 @@ pub fn run<G: GraphAccess>(
     let pattern = query.collapsed_pattern();
     let index = rt.warm_triple_index();
 
+    let source = effective_source(cfg.source, set);
+    let local = source == VecSource::LocalSort;
+    // A local source never walks a corpus-wide stream, so it gets an
+    // empty one rather than paying to build a ranking it will not read.
+    let cursor: Box<dyn crate::vector::cursor::NnCursor> = if local {
+        Box::new(crate::vector::cursor::EmptyCursor)
+    } else {
+        set.cursor(&spec.q, source == VecSource::Hnsw)
+    };
     let mut ctx = VecCtx::new(
-        NnStream::new(set.cursor(&spec.q, cfg.use_index)),
+        NnStream::new(cursor),
         DistThreshold::new(spec.k, spec.mode),
         cfg.tau_eps,
+        local,
+        set,
+        &spec.q,
     );
     let mut dists: Vec<Option<f32>> = Vec::new();
 
@@ -77,11 +92,7 @@ pub fn run<G: GraphAccess>(
         }
     };
 
-    stats.arm = if cfg.use_index && set.has_index() {
-        "inltj+index"
-    } else {
-        "inltj+brute"
-    };
+    stats.arm = arm_label(Strategy::InLtj, source);
     stats.ltj_visits = ctx.visits;
     stats.candidates_hashed = ctx.candidates_hashed;
     stats.nn_pops = ctx.nn_pops;

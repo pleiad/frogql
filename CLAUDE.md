@@ -80,7 +80,7 @@ Runtime/store toggles for A/B testing and tracing (all read at query/open time; 
 | `FROGQL_DEBUG_INDEXES` | print auto-built indexes + pinned variables |
 | `FROGQL_TRACE_OPEN` | print per-phase open latency (see *Open-time performance*) |
 | `FROGQL_VEC_STRATEGY=post\|pre\|inltj` | which vector-search evaluation strategy runs (default `post`); see `docs/internals/vector-search.md` |
-| `FROGQL_VEC_INDEX=hnsw\|brute` | metric index or exact brute-force cursor; `brute` is the mode the three strategies are pinned equivalent in |
+| `FROGQL_VEC_SOURCE=hnsw\|localsort\|globalsort` | where the nearest-first ranking comes from. `hnsw` and `globalsort` share the same walk and differ only in build cost + exactness; `localsort` ranks just the current visit's candidates and never re-scans. The two exact sources are what the strategies are pinned equivalent in |
 | `FROGQL_VEC_LEVEL=<n>` | VEO position of the vector-search variable (in-LTJ only, clamped to just before the first lonely var) |
 | `FROGQL_VEC_TAU_EPS=<f>` | relative slack on the top-k threshold cut; an approximate cursor's order is only approximately sorted |
 | `FROGQL_DISABLE_VECTORS` | ignore every vector sidecar; queries see no vector attribute |
@@ -446,8 +446,16 @@ emits on an `ef` lookahead). Reached from the runtime via
 pattern-extraction functions hold only `graph: &G`, so anything on
 `Runtime` would be unreachable from where candidate sets are produced.
 
+Orthogonal to the strategy is `VecSource` — where the nearest-first
+ranking comes from. `Hnsw` and `GlobalSort` produce a corpus-wide
+ranking and share their walk exactly (every visit re-scans from rank 0
+testing membership); they differ only in build cost and exactness.
+`LocalSort` ranks only the current visit's candidates, so it never looks
+outside the level. Pre-filter has no per-visit set and serves `LocalSort`
+as `GlobalSort`, reporting the source that actually ran.
+
 Strategies in `src/runtime/vsearch/`: `post_filter` (run then rank; the
-universal fallback and, with the exact cursor, the recall oracle),
+universal fallback and, with an exact source, the recall oracle),
 `pre_filter` (pin the search variable per neighbour and re-run), `in_ltj`
 (bind the variable from the neighbour stream at a chosen VEO level, with
 `DistThreshold` pruning each visit). All three return `IntermediateResult`

@@ -73,16 +73,72 @@ impl Strategy {
     }
 }
 
+/// Where a strategy gets its nearest-first stream from.
+///
+/// This axis is deliberately three-valued rather than an
+/// index/no-index boolean, because "no index" hides two genuinely
+/// different algorithms with different cost models:
+///
+/// - `GlobalSort` ranks the **whole attribute** once, then every visit
+///   to the search level re-scans that global list from the top testing
+///   membership in the level's candidate set. `O(n log n)` up front,
+///   and how deep each visit scans depends on where the k-th answer
+///   sits globally — not on how many candidates the visit has.
+/// - `LocalSort` ranks **only the candidates of the current visit**.
+///   `O(|C| log |C|)` per visit, no global structure, and it never
+///   looks at a node outside the level.
+///
+/// `Hnsw` shares `GlobalSort`'s walk exactly — same re-scan, same
+/// membership tests — and differs only in that it materialises the
+/// ranking lazily instead of sorting everything up front. That is why
+/// they are two values and not one: the saving is in *building* the
+/// stream, not in walking it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VecSource {
+    /// Incremental HNSW cursor. Approximate.
+    Hnsw,
+    /// Rank the current visit's candidates only. Exact. Meaningful for
+    /// the in-LTJ strategy, where a "visit" has its own candidate set;
+    /// for post-filter it ranks the whole match, and for pre-filter,
+    /// which has no level, it falls back to `GlobalSort`.
+    LocalSort,
+    /// Rank the whole attribute once, then test membership. Exact.
+    GlobalSort,
+}
+
+impl VecSource {
+    pub fn parse(s: &str) -> Option<VecSource> {
+        match s.to_ascii_lowercase().as_str() {
+            "hnsw" | "index" => Some(VecSource::Hnsw),
+            "localsort" | "local" => Some(VecSource::LocalSort),
+            "globalsort" | "global" | "brute" => Some(VecSource::GlobalSort),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            VecSource::Hnsw => "hnsw",
+            VecSource::LocalSort => "localsort",
+            VecSource::GlobalSort => "globalsort",
+        }
+    }
+
+    /// Is this an exact ranking? Only the exact sources are pinned to
+    /// mutual equality by the differential test; HNSW's recall is a
+    /// measurement, not an invariant.
+    pub fn is_exact(self) -> bool {
+        !matches!(self, VecSource::Hnsw)
+    }
+}
+
 /// Which strategy to run and how. Read from the environment by default
 /// and overridable programmatically by the benchmark driver.
 #[derive(Debug, Clone)]
 pub struct VecCfg {
     pub strategy: Strategy,
-    /// False forces the exact brute-force cursor even where an HNSW
-    /// graph exists. This is the "sin índice" sub-mode, and with it the
-    /// three strategies must agree exactly — that equivalence is what
-    /// the differential test pins.
-    pub use_index: bool,
+    /// Where the nearest-first stream comes from.
+    pub source: VecSource,
     /// Requested position of the search variable in the variable
     /// elimination order. In-LTJ only; clamped to a legal level.
     pub level: usize,
@@ -99,7 +155,7 @@ impl Default for VecCfg {
     fn default() -> Self {
         VecCfg {
             strategy: Strategy::PostFilter,
-            use_index: true,
+            source: VecSource::Hnsw,
             level: 0,
             tau_eps: 0.0,
             debug: false,
@@ -108,7 +164,8 @@ impl Default for VecCfg {
 }
 
 impl VecCfg {
-    /// `FROGQL_VEC_STRATEGY=post|pre|inltj`, `FROGQL_VEC_INDEX=hnsw|brute`,
+    /// `FROGQL_VEC_STRATEGY=post|pre|inltj`,
+    /// `FROGQL_VEC_SOURCE=hnsw|localsort|globalsort`,
     /// `FROGQL_VEC_LEVEL=<n>`, `FROGQL_VEC_TAU_EPS=<f>`, `FROGQL_DEBUG_VEC`.
     pub fn from_env() -> VecCfg {
         let mut cfg = VecCfg::default();
@@ -117,8 +174,10 @@ impl VecCfg {
                 cfg.strategy = v;
             }
         }
-        if let Ok(s) = std::env::var("FROGQL_VEC_INDEX") {
-            cfg.use_index = !s.eq_ignore_ascii_case("brute");
+        if let Ok(s) = std::env::var("FROGQL_VEC_SOURCE") {
+            if let Some(v) = VecSource::parse(&s) {
+                cfg.source = v;
+            }
         }
         if let Ok(s) = std::env::var("FROGQL_VEC_LEVEL") {
             if let Ok(v) = s.parse() {
@@ -347,11 +406,32 @@ pub(crate) fn finish(sink: TopK, spec: &NearestSpec, stats: &mut VecStats) -> In
     IntermediateResult::new(rows)
 }
 
-/// Shared helper: a cursor over `set` honouring `cfg.use_index`.
-pub(crate) fn cursor<'a>(
-    set: &'a VectorSet,
-    spec: &'a NearestSpec,
-    cfg: &VecCfg,
-) -> Box<dyn crate::vector::cursor::NnCursor + 'a> {
-    set.cursor(&spec.q, cfg.use_index)
+/// The source that can actually be served.
+///
+/// Asking for `Hnsw` on an attribute with no graph built cannot be
+/// honoured; the exact global ranking is the closest thing, and it is
+/// what gets reported. Silently keeping the requested label would make
+/// a benchmark row claim a walk that never happened.
+pub(crate) fn effective_source(requested: VecSource, set: &VectorSet) -> VecSource {
+    match requested {
+        VecSource::Hnsw if !set.has_index() => VecSource::GlobalSort,
+        other => other,
+    }
+}
+
+/// The arm label for `stats.arm`: strategy plus the source that actually
+/// ran. Never derived from the request alone — a strategy that degraded
+/// must not be reported under the name of the one that was asked for.
+pub(crate) fn arm_label(strategy: Strategy, source: VecSource) -> &'static str {
+    match (strategy, source) {
+        (Strategy::PostFilter, VecSource::Hnsw) => "post+hnsw",
+        (Strategy::PostFilter, VecSource::LocalSort) => "post+localsort",
+        (Strategy::PostFilter, VecSource::GlobalSort) => "post+globalsort",
+        (Strategy::PreFilter, VecSource::Hnsw) => "pre+hnsw",
+        (Strategy::PreFilter, VecSource::LocalSort) => "pre+localsort",
+        (Strategy::PreFilter, VecSource::GlobalSort) => "pre+globalsort",
+        (Strategy::InLtj, VecSource::Hnsw) => "inltj+hnsw",
+        (Strategy::InLtj, VecSource::LocalSort) => "inltj+localsort",
+        (Strategy::InLtj, VecSource::GlobalSort) => "inltj+globalsort",
+    }
 }

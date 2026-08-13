@@ -20,7 +20,7 @@ use frogql::model::graph::MemoryGraphStore;
 use frogql::model::value::Value;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
-use frogql::runtime::vsearch::{Strategy, VecCfg};
+use frogql::runtime::vsearch::{Strategy, VecCfg, VecSource};
 use frogql::store::lazy::LazyGraphStore;
 use frogql::vector::hnsw::{Hnsw, HnswParams};
 use frogql::vector::metric::Metric;
@@ -57,6 +57,18 @@ const USERS: usize = 12;
 const ITEMS: usize = 60;
 const TAGS: usize = 6;
 const DIM: usize = 4;
+
+/// Every (strategy, source) pair the engine can run.
+const ALL_ARMS: [(Strategy, VecSource); 8] = [
+    (Strategy::PostFilter, VecSource::Hnsw),
+    (Strategy::PostFilter, VecSource::LocalSort),
+    (Strategy::PostFilter, VecSource::GlobalSort),
+    (Strategy::PreFilter, VecSource::Hnsw),
+    (Strategy::PreFilter, VecSource::GlobalSort),
+    (Strategy::InLtj, VecSource::Hnsw),
+    (Strategy::InLtj, VecSource::LocalSort),
+    (Strategy::InLtj, VecSource::GlobalSort),
+];
 
 /// A small RDF-shaped graph with enough structure that the join has
 /// several variables and therefore several legal VEO levels:
@@ -185,10 +197,16 @@ fn run(db: &Path, q: &str, cfg: VecCfg) -> Vec<Vec<Value>> {
     }
 }
 
+/// An exact configuration. Both exact sources must agree with each
+/// other and with every strategy — that is the whole point of the file.
 fn exact(strategy: Strategy, level: usize) -> VecCfg {
+    cfg(strategy, VecSource::GlobalSort, level)
+}
+
+fn cfg(strategy: Strategy, source: VecSource, level: usize) -> VecCfg {
     VecCfg {
         strategy,
-        use_index: false,
+        source,
         level,
         ..VecCfg::default()
     }
@@ -247,18 +265,24 @@ fn the_three_strategies_agree_exactly_under_the_exact_cursor() {
             for rows_mode in [false, true] {
                 for q in queries(&vec_literal, k, rows_mode) {
                     let oracle = run(&db, &q, exact(Strategy::PostFilter, 0));
-                    for (strategy, level) in [
-                        (Strategy::PreFilter, 0),
-                        (Strategy::InLtj, 0),
-                        (Strategy::InLtj, 1),
-                        (Strategy::InLtj, 2),
-                        (Strategy::InLtj, 3),
+                    for (strategy, source, level) in [
+                        (Strategy::PostFilter, VecSource::LocalSort, 0),
+                        (Strategy::PreFilter, VecSource::GlobalSort, 0),
+                        (Strategy::PreFilter, VecSource::LocalSort, 0),
+                        (Strategy::InLtj, VecSource::GlobalSort, 0),
+                        (Strategy::InLtj, VecSource::GlobalSort, 1),
+                        (Strategy::InLtj, VecSource::GlobalSort, 2),
+                        (Strategy::InLtj, VecSource::GlobalSort, 3),
+                        (Strategy::InLtj, VecSource::LocalSort, 0),
+                        (Strategy::InLtj, VecSource::LocalSort, 1),
+                        (Strategy::InLtj, VecSource::LocalSort, 2),
+                        (Strategy::InLtj, VecSource::LocalSort, 3),
                     ] {
-                        let got = run(&db, &q, exact(strategy, level));
+                        let got = run(&db, &q, cfg(strategy, source, level));
                         assert_eq!(
                             bag(&got),
                             bag(&oracle),
-                            "\nstrategy {strategy:?} level {level}\nquery: {q}"
+                            "\nstrategy {strategy:?} source {source:?} level {level}\nquery: {q}"
                         );
                     }
                 }
@@ -294,27 +318,12 @@ fn every_arm_returns_at_most_k_bindings_in_distinct_var_mode() {
         let q = format!(
             "MATCH (u:User)-[:likes]->(i:Item) NEAREST {k} i.emb TO {vec_literal} RETURN i.idx"
         );
-        for (strategy, use_index) in [
-            (Strategy::PostFilter, false),
-            (Strategy::PostFilter, true),
-            (Strategy::PreFilter, false),
-            (Strategy::PreFilter, true),
-            (Strategy::InLtj, false),
-            (Strategy::InLtj, true),
-        ] {
-            let got = run(
-                &db,
-                &q,
-                VecCfg {
-                    strategy,
-                    use_index,
-                    ..VecCfg::default()
-                },
-            );
+        for (strategy, source) in ALL_ARMS {
+            let got = run(&db, &q, cfg(strategy, source, 0));
             let distinct: HashSet<String> = got.iter().map(|r| format!("{:?}", r[0])).collect();
             assert!(
                 distinct.len() <= k,
-                "{strategy:?} index={use_index} returned {} distinct bindings for k={k}",
+                "{strategy:?} {source:?} returned {} distinct bindings for k={k}",
                 distinct.len()
             );
         }
@@ -329,26 +338,11 @@ fn every_arm_returns_at_most_k_rows_in_rows_mode() {
         let q = format!(
             "MATCH (u:User)-[:likes]->(i:Item) NEAREST {k} ROWS i.emb TO {vec_literal} RETURN i.idx"
         );
-        for (strategy, use_index) in [
-            (Strategy::PostFilter, false),
-            (Strategy::PostFilter, true),
-            (Strategy::PreFilter, false),
-            (Strategy::PreFilter, true),
-            (Strategy::InLtj, false),
-            (Strategy::InLtj, true),
-        ] {
-            let got = run(
-                &db,
-                &q,
-                VecCfg {
-                    strategy,
-                    use_index,
-                    ..VecCfg::default()
-                },
-            );
+        for (strategy, source) in ALL_ARMS {
+            let got = run(&db, &q, cfg(strategy, source, 0));
             assert!(
                 got.len() <= k,
-                "{strategy:?} index={use_index} returned {} rows for k={k}",
+                "{strategy:?} {source:?} returned {} rows for k={k}",
                 got.len()
             );
         }
@@ -370,15 +364,7 @@ fn an_approximate_arm_never_invents_a_row() {
                 .collect();
 
             for strategy in [Strategy::PostFilter, Strategy::PreFilter, Strategy::InLtj] {
-                let got = run(
-                    &db,
-                    &q,
-                    VecCfg {
-                        strategy,
-                        use_index: true,
-                        ..VecCfg::default()
-                    },
-                );
+                let got = run(&db, &q, cfg(strategy, VecSource::Hnsw, 0));
                 for row in bag(&got) {
                     assert!(
                         universe.contains(&row),
@@ -406,7 +392,7 @@ fn the_in_ltj_arm_actually_ran_rather_than_falling_back() {
         .unwrap();
         let _ = rt.run_query(&query, 0);
         let stats = rt.last_vec_stats();
-        assert_eq!(stats.arm, "inltj+brute", "level {level}");
+        assert_eq!(stats.arm, "inltj+globalsort", "level {level}");
         assert!(
             stats.ltj_visits > 0,
             "level {level}: the level was never reached"
@@ -439,6 +425,59 @@ fn the_threshold_prunes_the_neighbour_walk() {
         pops[0],
         pops[1]
     );
+}
+
+#[test]
+fn local_and_global_sources_are_different_algorithms_not_just_labels() {
+    // Both are exact and must return the same answer — asserted above.
+    // What separates them is the work done to get there, and if that
+    // does not differ then the axis is decoration.
+    //
+    // `localsort` iterates only the candidates of the visit it is in, so
+    // its neighbour count can never exceed the candidates it hashed.
+    // `globalsort` re-scans a corpus-wide ranking on every visit, so it
+    // pops entries that are not candidates at all.
+    let db = build_db("source_split", 61);
+    let store = LazyGraphStore::open(&db).unwrap();
+    let rt = Runtime::new(&store);
+    let q = "MATCH (u:User)-[:likes]->(i:Item), (i)-[:tagged]->(g:Tag) \
+             NEAREST 3 i.emb TO [0.0, 0.0, 0.0, 0.0] RETURN i.idx";
+    let query = frogql::compile_query(q).unwrap();
+
+    rt.set_vec_cfg(cfg(Strategy::InLtj, VecSource::LocalSort, 1));
+    let _ = rt.run_query(&query, 0);
+    let local = rt.last_vec_stats();
+
+    rt.set_vec_cfg(cfg(Strategy::InLtj, VecSource::GlobalSort, 1));
+    let _ = rt.run_query(&query, 0);
+    let global = rt.last_vec_stats();
+
+    assert_eq!(local.arm, "inltj+localsort");
+    assert_eq!(global.arm, "inltj+globalsort");
+    assert!(
+        local.ltj_visits > 1,
+        "need several visits to tell them apart"
+    );
+    assert_eq!(
+        local.ltj_visits, global.ltj_visits,
+        "same search, same visits"
+    );
+
+    assert!(
+        local.nn_pops <= local.candidates_hashed,
+        "localsort popped {} for {} candidates — it must never look outside the level",
+        local.nn_pops,
+        local.candidates_hashed
+    );
+    assert!(
+        global.nn_pops > local.nn_pops,
+        "globalsort popped {} vs localsort {} — the corpus-wide re-scan is not showing up",
+        global.nn_pops,
+        local.nn_pops
+    );
+    // And the local source builds no shared stream at all.
+    assert_eq!(local.prefix_extends, 0);
+    assert!(global.prefix_extends > 0);
 }
 
 #[test]

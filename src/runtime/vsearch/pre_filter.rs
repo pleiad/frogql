@@ -23,7 +23,9 @@ use crate::runtime::result::IntermediateResult;
 use crate::syntax::query::{KMode, Query};
 use crate::vector::store::VectorSet;
 
-use super::{finish, NearestSpec, TopK, VecCfg, VecStats};
+use super::{
+    arm_label, effective_source, finish, NearestSpec, Strategy, TopK, VecCfg, VecSource, VecStats,
+};
 
 pub fn run<G: GraphAccess>(
     rt: &Runtime<'_, G>,
@@ -40,14 +42,17 @@ pub fn run<G: GraphAccess>(
     // up front avoids discovering it halfway through a neighbour walk.
     rt.run_pinned(&pattern, &[], 0)?;
 
-    stats.arm = if cfg.use_index && set.has_index() {
-        "pre+index"
-    } else {
-        "pre+brute"
+    // Pre-filter has no per-visit candidate set — its candidates are the
+    // whole corpus — so `LocalSort` has nothing local to rank and is the
+    // same walk as `GlobalSort`. Report what ran, not what was asked.
+    let source = match effective_source(cfg.source, set) {
+        VecSource::LocalSort => VecSource::GlobalSort,
+        other => other,
     };
+    stats.arm = arm_label(Strategy::PreFilter, source);
 
     let mut sink = TopK::new(spec.k, spec.mode);
-    let mut cursor = super::cursor(set, spec, cfg);
+    let mut cursor = set.cursor(&spec.q, source == VecSource::Hnsw);
 
     // In DistinctVar mode a candidate only has to *have* a match, so one
     // row is enough to decide. In Rows mode every row is a result.

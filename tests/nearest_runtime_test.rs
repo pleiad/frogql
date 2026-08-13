@@ -15,7 +15,7 @@ use frogql::model::graph_access::GraphAccess;
 use frogql::model::value::Value;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
-use frogql::runtime::vsearch::{Strategy, VecCfg};
+use frogql::runtime::vsearch::{Strategy, VecCfg, VecSource};
 use frogql::store::lazy::LazyGraphStore;
 use frogql::vector::hnsw::{Hnsw, HnswParams};
 use frogql::vector::metric::Metric;
@@ -115,12 +115,12 @@ fn build_db(name: &str, with_index: bool) -> PathBuf {
 
 /// Run `q` under `strategy`, returning the projected `idx` column.
 /// Items are named `item<idx>`, so an index doubles as an identity.
-fn idxs(db: &Path, q: &str, strategy: Strategy, use_index: bool) -> Vec<i64> {
+fn idxs(db: &Path, q: &str, strategy: Strategy, source: VecSource) -> Vec<i64> {
     let store = LazyGraphStore::open(db).unwrap();
     let rt = Runtime::new(&store);
     rt.set_vec_cfg(VecCfg {
         strategy,
-        use_index,
+        source,
         ..VecCfg::default()
     });
     let query = frogql::compile_query(q).unwrap_or_else(|e| panic!("compile `{q}`: {e}"));
@@ -136,15 +136,15 @@ fn idxs(db: &Path, q: &str, strategy: Strategy, use_index: bool) -> Vec<i64> {
     }
 }
 
-/// Every (strategy, index) combination that must agree exactly.
-fn exact_arms() -> Vec<(Strategy, bool)> {
+/// Every (strategy, source) combination that must agree exactly. HNSW
+/// is excluded: its recall is a measurement, not an invariant.
+fn exact_arms() -> Vec<(Strategy, VecSource)> {
     vec![
-        (Strategy::PostFilter, false),
-        (Strategy::PostFilter, true),
-        (Strategy::PreFilter, false),
-        (Strategy::PreFilter, true),
-        (Strategy::InLtj, false),
-        (Strategy::InLtj, true),
+        (Strategy::PostFilter, VecSource::LocalSort),
+        (Strategy::PostFilter, VecSource::GlobalSort),
+        (Strategy::PreFilter, VecSource::GlobalSort),
+        (Strategy::InLtj, VecSource::LocalSort),
+        (Strategy::InLtj, VecSource::GlobalSort),
     ]
 }
 
@@ -156,8 +156,8 @@ fn ranks_the_matching_items_by_distance() {
     let q = "MATCH (u:User)-[:likes]->(i:Item) WHERE u.idx = 0 \
              NEAREST 2 i.emb TO [3.5, 0.0] \
              RETURN i.idx";
-    for (s, idx) in exact_arms() {
-        assert_eq!(idxs(&db, q, s, idx), vec![4, 0], "arm {:?} index={idx}", s);
+    for (s, src) in exact_arms() {
+        assert_eq!(idxs(&db, q, s, src), vec![4, 0], "arm {s:?} source {src:?}");
     }
 }
 
@@ -167,8 +167,8 @@ fn k_truncates_to_the_nearest() {
     let q = "MATCH (u:User)-[:likes]->(i:Item) WHERE u.idx = 0 \
              NEAREST 1 i.emb TO [3.5, 0.0] \
              RETURN i.idx";
-    for (s, idx) in exact_arms() {
-        assert_eq!(idxs(&db, q, s, idx), vec![4], "arm {s:?} index={idx}");
+    for (s, src) in exact_arms() {
+        assert_eq!(idxs(&db, q, s, src), vec![4], "arm {s:?} source {src:?}");
     }
 }
 
@@ -179,11 +179,11 @@ fn the_search_is_restricted_to_pattern_matches() {
     let q = "MATCH (u:User)-[:likes]->(i:Item) WHERE u.idx = 0 \
              NEAREST 1 i.emb TO [1.0, 0.0] \
              RETURN i.idx";
-    for (s, idx) in exact_arms() {
+    for (s, src) in exact_arms() {
         assert_eq!(
-            idxs(&db, q, s, idx),
+            idxs(&db, q, s, src),
             vec![0],
-            "arm {s:?} index={idx}: the answer must satisfy the pattern"
+            "arm {s:?} source {src:?}: the answer must satisfy the pattern"
         );
     }
 }
@@ -194,8 +194,8 @@ fn a_k_larger_than_the_match_returns_everything_matching() {
     let q = "MATCH (u:User)-[:likes]->(i:Item) WHERE u.idx = 0 \
              NEAREST 99 i.emb TO [0.0, 0.0] \
              RETURN i.idx";
-    for (s, idx) in exact_arms() {
-        assert_eq!(idxs(&db, q, s, idx), vec![0, 4]);
+    for (s, src) in exact_arms() {
+        assert_eq!(idxs(&db, q, s, src), vec![0, 4]);
     }
 }
 
@@ -206,8 +206,8 @@ fn works_over_a_two_hop_join() {
     let q = "MATCH (a:User)-[:follows]->(b:User), (b)-[:likes]->(i:Item) WHERE a.idx = 0 \
              NEAREST 2 i.emb TO [4.6, 0.0] \
              RETURN i.idx";
-    for (s, idx) in exact_arms() {
-        assert_eq!(idxs(&db, q, s, idx), vec![5, 1], "arm {s:?} index={idx}");
+    for (s, src) in exact_arms() {
+        assert_eq!(idxs(&db, q, s, src), vec![5, 1], "arm {s:?} source {src:?}");
     }
 }
 
@@ -283,9 +283,9 @@ fn rows_mode_counts_rows_not_bindings() {
     let q = "MATCH (u:User)-[:likes]->(i:Item) \
              NEAREST 3 ROWS i.emb TO [0.0, 0.0] \
              RETURN i.idx";
-    for (s, idx) in exact_arms() {
-        let got = idxs(&db, q, s, idx);
-        assert_eq!(got.len(), 3, "arm {s:?} index={idx}: {got:?}");
+    for (s, src) in exact_arms() {
+        let got = idxs(&db, q, s, src);
+        assert_eq!(got.len(), 3, "arm {s:?} source {src:?}: {got:?}");
         assert_eq!(got[0], 0);
     }
 }
@@ -299,11 +299,11 @@ fn distinct_var_mode_keeps_all_rows_of_an_accepted_binding() {
     let q = "MATCH (u:User)-[:likes]->(i:Item) \
              NEAREST 1 i.emb TO [0.0, 0.0] \
              RETURN i.idx";
-    for (s, idx) in exact_arms() {
-        let got = idxs(&db, q, s, idx);
+    for (s, src) in exact_arms() {
+        let got = idxs(&db, q, s, src);
         assert!(
             got.iter().all(|n| *n == 0),
-            "arm {s:?} index={idx}: {got:?}"
+            "arm {s:?} source {src:?}: {got:?}"
         );
         assert_eq!(got.len(), 1, "item0 has exactly one liker");
     }
@@ -323,22 +323,22 @@ fn a_missing_sidecar_yields_no_rows_rather_than_the_unfiltered_match() {
         .unwrap();
 
     let q = "MATCH (u:User)-[:likes]->(i:Item) NEAREST 2 i.emb TO [0.0, 0.0] RETURN i.idx";
-    assert!(idxs(&db, q, Strategy::PostFilter, true).is_empty());
-    assert!(idxs(&db, q, Strategy::PreFilter, true).is_empty());
+    assert!(idxs(&db, q, Strategy::PostFilter, VecSource::Hnsw).is_empty());
+    assert!(idxs(&db, q, Strategy::PreFilter, VecSource::Hnsw).is_empty());
 }
 
 #[test]
 fn a_dimension_mismatch_yields_no_rows() {
     let db = build_db("dim_mismatch", true);
     let q = "MATCH (u:User)-[:likes]->(i:Item) NEAREST 2 i.emb TO [0.0, 0.0, 0.0] RETURN i.idx";
-    assert!(idxs(&db, q, Strategy::PostFilter, true).is_empty());
+    assert!(idxs(&db, q, Strategy::PostFilter, VecSource::Hnsw).is_empty());
 }
 
 #[test]
 fn nearest_zero_yields_no_rows() {
     let db = build_db("k_zero", true);
     let q = "MATCH (u:User)-[:likes]->(i:Item) NEAREST 0 i.emb TO [0.0, 0.0] RETURN i.idx";
-    assert!(idxs(&db, q, Strategy::PostFilter, true).is_empty());
+    assert!(idxs(&db, q, Strategy::PostFilter, VecSource::Hnsw).is_empty());
 }
 
 #[test]
@@ -351,17 +351,26 @@ fn the_executed_arm_is_reported() {
     )
     .unwrap();
 
-    for (strategy, use_index, expected) in [
-        (Strategy::PostFilter, true, "post+index"),
-        (Strategy::PostFilter, false, "post+brute"),
-        (Strategy::PreFilter, true, "pre+index"),
-        (Strategy::PreFilter, false, "pre+brute"),
-        (Strategy::InLtj, true, "inltj+index"),
-        (Strategy::InLtj, false, "inltj+brute"),
+    for (strategy, source, expected) in [
+        (Strategy::PostFilter, VecSource::Hnsw, "post+hnsw"),
+        (Strategy::PostFilter, VecSource::LocalSort, "post+localsort"),
+        (
+            Strategy::PostFilter,
+            VecSource::GlobalSort,
+            "post+globalsort",
+        ),
+        (Strategy::PreFilter, VecSource::Hnsw, "pre+hnsw"),
+        (Strategy::PreFilter, VecSource::GlobalSort, "pre+globalsort"),
+        // Pre-filter has no per-visit set, so a local request is served
+        // by the global walk and must say so.
+        (Strategy::PreFilter, VecSource::LocalSort, "pre+globalsort"),
+        (Strategy::InLtj, VecSource::Hnsw, "inltj+hnsw"),
+        (Strategy::InLtj, VecSource::LocalSort, "inltj+localsort"),
+        (Strategy::InLtj, VecSource::GlobalSort, "inltj+globalsort"),
     ] {
         rt.set_vec_cfg(VecCfg {
             strategy,
-            use_index,
+            source,
             ..VecCfg::default()
         });
         let _ = rt.run_query(&query, 0);

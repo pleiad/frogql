@@ -103,8 +103,18 @@ impl ResultTuple {
 /// a field held across the recursive call is an aliasing error, and a
 /// `RefCell` would turn that compile error into a runtime panic.
 pub struct VecCtx<'v> {
-    /// Neighbours, nearest first, shared across every visit to the level.
+    /// Neighbours, nearest first, shared across every visit to the
+    /// level. Unused when `local` is set — a local ranking has nothing
+    /// to share between visits, since each visit ranks its own set.
     pub stream: NnStream<'v>,
+    /// Rank only the current visit's candidates instead of walking a
+    /// corpus-wide stream. This is the axis that separates the two
+    /// exact sources: `false` re-scans a global ranking on every visit,
+    /// `true` never looks at a node outside the level.
+    pub local: bool,
+    /// The attribute and query vector, needed to rank locally.
+    pub set: &'v crate::vector::store::VectorSet,
+    pub q: &'v [f32],
     /// The running top-k threshold, updated as matches are accepted.
     pub cut: DistThreshold,
     /// Slack on the threshold: an approximate cursor's order is only
@@ -121,9 +131,19 @@ pub struct VecCtx<'v> {
 }
 
 impl<'v> VecCtx<'v> {
-    pub fn new(stream: NnStream<'v>, cut: DistThreshold, tau_eps: f32) -> VecCtx<'v> {
+    pub fn new(
+        stream: NnStream<'v>,
+        cut: DistThreshold,
+        tau_eps: f32,
+        local: bool,
+        set: &'v crate::vector::store::VectorSet,
+        q: &'v [f32],
+    ) -> VecCtx<'v> {
         VecCtx {
             stream,
+            local,
+            set,
+            q,
             cut,
             tau_eps,
             cur_id: 0,
@@ -412,12 +432,35 @@ impl<'a> LtjAlgorithm<'a> {
                     return true;
                 }
                 vc.candidates_hashed += candidates.len() as u64;
-                let hits: std::collections::HashSet<u32> = candidates.into_iter().collect();
+
+                // Two ways to visit the candidates nearest-first:
+                //
+                // - local: rank just this visit's set. Every element is
+                //   a candidate, so no membership test is needed and
+                //   nothing outside the level is ever touched.
+                // - global: walk the corpus-wide stream from the top and
+                //   test membership. Costs however deep the threshold
+                //   lets the scan run, which has nothing to do with how
+                //   many candidates this visit has.
+                let ranked: Option<Vec<(u32, f32)>> = if vc.local {
+                    Some(vc.set.rank_candidates(vc.q, &candidates))
+                } else {
+                    None
+                };
+                let hits: Option<std::collections::HashSet<u32>> = if vc.local {
+                    None
+                } else {
+                    Some(candidates.into_iter().collect())
+                };
 
                 let mut rank = 0usize;
                 loop {
                     let tau = vc.cut.get();
-                    let Some((id, dist)) = vc.stream.at(rank) else {
+                    let next = match &ranked {
+                        Some(v) => v.get(rank).copied(),
+                        None => vc.stream.at(rank),
+                    };
+                    let Some((id, dist)) = next else {
                         break;
                     };
                     rank += 1;
@@ -425,8 +468,10 @@ impl<'a> LtjAlgorithm<'a> {
                     if tau.is_finite() && dist > tau * (1.0 + vc.tau_eps) {
                         break;
                     }
-                    if !hits.contains(&id) {
-                        continue;
+                    if let Some(h) = &hits {
+                        if !h.contains(&id) {
+                            continue;
+                        }
                     }
 
                     tuple[j] = (var_id, id);

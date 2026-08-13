@@ -54,6 +54,17 @@ impl BruteForceCursor {
         }
     }
 
+    /// Wrap an already-sorted list. Used where the caller ranked the
+    /// entries itself and would otherwise pay for a second sort.
+    pub fn from_sorted(sorted: Vec<(Id, f32)>) -> Self {
+        let scanned = sorted.len() as u64;
+        BruteForceCursor {
+            sorted,
+            pos: 0,
+            scanned,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.sorted.len()
     }

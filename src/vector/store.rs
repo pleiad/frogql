@@ -219,12 +219,28 @@ impl VectorSet {
         if self.validate_query(q).is_err() {
             return Box::new(EmptyCursor);
         }
+        Box::new(BruteForceCursor::from_sorted(
+            self.rank_candidates(q, candidates),
+        ))
+    }
+
+    /// `candidates` ranked nearest first, as a plain vector.
+    ///
+    /// The in-LTJ strategy's local source calls this once per visit to
+    /// the search level and iterates the result directly, so it must not
+    /// pay for boxing a cursor each time. Candidates with no vector are
+    /// dropped: they cannot be among the nearest to anything.
+    pub fn rank_candidates(&self, q: &[f32], candidates: &[Id]) -> Vec<(Id, f32)> {
+        if self.validate_query(q).is_err() {
+            return Vec::new();
+        }
         let q_norm = self.query_norm(q);
-        let pairs: Vec<(Id, f32)> = candidates
+        let mut pairs: Vec<(Id, f32)> = candidates
             .iter()
             .filter_map(|&id| self.row_index(id).map(|i| (id, self.dist_at(q, q_norm, i))))
             .collect();
-        Box::new(BruteForceCursor::from_unsorted(pairs))
+        pairs.sort_by(|a, b| crate::vector::metric::cmp_dist(a.1, b.1).then_with(|| a.0.cmp(&b.0)));
+        pairs
     }
 
     /// Norm of a query vector under this attribute's metric. Zero when
