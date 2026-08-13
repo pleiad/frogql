@@ -59,7 +59,7 @@ echo "  --- gqlite/$BACKEND ic$IC ---" >&2
 # disagree. Sibling of the CSV; matches the Python runners' shape.
 ROWS_JSONL="${OUT_CSV%.csv}.rows.jsonl"
 rm -f "$ROWS_JSONL"  # fresh per run
-GQLITE_BENCH_ROWS_JSONL="$ROWS_JSONL" ./target/release/ldbc_bench "$GDB" \
+FROGQL_BENCH_ROWS_JSONL="$ROWS_JSONL" ./target/release/ldbc_bench "$GDB" \
     --ic "$IC" --backend "$BACKEND" \
     --iters "$ITERS" --warmup "$WARMUP" \
     > "$OUT_CSV"

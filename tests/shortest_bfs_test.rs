@@ -3,7 +3,7 @@
 //! The fast-path (`Runtime::try_shortest_bfs`) must produce results
 //! identical to the generic walk-enumeration selection it shortcuts. These
 //! tests pin the known answers and differentially compare the two paths by
-//! toggling `GQLITE_DISABLE_SHORTEST_BFS`.
+//! toggling `FROGQL_DISABLE_SHORTEST_BFS`.
 
 use frogql::compile_query;
 use frogql::model::graph::MemoryGraphStore;
@@ -59,16 +59,16 @@ fn g_directed() -> MemoryGraphStore {
     MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-/// Serializes the `GQLITE_DISABLE_SHORTEST_BFS` toggle: the var is
+/// Serializes the `FROGQL_DISABLE_SHORTEST_BFS` toggle: the var is
 /// process-global, so concurrent tests would otherwise clobber each other.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn run_proj(g: &MemoryGraphStore, q: &str, bfs: bool) -> Vec<Vec<Value>> {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if bfs {
-        std::env::remove_var("GQLITE_DISABLE_SHORTEST_BFS");
+        std::env::remove_var("FROGQL_DISABLE_SHORTEST_BFS");
     } else {
-        std::env::set_var("GQLITE_DISABLE_SHORTEST_BFS", "1");
+        std::env::set_var("FROGQL_DISABLE_SHORTEST_BFS", "1");
     }
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
@@ -76,7 +76,7 @@ fn run_proj(g: &MemoryGraphStore, q: &str, bfs: bool) -> Vec<Vec<Value>> {
         QueryResult::Projected(rs) => rs,
         _ => panic!("expected projected for {q:?}"),
     };
-    std::env::remove_var("GQLITE_DISABLE_SHORTEST_BFS");
+    std::env::remove_var("FROGQL_DISABLE_SHORTEST_BFS");
     out
 }
 

@@ -3,7 +3,7 @@
 //! out per physical edge. Counts are pinned by hand (ISO ground truth),
 //! NOT compared to the scan fallback — the fallback is still non-ISO for
 //! the cases LTJ doesn't cover (mixed direction, repetition) and aligning
-//! it is separate follow-up work. `GQLITE_DISABLE_ANYDIR_LTJ=1` forces the
+//! it is separate follow-up work. `FROGQL_DISABLE_ANYDIR_LTJ=1` forces the
 //! fallback; here we exercise the LTJ path (default on).
 
 use frogql::compile_query;

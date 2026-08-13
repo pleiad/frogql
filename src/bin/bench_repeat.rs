@@ -4,7 +4,7 @@
 // numbers reproduce across runs and machines), then runs
 // `(a)-[x]->{1,5}(b)` under both repetition implementations:
 //   - legacy   (default): per-length walk in run_repetition_pattern
-//   - incremental (env GQLITE_REPEAT_INCREMENTAL=1): single-pass over [lb,ub]
+//   - incremental (env FROGQL_REPEAT_INCREMENTAL=1): single-pass over [lb,ub]
 //
 // The bench dispatches by setting the env var inside the same process before
 // each measured run, so results come from one binary invocation.
@@ -130,9 +130,9 @@ fn build_graph_json(nodes: usize, avg_deg: usize) -> String {
 
 fn run_one<G: GraphAccess>(graph: &G, query: &str, incremental: bool) -> (u128, usize) {
     if incremental {
-        env::set_var("GQLITE_REPEAT_INCREMENTAL", "1");
+        env::set_var("FROGQL_REPEAT_INCREMENTAL", "1");
     } else {
-        env::remove_var("GQLITE_REPEAT_INCREMENTAL");
+        env::remove_var("FROGQL_REPEAT_INCREMENTAL");
     }
     let pattern = compile(query).expect("compile failed");
     let rt = Runtime::new(graph);

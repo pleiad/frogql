@@ -4,7 +4,7 @@ Status: **IMPLEMENTED** (Approach B — stored mirrored index), after the team
 adopted ISO bag semantics (issue #71). The unblocking prerequisite — the LTJ
 base-case per-eid fan-out — landed first; the mirrored index then produced
 ISO-correct multiplicity and verifies against a hand-computed ground-truth
-oracle (`tests/anydir_iso_test.rs`). Behind `GQLITE_DISABLE_ANYDIR_LTJ`.
+oracle (`tests/anydir_iso_test.rs`). Behind `FROGQL_DISABLE_ANYDIR_LTJ`.
 This note is retained as the rationale record; the *Multiplicity* section
 below documents the earlier reverted prototype and why the fan-out fix was
 the missing piece.
@@ -89,7 +89,7 @@ Options:
    needs the reverse tuples present. More invasive to the hot path than
    option 1.
 
-Recommendation: **option 1, lazily built, behind `GQLITE_DISABLE_ANYDIR_LTJ`.**
+Recommendation: **option 1, lazily built, behind `FROGQL_DISABLE_ANYDIR_LTJ`.**
 
 ## Interfaces this touches
 
@@ -188,7 +188,7 @@ fallback), so the oracle is free: a **differential suite** asserting
 merged-iterator LTJ ≡ current fallback on **row multisets** (not just
 counts), over graphs with reciprocal edges, self-loops, and mixed
 directed/undirected edges. Mirror the `shortest_bfs_test` pattern with a
-`GQLITE_DISABLE_ANYDIR_LTJ` toggle serialized by a mutex. Plus an LDBC /
+`FROGQL_DISABLE_ANYDIR_LTJ` toggle serialized by a mutex. Plus an LDBC /
 soc-LiveJournal1 latency run to justify the index-size increment.
 
 ## Relationship to issue #57

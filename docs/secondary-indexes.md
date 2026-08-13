@@ -15,15 +15,15 @@ over `bench/data/ldbc-sf0.1.gdb`, 15 params × 3 iters, lazy backend,
 
 | | Median | Range |
 |---|---|---|
-| Without secondary index (`GQLITE_DISABLE_INDEX_FOLD=1`) | 2417 ms | 2317–2582 ms |
+| Without secondary index (`FROGQL_DISABLE_INDEX_FOLD=1`) | 2417 ms | 2317–2582 ms |
 | With secondary index (default) | **1377 ms** | 1363–1392 ms |
 | **Speedup** | **1.76×** | |
 
 IC2 itself uses a top-level `Comment | Post` union that falls back to
 hash-join, but each branch independently decomposes into LTJ-eligible
 triples and benefits from the start-node pin. Diagnostic env vars:
-`GQLITE_DEBUG_INDEXES=1` prints the auto-built indexes and pinned
-variables; `GQLITE_DISABLE_INDEX_FOLD=1` reverts to the pre-index plan
+`FROGQL_DEBUG_INDEXES=1` prints the auto-built indexes and pinned
+variables; `FROGQL_DISABLE_INDEX_FOLD=1` reverts to the pre-index plan
 for A/B benchmarking.
 
 ## Declared indexes (`CREATE INDEX` DDL)

@@ -477,8 +477,8 @@ table). Same SF0.1 dataset, same 15 IC2 param rows, 5 measured iters
 | Mode | Env / args | Median (ms) | Peak RSS over baseline | × baseline |
 |---|---|---|---|---|
 | `lazy-baseline` | (none) | **0.23** | 432 MiB | 1× |
-| `lazy-no-auto-indexes` | `GQLITE_DISABLE_AUTO_INDEXES=1` | **182.69** | **315 MiB** (-117) | 794× slower |
-| `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | **186.15** | 431 MiB (-1) | 810× slower |
+| `lazy-no-auto-indexes` | `FROGQL_DISABLE_AUTO_INDEXES=1` | **182.69** | **315 MiB** (-117) | 794× slower |
+| `lazy-no-fold` | `FROGQL_DISABLE_INDEX_FOLD=1` | **186.15** | 431 MiB (-1) | 810× slower |
 | `disk-baseline` | `--backend disk` | **189.94** | **293 MiB** (-139) | 826× slower |
 
 The RSS deltas tell their own story:
@@ -505,11 +505,11 @@ slows the engine but doesn't change the answer set.
 
 ### What each disabled flag costs
 
-- **`GQLITE_DISABLE_AUTO_INDEXES=1`**: skips `LazyGraphStore::build_auto_indexes_bulk()`
+- **`FROGQL_DISABLE_AUTO_INDEXES=1`**: skips `LazyGraphStore::build_auto_indexes_bulk()`
   at open. Without secondary indexes on `(label, prop)`, IC2's start-
   node lookup `MATCH (p:Person {id: $personId})` degrades from O(1)
   hash lookup to a scan over the candidate-list backing store.
-- **`GQLITE_DISABLE_INDEX_FOLD=1`**: keeps the indexes built, but
+- **`FROGQL_DISABLE_INDEX_FOLD=1`**: keeps the indexes built, but
   disables the LTJ pre-pass that resolves the `Eq` predicate to a
   single NodeId pre-loop and drops `p` from the VEO. Without folding,
   the indexed lookup happens once per LTJ leapfrog round-trip instead

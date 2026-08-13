@@ -7,7 +7,7 @@
 # representative IC subset at increasing scale factors and records,
 # per (SF, backend):
 #   - per-iter query latency        (ldbc_bench CSV)
-#   - open-time phase breakdown     (GQLITE_TRACE_OPEN=1 stderr)
+#   - open-time phase breakdown     (FROGQL_TRACE_OPEN=1 stderr)
 #   - peak process RSS              (memrun process-group sampler;
 #                                    Linux only — reports -1 on macOS)
 #
@@ -28,7 +28,7 @@
 # Output: bench/scaling/results/<timestamp>/
 #   sf<SF>.<backend>.csv          per-iter latency rows (ldbc_bench schema)
 #   sf<SF>.<backend>.stderr.log   ldbc_bench stderr incl. open trace
-#   sf<SF>.<backend>.open.txt     extracted GQLITE_TRACE_OPEN phase lines
+#   sf<SF>.<backend>.open.txt     extracted FROGQL_TRACE_OPEN phase lines
 #   sf<SF>.<backend>.mem.txt      memrun peak-RSS summary
 #   run_info.txt                  host, commit, args, machine specs
 #
@@ -136,10 +136,10 @@ for sf in "${SF_LIST[@]}"; do
         out_csv="$OUT_DIR/${base}.csv"
         stderr_log="$OUT_DIR/${base}.stderr.log"
         mem_out="$OUT_DIR/${base}.mem.txt"
-        # GQLITE_TRACE_OPEN gives the per-phase open breakdown on stderr;
+        # FROGQL_TRACE_OPEN gives the per-phase open breakdown on stderr;
         # rows JSONL enables row-equivalence diffing across SFs/backends.
-        if ! GQLITE_TRACE_OPEN=1 \
-             GQLITE_BENCH_ROWS_JSONL="$OUT_DIR/${base}.rows.jsonl" \
+        if ! FROGQL_TRACE_OPEN=1 \
+             FROGQL_BENCH_ROWS_JSONL="$OUT_DIR/${base}.rows.jsonl" \
              "${MEMRUN[@]}" --peak-out "$mem_out" --label "$base" -- \
              ./target/release/ldbc_bench "$GDB" \
                  --ic "$ICS_ARG" --backend "$be" \

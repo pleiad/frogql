@@ -460,7 +460,7 @@ engine.rs          Integration: run_join() and run_concat_pattern() call
    stores every edge in both senses so a single forward triple matches
    either orientation in one LTJ pass. Verified against a hand-computed ISO
    oracle (`tests/{iso_multiplicity,anydir_iso}_test.rs`), behind
-   `GQLITE_DISABLE_ANYDIR_LTJ`. Bounded unused-edge any-direction
+   `FROGQL_DISABLE_ANYDIR_LTJ`. Bounded unused-edge any-direction
    *repetitions* (`(a)-[]-{1,3}(b)`) also reach the mirror: `unroll_repeat`
    unrolls them into flat any-direction arms. Full rationale in
    `anydir-ltj-plan.md`. All any-direction paths (mixed LTJ, seeded

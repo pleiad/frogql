@@ -179,7 +179,7 @@ impl LazyGraphStore {
     }
 
     pub fn open_with_cache(db_path: &Path, cache_size: usize) -> io::Result<Self> {
-        let trace = std::env::var("GQLITE_TRACE_OPEN").is_ok();
+        let trace = std::env::var("FROGQL_TRACE_OPEN").is_ok();
         let t0 = std::time::Instant::now();
         let mut pager = Pager::open_with_cache(db_path, cache_size)?;
         if trace {
@@ -276,11 +276,11 @@ impl LazyGraphStore {
 
         // Auto-infer secondary indexes. Bulk path: walk node records once,
         // decode each exactly once, and build hash+btree per (label, prop)
-        // in a single pass. Skip with GQLITE_DISABLE_AUTO_INDEXES=1.
+        // in a single pass. Skip with FROGQL_DISABLE_AUTO_INDEXES=1.
         let t4 = std::time::Instant::now();
-        if std::env::var("GQLITE_DISABLE_AUTO_INDEXES").is_err() {
+        if std::env::var("FROGQL_DISABLE_AUTO_INDEXES").is_err() {
             let idx = store.build_auto_indexes_bulk();
-            if std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
+            if std::env::var("FROGQL_DEBUG_INDEXES").is_ok() {
                 eprintln!("auto-built {} secondary indexes:", idx.list().len());
                 for spec in idx.list() {
                     eprintln!(

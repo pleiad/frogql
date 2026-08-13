@@ -34,7 +34,7 @@
 #                                     # (all opts on), no-fold, no-unroll,
 #                                     # no-pin, no-bfs — one optimization
 #                                     # disabled per mode via its
-#                                     # GQLITE_DISABLE_* env var.
+#                                     # FROGQL_DISABLE_* env var.
 #                                     # The fold pass turns
 #                                     # `MATCH (n {id:X})` into a single
 #                                     # NodeId pre-bind via the secondary
@@ -216,7 +216,7 @@ echo ""
 # ---- gqlite ablation modes -----------------------------------------
 #
 # When --ablate is set, gqlite runs in two modes: baseline (all opts
-# on) and no-fold (GQLITE_DISABLE_INDEX_FOLD=1). The fold pass turns
+# on) and no-fold (FROGQL_DISABLE_INDEX_FOLD=1). The fold pass turns
 # `MATCH (n {id:X})` into a single-NodeId pre-bind via the secondary
 # index; without it the variable enters the LTJ join normally and
 # gets scanned. This is the surgical "did the LTJ optimization buy
@@ -234,15 +234,15 @@ echo ""
 # Beyond no-fold, three more single-knob modes attribute the headline
 # per-IC wins to their optimization (reviewer ask: "which pass buys
 # what"):
-#   no-unroll  GQLITE_DISABLE_REPEAT_UNROLL — bounded {n,m} repetitions
+#   no-unroll  FROGQL_DISABLE_REPEAT_UNROLL — bounded {n,m} repetitions
 #              stay on the hash-join repetition path instead of being
 #              unrolled into LTJ-compatible unions.
-#   no-pin     GQLITE_DISABLE_EXISTS_PIN + GQLITE_DISABLE_VALUE_SUBQUERY_PIN
+#   no-pin     FROGQL_DISABLE_EXISTS_PIN + FROGQL_DISABLE_VALUE_SUBQUERY_PIN
 #              — correlated EXISTS / VALUE subqueries materialize the
 #              body globally instead of probing per outer row (IC4/IC7).
-#   no-bfs     GQLITE_DISABLE_SHORTEST_BFS — single-edge SHORTEST falls
+#   no-bfs     FROGQL_DISABLE_SHORTEST_BFS — single-edge SHORTEST falls
 #              back to the generic length-ordered heap (IC1/IC13).
-#   compact    GQLITE_LTJ_COMPACT — the TripleIndex is built as compact
+#   compact    FROGQL_LTJ_COMPACT — the TripleIndex is built as compact
 #              CLTJ (six LOUDS succinct tries, issue #66) instead of six
 #              sorted arrays: ~2.9× smaller index for 1.4–2.1× IC
 #              latency. Not a knock-out ablation like the no-* modes —
@@ -263,11 +263,11 @@ declare -A ABLATION_LABELS=(
 )
 declare -A ABLATION_ENV=(
     [baseline]=""
-    [no-fold]="GQLITE_DISABLE_INDEX_FOLD=1"
-    [no-unroll]="GQLITE_DISABLE_REPEAT_UNROLL=1"
-    [no-pin]="GQLITE_DISABLE_EXISTS_PIN=1 GQLITE_DISABLE_VALUE_SUBQUERY_PIN=1"
-    [no-bfs]="GQLITE_DISABLE_SHORTEST_BFS=1"
-    [compact]="GQLITE_LTJ_COMPACT=1"
+    [no-fold]="FROGQL_DISABLE_INDEX_FOLD=1"
+    [no-unroll]="FROGQL_DISABLE_REPEAT_UNROLL=1"
+    [no-pin]="FROGQL_DISABLE_EXISTS_PIN=1 FROGQL_DISABLE_VALUE_SUBQUERY_PIN=1"
+    [no-bfs]="FROGQL_DISABLE_SHORTEST_BFS=1"
+    [compact]="FROGQL_LTJ_COMPACT=1"
     [disk]=""
 )
 declare -A ABLATION_ARGS=(
@@ -452,7 +452,7 @@ for sys in "${SYSTEMS[@]}"; do
     # --- Per-IC bench phase ---
     # Ablation special-case: when --ablate is set AND we're running
     # gqlite, run the harness once per ablation mode (different
-    # GQLITE_DISABLE_* env vars) and rewrite the `backend` CSV column
+    # FROGQL_DISABLE_* env vars) and rewrite the `backend` CSV column
     # to distinguish the modes. ldbc_bench hard-codes "lazy" as the
     # backend label; awk does the rewrite without touching the
     # binary.
@@ -474,7 +474,7 @@ for sys in "${SYSTEMS[@]}"; do
                 mem_out="$OUT_DIR/${sys}-${mode}.ic${ic}.mem.txt"
                 echo "    [ablation: $label] env: ${env_setup:-(none)} args: ${extra_args:-(none)}"
                 # env_setup goes BEFORE memrun so the child (the actual
-                # runner) inherits the GQLITE_DISABLE_* var across exec.
+                # runner) inherits the FROGQL_DISABLE_* var across exec.
                 if ! eval "$env_setup ${MEMRUN[*]} --peak-out $mem_out --label ${sys}-${mode}-ic${ic} -- $runner_cmd $out_csv --ic $ic --iters $ITERS --warmup $WARMUP $extra_args" \
                         2>"$stderr_log"; then
                     mem_status=$(awk -F= '/^status=/{print $2}' "$mem_out" 2>/dev/null)

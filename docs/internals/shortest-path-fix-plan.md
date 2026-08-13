@@ -9,7 +9,7 @@
 > Verificado contra `bench/data/ldbc-sf0.1.gdb` (backend lazy):
 > **IC1 ~75 s→~33 ms**, **IC13 ~27 s→~20 ms** mediana por fila; **IC14**
 > deja de hacer OOM (~0.7 s mediana, resultados reales). Suite diferencial
-> BFS≡genérico en `tests/shortest_bfs_test.rs`; `GQLITE_DISABLE_SHORTEST_BFS=1`
+> BFS≡genérico en `tests/shortest_bfs_test.rs`; `FROGQL_DISABLE_SHORTEST_BFS=1`
 > lo apaga. Pendiente futuro: nivel 3 (producto NFA×grafo) para uniones de
 > label, modos restrictivos y `SHORTEST k>1`. Open items abajo (IC12, IC10)
 > siguen vigentes. El placeholder `$`→`{}` de IC1/IC14 se normalizó en sus
@@ -130,8 +130,8 @@ Para los IC alcanza con (1) + (2).
 ### Tests de corrección (rápidos, sin dataset)
 `tests/path_prefix_test.rs` ya cubre shortest sobre grafos fixture chicos.
 Agregar casos que comparen el resultado del fast-path BFS contra el fallback
-de walks (`GQLITE_...` flag para forzar uno u otro, estilo
-`GQLITE_ORDERBY_FORCE`). Verificar igualdad de filas en grafos con ciclos.
+de walks (`FROGQL_...` flag para forzar uno u otro, estilo
+`FROGQL_ORDERBY_FORCE`). Verificar igualdad de filas en grafos con ciclos.
 
 ### Bench contra LDBC (requiere el dataset, gitignored)
 Dataset presente local: `bench/data/ldbc-sf0.1.gdb` (1.5 GB) y

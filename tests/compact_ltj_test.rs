@@ -1,6 +1,6 @@
 //! Differential suite: compact CLTJ index ≡ array index (issue #66).
 //!
-//! `GQLITE_LTJ_COMPACT=1` builds the LOUDS succinct-trie representation
+//! `FROGQL_LTJ_COMPACT=1` builds the LOUDS succinct-trie representation
 //! instead of the six sorted arrays. Both feed the same LTJ algorithm
 //! through `LtjIterator`, so every query must produce the same bag of rows.
 //! The battery covers the LTJ-eligible shapes (chains, comma-joins,
@@ -44,9 +44,9 @@ fn rich() -> MemoryGraphStore {
 fn run(g: &MemoryGraphStore, q: &str, compact: bool) -> Vec<String> {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if compact {
-        std::env::set_var("GQLITE_LTJ_COMPACT", "1");
+        std::env::set_var("FROGQL_LTJ_COMPACT", "1");
     } else {
-        std::env::remove_var("GQLITE_LTJ_COMPACT");
+        std::env::remove_var("FROGQL_LTJ_COMPACT");
     }
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
@@ -54,7 +54,7 @@ fn run(g: &MemoryGraphStore, q: &str, compact: bool) -> Vec<String> {
         QueryResult::Projected(r) => r,
         other => panic!("expected projected, got {other:?}"),
     };
-    std::env::remove_var("GQLITE_LTJ_COMPACT");
+    std::env::remove_var("FROGQL_LTJ_COMPACT");
     let mut keys: Vec<String> = out.iter().map(|r| format!("{r:?}")).collect();
     keys.sort();
     keys
@@ -106,7 +106,7 @@ fn agree_undirected_edge() {
 
 #[test]
 fn agree_any_direction() {
-    // Mirrored compact index (`from_graph_anydir` under GQLITE_LTJ_COMPACT).
+    // Mirrored compact index (`from_graph_anydir` under FROGQL_LTJ_COMPACT).
     assert_reprs_agree("MATCH (x:N)-[e]-(y:N) RETURN x.id, y.id");
 }
 
@@ -197,11 +197,11 @@ fn compact_index_is_smaller_on_fixture() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let g = MemoryGraphStore::from_file(Path::new("test_data/movies.json")).unwrap();
 
-    std::env::remove_var("GQLITE_LTJ_COMPACT");
+    std::env::remove_var("FROGQL_LTJ_COMPACT");
     let array = Runtime::new(&g).warm_triple_index();
-    std::env::set_var("GQLITE_LTJ_COMPACT", "1");
+    std::env::set_var("FROGQL_LTJ_COMPACT", "1");
     let compact = Runtime::new(&g).warm_triple_index();
-    std::env::remove_var("GQLITE_LTJ_COMPACT");
+    std::env::remove_var("FROGQL_LTJ_COMPACT");
 
     assert_eq!(array.len(), compact.len(), "triple counts must match");
     assert!(

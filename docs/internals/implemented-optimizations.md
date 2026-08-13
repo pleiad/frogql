@@ -195,7 +195,7 @@ six-ordering TripleIndex: outer rows drive the loop, inner side runs
 as a small LTJ per pin, no global pattern materialisation.
 
 **Falls back to the original global path** when:
-- the optimization is disabled (`GQLITE_DISABLE_OPTIONAL_PUSHDOWN=1`);
+- the optimization is disabled (`FROGQL_DISABLE_OPTIONAL_PUSHDOWN=1`);
 - there are no shared variables (no correlation to exploit);
 - any outer row binds a shared variable to a non-Node value (edges,
   `Nothing` from a prior empty OPTIONAL, repetition `Group`s);
@@ -251,7 +251,7 @@ hash-join.
   `Node(None)` between consecutive copies and that boundary insertion
   is unambiguous only for edge inners.
 
-**Disable** with `GQLITE_DISABLE_REPEAT_UNROLL=1`.
+**Disable** with `FROGQL_DISABLE_REPEAT_UNROLL=1`.
 
 **Impact (LDBC SF0.1, IC2 with `~[:knows]~{1, 2}`):**
 
@@ -328,7 +328,7 @@ binding-table to evaluate `Expr` against.
 ## 10. Auto-activated btree-LTJ-real with multi-spec + Or-merge
 
 **Before:** `try_btree_ltj_real` was gated behind
-`GQLITE_ORDERBY_FORCE=btree-ltj-real`, only fired for single-spec
+`FROGQL_ORDERBY_FORCE=btree-ltj-real`, only fired for single-spec
 ORDER BY, and bailed for descriptors with `Or` labels (`Comment|Post`)
 because `LabelType::required_labels()` returns empty for `Or` and the
 function picks the first label whose btree exists. The pdqsort
@@ -339,7 +339,7 @@ how small the LIMIT was.
 
 1. **Auto-activation.** Drop the env-var gate; the function now runs
    on every ORDER BY query and fails closed (returns `None`) on any
-   precondition miss. Force off with `GQLITE_ORDERBY_FORCE=pdqsort`
+   precondition miss. Force off with `FROGQL_ORDERBY_FORCE=pdqsort`
    or `topk` (still useful for A/B benchmarking).
 
 2. **Multi-spec support with cohort early-exit.** When the primary
@@ -536,8 +536,8 @@ guard; it was absent from the standard sweep at the time.)*
 is not a `Node`; the body is OPTIONAL / `Selected` / not
 LTJ-decomposable; the body contains an undirected edge; (VALUE only) a
 parameter correlation or a grouping/aggregate body needing
-`run_aggregated`. Force off with `GQLITE_DISABLE_EXISTS_PIN=1` /
-`GQLITE_DISABLE_VALUE_SUBQUERY_PIN=1`.
+`run_aggregated`. Force off with `FROGQL_DISABLE_EXISTS_PIN=1` /
+`FROGQL_DISABLE_VALUE_SUBQUERY_PIN=1`.
 
 **Impact (LDBC SF0.1, lazy, median per param; results byte-identical
 to the materialise-once reference):**

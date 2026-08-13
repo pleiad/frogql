@@ -5,7 +5,7 @@
 //! (`try_concat_with_edge_repetition`), and the plain adjacency /
 //! hash-join fallback. All three iterate physical edges and, since the
 //! LTJ base-case per-edge fan-out landed, all three produce the same ISO
-//! bag multiplicity. This suite locks that in: `GQLITE_DISABLE_ANYDIR_LTJ`
+//! bag multiplicity. This suite locks that in: `FROGQL_DISABLE_ANYDIR_LTJ`
 //! toggles LTJ vs fallback, and the results must match as multisets across
 //! every shape — so a future change to either path can't silently diverge.
 //! One case is also anchored to a hand-computed ISO count.
@@ -46,9 +46,9 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn run(g: &MemoryGraphStore, q: &str, ltj: bool) -> Vec<String> {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if ltj {
-        std::env::remove_var("GQLITE_DISABLE_ANYDIR_LTJ");
+        std::env::remove_var("FROGQL_DISABLE_ANYDIR_LTJ");
     } else {
-        std::env::set_var("GQLITE_DISABLE_ANYDIR_LTJ", "1");
+        std::env::set_var("FROGQL_DISABLE_ANYDIR_LTJ", "1");
     }
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
@@ -56,7 +56,7 @@ fn run(g: &MemoryGraphStore, q: &str, ltj: bool) -> Vec<String> {
         QueryResult::Projected(r) => r,
         other => panic!("expected projected, got {other:?}"),
     };
-    std::env::remove_var("GQLITE_DISABLE_ANYDIR_LTJ");
+    std::env::remove_var("FROGQL_DISABLE_ANYDIR_LTJ");
     let mut keys: Vec<String> = out.iter().map(|r| format!("{r:?}")).collect();
     keys.sort();
     keys

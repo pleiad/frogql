@@ -5,7 +5,7 @@
 //! (issue #57). The seeded path must produce results identical to the
 //! legacy route it shortcuts; these tests pin known answers and
 //! differentially compare the two paths by toggling
-//! `GQLITE_DISABLE_SEEDED_REPEAT`.
+//! `FROGQL_DISABLE_SEEDED_REPEAT`.
 //!
 //! Note the anonymous directed / `~`-undirected repeats are unrolled by
 //! the optimizer before either runtime path sees them; the seeded path
@@ -48,16 +48,16 @@ fn graph() -> MemoryGraphStore {
     MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-/// Serializes the `GQLITE_DISABLE_SEEDED_REPEAT` toggle: the var is
+/// Serializes the `FROGQL_DISABLE_SEEDED_REPEAT` toggle: the var is
 /// process-global, so concurrent tests would otherwise clobber each other.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn run_proj(g: &MemoryGraphStore, q: &str, seeded: bool, limit: usize) -> Vec<Vec<Value>> {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if seeded {
-        std::env::remove_var("GQLITE_DISABLE_SEEDED_REPEAT");
+        std::env::remove_var("FROGQL_DISABLE_SEEDED_REPEAT");
     } else {
-        std::env::set_var("GQLITE_DISABLE_SEEDED_REPEAT", "1");
+        std::env::set_var("FROGQL_DISABLE_SEEDED_REPEAT", "1");
     }
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
@@ -65,7 +65,7 @@ fn run_proj(g: &MemoryGraphStore, q: &str, seeded: bool, limit: usize) -> Vec<Ve
         QueryResult::Projected(rs) => rs,
         _ => panic!("expected projected for {q:?}"),
     };
-    std::env::remove_var("GQLITE_DISABLE_SEEDED_REPEAT");
+    std::env::remove_var("FROGQL_DISABLE_SEEDED_REPEAT");
     out
 }
 

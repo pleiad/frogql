@@ -62,7 +62,7 @@ fn main() {
             for (k_label, q) in &queries {
                 for impl_name in ["pdqsort", "driftsort", "topk"] {
                     let med = bench_median(iters, || {
-                        std::env::set_var("GQLITE_ORDERBY_FORCE", impl_name);
+                        std::env::set_var("FROGQL_ORDERBY_FORCE", impl_name);
                         let rt = Runtime::with_triple_index(&g, memory_idx.clone());
                         let query = compile_query(q).expect("compile");
                         let t = Instant::now();
@@ -92,7 +92,7 @@ fn main() {
                     "btree-ltj-real",
                 ] {
                     let med = bench_median(iters, || {
-                        std::env::set_var("GQLITE_ORDERBY_FORCE", impl_name);
+                        std::env::set_var("FROGQL_ORDERBY_FORCE", impl_name);
                         let rt = Runtime::with_triple_index(&store, lazy_idx.clone());
                         let query = compile_query(q).expect("compile");
                         let t = Instant::now();
@@ -114,7 +114,7 @@ fn main() {
             for (k_label, q) in &join_queries {
                 for impl_name in ["pdqsort", "driftsort", "topk"] {
                     let med = bench_median(iters, || {
-                        std::env::set_var("GQLITE_ORDERBY_FORCE", impl_name);
+                        std::env::set_var("FROGQL_ORDERBY_FORCE", impl_name);
                         let rt = Runtime::with_triple_index(&gj, memory_idx_j.clone());
                         let query = compile_query(q).expect("compile");
                         let t = Instant::now();
@@ -140,7 +140,7 @@ fn main() {
                     "btree-ltj-real",
                 ] {
                     let med = bench_median(iters, || {
-                        std::env::set_var("GQLITE_ORDERBY_FORCE", impl_name);
+                        std::env::set_var("FROGQL_ORDERBY_FORCE", impl_name);
                         let rt = Runtime::with_triple_index(&store_j, lazy_idx_j.clone());
                         let query = compile_query(q).expect("compile");
                         let t = Instant::now();

@@ -21,7 +21,7 @@ pub type IndexEntry = (u32, u32, u32, u32);
 /// Physical representation of the six orderings. `Array` is the original
 /// simplified implementation (six fully-materialized sorted tuple arrays);
 /// `Compact` is the CLTJ port (six LOUDS succinct tries + an eid side table,
-/// issue #66). Selected at build time via `GQLITE_LTJ_COMPACT=1`.
+/// issue #66). Selected at build time via `FROGQL_LTJ_COMPACT=1`.
 enum IndexRepr {
     Array([Vec<IndexEntry>; 6]),
     Compact(Box<CompactTripleIndex>),
@@ -146,10 +146,10 @@ impl TripleIndex {
         }
     }
 
-    /// `GQLITE_LTJ_COMPACT=1` selects the compact CLTJ representation at
+    /// `FROGQL_LTJ_COMPACT=1` selects the compact CLTJ representation at
     /// build time; default stays on the array implementation.
     fn compact_selected() -> bool {
-        std::env::var("GQLITE_LTJ_COMPACT").is_ok_and(|v| v == "1")
+        std::env::var("FROGQL_LTJ_COMPACT").is_ok_and(|v| v == "1")
     }
 
     /// The array orderings, when this index was built in array mode.

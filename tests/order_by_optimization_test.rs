@@ -1,6 +1,6 @@
 //! Tests for the ORDER BY optimization paths: top-k heap and
 //! btree-driven bucket sort. Each path must produce the same output
-//! as the reference pdqsort implementation. The `GQLITE_ORDERBY_FORCE`
+//! as the reference pdqsort implementation. The `FROGQL_ORDERBY_FORCE`
 //! env var pins one path so the test exercises it deterministically.
 
 use frogql::compile_query;
@@ -38,17 +38,17 @@ fn build_users(n: usize) -> MemoryGraphStore {
 }
 
 fn run_with_force(g: &MemoryGraphStore, q: &str, force: Option<&str>) -> Vec<Vec<Value>> {
-    let prev = std::env::var("GQLITE_ORDERBY_FORCE").ok();
+    let prev = std::env::var("FROGQL_ORDERBY_FORCE").ok();
     match force {
-        Some(v) => std::env::set_var("GQLITE_ORDERBY_FORCE", v),
-        None => std::env::remove_var("GQLITE_ORDERBY_FORCE"),
+        Some(v) => std::env::set_var("FROGQL_ORDERBY_FORCE", v),
+        None => std::env::remove_var("FROGQL_ORDERBY_FORCE"),
     }
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     let result = rt.run_query(&query, 0);
     match prev {
-        Some(v) => std::env::set_var("GQLITE_ORDERBY_FORCE", v),
-        None => std::env::remove_var("GQLITE_ORDERBY_FORCE"),
+        Some(v) => std::env::set_var("FROGQL_ORDERBY_FORCE", v),
+        None => std::env::remove_var("FROGQL_ORDERBY_FORCE"),
     }
     match result {
         QueryResult::Projected(rs) => rs,
@@ -142,21 +142,21 @@ fn btree_path_emits_same_rows_as_pdqsort_via_lazy_store() {
     let store = LazyGraphStore::open(&tmp).unwrap();
 
     let q_str = "MATCH (x: User) RETURN x.id ORDER BY x.id LIMIT 8";
-    let prev = std::env::var("GQLITE_ORDERBY_FORCE").ok();
+    let prev = std::env::var("FROGQL_ORDERBY_FORCE").ok();
 
-    std::env::set_var("GQLITE_ORDERBY_FORCE", "pdqsort");
+    std::env::set_var("FROGQL_ORDERBY_FORCE", "pdqsort");
     let pdq = match Runtime::new(&store).run_query(&compile_query(q_str).unwrap(), 0) {
         QueryResult::Projected(rs) => rs,
         _ => panic!("expected projected"),
     };
-    std::env::set_var("GQLITE_ORDERBY_FORCE", "btree-ltj");
+    std::env::set_var("FROGQL_ORDERBY_FORCE", "btree-ltj");
     let bt = match Runtime::new(&store).run_query(&compile_query(q_str).unwrap(), 0) {
         QueryResult::Projected(rs) => rs,
         _ => panic!("expected projected"),
     };
     match prev {
-        Some(v) => std::env::set_var("GQLITE_ORDERBY_FORCE", v),
-        None => std::env::remove_var("GQLITE_ORDERBY_FORCE"),
+        Some(v) => std::env::set_var("FROGQL_ORDERBY_FORCE", v),
+        None => std::env::remove_var("FROGQL_ORDERBY_FORCE"),
     }
     let _ = std::fs::remove_file(&tmp);
 
@@ -213,21 +213,21 @@ fn btree_ltj_real_matches_pdqsort_on_join_query() {
     let store = LazyGraphStore::open(&tmp).unwrap();
 
     let q_str = "MATCH (u: User)-[:Knows]->(f: User) RETURN u.id, f.id ORDER BY u.id LIMIT 10";
-    let prev = std::env::var("GQLITE_ORDERBY_FORCE").ok();
+    let prev = std::env::var("FROGQL_ORDERBY_FORCE").ok();
 
-    std::env::set_var("GQLITE_ORDERBY_FORCE", "pdqsort");
+    std::env::set_var("FROGQL_ORDERBY_FORCE", "pdqsort");
     let pdq = match Runtime::new(&store).run_query(&compile_query(q_str).unwrap(), 0) {
         QueryResult::Projected(rs) => rs,
         _ => panic!("expected projected"),
     };
-    std::env::set_var("GQLITE_ORDERBY_FORCE", "btree-ltj-real");
+    std::env::set_var("FROGQL_ORDERBY_FORCE", "btree-ltj-real");
     let real = match Runtime::new(&store).run_query(&compile_query(q_str).unwrap(), 0) {
         QueryResult::Projected(rs) => rs,
         _ => panic!("expected projected"),
     };
     match prev {
-        Some(v) => std::env::set_var("GQLITE_ORDERBY_FORCE", v),
-        None => std::env::remove_var("GQLITE_ORDERBY_FORCE"),
+        Some(v) => std::env::set_var("FROGQL_ORDERBY_FORCE", v),
+        None => std::env::remove_var("FROGQL_ORDERBY_FORCE"),
     }
     let _ = std::fs::remove_file(&tmp);
 

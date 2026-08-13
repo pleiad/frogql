@@ -1018,7 +1018,7 @@ fn run_one_ic<G: GraphAccess>(
         };
         // Row-content hash for the cross-system row-equivalence oracle.
         // Canonicalize iter-0 rows, sha256, log to stderr; if the
-        // GQLITE_BENCH_ROWS_JSONL env var points at a path, also dump
+        // FROGQL_BENCH_ROWS_JSONL env var points at a path, also dump
         // the per-row envelope there so compare_results.py can diff
         // mismatches. Mirror the Python runners' logic in
         // `graphqlite/run.py` and `kuzu/run.py` so the three runners
@@ -1038,7 +1038,7 @@ fn run_one_ic<G: GraphAccess>(
         };
         let (rows_blob, row_hash) = canonicalize_and_hash(projected_rows);
         eprintln!("  ROW row={row_idx} count={actual_count} shape={actual_shape} hash={row_hash}");
-        if let Ok(jsonl_path) = env::var("GQLITE_BENCH_ROWS_JSONL") {
+        if let Ok(jsonl_path) = env::var("FROGQL_BENCH_ROWS_JSONL") {
             append_rows_jsonl(
                 Path::new(&jsonl_path),
                 q.id,

@@ -28,15 +28,15 @@ fn main() {
     let mut results: Vec<(&str, f64, usize, usize)> = Vec::new();
     for (name, env) in [("array", None), ("compact", Some("1"))] {
         match env {
-            Some(v) => std::env::set_var("GQLITE_LTJ_COMPACT", v),
-            None => std::env::remove_var("GQLITE_LTJ_COMPACT"),
+            Some(v) => std::env::set_var("FROGQL_LTJ_COMPACT", v),
+            None => std::env::remove_var("FROGQL_LTJ_COMPACT"),
         }
         let t0 = Instant::now();
         let idx = TripleIndex::from_graph(&store);
         let secs = t0.elapsed().as_secs_f64();
         results.push((name, secs, idx.heap_bytes(), idx.len()));
     }
-    std::env::remove_var("GQLITE_LTJ_COMPACT");
+    std::env::remove_var("FROGQL_LTJ_COMPACT");
 
     println!("index    build_s   heap_MiB   triples");
     for (name, secs, bytes, len) in &results {

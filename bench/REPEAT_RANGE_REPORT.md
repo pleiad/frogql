@@ -8,7 +8,7 @@ Dos implementaciones del operador `{lb,ub}` conviven, seleccionables por env var
   `run_repetition_pattern(p, i)` por cada longitud. Cada llamada evalúa el
   patrón interno desde cero, construye el hash `first → indices`, y desde
   longitud 1 hace `i-1` extensiones para llegar al nivel `i`.
-- **incremental** (`GQLITE_REPEAT_INCREMENTAL=1`): evalúa el patrón
+- **incremental** (`FROGQL_REPEAT_INCREMENTAL=1`): evalúa el patrón
   interno una vez, construye el hash una vez, y mantiene un único buffer
   `rows: Vec<ResultRow>` con todos los niveles concatenados. Cada nivel
   `k` se construye iterando el rango de índices del nivel `k-1`. Niveles
@@ -93,7 +93,7 @@ Patrones observables:
 
 ### Cobertura de tests
 
-Bajo `GQLITE_REPEAT_INCREMENTAL=1`:
+Bajo `FROGQL_REPEAT_INCREMENTAL=1`:
 
 - `runtime_test`: 46/46 pass
 - `parser_test`, `parse_and_run_test`, `count_test`, `record_test`,

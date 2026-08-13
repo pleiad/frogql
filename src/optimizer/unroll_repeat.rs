@@ -38,7 +38,7 @@
 //!     traversal for repetitions that bind an edge variable and so cannot
 //!     unroll.
 //!
-//! Disable with `GQLITE_DISABLE_REPEAT_UNROLL=1`.
+//! Disable with `FROGQL_DISABLE_REPEAT_UNROLL=1`.
 
 use crate::syntax::path_pattern::PathPattern;
 
@@ -53,7 +53,7 @@ use crate::syntax::path_pattern::PathPattern;
 const MAX_UNROLL: usize = 8;
 
 pub fn optimize(p: PathPattern) -> PathPattern {
-    if std::env::var("GQLITE_DISABLE_REPEAT_UNROLL").is_ok() {
+    if std::env::var("FROGQL_DISABLE_REPEAT_UNROLL").is_ok() {
         return p;
     }
     let unrolled = rewrite(p);

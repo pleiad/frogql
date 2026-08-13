@@ -36,7 +36,7 @@ Usage
                      [--limit-gb G] [--interval S] -- <cmd> [args...]
 
 Everything after `--` is the command, run with the current environment
-(so callers can prefix env vars, e.g. `GQLITE_DISABLE_INDEX_FOLD=1`,
+(so callers can prefix env vars, e.g. `FROGQL_DISABLE_INDEX_FOLD=1`,
 before `python memrun.py`). stdout/stderr of the child are inherited.
 
 Exit code: the child's exit code on a clean run; 137 if the child was

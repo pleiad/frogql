@@ -243,7 +243,7 @@ bench/cross-system/run_all.sh --ablate --only gqlite
 | Mode | Env | Tests |
 |---|---|---|
 | `lazy-baseline` | (none) | All optimizations on (LTJ + auto-indexes + index folding + TripleIndex cache) |
-| `lazy-no-fold` | `GQLITE_DISABLE_INDEX_FOLD=1` | Disable LTJ index-driven constant folding (the pre-pass that turns `MATCH (n {id:X})` into a single-NodeId pre-bind). The auto-indexes are still built; they just don't get used in the LTJ pre-pass. |
+| `lazy-no-fold` | `FROGQL_DISABLE_INDEX_FOLD=1` | Disable LTJ index-driven constant folding (the pre-pass that turns `MATCH (n {id:X})` into a single-NodeId pre-bind). The auto-indexes are still built; they just don't get used in the LTJ pre-pass. |
 
 This is the only gqlite-internal knob the external bench tracks —
 the surgical "did the LTJ fold optimization actually buy anything"
