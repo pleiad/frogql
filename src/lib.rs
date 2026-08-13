@@ -7,6 +7,7 @@ pub mod runtime;
 pub mod store;
 pub mod syntax;
 pub mod typing;
+pub mod vector;
 
 use syntax::path_pattern::PathPattern;
 use syntax::query::{MatchStatement, Query};
