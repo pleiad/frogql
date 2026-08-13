@@ -5,6 +5,10 @@
 //!   frogql <database.gdb> --import-csv <dir> [--no-typecheck]       # create from CSV (spanner_import_config.json)
 //!   frogql <database.gdb> --import-ldbc-csv <dir> [--no-typecheck]  # create from LDBC SNB CsvBasic dataset
 //!   frogql <database.gdb> --import-json <file> [--no-typecheck]     # create from JSON
+//!
+//! `--no-auto-indexes` is CLI sugar for `FROGQL_DISABLE_AUTO_INDEXES=1`
+//! (see `docs/modes-options.md`): it skips the secondary-index auto-build
+//! at open, trading query acceleration for open latency and RSS.
 
 use std::env;
 use std::path::Path;
@@ -33,9 +37,20 @@ use frogql::typing::variable_type::{Schema, VariableType};
 fn main() {
     let mut args: Vec<String> = env::args().collect();
 
-    // Strip --no-typecheck so positional dispatch below stays simple.
+    // Strip the mode flags so positional dispatch below stays simple.
     let typecheck = !args.iter().any(|a| a == "--no-typecheck");
     args.retain(|a| a != "--no-typecheck");
+
+    // `--no-auto-indexes` is sugar for the env var the store already reads
+    // (`store/lazy.rs`), set before the open below so it takes effect. The
+    // env var stays the single source of truth: every kill switch in the
+    // engine is env-driven so a differential test can A/B one flag without
+    // a rebuild.
+    let auto_indexes = !args.iter().any(|a| a == "--no-auto-indexes");
+    args.retain(|a| a != "--no-auto-indexes");
+    if !auto_indexes {
+        env::set_var("FROGQL_DISABLE_AUTO_INDEXES", "1");
+    }
 
     if args.len() < 2 {
         eprintln!("Usage:");
@@ -57,7 +72,10 @@ fn main() {
         );
         eprintln!();
         eprintln!("Options:");
-        eprintln!("  --no-typecheck    skip the typechecker for this session (default: on)");
+        eprintln!("  --no-typecheck      skip the typechecker for this session (default: on)");
+        eprintln!(
+            "  --no-auto-indexes   skip the secondary-index auto-build at open (default: on)"
+        );
         std::process::exit(1);
     }
 
@@ -89,6 +107,14 @@ fn main() {
         t0.elapsed().as_secs_f64()
     );
     eprintln!("Typechecker: {}", if typecheck { "on" } else { "off" });
+    eprintln!(
+        "Secondary indexes: {}",
+        if auto_indexes {
+            "auto-built"
+        } else {
+            "off (--no-auto-indexes)"
+        }
+    );
     match store.catalog().active_name() {
         Some(name) => eprintln!("Active GRAPH TYPE: {name}."),
         None => eprintln!("Active GRAPH TYPE: (none — schema-permissive)."),

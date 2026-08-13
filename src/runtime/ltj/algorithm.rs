@@ -129,20 +129,33 @@ impl<'a> LtjAlgorithm<'a> {
         }
     }
 
-    /// Run the LTJ algorithm. Returns result tuples.
-    pub fn run(&mut self, limit: usize) -> Vec<ResultTuple> {
+    /// Run the LTJ algorithm against `graph`. Returns result tuples.
+    ///
+    /// `G` is a method-level generic on purpose: the search state above
+    /// (iterators, VEO, placed filters, pins) never mentions the backend,
+    /// so parameterizing the struct would spread `G` across every field
+    /// for the sole benefit of `check_filters`. Taking the graph as an
+    /// argument keeps the state backend-agnostic without the wrapper type
+    /// this used to need — `LtjRunner`, whose only job was to hold this
+    /// reference, and which carried a second copy of `search` that drifted
+    /// out of sync (see the pinned-slot comment below).
+    pub fn run<G: GraphAccess>(&mut self, graph: &G, limit: usize) -> Vec<ResultTuple> {
         let mut results = Vec::new();
         let mut tuple = vec![(0u8, 0u32); self.num_vars];
         // Pre-populate pinned bindings into the slots beyond the VEO so
         // result construction sees them. The search loop only writes to
-        // tuple[0..veo.size()].
+        // tuple[0..veo.size()]. Omitting this leaves index-folded variables
+        // at the default `(0, 0)` and produces wrong bindings; it surfaces
+        // through the BTree-LTJ-real ORDER BY path. The bug was live for as
+        // long as there were two copies of this function — the dead one had
+        // the loop, the executed one did not.
         for (i, &binding) in self.pinned.iter().enumerate() {
             let slot = self.veo.size() + i;
             if slot < tuple.len() {
                 tuple[slot] = binding;
             }
         }
-        self.search(0, &mut tuple, &mut results, limit);
+        self.search(graph, 0, &mut tuple, &mut results, limit);
         results
     }
 
@@ -194,15 +207,16 @@ impl<'a> LtjAlgorithm<'a> {
         }
     }
 
-    /// Recursive search: bind variable at level `j`, evaluate filters, recurse.
-    fn search(
+    /// Recursive search: bind the variable at level `j`, evaluate the
+    /// filters placed there, descend, backtrack.
+    fn search<G: GraphAccess>(
         &mut self,
+        graph: &G,
         j: usize,
         tuple: &mut Vec<(u8, u32)>,
         results: &mut Vec<ResultTuple>,
         limit: usize,
     ) -> bool {
-        // Check limit
         if limit > 0 && results.len() >= limit {
             return false;
         }
@@ -259,14 +273,12 @@ impl<'a> LtjAlgorithm<'a> {
             for val in values {
                 tuple[j] = (var_id, val);
 
-                // Evaluate filters at this level
-                if !self.check_filters(j, tuple) {
+                if !self.check_filters(graph, j, tuple) {
                     continue;
                 }
 
-                // Descend
                 self.iterators[idx].down(pos, val);
-                let ok = self.search(j + 1, tuple, results, limit);
+                let ok = self.search(graph, j + 1, tuple, results, limit);
                 self.iterators[idx].up(pos);
 
                 if !ok {
@@ -282,14 +294,13 @@ impl<'a> LtjAlgorithm<'a> {
         while let Some(val) = c {
             tuple[j] = (var_id, val);
 
-            // Evaluate filters at this level
-            if self.check_filters(j, tuple) {
+            if self.check_filters(graph, j, tuple) {
                 // Descend in all iterators containing this variable
                 for k in 0..iter_indices.len() {
                     self.iterators[iter_indices[k]].down(positions[k], val);
                 }
 
-                let ok = self.search(j + 1, tuple, results, limit);
+                let ok = self.search(graph, j + 1, tuple, results, limit);
 
                 // Ascend in all iterators
                 for k in 0..iter_indices.len() {
@@ -307,153 +318,19 @@ impl<'a> LtjAlgorithm<'a> {
         true
     }
 
-    /// Evaluate all filters placed at level `j`.
-    fn check_filters(&self, j: usize, _tuple: &[(u8, u32)]) -> bool {
+    /// Evaluate the filters placed at level `j` against the graph. Called
+    /// after binding the level's variable and before descending, so a
+    /// rejected candidate prunes its whole subtree.
+    fn check_filters<G: GraphAccess>(&self, graph: &G, j: usize, tuple: &[(u8, u32)]) -> bool {
         if j >= self.filters_at_level.len() {
             return true;
         }
-        true
-    }
-}
-
-/// Extended algorithm that can evaluate filters against the graph.
-pub struct LtjRunner<'a, G: GraphAccess> {
-    pub algorithm: LtjAlgorithm<'a>,
-    pub graph: &'a G,
-}
-
-impl<'a, G: GraphAccess> LtjRunner<'a, G> {
-    pub fn new(algorithm: LtjAlgorithm<'a>, graph: &'a G) -> Self {
-        LtjRunner { algorithm, graph }
-    }
-
-    /// Run with filter evaluation against the graph.
-    pub fn run(&mut self, limit: usize) -> Vec<ResultTuple> {
-        let mut results = Vec::new();
-        let mut tuple = vec![(0u8, 0u32); self.algorithm.num_vars];
-        // Pre-populate pinned bindings into the slots beyond the VEO so
-        // result construction sees them. The search loop only writes to
-        // tuple[0..veo.size()]. This was previously missing in
-        // `LtjRunner::run` (the dead-code `LtjAlgorithm::run` had it),
-        // which left pinned-var slots at the default `(0, 0)` and
-        // produced wrong bindings for index-folded variables. Surfaces
-        // through the BTree-LTJ-real ORDER BY path.
-        for (i, &binding) in self.algorithm.pinned.iter().enumerate() {
-            let slot = self.algorithm.veo.size() + i;
-            if slot < tuple.len() {
-                tuple[slot] = binding;
-            }
-        }
-        self.search(0, &mut tuple, &mut results, limit);
-        results
-    }
-
-    fn search(
-        &mut self,
-        j: usize,
-        tuple: &mut Vec<(u8, u32)>,
-        results: &mut Vec<ResultTuple>,
-        limit: usize,
-    ) -> bool {
-        if limit > 0 && results.len() >= limit {
-            return false;
-        }
-
-        if j >= self.algorithm.veo.size() {
-            // Same ISO-bag fan-out as `LtjAlgorithm::search`: one row per
-            // parallel entry sharing the bound (s, p, o) prefix, whether or
-            // not the edge variable is projected (issue #71). The product
-            // accommodates joins where one triple has parallels and the
-            // others do not.
-            let eid_lists: Vec<Vec<u32>> = self
-                .algorithm
-                .iterators
-                .iter()
-                .map(|it| {
-                    let eids = it.current_eids_all();
-                    if eids.is_empty() {
-                        vec![u32::MAX]
-                    } else {
-                        eids
-                    }
-                })
-                .collect();
-            let var_bindings = tuple[..self.algorithm.num_vars].to_vec();
-            let mut accepted_any = false;
-            for combo in cartesian(&eid_lists) {
-                accepted_any = true;
-                results.push(ResultTuple::new(var_bindings.clone(), combo));
-                if limit > 0 && results.len() >= limit {
-                    return false;
-                }
-            }
-            if !accepted_any {
-                results.push(ResultTuple::new(var_bindings, Vec::new()));
-            }
-            return true;
-        }
-
-        let var_id = self.algorithm.veo.var_at(j);
-        let iter_indices: Vec<usize> = self.algorithm.var_to_iterators[var_id as usize].clone();
-        let positions: Vec<SpoPos> = self.algorithm.var_to_positions[var_id as usize].clone();
-
-        // Lonely variable optimization
-        if iter_indices.len() == 1 && self.algorithm.iterators[iter_indices[0]].in_last_level() {
-            let idx = iter_indices[0];
-            let pos = positions[0];
-            let values = self.algorithm.iterators[idx].seek_all(pos);
-
-            for val in values {
-                tuple[j] = (var_id, val);
-                if !self.check_filters(j, tuple) {
-                    continue;
-                }
-                self.algorithm.iterators[idx].down(pos, val);
-                let ok = self.search(j + 1, tuple, results, limit);
-                self.algorithm.iterators[idx].up(pos);
-                if !ok {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        // General leapfrog
-        let mut c = self.algorithm.seek(var_id, None);
-
-        while let Some(val) = c {
-            tuple[j] = (var_id, val);
-
-            if self.check_filters(j, tuple) {
-                for k in 0..iter_indices.len() {
-                    self.algorithm.iterators[iter_indices[k]].down(positions[k], val);
-                }
-                let ok = self.search(j + 1, tuple, results, limit);
-                for k in 0..iter_indices.len() {
-                    self.algorithm.iterators[iter_indices[k]].up(positions[k]);
-                }
-                if !ok {
-                    return false;
-                }
-            }
-
-            c = self.algorithm.seek(var_id, Some(val + 1));
-        }
-
-        true
-    }
-
-    /// Evaluate filters at level `j` using the graph.
-    fn check_filters(&self, j: usize, tuple: &[(u8, u32)]) -> bool {
-        if j >= self.algorithm.filters_at_level.len() {
-            return true;
-        }
-        for filter in &self.algorithm.filters_at_level[j] {
+        for filter in &self.filters_at_level[j] {
             match &filter.kind {
                 FilterKind::NodeLabel { var_id, label } => {
                     // Find the bound value for this variable
                     if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
-                        let actual = self.graph.node_labels(node_id);
+                        let actual = graph.node_labels(node_id);
                         let required = crate::typing::label_type::LabelType::Label(label.clone());
                         if !crate::typing::label_type::LabelType::is_subtype(&actual, &required) {
                             return false;
@@ -462,7 +339,7 @@ impl<'a, G: GraphAccess> LtjRunner<'a, G> {
                 }
                 FilterKind::NodeProperty { var_id, prop } => {
                     if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
-                        let props = self.graph.node_props(node_id);
+                        let props = graph.node_props(node_id);
                         if !props.contains_key(prop) {
                             return false;
                         }
@@ -475,7 +352,7 @@ impl<'a, G: GraphAccess> LtjRunner<'a, G> {
                     value,
                 } => {
                     if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
-                        let props = self.graph.node_props(node_id);
+                        let props = graph.node_props(node_id);
                         match props.get(attr) {
                             Some(actual) => {
                                 if !cmp_values(actual, *op, value) {

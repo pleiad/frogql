@@ -546,8 +546,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // the precondition holds; falls back closed (returns None) on
         // any precondition miss, so adding it to the auto path costs
         // nothing for queries that can't use it. Force off with
-        // `GQLITE_ORDERBY_FORCE=pdqsort` or `topk`.
-        let force = std::env::var("GQLITE_ORDERBY_FORCE").ok();
+        // `FROGQL_ORDERBY_FORCE=pdqsort` or `topk`.
+        let force = std::env::var("FROGQL_ORDERBY_FORCE").ok();
         let force_off = matches!(
             force.as_deref(),
             Some("pdqsort") | Some("topk") | Some("driftsort")
@@ -637,7 +637,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// short-circuits, it returns `true`; otherwise we fall back to
     /// `sort_rows` (which itself decides between top-k and pdqsort).
     ///
-    /// The env var `GQLITE_ORDERBY_FORCE` controls routing for benches:
+    /// The env var `FROGQL_ORDERBY_FORCE` controls routing for benches:
     /// `pdqsort` / `topk` skip the btree branch; `btree-ltj` enables it
     /// (and falls through to pdqsort if precondition not met).
     fn route_pre_sort(
@@ -647,7 +647,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         matches: &[MatchStatement],
         limit: usize,
     ) {
-        let force = std::env::var("GQLITE_ORDERBY_FORCE").ok();
+        let force = std::env::var("FROGQL_ORDERBY_FORCE").ok();
         let try_btree = !matches!(
             force.as_deref(),
             Some("pdqsort") | Some("topk") | Some("driftsort")
@@ -754,7 +754,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             // in primary-attr order, which is sufficient under the
             // already-enforced `NULLS LAST` precondition.
             let or_labels = or_candidate_labels_for_var(&query.matches, var)?;
-            if std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
+            if std::env::var("FROGQL_DEBUG_INDEXES").is_ok() {
                 eprintln!(
                     "btree-ltj-real: or-merge over labels {:?} on attr {:?}",
                     or_labels, attr
@@ -765,7 +765,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 let ids = match self.graph.lookup_node_ordered(&l, attr, asc) {
                     Some(v) => v,
                     None => {
-                        if std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
+                        if std::env::var("FROGQL_DEBUG_INDEXES").is_ok() {
                             eprintln!(
                                 "btree-ltj-real:   {} no btree on (label, attr) — fallback",
                                 l
@@ -775,7 +775,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     }
                 };
                 let label_total = self.graph.nodes_with_label(&l)?.len();
-                if std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
+                if std::env::var("FROGQL_DEBUG_INDEXES").is_ok() {
                     eprintln!(
                         "btree-ltj-real:   {} ids={} label_total={}",
                         l,
@@ -1097,7 +1097,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// index lookup on the inner side.
     ///
     /// Returns `None` (caller falls back to global eval + left_outer_join) when:
-    ///   - the optimization is disabled (`GQLITE_DISABLE_OPTIONAL_PUSHDOWN`);
+    ///   - the optimization is disabled (`FROGQL_DISABLE_OPTIONAL_PUSHDOWN`);
     ///   - there are no shared variables between outer rows and the inner
     ///     pattern (no correlation to exploit);
     ///   - any outer row binds a shared variable to a non-Node value (edges
@@ -1111,7 +1111,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         bound_vars: &HashSet<String>,
         new_vars: &HashSet<String>,
     ) -> Option<IntermediateResult> {
-        if std::env::var("GQLITE_DISABLE_OPTIONAL_PUSHDOWN").is_ok() {
+        if std::env::var("FROGQL_DISABLE_OPTIONAL_PUSHDOWN").is_ok() {
             return None;
         }
         let shared: Vec<String> = bound_vars.intersection(new_vars).cloned().collect();
@@ -1683,8 +1683,13 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             return result;
         }
         // Any-direction join (pure or mixed with directed): route each
-        // triple to the plain or mirrored index inside one LTJ.
-        if pattern_extract::has_any_direction(&join_pattern) {
+        // triple to the plain or mirrored index inside one LTJ. The kill
+        // switch is checked here, not just inside `try_ltj_mixed`, so the
+        // mirror is never built when it is disabled (see
+        // `anydir_ltj_disabled`).
+        if pattern_extract::has_any_direction(&join_pattern)
+            && !pattern_extract::anydir_ltj_disabled()
+        {
             if let Some(result) = pattern_extract::try_ltj_mixed(
                 self.graph,
                 &join_pattern,
@@ -1770,7 +1775,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // repetition is not decomposable, so a chain containing `-[e]-{n,m}`
         // still takes the seeded traversal below; this catches flat chains
         // like `(a)-[]-(b)-[]-(c)` and `(a)-[:X]->(b)-[]-(c)`.
-        if pattern_extract::has_any_direction(&concat_pattern) {
+        if pattern_extract::has_any_direction(&concat_pattern)
+            && !pattern_extract::anydir_ltj_disabled()
+        {
             if let Some(result) = pattern_extract::try_ltj_mixed(
                 self.graph,
                 &concat_pattern,
@@ -1872,7 +1879,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// already bound by the left side (Group-vs-flat unification is the
     /// legacy join's concern). Differential coverage against the legacy
     /// route lives in `tests/seeded_repetition_test.rs`; disable with
-    /// `GQLITE_DISABLE_SEEDED_REPEAT=1`.
+    /// `FROGQL_DISABLE_SEEDED_REPEAT=1`.
     fn try_concat_with_edge_repetition(
         &self,
         ir1: &IntermediateResult,
@@ -1881,7 +1888,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         ub: Option<usize>,
         limit: usize,
     ) -> Option<IntermediateResult> {
-        if std::env::var("GQLITE_DISABLE_SEEDED_REPEAT").is_ok() {
+        if std::env::var("FROGQL_DISABLE_SEEDED_REPEAT").is_ok() {
             return None;
         }
         let ub = ub?;
@@ -2634,7 +2641,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         pattern: &PathPattern,
         limit: usize,
     ) -> Option<IntermediateResult> {
-        if std::env::var("GQLITE_DISABLE_SHORTEST_BFS").is_ok() {
+        if std::env::var("FROGQL_DISABLE_SHORTEST_BFS").is_ok() {
             return None;
         }
         if prefix.mode != PathMode::Walk {
@@ -3756,7 +3763,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// correlation value is not a `Node`, the body groups/aggregates or is
     /// OPTIONAL/`Selected`, there is a non-pinned parameter correlation, or
     /// the pattern is not LTJ-decomposable. Disable with
-    /// `GQLITE_DISABLE_VALUE_SUBQUERY_PIN=1`.
+    /// `FROGQL_DISABLE_VALUE_SUBQUERY_PIN=1`.
     fn value_subquery_pinned(
         &self,
         mu: &Assignment,
@@ -3764,7 +3771,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         keys: &[String],
         params: &[String],
     ) -> Option<Value> {
-        if std::env::var("GQLITE_DISABLE_VALUE_SUBQUERY_PIN").is_ok() {
+        if std::env::var("FROGQL_DISABLE_VALUE_SUBQUERY_PIN").is_ok() {
             return None;
         }
         // A parameter correlation (outer var referenced but not bound by the
@@ -4011,14 +4018,14 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// LTJ restricted. Returns `Some(non_empty)` when the body is pinnable
     /// (every correlation value is a `Node` and the pattern decomposes),
     /// `None` otherwise so the caller can fall back to the global
-    /// materialisation. Disable with `GQLITE_DISABLE_EXISTS_PIN=1`.
+    /// materialisation. Disable with `FROGQL_DISABLE_EXISTS_PIN=1`.
     fn exists_body_pinned(
         &self,
         mu: &Assignment,
         body: &Query,
         correlation: &[String],
     ) -> Option<bool> {
-        if std::env::var("GQLITE_DISABLE_EXISTS_PIN").is_ok() {
+        if std::env::var("FROGQL_DISABLE_EXISTS_PIN").is_ok() {
             return None;
         }
         // Pinning collapses the body to a single pattern; an OPTIONAL or a
@@ -5126,7 +5133,7 @@ fn btree_bucket_output(
 ///   implementation-dependent (§16.17 GR 1k/US006) so stability buys
 ///   nothing the default path needs.
 ///
-/// Override the heuristic with `GQLITE_ORDERBY_FORCE=pdqsort|topk|driftsort` —
+/// Override the heuristic with `FROGQL_ORDERBY_FORCE=pdqsort|topk|driftsort` —
 /// useful for benchmarking the worst case of each algorithm in
 /// isolation. Force=topk silently degrades to pdqsort when `limit == 0`
 /// or `limit >= n` (no top-k to extract).
@@ -5136,7 +5143,7 @@ fn sort_decorated<T>(
     limit: usize,
 ) {
     let n = decorated.len();
-    let force = std::env::var("GQLITE_ORDERBY_FORCE").ok();
+    let force = std::env::var("FROGQL_ORDERBY_FORCE").ok();
     let topk_applies = limit > 0 && limit < n;
     let use_topk = match force.as_deref() {
         Some("topk") => topk_applies,

@@ -8,7 +8,7 @@ use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::BinOp;
 use crate::syntax::path_pattern::PathPattern;
 
-use super::algorithm::{FilterKind, LtjAlgorithm, LtjRunner, PlacedFilter, ResultTuple};
+use super::algorithm::{FilterKind, LtjAlgorithm, PlacedFilter, ResultTuple};
 use super::iterator::{LtjIterator, SpoPos, Term, TriplePattern};
 use super::triple_index::TripleIndex;
 use super::veo::{Veo, VeoSimple};
@@ -94,7 +94,7 @@ pub fn try_ltj<G: GraphAccess>(
 /// Result reconstruction is unchanged: `edge_path_value(eid)` tags each
 /// edge with its physical variant, and the base-case per-eid fan-out gives
 /// ISO bag multiplicity (issue #71). Disabled with
-/// `GQLITE_DISABLE_ANYDIR_LTJ=1`.
+/// `FROGQL_DISABLE_ANYDIR_LTJ=1`.
 pub fn try_ltj_mixed<G: GraphAccess>(
     graph: &G,
     pattern: &PathPattern,
@@ -102,10 +102,23 @@ pub fn try_ltj_mixed<G: GraphAccess>(
     anydir_index: &TripleIndex,
     limit: usize,
 ) -> Option<IntermediateResult> {
-    if std::env::var("GQLITE_DISABLE_ANYDIR_LTJ").is_ok() {
+    if anydir_ltj_disabled() {
         return None;
     }
     try_ltj_inner(graph, pattern, index, Some(anydir_index), limit, &[])
+}
+
+/// True when `FROGQL_DISABLE_ANYDIR_LTJ=1` forces the hash-join fallback
+/// for any-direction patterns.
+///
+/// Callers MUST consult this *before* materializing the mirrored index they
+/// would pass to `try_ltj_mixed`. Rust evaluates arguments eagerly, so a
+/// `try_ltj_mixed(.., &self.anydir_index(), ..)` call guarded only by the
+/// check inside the callee still pays the full mirror build (~232 MiB /
+/// ~1 s at SF0.1) before discarding the path — the kill switch then costs
+/// more memory than the optimization it disables.
+pub fn anydir_ltj_disabled() -> bool {
+    std::env::var("FROGQL_DISABLE_ANYDIR_LTJ").is_ok()
 }
 
 /// True when the pattern contains at least one any-direction (`-[e]-`)
@@ -190,7 +203,7 @@ fn try_ltj_inner<G: GraphAccess>(
     // the triples and pre-bind it in the result tuple. Without this, even with
     // the eq weight=1 in the VEO, the lonely-var binding would still scan the
     // variable's position before rejecting (see `veo.rs` rationale comment).
-    let mut pinned = if std::env::var("GQLITE_DISABLE_INDEX_FOLD").is_ok() {
+    let mut pinned = if std::env::var("FROGQL_DISABLE_INDEX_FOLD").is_ok() {
         Vec::new()
     } else {
         match fold_indexed_constants(graph, &mut decomp) {
@@ -241,10 +254,10 @@ fn try_ltj_inner<G: GraphAccess>(
         }
     }
 
-    if std::env::var("GQLITE_DISABLE_INDEX_FOLD").is_err() {
+    if std::env::var("FROGQL_DISABLE_INDEX_FOLD").is_err() {
         fold_range_filters(graph, &mut decomp);
     }
-    if !pinned.is_empty() && std::env::var("GQLITE_DEBUG_INDEXES").is_ok() {
+    if !pinned.is_empty() && std::env::var("FROGQL_DEBUG_INDEXES").is_ok() {
         eprintln!(
             "ltj: pinned {} variable(s) via secondary index: {:?}",
             pinned.len(),
@@ -335,7 +348,7 @@ fn try_ltj_inner<G: GraphAccess>(
     // Run LTJ. The base case fans out one row per physical edge at the
     // bound (s, p, o) unconditionally (ISO bag semantics, issue #71), so
     // there is no per-triple edge-var flag to thread through anymore.
-    let algorithm = LtjAlgorithm::new(
+    let mut algorithm = LtjAlgorithm::new(
         iterators,
         var_to_iterators,
         var_to_positions,
@@ -345,8 +358,7 @@ fn try_ltj_inner<G: GraphAccess>(
         pinned,
     );
 
-    let mut runner = LtjRunner::new(algorithm, graph);
-    let tuples = runner.run(limit);
+    let tuples = algorithm.run(graph, limit);
 
     Some(convert_results(graph, &tuples, &decomp))
 }
