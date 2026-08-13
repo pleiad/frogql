@@ -3624,6 +3624,52 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     e @ ExprResult::Failure(_) => e,
                 },
             },
+            // Non-ISO: read a stored vector, so a query can say "nearest
+            // to the embedding of this entity" rather than inlining
+            // hundreds of floats. The node argument is a node reference
+            // or its internal id; the attribute argument names the
+            // sidecar. Returns a list of floats, the same shape a
+            // literal query vector has.
+            "VECTOR" => {
+                let node = match self.run_expr(mu, &args[0]) {
+                    ExprResult::Success(v) => v,
+                    e @ ExprResult::Failure(_) => return e,
+                };
+                let attr = match self.run_expr(mu, &args[1]) {
+                    ExprResult::Success(Value::Str(s)) => s,
+                    ExprResult::Success(v) => {
+                        return ExprResult::Failure(format!(
+                            "VECTOR expects a string attribute name, got {v:?}"
+                        ))
+                    }
+                    e @ ExprResult::Failure(_) => return e,
+                };
+                let id = match node {
+                    Value::Node(id) => id,
+                    Value::Int(n) if n >= 0 && n <= u32::MAX as i64 => n as u32,
+                    other => {
+                        return ExprResult::Failure(format!(
+                            "VECTOR expects a node or a node id, got {other:?}"
+                        ))
+                    }
+                };
+                let set = match self.graph.vectors(&attr) {
+                    Some(s) => s,
+                    None => {
+                        return ExprResult::Failure(format!(
+                            "no vector attribute `{attr}` is loaded for this database"
+                        ))
+                    }
+                };
+                match set.row(id) {
+                    Some(v) => ExprResult::Success(Value::List(
+                        v.iter().map(|x| Value::Float(*x as f64)).collect(),
+                    )),
+                    // A node with no vector is a null, not an error: the
+                    // attribute is legitimately partial.
+                    None => ExprResult::Success(Value::Null),
+                }
+            }
             other => ExprResult::Failure(format!("unknown built-in function `{other}`")),
         }
     }

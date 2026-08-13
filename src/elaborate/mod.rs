@@ -75,8 +75,16 @@ pub fn elaborate_query(q: Query) -> Query {
             .map(|g| resolve_group_key(g, &bound, returns.as_deref()))
             .collect()
     });
+    // The NEAREST query vector is an ordinary expression, so it goes
+    // through the same lowering as any other — cheap, and it keeps the
+    // clause from being the one place a future desugaring is forgotten.
+    let nearest = q.nearest.map(|mut n| {
+        n.query = elaborate_expr(n.query);
+        n
+    });
     Query {
         matches,
+        nearest,
         returns,
         group_by,
         order_by,

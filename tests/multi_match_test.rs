@@ -34,11 +34,7 @@ fn multi_match_query(patterns: &[&str]) -> Query {
         .collect();
     elaborate_query(Query {
         matches,
-        group_by: None,
-        returns: None,
-        distinct: false,
-        order_by: None,
-        limit: None,
+        ..Query::empty()
     })
 }
 

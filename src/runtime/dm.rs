@@ -86,11 +86,7 @@ where
     } else {
         let q = crate::syntax::query::Query {
             matches: dm.matches.clone(),
-            group_by: None,
-            returns: None,
-            distinct: false,
-            order_by: None,
-            limit: None,
+            ..crate::syntax::query::Query::empty()
         };
         // Run the match chain through the same elaborate-then-execute path
         // that compile_query uses, so value-equality filters from the

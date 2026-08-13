@@ -38,11 +38,7 @@ fn multi_match_query(patterns: &[String]) -> Query {
         .collect();
     elaborate_query(Query {
         matches,
-        group_by: None,
-        returns: None,
-        distinct: false,
-        order_by: None,
-        limit: None,
+        ..Query::empty()
     })
 }
 

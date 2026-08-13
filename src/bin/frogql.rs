@@ -1424,6 +1424,7 @@ fn color_variable(vt: &VariableType) -> String {
         VariableType::Group(t) => format!("group<{}>", color_variable(t)),
         VariableType::Null => "Null".to_string(),
         VariableType::Path => format!("{C_GREEN}PATH{C_RESET}"),
+        VariableType::Scalar(t) => format!("{C_GREEN}{t}{C_RESET}"),
         VariableType::Zero => "⊥".to_string(),
     }
 }

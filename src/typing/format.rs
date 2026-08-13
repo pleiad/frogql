@@ -68,6 +68,7 @@ pub fn format_variable(vt: &VariableType) -> String {
         VariableType::Group(t) => format!("group<{}>", format_variable(t)),
         VariableType::Null => "Null".to_string(),
         VariableType::Path => "PATH".to_string(),
+        VariableType::Scalar(t) => format_simple_type(t),
         VariableType::Zero => "⊥".to_string(),
     }
 }

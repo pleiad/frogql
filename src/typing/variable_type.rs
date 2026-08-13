@@ -31,6 +31,13 @@ pub enum VariableType {
     /// across operands, so it stays inert under every lattice operation.
     /// Lifts to `SimpleType::Path`.
     Path,
+    /// A plain scalar bound by a clause rather than by the pattern — for
+    /// now only the distance of a `NEAREST ... AS d`. Terminal in the
+    /// same sense as `Path`: it carries no descriptor and never refines
+    /// against the schema, so it is inert under the lattice operations.
+    /// It lifts to the wrapped `SimpleType`, which is what makes such a
+    /// variable projectable and orderable like any other value.
+    Scalar(SimpleType),
     Zero,
 }
 
@@ -78,6 +85,7 @@ impl VariableType {
             VariableType::Null => SimpleType::Zero,
             // A path has no attributes — `path.attr` is undefined.
             VariableType::Path => SimpleType::Zero,
+            VariableType::Scalar(_) => SimpleType::Zero,
             VariableType::Zero => SimpleType::Zero,
         }
     }
@@ -184,6 +192,9 @@ impl VariableType {
             // operand and never shared across a comma-join/concat, so this
             // arm is reached only by a degenerate `p = ..., p = ...`.
             (VariableType::Path, VariableType::Path) => VariableType::Path,
+            (VariableType::Scalar(a), VariableType::Scalar(b)) => {
+                VariableType::Scalar(SimpleType::meet(a, b))
+            }
             (VariableType::Zero, _) | (_, VariableType::Zero) => VariableType::Zero,
             _ => VariableType::Zero,
         }
@@ -240,6 +251,7 @@ impl VariableType {
             (VariableType::Zero, _) => true,
             (VariableType::Null, VariableType::Null) => true,
             (VariableType::Path, VariableType::Path) => true,
+            (VariableType::Scalar(a), VariableType::Scalar(b)) => SimpleType::is_subtype(a, b),
             (VariableType::Node(a), VariableType::Node(b)) => DescriptorType::is_subtype(a, b),
             (
                 VariableType::EdgeDirectional {
@@ -329,6 +341,7 @@ impl VariableType {
             }
             VariableType::Null => VariableType::Null,
             VariableType::Path => VariableType::Path,
+            VariableType::Scalar(t) => VariableType::Scalar(t.clone()),
             VariableType::Zero => VariableType::Zero,
         }
     }
@@ -348,6 +361,7 @@ impl VariableType {
             VariableType::Null => false,
             // A path binding is always inhabited; it never empties an env.
             VariableType::Path => false,
+            VariableType::Scalar(t) => t.is_empty(),
         }
     }
 }
@@ -366,6 +380,7 @@ impl fmt::Display for VariableType {
             VariableType::Group(t) => write!(f, "group<{t}>"),
             VariableType::Null => write!(f, "Null"),
             VariableType::Path => write!(f, "path"),
+            VariableType::Scalar(t) => write!(f, "{t}"),
             VariableType::Zero => write!(f, "⊥"),
         }
     }

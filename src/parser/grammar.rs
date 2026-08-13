@@ -5,8 +5,8 @@ use crate::syntax::expr::{BinOp, Expr, UnOp};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::path_prefix::{PathMode, PathPrefix, PathSearch};
 use crate::syntax::query::{
-    Aggregator, GeneralSetKind, MatchStatement, NullsOrder, Query, ReturnItem, SetQuantifier,
-    SortDir, SortKey, SortSpec,
+    Aggregator, GeneralSetKind, KMode, MatchStatement, NearestClause, NullsOrder, Query,
+    ReturnItem, SetQuantifier, SortDir, SortKey, SortSpec,
 };
 use crate::syntax::statement::{IndexKindStmt, Statement, TypeElement};
 use crate::typing::descriptor_type::DescriptorType;
@@ -217,6 +217,10 @@ impl Parser {
         &mut self,
         matches: Vec<MatchStatement>,
     ) -> Result<Query, String> {
+        // Vector search, before GROUP BY / RETURN so its distance
+        // variable is in scope for them.
+        let nearest = self.parse_optional_nearest()?;
+
         // Legacy position: GROUP BY between the match chain and RETURN.
         // Pre-ISO form kept for back-compat (commit 72a6449e). The
         // canonical post-items position below is ISO §14.11.
@@ -250,12 +254,101 @@ impl Parser {
 
         Ok(Query {
             matches,
+            nearest,
             group_by,
             returns,
             distinct,
             order_by,
             limit,
         })
+    }
+
+    /// Optional `NEAREST <k> [ROWS] <var>.<attr> TO <expr> [AS <dist>]`.
+    ///
+    /// `NEAREST`, `ROWS`, and `TO` are matched as soft keywords at the
+    /// grammar level rather than lexed, the same treatment
+    /// `TRAIL`/`SHORTEST`/`ACYCLIC` get. That keeps `nearest`, `rows`,
+    /// and `to` usable as ordinary variable, label, and property names,
+    /// which matters because `to` in particular is a plausible property.
+    fn parse_optional_nearest(&mut self) -> Result<Option<NearestClause>, String> {
+        if !self.check_name_keyword("NEAREST") {
+            return Ok(None);
+        }
+        self.advance();
+
+        let k = self
+            .expect_number()
+            .map_err(|e| format!("NEAREST requires a non-negative integer count: {e}"))?;
+        if k < 0 {
+            return Err(format!("NEAREST requires a non-negative count, got {k}"));
+        }
+        let k =
+            u32::try_from(k).map_err(|_| format!("NEAREST {k} exceeds the supported u32 range"))?;
+
+        let mode = if self.eat_name_keyword("ROWS") {
+            KMode::Rows
+        } else {
+            KMode::DistinctVar
+        };
+
+        let var = match self.peek().clone() {
+            Token::Name(n) => {
+                self.advance();
+                n
+            }
+            other => {
+                return Err(format!(
+                    "NEAREST expects a pattern variable after the count, got {other:?}"
+                ))
+            }
+        };
+        self.expect(&Token::Dot)
+            .map_err(|_| format!("NEAREST expects `{var}.<vector attribute>`"))?;
+        let attr = match self.peek().clone() {
+            Token::Name(n) => {
+                self.advance();
+                n
+            }
+            other => {
+                return Err(format!(
+                    "NEAREST expects a vector attribute name after `{var}.`, got {other:?}"
+                ))
+            }
+        };
+
+        if !self.eat_name_keyword("TO") {
+            return Err(format!(
+                "NEAREST {var}.{attr} must be followed by TO <query vector>"
+            ));
+        }
+        // `return_comparison` rather than `expr`: it excludes AS from the
+        // operator set, leaving AS free for the distance binding below.
+        let query = self.return_comparison()?;
+
+        let dist_var = if self.eat(&Token::As) {
+            match self.peek().clone() {
+                Token::Name(n) => {
+                    self.advance();
+                    Some(n)
+                }
+                other => {
+                    return Err(format!(
+                        "NEAREST ... AS expects a variable name for the distance, got {other:?}"
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+
+        Ok(Some(NearestClause {
+            k,
+            mode,
+            var,
+            attr,
+            query,
+            dist_var,
+        }))
     }
 
     fn parse_group_by_clause(&mut self) -> Result<Option<Vec<Expr>>, String> {
@@ -1535,11 +1628,7 @@ impl Parser {
 
         Ok(Query {
             matches,
-            group_by: None,
-            returns: None,
-            distinct: false,
-            order_by: None,
-            limit: None,
+            ..Query::empty()
         })
     }
 
@@ -1656,11 +1745,10 @@ impl Parser {
 
         Ok(Query {
             matches,
-            group_by: None,
             returns: Some(items),
-            distinct: false,
             order_by,
             limit,
+            ..Query::empty()
         })
     }
 
@@ -1817,6 +1905,24 @@ impl Parser {
                         }
                         self.expect(&Token::RParen)?;
                         return Ok(Expr::Call { name: canon, args });
+                    }
+                    // Non-ISO: `VECTOR(<node id>, '<attr>')` reads a stored
+                    // vector, so a query can say "nearest to the embedding
+                    // of this example entity" instead of pasting hundreds
+                    // of floats. Same soft-keyword discipline.
+                    if name.eq_ignore_ascii_case("VECTOR") {
+                        self.advance(); // consume '('
+                        let node = self.expr()?;
+                        self.expect(&Token::Comma).map_err(|_| {
+                            "VECTOR expects two arguments: VECTOR(<node id>, '<attribute>')"
+                                .to_string()
+                        })?;
+                        let attr = self.expr()?;
+                        self.expect(&Token::RParen)?;
+                        return Ok(Expr::Call {
+                            name: "VECTOR".to_string(),
+                            args: vec![node, attr],
+                        });
                     }
                 }
                 // First dot: variable-to-property. Subsequent dots: field access

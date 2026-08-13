@@ -84,6 +84,7 @@ impl PathType {
             VariableType::Group(_)
             | VariableType::Null
             | VariableType::Path
+            | VariableType::Scalar(_)
             | VariableType::Zero => PathType::Zero,
         }
     }

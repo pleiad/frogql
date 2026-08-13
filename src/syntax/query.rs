@@ -150,12 +150,77 @@ impl MatchStatement {
     }
 }
 
+/// What the `k` of a `NEAREST` clause counts.
+///
+/// The two differ whenever one binding of the search variable yields
+/// several result rows, which for a join pattern is the common case.
+/// Both are supported because which one a study wants depends on the
+/// question: "the 10 nearest images that appear in a matching pattern"
+/// is `DistinctVar`; "the 10 best rows" is `Rows`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KMode {
+    /// `k` distinct values of the search variable, each having at least
+    /// one match. Default.
+    DistinctVar,
+    /// `k` result rows, ordered by the search variable's distance.
+    Rows,
+}
+
+/// A vector-search constraint on one variable of the pattern.
+///
+/// ```text
+/// NEAREST <k> [ROWS] <var>.<attr> TO <expr> [AS <distvar>]
+/// ```
+///
+/// Modelled on the "magic predicate" idiom SPARQL engines use for
+/// nearest-neighbour iterators (`?img proc:hnswIterator ("idx" ?v ?d)`),
+/// but written as a clause rather than a pattern operand. Position in a
+/// SPARQL basic graph pattern does not fix evaluation order either, so
+/// nothing is lost, and a clause avoids threading a new variant through
+/// every `PathPattern` traversal.
+///
+/// It sits between the MATCH chain and RETURN so `dist_var` is in scope
+/// for projection, GROUP BY, and ORDER BY.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NearestClause {
+    /// How many neighbours to keep. `0` yields an empty result.
+    pub k: u32,
+    pub mode: KMode,
+    /// The pattern variable constrained to the nearest neighbours.
+    pub var: String,
+    /// Which vector attribute of `var` to search.
+    pub attr: String,
+    /// The query vector. Either a literal list of numbers or a
+    /// `VECTOR(<node id>, '<attr>')` call reading a stored vector — the
+    /// analogue of taking the embedding of an example entity.
+    pub query: Expr,
+    /// Optional binding for the distance, like SPARQL's `?dist`.
+    pub dist_var: Option<String>,
+}
+
+impl fmt::Display for NearestClause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "NEAREST {}", self.k)?;
+        if self.mode == KMode::Rows {
+            write!(f, " ROWS")?;
+        }
+        write!(f, " {}.{} TO {}", self.var, self.attr, self.query)?;
+        if let Some(d) = &self.dist_var {
+            write!(f, " AS {d}")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     /// ISO §14.3 `<simple linear query statement>` — the chain of MATCH
     /// statements. Always non-empty for parsed queries. May mix
     /// `MatchStatement::Simple` and `MatchStatement::Optional`.
     pub matches: Vec<MatchStatement>,
+    /// Non-ISO extension: a vector-search constraint on one pattern
+    /// variable. See `NearestClause`.
+    pub nearest: Option<NearestClause>,
     /// ISO §16.15 explicit GROUP BY. None → no grouping (only valid when
     /// RETURN is pure-aggregate or pure-projection; the typechecker rejects
     /// mixed RETURN without an explicit GROUP BY).
@@ -206,6 +271,18 @@ impl Query {
     pub fn pattern_only(pattern: PathPattern) -> Self {
         Query {
             matches: vec![MatchStatement::Simple { pattern }],
+            ..Query::empty()
+        }
+    }
+
+    /// A query with no clauses and no match statements. Not valid on its
+    /// own — `matches` must be non-empty — but it gives every
+    /// construction site a `..Query::empty()` tail so adding a clause
+    /// does not touch two dozen struct literals.
+    pub fn empty() -> Self {
+        Query {
+            matches: Vec::new(),
+            nearest: None,
             group_by: None,
             returns: None,
             distinct: false,
@@ -315,6 +392,9 @@ impl fmt::Display for Query {
                 MatchStatement::Optional { pattern } => ("OPTIONAL MATCH", pattern),
             };
             write!(f, "{kw} {pattern}")?;
+        }
+        if let Some(n) = &self.nearest {
+            write!(f, " {n}")?;
         }
         if let Some(gb) = &self.group_by {
             let exprs: Vec<String> = gb.iter().map(|e| e.to_string()).collect();

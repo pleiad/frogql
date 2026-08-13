@@ -182,22 +182,7 @@ fn a_property_change_does_not_suspend_vector_search() {
     );
 }
 
-#[test]
-fn the_kill_switch_hides_a_valid_sidecar() {
-    let db = fraud_db("kill_switch");
-    let fp = current_fingerprint(&db);
-    write_sidecar(&db, "emb", vec![0, 1, 2], fp, false);
-
-    // Scoped to this test's open() call. Tests share a process, so the
-    // variable is removed immediately after.
-    std::env::set_var("FROGQL_DISABLE_VECTORS", "1");
-    let store = LazyGraphStore::open(&db).unwrap();
-    std::env::remove_var("FROGQL_DISABLE_VECTORS");
-
-    assert!(store.vectors("emb").is_none());
-    assert_eq!(
-        store.vector_store().attrs(),
-        vec!["emb"],
-        "diagnostics still see the sidecar, queries do not"
-    );
-}
+// The FROGQL_DISABLE_VECTORS kill switch is covered in
+// `vector_kill_switch_test.rs`. It lives in its own integration target
+// because an env var is process-global: setting it here would leak into
+// whichever test in this file happened to call `open()` concurrently.

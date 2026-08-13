@@ -11,7 +11,9 @@ use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::path_prefix::{PathPrefix, PathSearch, UnboundedSupport};
-use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem, SortKey, SortSpec};
+use crate::syntax::query::{
+    Aggregator, MatchStatement, NearestClause, Query, ReturnItem, SortKey, SortSpec,
+};
 
 use super::descriptor_type::DescriptorType;
 use super::label_type::LabelType;
@@ -97,6 +99,12 @@ impl Typechecker {
         self.check_unbounded_repetition(q);
         self.check_selective_isolation(q);
 
+        // NEAREST binds its distance variable, so it must be checked
+        // before the clauses that may reference it.
+        if let Some(n) = &q.nearest {
+            self.check_nearest(n, &mut r.env);
+        }
+
         if let Some(group_by) = &q.group_by {
             self.check_group_by(group_by, &r.env);
         }
@@ -115,6 +123,53 @@ impl Typechecker {
             r.ok = false;
         }
         r
+    }
+
+    /// Check a `NEAREST` clause and bind its distance variable.
+    ///
+    /// The search variable must already be bound by the pattern and must
+    /// be a node: vectors attach to nodes, and every strategy pins or
+    /// filters node ids. The query expression must be able to be a list
+    /// of numbers. The distance variable, if present, is bound as a
+    /// `Scalar(F)` so RETURN and ORDER BY can use it like any value.
+    fn check_nearest(&mut self, n: &NearestClause, env: &mut TypeEnvironment) {
+        match env.get(&n.var) {
+            None => self.errors.push(format!(
+                "NEAREST refers to `{}`, which is not bound by the pattern",
+                n.var
+            )),
+            Some(VariableType::Node(_)) | Some(VariableType::Union(_, _)) => {}
+            Some(other) => self.errors.push(format!(
+                "NEAREST expects `{}` to be a node variable, but it is {other}",
+                n.var
+            )),
+        }
+
+        // `Star` passes: an untyped schema knows nothing about the shape
+        // of the query expression, and the runtime rejects a non-vector
+        // there anyway.
+        let qt = self.check_expr(&n.query, env);
+        let vector_t = SimpleType::List(Box::new(SimpleType::Star));
+        if SimpleType::meet(&qt, &vector_t).is_empty() {
+            self.errors.push(format!(
+                "NEAREST ... TO expects a vector (a list of numbers), got {qt}"
+            ));
+        }
+
+        if n.k == 0 {
+            self.warnings
+                .push("NEAREST 0 always produces an empty result".to_string());
+        }
+
+        if let Some(d) = &n.dist_var {
+            if env.get(d).is_some() {
+                self.errors.push(format!(
+                    "NEAREST ... AS {d} would shadow `{d}`, which the pattern already binds"
+                ));
+            } else {
+                env.set(d, VariableType::Scalar(SimpleType::F));
+            }
+        }
     }
 
     /// ISO §16.17 + §22.14: enforce comparable-value-type per CR 1
@@ -888,6 +943,28 @@ impl Typechecker {
                             _ => SimpleType::List(Box::new(SimpleType::Star)),
                         }
                     }
+                    // Non-ISO: `VECTOR(<node id>, '<attribute>')` reads a
+                    // stored vector. Vectors are plain float lists rather
+                    // than a terminal type — a new `SimpleType` would
+                    // ripple through the whole lattice for no gain here,
+                    // since nothing in the language needs to distinguish
+                    // a vector from a list of numbers.
+                    "VECTOR" => {
+                        if args.len() != 2 {
+                            self.errors.push(format!(
+                                "VECTOR expects two arguments (node id, attribute name), got {}",
+                                args.len()
+                            ));
+                        }
+                        if let Some(t) = arg_types.get(1) {
+                            if SimpleType::meet(t, &SimpleType::S).is_empty() {
+                                self.errors.push(format!(
+                                    "VECTOR expects a string attribute name, got {t}"
+                                ));
+                            }
+                        }
+                        SimpleType::List(Box::new(SimpleType::F))
+                    }
                     other => {
                         self.errors
                             .push(format!("unknown built-in function `{other}`"));
@@ -1242,6 +1319,7 @@ fn variable_type_to_simple_type(t: &VariableType) -> SimpleType {
         ),
         VariableType::Null => SimpleType::Star,
         VariableType::Path => SimpleType::Path,
+        VariableType::Scalar(t) => t.clone(),
         VariableType::Zero => SimpleType::Zero,
         // Repetition-grouping is not projectable as a single value;
         // typing it as Star defers the runtime check (`Expr::Var` on
@@ -1384,6 +1462,7 @@ fn short_var_type(t: &VariableType) -> String {
         VariableType::Group(inner) => format!("group<{}>", short_var_type(inner)),
         VariableType::Null => "Null".to_string(),
         VariableType::Path => "path".to_string(),
+        VariableType::Scalar(t) => t.to_string(),
         VariableType::Zero => "⊥".to_string(),
     }
 }
