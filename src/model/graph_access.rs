@@ -97,6 +97,22 @@ pub trait GraphAccess {
     fn lookup_node_ordered(&self, _label: &str, _prop: &str, _ascending: bool) -> Option<Vec<Id>> {
         None
     }
+
+    // --- Vector attributes ---
+
+    /// The vectors stored for `attr`, or `None` when the backend has no
+    /// such attribute (or has switched vector search off after a DML
+    /// statement). Vectors live in sidecar files next to the `.gdb`, so
+    /// only `LazyGraphStore` overrides this; the in-RAM and fully
+    /// disk-backed stores have no sidecars and keep the default.
+    ///
+    /// This is on the trait rather than on `Runtime` because the LTJ
+    /// pattern-extraction functions are free functions that receive only
+    /// `graph: &G` — anything hung off the runtime would be unreachable
+    /// from where the candidate sets are actually produced.
+    fn vectors(&self, _attr: &str) -> Option<&crate::vector::store::VectorSet> {
+        None
+    }
 }
 
 /// Shape of a `dependent object error` raised by NODETACH DELETE when a

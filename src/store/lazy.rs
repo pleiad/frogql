@@ -10,7 +10,7 @@
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::model::graph::Props;
 use crate::model::graph_access::GraphAccess;
@@ -19,6 +19,7 @@ use crate::pager::page::{Page, PageType, PAGE_SIZE};
 use crate::pager::pager::Pager;
 use crate::runtime::catalog::GraphTypeCatalog;
 use crate::typing::label_type::LabelType;
+use crate::vector::store::{VectorSet, VectorStore};
 
 use super::catalog_io;
 use super::disk_index;
@@ -146,6 +147,15 @@ pub struct LazyGraphStore {
     /// the first DML statement. Persistence happens via `save()`, which
     /// materializes the merged base+overlay view into a fresh `.gdb`.
     overlay: RefCell<MutationOverlay>,
+
+    /// Where this database was opened from. Kept because the vector
+    /// sidecars are named after it (`<db>.vec.<attr>`) and nothing else
+    /// in the store had a reason to remember the path.
+    db_path: PathBuf,
+    /// Vector attributes loaded from the sidecars next to `db_path`.
+    /// Read-only after open, so it is a plain field rather than a
+    /// `RefCell`: `&self` methods hand out `&VectorSet` directly.
+    vectors: VectorStore,
 }
 
 impl LazyGraphStore {
@@ -232,6 +242,8 @@ impl LazyGraphStore {
             secondary: RefCell::new(SecondaryIndex::new()),
             secondary_index_root: Cell::new(secondary_index_root),
             overlay: RefCell::new(MutationOverlay::default()),
+            db_path: db_path.to_path_buf(),
+            vectors: VectorStore::empty(),
         };
 
         let t2 = std::time::Instant::now();
@@ -333,7 +345,44 @@ impl LazyGraphStore {
             );
         }
 
+        // Vector-attribute sidecars, if any sit next to the database.
+        // They are optional and independent of everything above, so a
+        // missing or stale one only costs a warning. The fingerprint is
+        // computed here rather than stored, so it always reflects the
+        // graph as just loaded.
+        let t6 = std::time::Instant::now();
+        let fp = crate::vector::sidecar::fingerprint(
+            store.node_count as usize,
+            store.edge_count as usize,
+        );
+        let (vectors, warnings) = VectorStore::open(db_path, fp);
+        for w in warnings {
+            eprintln!("warning: {w}");
+        }
+        if std::env::var("FROGQL_DISABLE_VECTORS").is_ok() {
+            vectors.disable();
+        }
+        store.vectors = vectors;
+        if trace && !store.vectors.is_empty() {
+            eprintln!(
+                "  vector sidecars:      {:.3}s  ({} attributes: {})",
+                t6.elapsed().as_secs_f64(),
+                store.vectors.attrs().len(),
+                store.vectors.attrs().join(", ")
+            );
+        }
+
         Ok(store)
+    }
+
+    /// The path this database was opened from.
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
+    }
+
+    /// The loaded vector attributes.
+    pub fn vector_store(&self) -> &VectorStore {
+        &self.vectors
     }
 
     /// Read-only borrow of the secondary indexes.
@@ -1279,6 +1328,21 @@ impl GraphAccess for LazyGraphStore {
 
     fn lookup_node_ordered(&self, label: &str, prop: &str, ascending: bool) -> Option<Vec<Id>> {
         self.secondary.borrow().ordered_ids(label, prop, ascending)
+    }
+
+    /// Vector search is suspended while the session holds an unsaved
+    /// node insert or delete. Sidecar rows key on graph-internal node
+    /// ids: the overlay hands out ids above the base watermark that no
+    /// sidecar covers, and a delete makes `save()` renumber everything.
+    /// Same guard, and the same reasoning, as `lookup_node_eq` above.
+    /// Property and label mutations are deliberately not a trigger —
+    /// they cannot move a node's id, and a vector is not a property.
+    fn vectors(&self, attr: &str) -> Option<&VectorSet> {
+        let overlay = self.overlay.borrow();
+        if !overlay.new_nodes.is_empty() || !overlay.deleted_nodes.is_empty() {
+            return None;
+        }
+        self.vectors.get(attr)
     }
 
     fn outgoing_edges(&self, node_id: Id) -> Vec<Id> {
