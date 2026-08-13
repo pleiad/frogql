@@ -5,6 +5,7 @@ pub mod engine;
 pub mod ltj;
 pub mod path_select;
 pub mod result;
+pub mod vsearch;
 
 use crate::model::value::Value;
 use crate::syntax::expr::BinOp;

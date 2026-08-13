@@ -1,12 +1,23 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use crate::model::value::PathValue;
+use crate::model::value::{PathValue, Value};
 
 /// Maps pattern variables to matched runtime values.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Assignment {
     pub m: HashMap<String, PathValue>,
+    /// Plain scalars bound by a clause rather than by the pattern — for
+    /// now only the distance of a `NEAREST ... AS d`.
+    ///
+    /// A separate map rather than a new `PathValue` variant: `PathValue`
+    /// models graph elements (nodes, edges, groups, paths) and is matched
+    /// exhaustively in a dozen places, none of which has anything
+    /// sensible to do with a float. Empty for every query that does not
+    /// bind one, so it costs an empty `HashMap` per row. The precedent is
+    /// `Runtime::comprehension_scope`, which already carries
+    /// scalar-valued bindings outside the binding table.
+    pub scalars: HashMap<String, Value>,
 }
 
 impl Assignment {
@@ -27,12 +38,21 @@ impl Assignment {
         self.m.get(x)
     }
 
+    /// A clause-bound scalar, if `x` names one.
+    pub fn get_scalar(&self, x: &str) -> Option<&Value> {
+        self.scalars.get(x)
+    }
+
+    pub fn set_scalar(&mut self, x: String, v: Value) {
+        self.scalars.insert(x, v);
+    }
+
     pub fn extend(&mut self, x: String, val: PathValue) {
         self.m.insert(x, val);
     }
 
     pub fn keys(&self) -> HashSet<String> {
-        self.m.keys().cloned().collect()
+        self.m.keys().chain(self.scalars.keys()).cloned().collect()
     }
 
     /// Can this assignment be unified with another?
@@ -40,6 +60,13 @@ impl Assignment {
     pub fn can_unify(&self, other: &Assignment) -> bool {
         for (k, v) in &self.m {
             if let Some(ov) = other.m.get(k) {
+                if v != ov {
+                    return false;
+                }
+            }
+        }
+        for (k, v) in &self.scalars {
+            if let Some(ov) = other.scalars.get(k) {
                 if v != ov {
                     return false;
                 }
@@ -54,6 +81,9 @@ impl Assignment {
         let mut result = self.clone();
         for (k, v) in &other.m {
             result.m.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &other.scalars {
+            result.scalars.insert(k.clone(), v.clone());
         }
         result
     }
@@ -104,9 +134,18 @@ impl Assignment {
 
 impl fmt::Display for Assignment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut entries: Vec<_> = self.m.iter().collect();
-        entries.sort_by_key(|(k, _)| (*k).clone());
-        let parts: Vec<String> = entries.iter().map(|(k, v)| format!("{k} ↦ {v}")).collect();
+        let mut parts: Vec<(String, String)> = self
+            .m
+            .iter()
+            .map(|(k, v)| (k.clone(), format!("{k} ↦ {v}")))
+            .chain(
+                self.scalars
+                    .iter()
+                    .map(|(k, v)| (k.clone(), format!("{k} ↦ {v}"))),
+            )
+            .collect();
+        parts.sort_by(|a, b| a.0.cmp(&b.0));
+        let parts: Vec<String> = parts.into_iter().map(|(_, s)| s).collect();
         write!(f, "{}", parts.join(", "))
     }
 }

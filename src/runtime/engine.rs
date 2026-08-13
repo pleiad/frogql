@@ -358,6 +358,14 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// `Assignment` does not bind the name. Set per outer row while the
     /// correlated body runs.
     correlation_scope: RefCell<Vec<Assignment>>,
+    /// Which vector-search strategy to use and how. Interior mutability
+    /// keeps every `Runtime` method on `&self`, the same reason
+    /// `unbounded_policy` is a `Cell`. Defaults come from the
+    /// environment; the benchmark driver overrides them per run.
+    vec_cfg: RefCell<crate::runtime::vsearch::VecCfg>,
+    /// Counters from the last `NEAREST` evaluation. The benchmark reads
+    /// which arm actually ran, which is not always the one requested.
+    last_vec_stats: RefCell<crate::runtime::vsearch::VecStats>,
 }
 
 /// Cached evaluation result for an existential predicate.
@@ -419,6 +427,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
             comprehension_scope: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
+            vec_cfg: RefCell::new(crate::runtime::vsearch::VecCfg::from_env()),
+            last_vec_stats: RefCell::new(crate::runtime::vsearch::VecStats::default()),
         }
     }
 
@@ -436,6 +446,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
             comprehension_scope: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
+            vec_cfg: RefCell::new(crate::runtime::vsearch::VecCfg::from_env()),
+            last_vec_stats: RefCell::new(crate::runtime::vsearch::VecStats::default()),
         }
     }
 
@@ -443,6 +455,74 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// shared Arc. Use it in long-lived sessions (REPL, Python Connection,
     /// benchmarks) at open time to amortize the build cost — every Runtime
     /// constructed afterwards via `with_triple_index` is instant.
+    /// Read the active vector-search configuration.
+    pub fn vec_cfg(&self) -> crate::runtime::vsearch::VecCfg {
+        self.vec_cfg.borrow().clone()
+    }
+
+    /// Override the vector-search configuration for this runtime.
+    pub fn set_vec_cfg(&self, cfg: crate::runtime::vsearch::VecCfg) {
+        *self.vec_cfg.borrow_mut() = cfg;
+    }
+
+    /// Counters from the most recent `NEAREST` evaluation.
+    pub fn last_vec_stats(&self) -> crate::runtime::vsearch::VecStats {
+        self.last_vec_stats.borrow().clone()
+    }
+
+    pub(crate) fn set_last_vec_stats(&self, s: crate::runtime::vsearch::VecStats) {
+        *self.last_vec_stats.borrow_mut() = s;
+    }
+
+    /// Evaluate the match chain with no vector-search post-processing.
+    /// The strategies call this rather than `run_query` so they see raw
+    /// pattern rows, and so `run_query` cannot recurse into itself.
+    /// Evaluate the match chain, applying a `NEAREST` clause if there is
+    /// one. Rows come back nearest-first with the distance bound.
+    fn run_match_chain_or_nearest(&self, query: &Query, limit: usize) -> IntermediateResult {
+        let clause = match &query.nearest {
+            Some(c) => c,
+            None => return self.run_match_chain(query, limit),
+        };
+        let cfg = self.vec_cfg();
+        match crate::runtime::vsearch::resolve_spec(self, clause) {
+            Ok(spec) => crate::runtime::vsearch::run_nearest(self, query, &spec, &cfg),
+            Err(e) => {
+                // A query vector that will not evaluate cannot select
+                // anything; an empty result is the honest answer, and the
+                // reason is recorded for the diagnostics.
+                let mut stats = crate::runtime::vsearch::VecStats {
+                    arm: "none",
+                    fallback_reason: Some(e),
+                    ..Default::default()
+                };
+                if cfg.debug {
+                    stats.print();
+                }
+                stats.accepted = 0;
+                self.set_last_vec_stats(stats);
+                IntermediateResult::new(Vec::new())
+            }
+        }
+    }
+
+    pub(crate) fn run_match_chain_plain(&self, query: &Query, limit: usize) -> IntermediateResult {
+        self.run_match_chain(query, limit)
+    }
+
+    /// Run `pattern` with variables pinned to node ids. Used by the
+    /// pre-filter strategy, which re-runs the whole pattern once per
+    /// candidate neighbour. `None` when the pattern does not decompose.
+    pub(crate) fn run_pinned(
+        &self,
+        pattern: &PathPattern,
+        pins: &[(&str, u32)],
+        limit: usize,
+    ) -> Option<IntermediateResult> {
+        let index = self.triple_index();
+        self.pinned_run_multi(pattern, &index, pins, limit)
+    }
+
     pub fn warm_triple_index(&self) -> Arc<TripleIndex> {
         self.triple_index().clone()
     }
@@ -552,7 +632,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             force.as_deref(),
             Some("pdqsort") | Some("topk") | Some("driftsort")
         );
-        let real_rows = if has_order && !force_off {
+        // NEAREST imposes its own row order (nearest first) and must see
+        // the whole match, so the btree-driven ORDER BY path — which
+        // bypasses the match chain and cuts in key order — cannot run
+        // alongside it.
+        let real_rows = if has_order && !force_off && query.nearest.is_none() {
             self.try_btree_ltj_real(query, limit)
         } else {
             None
@@ -568,8 +652,15 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     }
                     return QueryResult::Raw(ir);
                 }
-                let input_limit = if has_order { 0 } else { limit };
-                let mut ir = self.run_match_chain(query, input_limit);
+                let input_limit = if has_order || query.nearest.is_some() {
+                    0
+                } else {
+                    limit
+                };
+                let mut ir = self.run_match_chain_or_nearest(query, input_limit);
+                if query.nearest.is_some() && limit > 0 && ir.rows.len() > limit {
+                    ir.rows.truncate(limit);
+                }
                 if let Some(specs) = &query.order_by {
                     self.route_pre_sort(&mut ir.rows, specs, &query.matches, limit);
                     if limit > 0 && ir.rows.len() > limit {
@@ -586,12 +677,15 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // each partition to one representative row (dedup-by-key). Route it
         // through `run_aggregated` so the grouping happens.
         let needs_grouping = has_aggs || query.group_by.is_some();
-        let needs_full_input = needs_grouping || query.distinct || has_order;
+        // A LIMIT cuts in row-arrival order, which for NEAREST has nothing
+        // to do with distance; the clause must rank the full match first.
+        let needs_full_input =
+            needs_grouping || query.distinct || has_order || query.nearest.is_some();
         let input_limit = if needs_full_input { 0 } else { limit };
 
         let (mut ir, used_real) = match real_rows {
             Some(rows) => (IntermediateResult::new(rows), true),
-            None => (self.run_match_chain(query, input_limit), false),
+            None => (self.run_match_chain_or_nearest(query, input_limit), false),
         };
 
         let pre_projection_sort = !needs_grouping && !has_column_sort_key && !used_real;
@@ -3233,6 +3327,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             Expr::Var(name) => {
                 if let Some(v) = self.comprehension_lookup(name) {
                     return ExprResult::Success(v);
+                }
+                // A clause-bound scalar (the distance of `NEAREST ... AS
+                // d`) is not in the binding table proper.
+                if let Some(v) = mu.get_scalar(name) {
+                    return ExprResult::Success(v.clone());
                 }
                 match mu.get(name) {
                     Some(pv) => ExprResult::Success(path_value_to_value(pv)),
