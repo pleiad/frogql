@@ -205,3 +205,43 @@ unbounded repetition reached the runtime without a finite-making prefix
 
 Reach for the flag to measure typechecker overhead, not to run queries the
 checker rejects.
+
+---
+
+## Vector search
+
+`NEAREST` picks its evaluation strategy from the environment. Nothing here
+changes the *answer* under `FROGQL_VEC_INDEX=brute` — the three strategies
+are pinned equivalent there by `tests/vector_strategy_equiv_test.rs` — so
+these are cost knobs, not semantic ones.
+
+| Var | Effect |
+|---|---|
+| `FROGQL_VEC_STRATEGY=post\|pre\|inltj` | which strategy runs (default `post`) |
+| `FROGQL_VEC_INDEX=hnsw\|brute` | metric index or exact brute force (default `hnsw`) |
+| `FROGQL_VEC_LEVEL=<n>` | VEO position of the search variable; in-LTJ only |
+| `FROGQL_VEC_TAU_EPS=<f>` | relative slack on the top-k threshold cut |
+| `FROGQL_DISABLE_VECTORS` | ignore every sidecar |
+| `FROGQL_DEBUG_VEC` | print the executed arm and its counters |
+
+**`FROGQL_VEC_INDEX=hnsw` changes the answer, deliberately.** HNSW is
+approximate, and the three strategies walk its proximity graph
+differently, so their recall differs. That difference is a measurement,
+not a defect. Only `brute` is exact.
+
+**The strategy you ask for is not always the one that runs.** A shape an
+interleaving arm cannot hook into — an `OPTIONAL MATCH`, a §16.6 prefix, a
+pattern that does not decompose, a search variable the secondary index
+folded to a constant — falls back to post-filtering. `FROGQL_DEBUG_VEC`
+prints what actually ran and why; `vec_bench` warns on the mismatch. Never
+read a timing as belonging to the requested arm without checking.
+
+**`FROGQL_VEC_LEVEL` is a real trade, not a tuning default.** At level 0
+the neighbour stream drives the whole join. Deeper, the candidate set at
+each visit is smaller but the level is reached once per binding above it.
+On 3k items / 300 users / dim 16 with a broad pattern and k=10, level 0
+ran at 1.0 ms against post-filter's 14.3 ms, while level 1 slowed to
+3.9 ms — 300 visits and ~10k neighbour pops to do the same work. Which
+side wins depends on the graph, which is why it is a knob.
+
+Full write-up: `docs/internals/vector-search.md`.
