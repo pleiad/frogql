@@ -179,6 +179,20 @@ impl TripleIndex {
         }
     }
 
+    /// Heap footprint split per ordering, plus whatever is shared across
+    /// all six. Array mode has nothing shared (each ordering is a full
+    /// materialized copy); compact mode shares the eid side table, which
+    /// belongs to no single trie. The pair sums to `heap_bytes()`.
+    pub fn heap_breakdown(&self) -> ([usize; 6], usize) {
+        match &self.repr {
+            IndexRepr::Array(orderings) => (
+                std::array::from_fn(|i| orderings[i].len() * std::mem::size_of::<IndexEntry>()),
+                0,
+            ),
+            IndexRepr::Compact(c) => (c.trie_heap_bytes(), c.side_table_bytes()),
+        }
+    }
+
     fn get_or_insert_label(
         map: &mut HashMap<String, u32>,
         vec: &mut Vec<String>,

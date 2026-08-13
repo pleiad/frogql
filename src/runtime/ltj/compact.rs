@@ -410,6 +410,19 @@ impl CompactTripleIndex {
             + self.leaf_offsets.len() * 4
             + self.leaf_eids.len() * 4
     }
+
+    /// Per-trie heap footprint in `TrieOrder` index order. Sums to
+    /// `heap_bytes()` minus `side_table_bytes()`.
+    pub fn trie_heap_bytes(&self) -> [usize; 6] {
+        std::array::from_fn(|i| self.tries[i].heap_bytes())
+    }
+
+    /// Heap of the eid side table (`leaf_offsets` + `leaf_eids`). It belongs
+    /// to no single trie: the tries collapse parallel edges into one leaf, so
+    /// this table is what restores ISO bag multiplicity for all six.
+    pub fn side_table_bytes(&self) -> usize {
+        self.leaf_offsets.len() * 4 + self.leaf_eids.len() * 4
+    }
 }
 
 #[cfg(test)]
