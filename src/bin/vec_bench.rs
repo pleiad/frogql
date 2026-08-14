@@ -8,7 +8,7 @@
 //! Output is CSV on stdout:
 //!
 //! ```text
-//! items,dim,k,mode,selectivity,strategy,source,level,median_ms,recall,nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,rows
+//! items,dim,k,mode,selectivity,strategy,source,level,median_ms,recall,nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,resumes,rows
 //! ```
 //!
 //! `recall` is measured against post-filter with the exact cursor, which
@@ -266,7 +266,7 @@ fn main() {
 
     println!(
         "items,dim,k,mode,selectivity,strategy,source,level,median_ms,recall,\
-         nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,rows"
+         nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,resumes,rows"
     );
 
     // Two selectivities: `broad` matches every item, `narrow` only the
@@ -323,12 +323,15 @@ fn main() {
                     (Strategy::PostFilter, VecSource::GlobalSort),
                     (Strategy::PreFilter, VecSource::Hnsw),
                     (Strategy::PreFilter, VecSource::GlobalSort),
-                    (Strategy::InLtj, VecSource::Hnsw),
-                    (Strategy::InLtj, VecSource::LocalSort),
-                    (Strategy::InLtj, VecSource::GlobalSort),
+                    (Strategy::Interleave, VecSource::Hnsw),
+                    (Strategy::Interleave, VecSource::LocalSort),
+                    (Strategy::Interleave, VecSource::GlobalSort),
+                    (Strategy::Memo, VecSource::Hnsw),
+                    (Strategy::Memo, VecSource::LocalSort),
+                    (Strategy::Memo, VecSource::GlobalSort),
                 ] {
                     // The level axis only exists for in-LTJ.
-                    let levels: Vec<usize> = if strategy == Strategy::InLtj {
+                    let levels: Vec<usize> = if strategy.is_in_ltj() {
                         a.levels.clone()
                     } else {
                         vec![0]
@@ -363,7 +366,7 @@ fn main() {
                         };
 
                         println!(
-                            "{},{},{k},distinct,{sel_name},{},{},{level},{:.3},{recall:.3},{},{},{},{},{},{}",
+                            "{},{},{k},distinct,{sel_name},{},{},{level},{:.3},{recall:.3},{},{},{},{},{},{},{}",
                             a.items,
                             a.dim,
                             strategy.name(),
@@ -374,6 +377,7 @@ fn main() {
                             stats.pattern_runs,
                             stats.ltj_visits,
                             stats.candidates_hashed,
+                            stats.suffix_resumes,
                             rows.len(),
                         );
 

@@ -59,15 +59,18 @@ const TAGS: usize = 6;
 const DIM: usize = 4;
 
 /// Every (strategy, source) pair the engine can run.
-const ALL_ARMS: [(Strategy, VecSource); 8] = [
+const ALL_ARMS: [(Strategy, VecSource); 11] = [
     (Strategy::PostFilter, VecSource::Hnsw),
     (Strategy::PostFilter, VecSource::LocalSort),
     (Strategy::PostFilter, VecSource::GlobalSort),
     (Strategy::PreFilter, VecSource::Hnsw),
     (Strategy::PreFilter, VecSource::GlobalSort),
-    (Strategy::InLtj, VecSource::Hnsw),
-    (Strategy::InLtj, VecSource::LocalSort),
-    (Strategy::InLtj, VecSource::GlobalSort),
+    (Strategy::Interleave, VecSource::Hnsw),
+    (Strategy::Interleave, VecSource::LocalSort),
+    (Strategy::Interleave, VecSource::GlobalSort),
+    (Strategy::Memo, VecSource::Hnsw),
+    (Strategy::Memo, VecSource::LocalSort),
+    (Strategy::Memo, VecSource::GlobalSort),
 ];
 
 /// A small RDF-shaped graph with enough structure that the join has
@@ -269,14 +272,22 @@ fn the_three_strategies_agree_exactly_under_the_exact_cursor() {
                         (Strategy::PostFilter, VecSource::LocalSort, 0),
                         (Strategy::PreFilter, VecSource::GlobalSort, 0),
                         (Strategy::PreFilter, VecSource::LocalSort, 0),
-                        (Strategy::InLtj, VecSource::GlobalSort, 0),
-                        (Strategy::InLtj, VecSource::GlobalSort, 1),
-                        (Strategy::InLtj, VecSource::GlobalSort, 2),
-                        (Strategy::InLtj, VecSource::GlobalSort, 3),
-                        (Strategy::InLtj, VecSource::LocalSort, 0),
-                        (Strategy::InLtj, VecSource::LocalSort, 1),
-                        (Strategy::InLtj, VecSource::LocalSort, 2),
-                        (Strategy::InLtj, VecSource::LocalSort, 3),
+                        (Strategy::Interleave, VecSource::GlobalSort, 0),
+                        (Strategy::Interleave, VecSource::GlobalSort, 1),
+                        (Strategy::Interleave, VecSource::GlobalSort, 2),
+                        (Strategy::Interleave, VecSource::GlobalSort, 3),
+                        (Strategy::Interleave, VecSource::LocalSort, 0),
+                        (Strategy::Interleave, VecSource::LocalSort, 1),
+                        (Strategy::Interleave, VecSource::LocalSort, 2),
+                        (Strategy::Interleave, VecSource::LocalSort, 3),
+                        (Strategy::Memo, VecSource::GlobalSort, 0),
+                        (Strategy::Memo, VecSource::GlobalSort, 1),
+                        (Strategy::Memo, VecSource::GlobalSort, 2),
+                        (Strategy::Memo, VecSource::GlobalSort, 3),
+                        (Strategy::Memo, VecSource::LocalSort, 0),
+                        (Strategy::Memo, VecSource::LocalSort, 1),
+                        (Strategy::Memo, VecSource::LocalSort, 2),
+                        (Strategy::Memo, VecSource::LocalSort, 3),
                     ] {
                         let got = run(&db, &q, cfg(strategy, source, level));
                         assert_eq!(
@@ -298,13 +309,15 @@ fn the_veo_level_does_not_change_the_answer() {
     let vec_literal = &query_vectors(3, 1)[0];
     for k in [1usize, 5] {
         for q in queries(vec_literal, k, false) {
-            let base = run(&db, &q, exact(Strategy::InLtj, 0));
-            for level in 1..5 {
-                assert_eq!(
-                    bag(&run(&db, &q, exact(Strategy::InLtj, level))),
-                    bag(&base),
-                    "\nlevel {level}\nquery: {q}"
-                );
+            for strategy in [Strategy::Interleave, Strategy::Memo] {
+                let base = run(&db, &q, exact(strategy, 0));
+                for level in 1..5 {
+                    assert_eq!(
+                        bag(&run(&db, &q, exact(strategy, level))),
+                        bag(&base),
+                        "\n{strategy:?} level {level}\nquery: {q}"
+                    );
+                }
             }
         }
     }
@@ -363,7 +376,12 @@ fn an_approximate_arm_never_invents_a_row() {
                 .into_iter()
                 .collect();
 
-            for strategy in [Strategy::PostFilter, Strategy::PreFilter, Strategy::InLtj] {
+            for strategy in [
+                Strategy::PostFilter,
+                Strategy::PreFilter,
+                Strategy::Interleave,
+                Strategy::Memo,
+            ] {
                 let got = run(&db, &q, cfg(strategy, VecSource::Hnsw, 0));
                 for row in bag(&got) {
                     assert!(
@@ -383,21 +401,26 @@ fn the_in_ltj_arm_actually_ran_rather_than_falling_back() {
     let db = build_db("no_silent_fallback", 31);
     let store = LazyGraphStore::open(&db).unwrap();
     let rt = Runtime::new(&store);
-    for level in 0..3 {
-        rt.set_vec_cfg(exact(Strategy::InLtj, level));
-        let query = frogql::compile_query(
-            "MATCH (u:User)-[:likes]->(i:Item), (i)-[:tagged]->(g:Tag) \
-             NEAREST 3 i.emb TO [0.1, 0.2, 0.3, 0.4] RETURN i.idx",
-        )
-        .unwrap();
-        let _ = rt.run_query(&query, 0);
-        let stats = rt.last_vec_stats();
-        assert_eq!(stats.arm, "inltj+globalsort", "level {level}");
-        assert!(
-            stats.ltj_visits > 0,
-            "level {level}: the level was never reached"
-        );
-        assert_eq!(stats.pattern_runs, 1, "one join, not one per candidate");
+    for (strategy, arm) in [
+        (Strategy::Interleave, "interleave+globalsort"),
+        (Strategy::Memo, "memo+globalsort"),
+    ] {
+        for level in 0..3 {
+            rt.set_vec_cfg(exact(strategy, level));
+            let query = frogql::compile_query(
+                "MATCH (u:User)-[:likes]->(i:Item), (i)-[:tagged]->(g:Tag) \
+                 NEAREST 3 i.emb TO [0.1, 0.2, 0.3, 0.4] RETURN i.idx",
+            )
+            .unwrap();
+            let _ = rt.run_query(&query, 0);
+            let stats = rt.last_vec_stats();
+            assert_eq!(stats.arm, arm, "{strategy:?} level {level}");
+            assert!(
+                stats.ltj_visits > 0,
+                "{strategy:?} level {level}: the level was never reached"
+            );
+            assert_eq!(stats.pattern_runs, 1, "one join, not one per candidate");
+        }
     }
 }
 
@@ -410,7 +433,7 @@ fn the_threshold_prunes_the_neighbour_walk() {
     let rt = Runtime::new(&store);
     let mut pops = Vec::new();
     for k in [1usize, ITEMS] {
-        rt.set_vec_cfg(exact(Strategy::InLtj, 0));
+        rt.set_vec_cfg(exact(Strategy::Interleave, 0));
         let query = frogql::compile_query(&format!(
             "MATCH (u:User)-[:likes]->(i:Item) NEAREST {k} i.emb TO [0.0, 0.0, 0.0, 0.0] \
              RETURN i.idx"
@@ -444,16 +467,16 @@ fn local_and_global_sources_are_different_algorithms_not_just_labels() {
              NEAREST 3 i.emb TO [0.0, 0.0, 0.0, 0.0] RETURN i.idx";
     let query = frogql::compile_query(q).unwrap();
 
-    rt.set_vec_cfg(cfg(Strategy::InLtj, VecSource::LocalSort, 1));
+    rt.set_vec_cfg(cfg(Strategy::Interleave, VecSource::LocalSort, 1));
     let _ = rt.run_query(&query, 0);
     let local = rt.last_vec_stats();
 
-    rt.set_vec_cfg(cfg(Strategy::InLtj, VecSource::GlobalSort, 1));
+    rt.set_vec_cfg(cfg(Strategy::Interleave, VecSource::GlobalSort, 1));
     let _ = rt.run_query(&query, 0);
     let global = rt.last_vec_stats();
 
-    assert_eq!(local.arm, "inltj+localsort");
-    assert_eq!(global.arm, "inltj+globalsort");
+    assert_eq!(local.arm, "interleave+localsort");
+    assert_eq!(global.arm, "interleave+globalsort");
     assert!(
         local.ltj_visits > 1,
         "need several visits to tell them apart"
@@ -481,14 +504,21 @@ fn local_and_global_sources_are_different_algorithms_not_just_labels() {
 }
 
 #[test]
-fn the_shared_prefix_is_reused_across_visits() {
-    // Off level 0 the search reaches the level once per binding above it,
-    // and each visit re-walks the stream from the nearest. If the prefix
-    // cache were not shared, every visit would re-drive the cursor.
+fn the_ranking_is_walked_once_not_once_per_visit() {
+    // The property the two-phase shape exists for. Off level 0 the search
+    // reaches the level once per binding above it. Interleaving the
+    // neighbour walk into those visits re-walks the ranking, because each
+    // visit is internally sorted but their concatenation is not, so no
+    // visit can stop early on distance until a later one has contributed.
+    //
+    // Phase 1 collects the prefixes instead, and phase 2 walks the
+    // ranking once. Every read is therefore a fresh extension of the
+    // cursor: nothing is ever re-read. `replays > extends` was the old
+    // interleaved design's signature and must not come back.
     let db = build_db("prefix_reuse", 51);
     let store = LazyGraphStore::open(&db).unwrap();
     let rt = Runtime::new(&store);
-    rt.set_vec_cfg(exact(Strategy::InLtj, 1));
+    rt.set_vec_cfg(exact(Strategy::Memo, 1));
     // Two triples, so `i` is non-lonely and level 1 is legal. With a
     // single triple every variable is lonely, `max_level` is 0, and the
     // request would be clamped back to a single visit.
@@ -500,11 +530,24 @@ fn the_shared_prefix_is_reused_across_visits() {
     let _ = rt.run_query(&query, 0);
     let stats = rt.last_vec_stats();
     assert!(stats.ltj_visits > 1, "expected several visits to the level");
+    // One read per position, one position per read.
+    assert_eq!(
+        stats.prefix_replays, stats.prefix_extends,
+        "visits={} replays={} extends={}: the ranking is being re-walked, \
+         not walked once",
+        stats.ltj_visits, stats.prefix_replays, stats.prefix_extends
+    );
+    assert_eq!(
+        stats.nn_pops, stats.prefix_extends,
+        "every neighbour popped should have cost exactly one cursor extension"
+    );
+    // The memo's payoff: the join produced candidates, and the neighbour
+    // order decided which of them were worth completing.
+    assert!(stats.candidates_hashed > 0, "phase 1 collected nothing");
     assert!(
-        stats.prefix_replays > stats.prefix_extends,
-        "visits={} replays={} extends={}: the prefix is not being reused",
-        stats.ltj_visits,
-        stats.prefix_replays,
-        stats.prefix_extends
+        stats.suffix_resumes <= stats.candidates_hashed,
+        "resumed {} prefixes from {} collected — phase 2 cannot exceed phase 1",
+        stats.suffix_resumes,
+        stats.candidates_hashed
     );
 }

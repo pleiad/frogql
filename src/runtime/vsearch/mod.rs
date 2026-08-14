@@ -8,9 +8,16 @@
 //! - **post-filter** — run the pattern, then rank what it produced.
 //! - **pre-filter** — walk the neighbour stream, re-running the pattern
 //!   with the search variable pinned to each candidate.
-//! - **in-LTJ** — interleave, driving the neighbour stream from inside
-//!   the join's backtracking search at a chosen variable-elimination
-//!   level.
+//! - **interleave** — in-LTJ, consulting the ranking inside the join:
+//!   every visit to the search variable's level walks the neighbour
+//!   stream and descends into the hits.
+//! - **memo** — in-LTJ, consulting it after the join's prefix: collect
+//!   every prefix that reaches the search variable, then walk the
+//!   neighbour stream once, globally, and resume only what it accepts.
+//!
+//! The last two are the same hook at the same VEO level and differ only
+//! in *when* the ranking is consulted, which is exactly the axis under
+//! study — so they are two named strategies, not one with a flag.
 //!
 //! All three go in through `run_nearest` and come out as an
 //! `IntermediateResult`, so everything downstream in `run_query`
@@ -25,6 +32,7 @@ pub mod topk;
 use crate::model::graph_access::GraphAccess;
 use crate::model::value::{Id, Value};
 use crate::runtime::engine::Runtime;
+use crate::runtime::ltj::algorithm::NnMode;
 use crate::runtime::result::ExprResult;
 use crate::runtime::result::{IntermediateResult, ResultRow};
 use crate::syntax::query::{KMode, NearestClause, Query};
@@ -51,15 +59,22 @@ pub struct NearestSpec {
 pub enum Strategy {
     PostFilter,
     PreFilter,
-    InLtj,
+    /// In-LTJ, consulting the ranking **inside** the join.
+    Interleave,
+    /// In-LTJ, consulting the ranking **after** the join's prefix.
+    Memo,
 }
 
 impl Strategy {
+    /// `inltj` stays an alias for `interleave`: it was the only in-LTJ
+    /// algorithm when the flag was introduced, and scripts and recorded
+    /// benchmark runs still spell it that way.
     pub fn parse(s: &str) -> Option<Strategy> {
         match s.to_ascii_lowercase().as_str() {
             "post" | "postfilter" | "post-filter" => Some(Strategy::PostFilter),
             "pre" | "prefilter" | "pre-filter" => Some(Strategy::PreFilter),
-            "inltj" | "in-ltj" | "ltj" => Some(Strategy::InLtj),
+            "interleave" | "inltj" | "in-ltj" | "ltj" => Some(Strategy::Interleave),
+            "memo" | "memoprefix" | "memo-prefix" => Some(Strategy::Memo),
             _ => None,
         }
     }
@@ -68,8 +83,15 @@ impl Strategy {
         match self {
             Strategy::PostFilter => "post",
             Strategy::PreFilter => "pre",
-            Strategy::InLtj => "inltj",
+            Strategy::Interleave => "interleave",
+            Strategy::Memo => "memo",
         }
+    }
+
+    /// Does this strategy bind the search variable at a VEO level? Only
+    /// these two read `VecCfg::level`.
+    pub fn is_in_ltj(self) -> bool {
+        matches!(self, Strategy::Interleave | Strategy::Memo)
     }
 }
 
@@ -140,7 +162,8 @@ pub struct VecCfg {
     /// Where the nearest-first stream comes from.
     pub source: VecSource,
     /// Requested position of the search variable in the variable
-    /// elimination order. In-LTJ only; clamped to a legal level.
+    /// elimination order. `interleave` / `memo` only; clamped to a legal
+    /// level.
     pub level: usize,
     /// Slack on the threshold cut, as a relative fraction. An
     /// approximate cursor's distances are not strictly non-decreasing,
@@ -164,7 +187,7 @@ impl Default for VecCfg {
 }
 
 impl VecCfg {
-    /// `FROGQL_VEC_STRATEGY=post|pre|inltj`,
+    /// `FROGQL_VEC_STRATEGY=post|pre|interleave|memo`,
     /// `FROGQL_VEC_SOURCE=hnsw|localsort|globalsort`,
     /// `FROGQL_VEC_LEVEL=<n>`, `FROGQL_VEC_TAU_EPS=<f>`, `FROGQL_DEBUG_VEC`.
     pub fn from_env() -> VecCfg {
@@ -220,6 +243,9 @@ pub struct VecStats {
     pub candidates_hashed: u64,
     /// Whole-pattern evaluations (pre-filter: one per candidate).
     pub pattern_runs: u64,
+    /// Stored prefixes the in-LTJ arm resumed in phase 2. Read against
+    /// `candidates_hashed`: the gap is what the neighbour order saved.
+    pub suffix_resumes: u64,
     pub rows_buffered: u64,
     pub rows_evicted: u64,
     /// Results produced.
@@ -230,7 +256,7 @@ impl VecStats {
     pub fn print(&self) {
         eprintln!(
             "vsearch arm={} accepted={} nn_pops={} nn_expanded={} pattern_runs={} \
-             ltj_visits={} candidates={} replays={} extends={} buffered={} evicted={}{}",
+             ltj_visits={} candidates={} resumes={} replays={} extends={} buffered={} evicted={}{}",
             self.arm,
             self.accepted,
             self.nn_pops,
@@ -238,6 +264,7 @@ impl VecStats {
             self.pattern_runs,
             self.ltj_visits,
             self.candidates_hashed,
+            self.suffix_resumes,
             self.prefix_replays,
             self.prefix_extends,
             self.rows_buffered,
@@ -367,7 +394,8 @@ fn dispatch<G: GraphAccess>(
             None
         }
         Strategy::PreFilter => pre_filter::run(rt, query, spec, cfg, set, stats),
-        Strategy::InLtj => in_ltj::run(rt, query, spec, cfg, set, stats),
+        Strategy::Interleave => in_ltj::run(rt, query, spec, cfg, set, stats, NnMode::Interleave),
+        Strategy::Memo => in_ltj::run(rt, query, spec, cfg, set, stats, NnMode::Memo),
     };
     match attempted {
         Some(ir) => ir,
@@ -430,8 +458,11 @@ pub(crate) fn arm_label(strategy: Strategy, source: VecSource) -> &'static str {
         (Strategy::PreFilter, VecSource::Hnsw) => "pre+hnsw",
         (Strategy::PreFilter, VecSource::LocalSort) => "pre+localsort",
         (Strategy::PreFilter, VecSource::GlobalSort) => "pre+globalsort",
-        (Strategy::InLtj, VecSource::Hnsw) => "inltj+hnsw",
-        (Strategy::InLtj, VecSource::LocalSort) => "inltj+localsort",
-        (Strategy::InLtj, VecSource::GlobalSort) => "inltj+globalsort",
+        (Strategy::Interleave, VecSource::Hnsw) => "interleave+hnsw",
+        (Strategy::Interleave, VecSource::LocalSort) => "interleave+localsort",
+        (Strategy::Interleave, VecSource::GlobalSort) => "interleave+globalsort",
+        (Strategy::Memo, VecSource::Hnsw) => "memo+hnsw",
+        (Strategy::Memo, VecSource::LocalSort) => "memo+localsort",
+        (Strategy::Memo, VecSource::GlobalSort) => "memo+globalsort",
     }
 }

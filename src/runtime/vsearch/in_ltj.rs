@@ -1,32 +1,42 @@
-//! Strategy 2: drive the neighbour stream from inside the join.
+//! Strategy 2: split the join at the search variable and drive the
+//! second half from the neighbour stream.
 //!
 //! The search variable is placed at a chosen level of the variable
-//! elimination order. Each time the backtracking search reaches that
-//! level it materialises the candidate set for the variable — already
-//! narrowed by the partial binding of everything above it — hashes it,
-//! then walks the neighbour stream nearest-first and descends only into
-//! candidates that are hits, with normal backtracking.
+//! elimination order, and evaluation runs in two phases.
 //!
-//! **What the level does.** At level 0 the neighbour stream drives the
-//! whole join and this degenerates to pre-filtering, except that the
-//! candidate set is the variable's whole domain rather than the corpus.
-//! Deeper down, the set at each visit is smaller but the level is
-//! reached many times, once per binding of the variables above. Which
-//! trades better is the question the benchmark exists to answer, so the
-//! position is a knob (`FROGQL_VEC_LEVEL`) rather than a policy.
+//! **Phase 1 — memoise the prefix.** Run the join down to that level and
+//! stop. Every candidate that survives the levels above is recorded in a
+//! table keyed by the candidate, holding *all* the prefixes that reach
+//! it. One node is reachable by many paths, so a key carries a list, and
+//! phase 2 has to follow every entry of it.
 //!
-//! **Why the answer is still correct off level 0.** The level is visited
-//! many times and each visit is internally sorted by distance, but the
-//! concatenation of the visits is not. A global bounded threshold fixes
-//! that: `DistThreshold` holds the `k` best distances accepted so far,
-//! and a visit stops as soon as the stream passes it. The threshold only
-//! ever tightens, so a neighbour rejected once can never be needed
-//! later. Ranking then happens once, at the end, over everything
-//! accepted.
+//! **Phase 2 — one global walk.** Walk the ranking nearest-first, once.
+//! A candidate the table does not hold costs a hash lookup and nothing
+//! else. A candidate it does hold is resumed: replay its stored prefix
+//! and search the levels below. Stop as soon as the walk passes the
+//! running top-`k` threshold.
+//!
+//! **Why two phases rather than one interleaved walk.** The level is
+//! reached once per binding of everything above it. Walking a
+//! nearest-first stream *inside* each of those visits re-walks it: each
+//! visit is internally sorted but their concatenation is not, so the
+//! best candidate overall may live under the last prefix enumerated and
+//! no visit can stop early on distance until a later one has already
+//! contributed. Hoisting the walk out makes the distance cut global,
+//! which is the only version of the cut that ends the search rather than
+//! trimming each visit.
+//!
+//! **What the level does.** It sets where the join is cut. At level 0 the
+//! prefix is empty, the table is the variable's whole domain, and this
+//! is pre-filtering with the domain memoised. Deeper down the table is
+//! smaller and better conditioned, but phase 1 pays more of the join
+//! before the ranking is consulted at all. Which trades better is the
+//! question the benchmark exists to answer, so the position stays a knob
+//! (`FROGQL_VEC_LEVEL`) rather than a policy.
 
 use crate::model::graph_access::GraphAccess;
 use crate::runtime::engine::Runtime;
-use crate::runtime::ltj::algorithm::VecCtx;
+use crate::runtime::ltj::algorithm::{NnMode, VecCtx};
 use crate::runtime::ltj::pattern_extract::{self, NnPlan};
 use crate::runtime::result::IntermediateResult;
 use crate::syntax::query::{KMode, Query};
@@ -46,14 +56,16 @@ pub fn run<G: GraphAccess>(
     cfg: &VecCfg,
     set: &VectorSet,
     stats: &mut VecStats,
+    mode: NnMode,
 ) -> Option<IntermediateResult> {
     let pattern = query.collapsed_pattern();
     let index = rt.warm_triple_index();
 
     let source = effective_source(cfg.source, set);
     let local = source == VecSource::LocalSort;
-    // A local source never walks a corpus-wide stream, so it gets an
-    // empty one rather than paying to build a ranking it will not read.
+    // A local source ranks the context table's keys directly, so it
+    // never reads a corpus-wide stream and gets an empty one rather than
+    // paying to build a ranking it will not use.
     let cursor: Box<dyn crate::vector::cursor::NnCursor> = if local {
         Box::new(crate::vector::cursor::EmptyCursor)
     } else {
@@ -66,6 +78,7 @@ pub fn run<G: GraphAccess>(
         local,
         set,
         &spec.q,
+        mode,
     );
     let mut dists: Vec<Option<f32>> = Vec::new();
 
@@ -92,13 +105,22 @@ pub fn run<G: GraphAccess>(
         }
     };
 
-    stats.arm = arm_label(Strategy::InLtj, source);
+    let strategy = match mode {
+        NnMode::Interleave => Strategy::Interleave,
+        NnMode::Memo => Strategy::Memo,
+    };
+    stats.arm = arm_label(strategy, source);
     stats.ltj_visits = ctx.visits;
     stats.candidates_hashed = ctx.candidates_hashed;
     stats.nn_pops = ctx.nn_pops;
     stats.prefix_replays = ctx.stream.replays;
     stats.prefix_extends = ctx.stream.extends;
     stats.nn_expanded = ctx.stream.expanded();
+    stats.suffix_resumes = ctx.resumes;
+    // One prefix pass, however many suffixes it resumes. The pair
+    // (`candidates_hashed`, `suffix_resumes`) is what the memo buys:
+    // the first is how many candidates the join produced, the second how
+    // many of them the neighbour order made worth completing.
     stats.pattern_runs = 1;
 
     // Final ranking. The search accepted everything inside the threshold,

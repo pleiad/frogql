@@ -124,13 +124,70 @@ pub struct VecCtx<'v> {
     /// The candidate currently being descended into.
     pub cur_id: u32,
     pub cur_dist: f32,
+    /// Which of the two in-LTJ algorithms is running.
+    pub mode: NnMode,
+    /// `Memo` only. The table phase 1 fills and phase 2 drains: every
+    /// binding of the search variable that survives the levels above it,
+    /// mapped to **all** the prefixes that reach it. One node is
+    /// reachable by many paths, so a key holds several prefixes and
+    /// phase 2 has to resume every one of them, not just the first.
+    pub table: PrefixTable,
     /// Instrumentation.
     pub visits: u64,
     pub candidates_hashed: u64,
     pub nn_pops: u64,
+    /// `Memo` only. Prefixes resumed in phase 2, against
+    /// `candidates_hashed` as the number phase 1 collected. The gap is
+    /// what consulting the neighbour order saved.
+    pub resumes: u64,
+}
+
+/// The two ways to combine a nearest-first ranking with the join, and
+/// the reason `in_ltj` is one module holding two algorithms rather than
+/// one algorithm with a flag: they differ in *when* the ranking is
+/// consulted, which is the whole question the benchmark asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NnMode {
+    /// Consult it inside the join. Every visit to the search level hashes
+    /// that visit's candidates and walks the ranking from the nearest.
+    /// The visits are each sorted but their concatenation is not, so a
+    /// visit cannot stop early on distance until a later one has
+    /// contributed — the ranking gets re-walked once per visit.
+    Interleave,
+    /// Consult it after the join's prefix. Phase 1 collects every
+    /// candidate with the prefixes reaching it; phase 2 walks the ranking
+    /// once, globally, and resumes only what it accepts. Trades the
+    /// re-walks for materialising the prefix.
+    Memo,
+}
+
+/// Search-variable binding → the prefixes that reach it.
+pub type PrefixTable = std::collections::HashMap<u32, Prefixes>;
+
+/// The prefixes reaching one binding, stored flat.
+///
+/// Every prefix is the same length — one value per VEO level above the
+/// search level — so they pack end to end into a single buffer and the
+/// `i`-th is a slice at `i * stride`. The obvious `Vec<Vec<u32>>` costs
+/// one allocation per prefix, and at a deep level there are as many
+/// prefixes as the join has partial rows: 39 880 allocations on a
+/// 3 000-item fixture, against 3 000 growable buffers here.
+#[derive(Debug, Default, Clone)]
+pub struct Prefixes {
+    pub count: usize,
+    pub flat: Vec<u32>,
+}
+
+impl Prefixes {
+    /// The `i`-th prefix. Empty for a search variable at level 0, where
+    /// there is nothing above it and `count` alone carries the arity.
+    pub fn get(&self, i: usize, stride: usize) -> &[u32] {
+        &self.flat[i * stride..(i + 1) * stride]
+    }
 }
 
 impl<'v> VecCtx<'v> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: NnStream<'v>,
         cut: DistThreshold,
@@ -138,6 +195,7 @@ impl<'v> VecCtx<'v> {
         local: bool,
         set: &'v crate::vector::store::VectorSet,
         q: &'v [f32],
+        mode: NnMode,
     ) -> VecCtx<'v> {
         VecCtx {
             stream,
@@ -148,9 +206,12 @@ impl<'v> VecCtx<'v> {
             tau_eps,
             cur_id: 0,
             cur_dist: 0.0,
+            mode,
+            table: PrefixTable::new(),
             visits: 0,
             candidates_hashed: 0,
             nn_pops: 0,
+            resumes: 0,
         }
     }
 }
@@ -221,32 +282,44 @@ impl<'a> LtjAlgorithm<'a> {
     /// out of sync (see the pinned-slot comment below).
     pub fn run<G: GraphAccess>(&mut self, graph: &G, limit: usize) -> Vec<ResultTuple> {
         let mut results = Vec::new();
-        let mut tuple = vec![(0u8, 0u32); self.num_vars];
-        // Pre-populate pinned bindings into the slots beyond the VEO so
-        // result construction sees them. The search loop only writes to
-        // tuple[0..veo.size()]. Omitting this leaves index-folded variables
-        // at the default `(0, 0)` and produces wrong bindings; it surfaces
-        // through the BTree-LTJ-real ORDER BY path. The bug was live for as
-        // long as there were two copies of this function — the dead one had
-        // the loop, the executed one did not.
-        for (i, &binding) in self.pinned.iter().enumerate() {
-            let slot = self.veo.size() + i;
-            if slot < tuple.len() {
-                tuple[slot] = binding;
-            }
-        }
+        let mut tuple = self.fresh_tuple();
         self.search(graph, 0, &mut tuple, &mut results, limit, None);
         results
     }
 
     /// Run with the vector-search level active. Every returned tuple
     /// carries the distance of its search-variable binding.
+    ///
+    /// `Interleave` is one ordinary pass: the search level walks the
+    /// ranking itself, so there is nothing to do here beyond starting
+    /// the search. `Memo` is the two-phase algorithm below.
     pub fn run_nearest<G: GraphAccess>(
         &mut self,
         graph: &G,
         ctx: &mut VecCtx<'_>,
     ) -> Vec<ResultTuple> {
-        let mut results = Vec::new();
+        match ctx.mode {
+            NnMode::Interleave => {
+                let mut results = Vec::new();
+                let mut tuple = self.fresh_tuple();
+                // No limit: an arrival-order cut has nothing to do with
+                // distance. `ctx.cut` is what bounds the work instead.
+                self.search(graph, 0, &mut tuple, &mut results, 0, Some(ctx));
+                results
+            }
+            NnMode::Memo => self.run_nearest_memo(graph, ctx),
+        }
+    }
+
+    /// A result tuple with the index-folded bindings pre-populated.
+    ///
+    /// Those slots sit beyond the VEO and the search loop never writes
+    /// them, so omitting this leaves index-folded variables at the
+    /// default `(0, 0)` and produces wrong bindings — it surfaces through
+    /// the BTree-LTJ-real ORDER BY path. The bug was live for as long as
+    /// there were two copies of the search function; keeping the
+    /// pre-population in one place is what stops it coming back.
+    fn fresh_tuple(&self) -> Vec<(u8, u32)> {
         let mut tuple = vec![(0u8, 0u32); self.num_vars];
         for (i, &binding) in self.pinned.iter().enumerate() {
             let slot = self.veo.size() + i;
@@ -254,10 +327,154 @@ impl<'a> LtjAlgorithm<'a> {
                 tuple[slot] = binding;
             }
         }
-        // No limit: an arrival-order cut has nothing to do with distance.
-        // The threshold in `ctx.cut` is what bounds the work instead.
-        self.search(graph, 0, &mut tuple, &mut results, 0, Some(ctx));
+        tuple
+    }
+
+    /// The `Memo` algorithm, in two phases.
+    ///
+    /// **Phase 1** runs the ordinary search down to the level the search
+    /// variable occupies and stops there, recording every surviving
+    /// candidate against the prefix that reached it. One pass, so a
+    /// candidate reachable by many prefixes is enumerated once per
+    /// prefix and no prefix is ever recomputed.
+    ///
+    /// **Phase 2** walks the nearest-first ranking once, globally, and
+    /// resumes the search below the level only for the candidates the
+    /// table holds. A miss costs a hash lookup; a hit costs the suffix
+    /// of the join, once per stored prefix.
+    ///
+    /// The gain over interleaving the walk into phase 1 is that the
+    /// distance cut becomes global. `ctx.cut` holds the `k` best
+    /// distances accepted so far and the walk is non-decreasing, so once
+    /// it passes the threshold nothing further can be accepted and the
+    /// whole search stops — instead of every visit re-walking the
+    /// ranking because the best candidate might still be under the last
+    /// prefix.
+    fn run_nearest_memo<G: GraphAccess>(
+        &mut self,
+        graph: &G,
+        ctx: &mut VecCtx<'_>,
+    ) -> Vec<ResultTuple> {
+        let Some((level, var_id)) = self.nn_level else {
+            return Vec::new();
+        };
+
+        let mut tuple = self.fresh_tuple();
+
+        // Phase 1. `search` stops at the search level and fills
+        // `ctx.table`, so it produces no tuples of its own.
+        let mut discarded = Vec::new();
+        self.search(graph, 0, &mut tuple, &mut discarded, 0, Some(ctx));
+        debug_assert!(
+            discarded.is_empty(),
+            "phase 1 stops above the search level and must not emit tuples"
+        );
+
+        // Phase 2. `LocalSort` ranks the table's keys directly: they are
+        // the only nodes that can contribute, so nothing outside the
+        // domain is ever touched and no membership test is needed. The
+        // corpus-wide sources walk their stream and test membership.
+        let mut results = Vec::new();
+        let ranked: Option<Vec<(u32, f32)>> = if ctx.local {
+            let keys: Vec<u32> = ctx.table.keys().copied().collect();
+            Some(ctx.set.rank_candidates(ctx.q, &keys))
+        } else {
+            None
+        };
+
+        let mut rank = 0usize;
+        loop {
+            let next = match &ranked {
+                Some(v) => v.get(rank).copied(),
+                None => ctx.stream.at(rank),
+            };
+            let Some((id, dist)) = next else {
+                break;
+            };
+            rank += 1;
+            ctx.nn_pops += 1;
+
+            // Re-read the threshold every iteration: resuming a candidate
+            // can accept matches and tighten it.
+            let tau = ctx.cut.get();
+            if tau.is_finite() && dist > tau * (1.0 + ctx.tau_eps) {
+                break;
+            }
+
+            // Taken, not borrowed: the resume below needs `ctx` mutably,
+            // and the ranking visits each id once so the entry is dead
+            // after this.
+            let Some(prefixes) = ctx.table.remove(&id) else {
+                continue;
+            };
+            ctx.cur_id = id;
+            ctx.cur_dist = dist;
+            for i in 0..prefixes.count {
+                let context = prefixes.get(i, level);
+                self.resume(
+                    graph,
+                    level,
+                    var_id,
+                    id,
+                    context,
+                    &mut tuple,
+                    &mut results,
+                    ctx,
+                );
+            }
+        }
         results
+    }
+
+    /// Complete one stored prefix: replay the descent phase 1 already
+    /// proved valid, search the levels below, then undo the descent.
+    ///
+    /// Replaying is sound because `down` is self-sufficient — it needs no
+    /// preceding `seek`, which is why phase 1's own level could call it
+    /// straight after collecting candidates — and because `leap` is a
+    /// pure query against state only `down`/`up` mutate. The iterators
+    /// land exactly where the collecting pass left them.
+    ///
+    /// The filters at and above `level` are not re-evaluated: phase 1
+    /// already ran them, and a stored prefix is one that passed.
+    #[allow(clippy::too_many_arguments)]
+    fn resume<G: GraphAccess>(
+        &mut self,
+        graph: &G,
+        level: usize,
+        var_id: u8,
+        id: u32,
+        context: &[u32],
+        tuple: &mut Vec<(u8, u32)>,
+        results: &mut Vec<ResultTuple>,
+        ctx: &mut VecCtx<'_>,
+    ) {
+        let mut descended: Vec<(usize, SpoPos)> = Vec::new();
+        for (l, &val) in context.iter().enumerate() {
+            let v = self.veo.var_at(l);
+            tuple[l] = (v, val);
+            for k in 0..self.var_to_iterators[v as usize].len() {
+                let it = self.var_to_iterators[v as usize][k];
+                let pos = self.var_to_positions[v as usize][k];
+                self.iterators[it].down(pos, val);
+                descended.push((it, pos));
+            }
+        }
+        tuple[level] = (var_id, id);
+        for k in 0..self.var_to_iterators[var_id as usize].len() {
+            let it = self.var_to_iterators[var_id as usize][k];
+            let pos = self.var_to_positions[var_id as usize][k];
+            self.iterators[it].down(pos, id);
+            descended.push((it, pos));
+        }
+
+        ctx.resumes += 1;
+        // No limit: an arrival-order cut has nothing to do with distance.
+        self.search(graph, level + 1, tuple, results, 0, Some(ctx));
+
+        for &(it, pos) in descended.iter().rev() {
+            self.iterators[it].up(pos);
+        }
     }
 
     /// Leapfrog seek: intersect across all iterators containing `var_id`.
@@ -410,20 +627,8 @@ impl<'a> LtjAlgorithm<'a> {
         let iter_indices: Vec<usize> = self.var_to_iterators[var_id as usize].clone();
         let positions: Vec<SpoPos> = self.var_to_positions[var_id as usize].clone();
 
-        // Vector-search level: instead of enumerating this variable's
-        // candidates in index order, enumerate them nearest-first.
-        //
-        // The candidate set is already conditioned on the partial binding
-        // of everything above, so it is normally small; hashing it and
-        // walking the shared neighbour stream costs a membership test per
-        // neighbour and no distance computation at all.
-        //
-        // The threshold cut is what makes this cheap. Within one visit
-        // the stream is non-decreasing, so once a neighbour is past the
-        // running top-k threshold every later one is too, and the visit
-        // stops. It is re-read on every iteration rather than hoisted:
-        // the recursive descent between two iterations can accept matches
-        // and tighten it.
+        // The vector-search level. What happens here is the entire
+        // difference between the two in-LTJ algorithms.
         if self.nn_level == Some((j, var_id)) {
             if let Some(vc) = ctx {
                 vc.visits += 1;
@@ -433,7 +638,33 @@ impl<'a> LtjAlgorithm<'a> {
                 }
                 vc.candidates_hashed += candidates.len() as u64;
 
-                // Two ways to visit the candidates nearest-first:
+                // `Memo`, phase 1: record this visit's candidates with
+                // the prefix that reached them, and stop. The descent
+                // below this level is phase 2's job, after the ranking
+                // has been walked once, globally.
+                //
+                // The filters placed at this level still run, so a
+                // candidate that cannot survive never enters the table.
+                if vc.mode == NnMode::Memo {
+                    for id in candidates {
+                        tuple[j] = (var_id, id);
+                        if !self.check_filters(graph, j, tuple) {
+                            continue;
+                        }
+                        // The prefix is the value bound at each level
+                        // above this one. The var ids are implied by the
+                        // VEO, so only the values are stored.
+                        let entry = vc.table.entry(id).or_default();
+                        entry.count += 1;
+                        entry.flat.extend((0..j).map(|l| tuple[l].1));
+                    }
+                    return true;
+                }
+
+                // `Interleave`: enumerate this visit's candidates
+                // nearest-first and descend into them here.
+                //
+                // Two ways to do that:
                 //
                 // - local: rank just this visit's set. Every element is
                 //   a candidate, so no membership test is needed and
@@ -442,6 +673,16 @@ impl<'a> LtjAlgorithm<'a> {
                 //   test membership. Costs however deep the threshold
                 //   lets the scan run, which has nothing to do with how
                 //   many candidates this visit has.
+                //
+                // The threshold cut is what keeps this bounded. Within
+                // one visit the stream is non-decreasing, so once a
+                // neighbour is past the running top-k threshold every
+                // later one is too, and the visit stops. It is re-read
+                // on every iteration rather than hoisted: the recursive
+                // descent between two iterations can accept matches and
+                // tighten it. Across visits there is no such order, which
+                // is why the ranking gets re-walked and why `Memo`
+                // exists.
                 let ranked: Option<Vec<(u32, f32)>> = if vc.local {
                     Some(vc.set.rank_candidates(vc.q, &candidates))
                 } else {

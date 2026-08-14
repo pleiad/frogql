@@ -143,8 +143,10 @@ fn exact_arms() -> Vec<(Strategy, VecSource)> {
         (Strategy::PostFilter, VecSource::LocalSort),
         (Strategy::PostFilter, VecSource::GlobalSort),
         (Strategy::PreFilter, VecSource::GlobalSort),
-        (Strategy::InLtj, VecSource::LocalSort),
-        (Strategy::InLtj, VecSource::GlobalSort),
+        (Strategy::Interleave, VecSource::LocalSort),
+        (Strategy::Interleave, VecSource::GlobalSort),
+        (Strategy::Memo, VecSource::LocalSort),
+        (Strategy::Memo, VecSource::GlobalSort),
     ]
 }
 
@@ -364,9 +366,20 @@ fn the_executed_arm_is_reported() {
         // Pre-filter has no per-visit set, so a local request is served
         // by the global walk and must say so.
         (Strategy::PreFilter, VecSource::LocalSort, "pre+globalsort"),
-        (Strategy::InLtj, VecSource::Hnsw, "inltj+hnsw"),
-        (Strategy::InLtj, VecSource::LocalSort, "inltj+localsort"),
-        (Strategy::InLtj, VecSource::GlobalSort, "inltj+globalsort"),
+        (Strategy::Interleave, VecSource::Hnsw, "interleave+hnsw"),
+        (
+            Strategy::Interleave,
+            VecSource::LocalSort,
+            "interleave+localsort",
+        ),
+        (
+            Strategy::Interleave,
+            VecSource::GlobalSort,
+            "interleave+globalsort",
+        ),
+        (Strategy::Memo, VecSource::Hnsw, "memo+hnsw"),
+        (Strategy::Memo, VecSource::LocalSort, "memo+localsort"),
+        (Strategy::Memo, VecSource::GlobalSort, "memo+globalsort"),
     ] {
         rt.set_vec_cfg(VecCfg {
             strategy,
