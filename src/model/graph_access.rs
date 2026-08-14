@@ -29,9 +29,9 @@ pub trait GraphAccess {
     fn edge_path_value(&self, edge_id: Id) -> PathValue;
 
     /// Resolve an internal node ID to its user-facing string name.
-    fn node_name(&self, id: Id) -> &str;
+    fn node_name(&self, id: Id) -> String;
     /// Resolve an internal edge ID to its user-facing string name.
-    fn edge_name(&self, id: Id) -> &str;
+    fn edge_name(&self, id: Id) -> String;
 
     // --- Index-aware methods ---
 

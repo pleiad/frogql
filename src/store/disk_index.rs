@@ -48,8 +48,24 @@ pub fn read_label_index_root(pager: &mut Pager, root_page: u32) -> io::Result<Ve
 }
 
 /// Read all u32 IDs from a page chain.
+/// Reads the chain twice: once to total the entry counts, once to fill an
+/// exactly-sized vector.
+///
+/// The second walk is nearly free — the pages are in the cache from the
+/// first — and it is the only way to avoid `Vec` growth doubling, which
+/// on the CSR adjacency chains leaves tens of MiB resident for the life
+/// of the process. Shrinking afterwards does not recover it: the freed
+/// pages go to the allocator's free list, not back to the OS.
 pub fn read_u32_chain(pager: &mut Pager, first_page: u32) -> io::Result<Vec<u32>> {
-    let mut result = Vec::new();
+    let mut total = 0usize;
+    let mut probe = first_page;
+    while probe != 0 {
+        let page = pager.read_page(probe)?;
+        total += entry_count(&page) as usize;
+        probe = next_page(&page);
+    }
+
+    let mut result = Vec::with_capacity(total);
     let mut current = first_page;
     while current != 0 {
         let page = pager.read_page(current)?;
@@ -331,8 +347,22 @@ pub fn write_node_locs(pager: &mut Pager, locs: &[(u32, u16)]) -> io::Result<u32
 }
 
 /// Read node record locations from a page chain.
-pub fn read_node_locs(pager: &mut Pager, first_page: u32) -> io::Result<Vec<(u32, u16)>> {
-    let mut result = Vec::new();
+/// `expected` is the element count from the file header. It only sizes
+/// the allocation; the chain still decides how many entries there are.
+///
+/// Reserving matters more than it looks: `Vec` growth doubles, so a
+/// pushed-into array ends up holding up to twice what it needs, and the
+/// caller's `into_iter().map(...).collect()` *reuses this allocation*
+/// when element size and alignment match — so the slack survives into
+/// the store and stays resident for the process's life. Shrinking
+/// afterwards does not help: it reallocates, and the freed pages go to
+/// the allocator's free list rather than back to the OS.
+pub fn read_node_locs(
+    pager: &mut Pager,
+    first_page: u32,
+    expected: usize,
+) -> io::Result<Vec<(u32, u16)>> {
+    let mut result = Vec::with_capacity(expected);
     let mut current = first_page;
     while current != 0 {
         let page = pager.read_page(current)?;
@@ -424,14 +454,16 @@ pub fn write_edge_topo(
 // Tuple of parallel vectors — one column per field. Listing them here
 // is clearer than naming the bundle.
 #[allow(clippy::type_complexity)]
+/// `expected` sizes the allocations; see `read_node_locs`.
 pub fn read_edge_topo(
     pager: &mut Pager,
     first_page: u32,
+    expected: usize,
 ) -> io::Result<(Vec<(u32, u16)>, Vec<u32>, Vec<u32>, Vec<bool>)> {
-    let mut locs = Vec::new();
-    let mut src = Vec::new();
-    let mut tgt = Vec::new();
-    let mut directed = Vec::new();
+    let mut locs = Vec::with_capacity(expected);
+    let mut src = Vec::with_capacity(expected);
+    let mut tgt = Vec::with_capacity(expected);
+    let mut directed = Vec::with_capacity(expected);
     let mut current = first_page;
     while current != 0 {
         let page = pager.read_page(current)?;

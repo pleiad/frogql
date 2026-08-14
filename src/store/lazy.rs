@@ -99,6 +99,20 @@ fn build_csr(node_count: usize, pairs: &[(u32, u32)]) -> AdjCsr {
 pub struct LazyGraphStore {
     pager: RefCell<Pager>,
     strings: StringTable,
+    /// The element-name table: page numbers only, read on first use.
+    ///
+    /// Names are 90% of a graph's string data and nothing in the query
+    /// path resolves them — `node_name` / `edge_name` are called by
+    /// `materialize_to_graph` (behind `.save`) and by the dump
+    /// utilities, all of which walk the whole graph. Loading them at
+    /// open cost 197 MiB of resident memory at SF0.3 to serve two batch
+    /// operations, so open records where they live and the first caller
+    /// pays for reading them.
+    ///
+    /// `None` pages means a legacy file whose names are interned in
+    /// `strings`; resolution falls back there and this stays empty.
+    name_pages: Option<Vec<u32>>,
+    names: RefCell<Option<StringTable>>,
 
     // Counts
     node_count: u32,
@@ -175,6 +189,35 @@ impl LazyGraphStore {
     /// allocator slack and every transient buffer the process has touched.
     /// Every interned string. Diagnostics only — see
     /// `StringTable::iter_strings`.
+    /// Resolve an element name, reading the name table on first use.
+    ///
+    /// The whole table is read at once rather than seeking to one entry:
+    /// the format stores entries back to back with no offset directory,
+    /// so there is no random access to seek *with*. That costs nothing
+    /// here because every caller is a full graph walk — one pays the
+    /// read, the rest hit the cache — and a query session never calls
+    /// this at all.
+    fn resolve_name(&self, sid: u32) -> String {
+        let Some(pages) = &self.name_pages else {
+            // Legacy file: names are in the shared table.
+            return self.strings.resolve(sid).unwrap_or_default().to_string();
+        };
+        if self.names.borrow().is_none() {
+            let mut pager = self.pager.borrow_mut();
+            match StringTable::load(pages, &mut pager) {
+                Ok(t) => *self.names.borrow_mut() = Some(t),
+                // A name is display-only; failing to read one must not
+                // take down a save that is otherwise fine.
+                Err(_) => return String::new(),
+            }
+        }
+        self.names
+            .borrow()
+            .as_ref()
+            .and_then(|t| t.resolve(sid).map(str::to_string))
+            .unwrap_or_default()
+    }
+
     pub fn iter_strings(&self) -> impl Iterator<Item = &str> {
         self.strings.iter_strings()
     }
@@ -267,6 +310,15 @@ impl LazyGraphStore {
             collect_pages_by_type(&mut pager, PageType::StringTable)?
         };
         let strings = StringTable::load(&st_pages, &mut pager)?;
+        // Names: page numbers only. Reading the chain directory is a
+        // handful of pages; reading the strings it points at is the part
+        // deliberately deferred.
+        let names_root = pager.header.names_root;
+        let name_pages = if names_root != 0 {
+            Some(disk_index::read_u32_chain(&mut pager, names_root)?)
+        } else {
+            None
+        };
         if trace {
             eprintln!("  string table load:    {:.3}s", t1.elapsed().as_secs_f64());
         }
@@ -281,6 +333,8 @@ impl LazyGraphStore {
         let mut store = LazyGraphStore {
             pager: RefCell::new(pager),
             strings,
+            name_pages,
+            names: RefCell::new(None),
             node_count: 0,
             edge_count: 0,
             node_locs: Vec::new(),
@@ -569,7 +623,9 @@ impl LazyGraphStore {
         let mut pager = self.pager.borrow_mut();
 
         // Node locations
-        let raw_node_locs = disk_index::read_node_locs(&mut pager, node_locs_root)?;
+        let n_hint = pager.header.node_count as usize;
+        let e_hint = pager.header.edge_count as usize;
+        let raw_node_locs = disk_index::read_node_locs(&mut pager, node_locs_root, n_hint)?;
         self.node_count = raw_node_locs.len() as u32;
         self.node_locs = raw_node_locs
             .into_iter()
@@ -581,7 +637,7 @@ impl LazyGraphStore {
 
         // Edge topology (locations + src/tgt/directed)
         let (raw_edge_locs, edge_src, edge_tgt, edge_directed) =
-            disk_index::read_edge_topo(&mut pager, edge_topo_root)?;
+            disk_index::read_edge_topo(&mut pager, edge_topo_root, e_hint)?;
         self.edge_count = raw_edge_locs.len() as u32;
         self.edge_locs = raw_edge_locs
             .into_iter()
@@ -1160,26 +1216,23 @@ impl GraphAccess for LazyGraphStore {
         }
     }
 
-    fn node_name(&self, id: Id) -> &str {
+    fn node_name(&self, id: Id) -> String {
         if id >= self.overlay.borrow().base_node_count {
             // Synthetic display name for overlay-tracked nodes — keeps
             // node_count display + REPL "path" column working without
             // round-tripping through the (still empty) string table.
-            return Box::leak(Box::new(format!("auto-n-{id}")));
+            return format!("auto-n-{id}");
         }
         let decoded = self.read_node_record(id);
-        let s = self.strings.resolve(decoded.user_id_str_id).unwrap();
-        // Leak the string to return &str — only called for display, not hot path
-        Box::leak(Box::new(s.to_string()))
+        self.resolve_name(decoded.user_id_str_id)
     }
 
-    fn edge_name(&self, id: Id) -> &str {
+    fn edge_name(&self, id: Id) -> String {
         if id >= self.overlay.borrow().base_edge_count {
-            return Box::leak(Box::new(format!("auto-e-{id}")));
+            return format!("auto-e-{id}");
         }
         let decoded = self.read_edge_record(id);
-        let s = self.strings.resolve(decoded.node.user_id_str_id).unwrap();
-        Box::leak(Box::new(s.to_string()))
+        self.resolve_name(decoded.node.user_id_str_id)
     }
 
     fn nodes_with_label(&self, label: &str) -> Option<Vec<Id>> {

@@ -30,7 +30,9 @@ pub const FORMAT_VERSION: u16 = 1;
 /// bytes 96-99: CSR adjacency root page (u32 LE, 0 = legacy adjacency_root only)
 /// bytes 100-103: secondary-index DDL chain root (u32 LE, 0 = legacy file
 ///   without persisted indexes; auto-builds run normally on open)
-/// bytes 104+:  reserved (zeroed)
+/// bytes 104-107: element-name table root (u32 LE, 0 = legacy file whose
+///   names live in the main string table)
+/// bytes 108+:  reserved (zeroed)
 /// ```
 ///
 /// Note: page 0 does NOT use the standard slotted-page cell machinery.
@@ -78,6 +80,21 @@ pub struct FileHeader {
     /// universally present, the absence of a non-zero root can become
     /// an error path or just a "no DDL indexes" signal.
     pub secondary_index_root: u32,
+
+    /// Root of the page-number list for the **element-name** table:
+    /// the external names of nodes and edges, in their own chain so
+    /// `LazyGraphStore::open` can skip reading them.
+    ///
+    /// They are 90% of the string data and no query resolves them —
+    /// grep says the only callers of `node_name` / `edge_name` are
+    /// `materialize_to_graph` (behind `.save`) and the dump utilities,
+    /// all of which walk the whole graph anyway. Keeping them in the
+    /// main table cost 197 MiB of resident memory at SF0.3 to serve two
+    /// batch operations.
+    ///
+    /// `0` means a legacy file whose names are interned in the main
+    /// string table; readers fall back to resolving there.
+    pub names_root: u32,
 }
 
 impl Default for FileHeader {
@@ -101,6 +118,7 @@ impl Default for FileHeader {
             active_type_name: None,
             csr_adjacency_root: 0,
             secondary_index_root: 0,
+            names_root: 0,
         }
     }
 }
@@ -162,6 +180,7 @@ impl FileHeader {
         d[64..96].copy_from_slice(&encode_active_name(self.active_type_name.as_deref()));
         d[96..100].copy_from_slice(&self.csr_adjacency_root.to_le_bytes());
         d[100..104].copy_from_slice(&self.secondary_index_root.to_le_bytes());
+        d[104..108].copy_from_slice(&self.names_root.to_le_bytes());
 
         page
     }
@@ -198,6 +217,7 @@ impl FileHeader {
             // the legacy compat once all stored databases have been
             // re-saved with this field present.
             secondary_index_root: u32::from_le_bytes([d[100], d[101], d[102], d[103]]),
+            names_root: u32::from_le_bytes([d[104], d[105], d[106], d[107]]),
         })
     }
 }

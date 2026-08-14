@@ -31,6 +31,11 @@ const ADJ_UNDIRECTED: u8 = 2;
 pub struct DiskGraphStore {
     pager: RefCell<Pager>,
     strings: StringTable,
+    /// Element-name table, deferred exactly as in `LazyGraphStore`: page
+    /// numbers at open, contents on the first `node_name` / `edge_name`.
+    /// `None` pages means a legacy file whose names sit in `strings`.
+    name_pages: Option<Vec<u32>>,
+    names: RefCell<Option<StringTable>>,
 
     // Root page pointers (from header)
     node_label_root: u32,
@@ -87,6 +92,12 @@ impl DiskGraphStore {
             collect_st_pages(&mut pager)?
         };
         let strings = StringTable::load(&st_pages, &mut pager)?;
+        let names_root = pager.header.names_root;
+        let name_pages = if names_root != 0 {
+            Some(disk_index::read_u32_chain(&mut pager, names_root)?)
+        } else {
+            None
+        };
 
         let (node_locs, edge_locs, edge_src, edge_tgt, edge_directed);
 
@@ -94,8 +105,10 @@ impl DiskGraphStore {
 
         if has_fast_index {
             // Fast path: read pre-built indexes
-            node_locs = disk_index::read_node_locs(&mut pager, node_locs_root)?;
-            let (el, es, et, ed) = disk_index::read_edge_topo(&mut pager, edge_topo_root)?;
+            node_locs =
+                disk_index::read_node_locs(&mut pager, node_locs_root, node_count as usize)?;
+            let (el, es, et, ed) =
+                disk_index::read_edge_topo(&mut pager, edge_topo_root, edge_count as usize)?;
             edge_locs = el;
             edge_src = es;
             edge_tgt = et;
@@ -158,6 +171,8 @@ impl DiskGraphStore {
         Ok(DiskGraphStore {
             pager: RefCell::new(pager),
             strings,
+            name_pages,
+            names: RefCell::new(None),
             node_label_root,
             edge_label_root,
             node_label_dir: RefCell::new(None),
@@ -284,6 +299,29 @@ impl DiskGraphStore {
     }
 }
 
+impl DiskGraphStore {
+    /// See `LazyGraphStore::resolve_name`: the name table is read whole on
+    /// first use because the format has no offset directory to seek with,
+    /// and every caller walks the whole graph anyway.
+    fn resolve_name(&self, sid: u32) -> String {
+        let Some(pages) = &self.name_pages else {
+            return self.strings.resolve(sid).unwrap_or_default().to_string();
+        };
+        if self.names.borrow().is_none() {
+            let mut pager = self.pager.borrow_mut();
+            match StringTable::load(pages, &mut pager) {
+                Ok(t) => *self.names.borrow_mut() = Some(t),
+                Err(_) => return String::new(),
+            }
+        }
+        self.names
+            .borrow()
+            .as_ref()
+            .and_then(|t| t.resolve(sid).map(str::to_string))
+            .unwrap_or_default()
+    }
+}
+
 impl GraphAccess for DiskGraphStore {
     fn nodes(&self) -> Vec<Id> {
         (0..self.node_count).collect()
@@ -341,16 +379,14 @@ impl GraphAccess for DiskGraphStore {
         }
     }
 
-    fn node_name(&self, id: Id) -> &str {
+    fn node_name(&self, id: Id) -> String {
         let decoded = self.read_node_record(id);
-        let s = self.strings.resolve(decoded.user_id_str_id).unwrap();
-        Box::leak(Box::new(s.to_string()))
+        self.resolve_name(decoded.user_id_str_id)
     }
 
-    fn edge_name(&self, id: Id) -> &str {
+    fn edge_name(&self, id: Id) -> String {
         let decoded = self.read_edge_record(id);
-        let s = self.strings.resolve(decoded.node.user_id_str_id).unwrap();
-        Box::leak(Box::new(s.to_string()))
+        self.resolve_name(decoded.node.user_id_str_id)
     }
 
     fn nodes_with_label(&self, label: &str) -> Option<Vec<Id>> {

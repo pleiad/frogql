@@ -31,6 +31,10 @@ pub enum PageType {
     Catalog = 8,
     /// Persisted secondary-index DDL list (chained, JSON payload).
     SecondaryIndex = 9,
+    /// External element names (chained). Same layout as `StringTable`,
+    /// separate chain so `open` can skip it: names are read only by
+    /// `save` and the dump utilities, never by a query.
+    NameTable = 10,
 }
 
 impl PageType {
@@ -46,6 +50,7 @@ impl PageType {
             7 => Some(Self::Free),
             8 => Some(Self::Catalog),
             9 => Some(Self::SecondaryIndex),
+            10 => Some(Self::NameTable),
             _ => None,
         }
     }

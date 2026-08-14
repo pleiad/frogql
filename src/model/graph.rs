@@ -485,20 +485,20 @@ impl super::graph_access::GraphAccess for MemoryGraphStore {
             PathValue::EdgeUndirectional(edge_id)
         }
     }
-    fn node_name(&self, id: Id) -> &str {
+    fn node_name(&self, id: Id) -> String {
         // Overlay-allocated nodes have no entry in the base name vec; hand
         // back a synthetic display name (leaked, like LazyGraphStore — only
         // hit on the display path, never the hot loop).
         if id >= self.overlay.borrow().base_node_count {
-            return Box::leak(Box::new(format!("auto-n-{id}")));
+            return format!("auto-n-{id}");
         }
-        &self.node_names[id as usize]
+        self.node_names[id as usize].clone()
     }
-    fn edge_name(&self, id: Id) -> &str {
+    fn edge_name(&self, id: Id) -> String {
         if id >= self.overlay.borrow().base_edge_count {
-            return Box::leak(Box::new(format!("auto-e-{id}")));
+            return format!("auto-e-{id}");
         }
-        &self.edge_names[id as usize]
+        self.edge_names[id as usize].clone()
     }
     fn nodes_with_label(&self, label: &str) -> Option<Vec<Id>> {
         let overlay = self.overlay.borrow();

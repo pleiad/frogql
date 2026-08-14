@@ -44,6 +44,11 @@ const MAX_INLINE: usize = PAGE_SIZE - PAGE_HEADER - 2;
 /// [payload: up to OVERFLOW_PAGE_PAYLOAD bytes]
 /// ```
 pub struct StringTable {
+    /// Page type this table allocates. `StringTable` for the shared
+    /// dictionary, `NameTable` for the element-name chain — distinct so
+    /// the legacy "scan every page of this type" fallback, which fires
+    /// on files predating the page directories, cannot mix the two.
+    page_type: PageType,
     /// String → ID mapping for deduplication. Built lazily: at `load` time
     /// the map is left empty (`None`), and the first caller that needs it
     /// (`intern` for writes, `id_for_str` for label-index lookups) pays the
@@ -64,6 +69,7 @@ pub struct StringTable {
 impl Default for StringTable {
     fn default() -> Self {
         StringTable {
+            page_type: PageType::StringTable,
             str_to_id: RefCell::new(Some(HashMap::new())),
             id_to_str: Vec::new(),
             pages: Vec::new(),
@@ -101,10 +107,20 @@ impl StringTable {
         Self::default()
     }
 
+    /// A table that writes its pages as `NameTable` rather than
+    /// `StringTable`. Same layout and same code path; only the chain it
+    /// lands in differs.
+    pub fn new_names() -> Self {
+        StringTable {
+            page_type: PageType::NameTable,
+            ..Self::default()
+        }
+    }
+
     /// Allocate the first page for a fresh string table.
     pub fn init(&mut self, pager: &mut Pager) -> std::io::Result<u32> {
         let page_num = pager.allocate_page()?;
-        let page = Page::new(PageType::StringTable);
+        let page = Page::new(self.page_type);
         pager.write_page(page_num, &page)?;
         self.pages.push(page_num);
         self.current_page_idx = 0;
@@ -309,6 +325,7 @@ impl StringTable {
         // queries through LazyGraphStore the map is never built — saves
         // ~50% of load time on graphs with many interned strings.
         let mut st = StringTable {
+            page_type: PageType::StringTable,
             str_to_id: RefCell::new(None),
             id_to_str: Vec::new(),
             pages: pages.to_vec(),
@@ -387,7 +404,7 @@ impl StringTable {
     /// Allocate a new string table page and switch to it.
     fn allocate_string_page(&mut self, pager: &mut Pager) -> std::io::Result<()> {
         let new_page_num = pager.allocate_page()?;
-        let page = Page::new(PageType::StringTable);
+        let page = Page::new(self.page_type);
         pager.write_page(new_page_num, &page)?;
         self.pages.push(new_page_num);
         self.current_page_idx = self.pages.len() - 1;

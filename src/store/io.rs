@@ -83,6 +83,11 @@ pub fn save_graph(graph: &MemoryGraphStore, db_path: &Path) -> io::Result<()> {
     let mut pager = Pager::create(db_path)?;
     let mut strings = StringTable::new();
     strings.init(&mut pager)?;
+    // Element names go in their own chain. They are 90% of the string
+    // data and nothing in the query path resolves them, so keeping them
+    // separate is what lets `open` skip reading them entirely.
+    let mut names = StringTable::new_names();
+    names.init(&mut pager)?;
 
     let mut node_pages: Vec<u32> = Vec::new();
     let mut edge_pages: Vec<u32> = Vec::new();
@@ -94,7 +99,7 @@ pub fn save_graph(graph: &MemoryGraphStore, db_path: &Path) -> io::Result<()> {
     // Write nodes
     for (nid, name) in graph.node_names.iter().enumerate() {
         let labels = MemoryGraphStore::label_strings(&graph.node_labels[nid]);
-        let user_id_sid = strings.intern(name, &mut pager)?;
+        let user_id_sid = names.intern(name, &mut pager)?;
         let label_sids = intern_strings(&labels, &mut strings, &mut pager)?;
         let encoded_props = encode_props(&graph.node_props[nid], &mut strings, &mut pager)?;
         let cell = record::encode_node(user_id_sid, &label_sids, &encoded_props);
@@ -105,7 +110,7 @@ pub fn save_graph(graph: &MemoryGraphStore, db_path: &Path) -> io::Result<()> {
     // Write edges
     for (eid, name) in graph.edge_names.iter().enumerate() {
         let labels = MemoryGraphStore::label_strings(&graph.edge_labels[eid]);
-        let user_id_sid = strings.intern(name, &mut pager)?;
+        let user_id_sid = names.intern(name, &mut pager)?;
         let label_sids = intern_strings(&labels, &mut strings, &mut pager)?;
         let encoded_props = encode_props(&graph.edge_props[eid], &mut strings, &mut pager)?;
         let cell = record::encode_edge(
@@ -195,6 +200,8 @@ pub fn save_graph(graph: &MemoryGraphStore, db_path: &Path) -> io::Result<()> {
     // --- Write string table page directory ---
     let st_page_list = strings.page_numbers().to_vec();
     let st_root = disk_index::write_u32_list(&mut pager, &st_page_list)?;
+    let name_page_list = names.page_numbers().to_vec();
+    let names_root = disk_index::write_u32_list(&mut pager, &name_page_list)?;
 
     // --- Write fast-open indexes (node locs + edge topology) ---
     let node_locs_root = disk_index::write_node_locs(&mut pager, &node_locs)?;
@@ -214,11 +221,23 @@ pub fn save_graph(graph: &MemoryGraphStore, db_path: &Path) -> io::Result<()> {
     pager.header.adjacency_root = 0;
     pager.header.csr_adjacency_root = csr_adj_root;
     pager.header.string_table_root = st_root;
+    pager.header.names_root = names_root;
     pager.header.node_locs_root = node_locs_root;
     pager.header.edge_topo_root = edge_topo_root;
     pager.write_header()?;
 
     Ok(())
+}
+
+/// The element-name table, or `None` for a legacy file whose names are
+/// interned in the main string table.
+pub(crate) fn load_name_table(pager: &mut Pager) -> io::Result<Option<StringTable>> {
+    let root = pager.header.names_root;
+    if root == 0 {
+        return Ok(None);
+    }
+    let pages = disk_index::read_u32_chain(pager, root)?;
+    Ok(Some(StringTable::load(&pages, pager)?))
 }
 
 /// Load a MemoryGraphStore from a .gql database file.
@@ -232,6 +251,17 @@ pub fn load_graph(db_path: &Path) -> io::Result<MemoryGraphStore> {
         collect_pages_by_type(&mut pager, PageType::StringTable)?
     };
     let strings = StringTable::load(&st_pages, &mut pager)?;
+    // Names live in their own chain since the split; a legacy file has
+    // `names_root == 0` and keeps them in the main table, so resolution
+    // falls back there. This backend materialises the whole graph, so it
+    // reads both — the saving is `LazyGraphStore`'s.
+    let names = load_name_table(&mut pager)?;
+    let resolve_name = |sid: u32| -> String {
+        match &names {
+            Some(n) => n.resolve(sid).unwrap_or_default().to_string(),
+            None => strings.resolve(sid).unwrap_or_default().to_string(),
+        }
+    };
 
     let mut node_names: Vec<String> = Vec::new();
     let mut node_labels: Vec<LabelType> = Vec::new();
@@ -252,7 +282,7 @@ pub fn load_graph(db_path: &Path) -> io::Result<MemoryGraphStore> {
                 for i in 0..page.cell_count() {
                     let (offset, end) = cell_bounds(&page, i);
                     let (decoded, _) = record::decode_node(&page.data[offset..end]);
-                    let name = strings.resolve(decoded.user_id_str_id).unwrap().to_string();
+                    let name = resolve_name(decoded.user_id_str_id);
                     let labs: Vec<String> = decoded
                         .label_str_ids
                         .iter()
@@ -272,10 +302,7 @@ pub fn load_graph(db_path: &Path) -> io::Result<MemoryGraphStore> {
                 for i in 0..page.cell_count() {
                     let (offset, end) = cell_bounds(&page, i);
                     let decoded = record::decode_edge(&page.data[offset..end]);
-                    let name = strings
-                        .resolve(decoded.node.user_id_str_id)
-                        .unwrap()
-                        .to_string();
+                    let name = resolve_name(decoded.node.user_id_str_id);
                     let labs: Vec<String> = decoded
                         .node
                         .label_str_ids
