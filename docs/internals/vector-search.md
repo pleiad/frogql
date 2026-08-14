@@ -13,44 +13,84 @@ interchangeable and so a latency comparison between them means something.
 
 ## The algorithms being compared
 
-Four, as originally specified:
+Five. Four as originally specified, plus a second in-LTJ algorithm that
+came out of review — the original in-LTJ turned out to describe one of
+two genuinely different ways to combine the ranking with the join, and
+both are worth measuring.
 
 | # | algorithm | metric index? |
 |---|---|---|
 | 1 | **post-filter** — run the pattern, then rank what it produced | with or without |
-| 2 | **in-LTJ** — at VEO level `x`, hash that level's candidates and iterate the neighbour index nearest-first, descending into hits with backtracking | with or without |
+| 2 | **interleave** — at VEO level `x`, hash that level's candidates and iterate the neighbour index nearest-first, descending into hits with backtracking | with or without |
 | 3 | **global pre-sort** — rank the whole attribute once, then at level `x` walk that ranking testing membership in the candidates | exact by construction |
 | 4 | **pre-filter** — for each neighbour the index yields, substitute it as a constant for `x` and re-run the query | with or without |
+| 5 | **memo** — collect every prefix that reaches `x`, keyed by `x`; then walk the ranking **once**, globally, and resume the join below `x` only for what it accepts | with or without |
 
-They are not four independent code paths. Two axes generate them:
-`Strategy` (post / in-LTJ / pre) crossed with `VecSource` (where the
-nearest-first ranking comes from). Algorithms 2 and 3 share the same
-`search()` — the only difference is the source — which is exactly why the
-source is a first-class axis rather than an index/no-index flag.
+They are not five independent code paths. Two axes generate them:
+`Strategy` (post / interleave / memo / pre) crossed with `VecSource`
+(where the nearest-first ranking comes from). Algorithms 2 and 3 share
+the same `search()` and differ only in the source, which is exactly why
+the source is a first-class axis rather than an index/no-index flag.
+
+### Why 2 and 5 are separate names and not a flag
+
+Both bind `x` at a VEO level. They differ in **when the ranking is
+consulted**, and that is the axis under study.
+
+The search reaches level `x` once per binding of everything above it.
+`interleave` walks the ranking inside each of those visits. Each visit is
+internally sorted, but the concatenation of the visits is not: the
+nearest surviving candidate overall may live under the last prefix
+enumerated, so no visit can stop early on distance until a later one has
+already contributed. The ranking therefore gets re-walked, once per
+visit.
+
+`memo` hoists the walk out. Phase 1 runs the join down to `x` and stops,
+recording each surviving candidate against **all** the prefixes that
+reach it — one node is reachable by many paths, so a key holds several
+prefixes and phase 2 must resume every one. Phase 2 walks the ranking
+once and resumes only what it accepts, so the distance cut becomes
+global: it ends the search rather than trimming each visit.
+
+| | `interleave` | `memo` |
+|---|---|---|
+| ranking walked | once per visit | once, globally |
+| distance cut | per visit | global |
+| prefix materialised | never | fully |
+| a miss costs | a membership test per visit | one hash lookup, ever |
 
 | # | `FROGQL_VEC_STRATEGY` | `FROGQL_VEC_SOURCE` | `stats.arm` |
 |---|---|---|---|
 | 1 without index | `post` | `localsort` | `post+localsort` |
 | 1 with index | `post` | `hnsw` | `post+hnsw` |
-| 2 without index | `inltj` | `localsort` | `inltj+localsort` |
-| 2 with index | `inltj` | `hnsw` | `inltj+hnsw` |
-| 3 | `inltj` | `globalsort` | `inltj+globalsort` |
+| 2 without index | `interleave` | `localsort` | `interleave+localsort` |
+| 2 with index | `interleave` | `hnsw` | `interleave+hnsw` |
+| 3 | `interleave` | `globalsort` | `interleave+globalsort` |
 | 4 without index | `pre` | `globalsort` | `pre+globalsort` |
 | 4 with index | `pre` | `hnsw` | `pre+hnsw` |
+| 5 without index | `memo` | `localsort` | `memo+localsort` |
+| 5 with index | `memo` | `hnsw` | `memo+hnsw` |
+| 5 global pre-sort | `memo` | `globalsort` | `memo+globalsort` |
 
-`vec_bench` sweeps all eight itself and sets them programmatically; the
+`inltj` remains an accepted spelling of `interleave`: it was the only
+in-LTJ algorithm when the flag was introduced, and recorded runs still
+use it.
+
+`vec_bench` sweeps all eleven itself and sets them programmatically; the
 env vars are for the REPL and one-off runs. Read `stats.arm` (or the
-`strategy` / `source` columns of the CSV) rather than the request —
-an arm that could not be honoured degrades and says so.
+`strategy` / `source` columns of the CSV) rather than the request — an
+arm that could not be honoured degrades and says so.
 
-Eight runnable arms in total: `post` × 3 sources, `inltj` × 3, and `pre`
-× 2 (pre-filter has no per-visit candidate set, so `localsort` there is
-the same walk as `globalsort`). `post+globalsort` is not in the original
-four; it is a control — post-filtering that reads a corpus-wide ranking
-instead of ranking only what the pattern produced.
+Eleven runnable arms: `post` × 3 sources, `interleave` × 3, `memo` × 3,
+and `pre` × 2 (pre-filter has no per-visit candidate set, so `localsort`
+there is the same walk as `globalsort`). `post+globalsort` is not in the
+original four; it is a control — post-filtering that reads a corpus-wide
+ranking instead of ranking only what the pattern produced.
 
 Algorithm 3 is the one predicted to be bad, and the prediction is about
-level `x > 0`: see *Where the ranking comes from* below.
+level `x > 0`: see *Where the ranking comes from* below. Algorithm 5 is
+the fix for that prediction; whether the fix pays is measured in
+*Results*.
 
 ## Surface
 
@@ -234,7 +274,7 @@ pattern is unselective, and deep when it is selective.
 
 Answers every query shape, so it is also the universal fallback.
 
-### 2. in-LTJ (`vsearch/in_ltj.rs`)
+### 2. interleave (`vsearch/in_ltj.rs`, `NnMode::Interleave`)
 
 Place the search variable at a chosen VEO level. Each time the search
 reaches it, materialise the candidate set — already narrowed by the
@@ -253,6 +293,38 @@ rejected once can never be needed later. It is re-read every iteration
 rather than hoisted — the recursive descent between two iterations can
 accept matches and tighten it.
 
+The cut is per visit, not global: it bounds how deep each visit scans,
+not how many visits scan. That is the cost `memo` was written to remove.
+
+### 5. memo (`vsearch/in_ltj.rs`, `NnMode::Memo`)
+
+Same hook, same level, ranking consulted once instead of per visit.
+
+**Phase 1** runs the ordinary search down to the search level and stops.
+Every candidate that survives the levels above is recorded in
+`VecCtx::table` against all the prefixes reaching it. Prefixes are stored
+flat — one buffer per key, the `i`-th prefix a slice at `i * stride`
+(`Prefixes`) — because the obvious `Vec<Vec<u32>>` costs one allocation
+per prefix and a deep level has as many prefixes as the join has partial
+rows. The filters at the level still run, so a candidate that cannot
+survive never enters the table.
+
+**Phase 2** walks the ranking once. A miss is a hash lookup. A hit is
+resumed: replay the stored prefix with `down`, search the levels below,
+undo with `up`. Replaying is sound because `down` needs no preceding
+`seek` — which is why phase 1's own level could call it straight after
+collecting candidates — so the iterators land exactly where the
+collecting pass left them. The filters at and above the level are not
+re-evaluated: a stored prefix is one that already passed them.
+
+`LocalSort` here ranks the **table's keys** rather than a per-visit set:
+they are the only nodes that can contribute, so nothing outside the
+domain is touched and no membership test is needed.
+
+**Level 0 is where `memo` cannot win.** With the search variable at level
+0 there is exactly one visit, so there is nothing to re-walk and the
+table is pure overhead. Measured below.
+
 **The VEO override is applied before filters are placed.** Placement
 resolves each filter to the level where its last dependency binds;
 reordering afterwards can leave a filter reading a variable that is not
@@ -265,7 +337,8 @@ the first lonely variable — and the real position is read back, never
 assumed. Note this deliberately overrides the lonely-last rule documented
 in `veo.rs`; correctness is unaffected (leapfrog is order-agnostic), but
 the level axis of the benchmark is partly measuring how much that
-heuristic was worth.
+heuristic was worth. On the fixture below the clamp makes levels 1 and 2
+the same position, which is why their rows are identical.
 
 ### 3. pre-filter (`vsearch/pre_filter.rs`)
 
@@ -275,16 +348,23 @@ LTJ already does for correlated EXISTS. Exactly one pattern evaluation per
 neighbour examined, so it wins when the first few neighbours also match
 and loses badly when the pattern is selective.
 
-A special case of in-LTJ with the search variable at level 0 — but only
-at level 0. Placing it deeper is something only the in-LTJ arm can do.
+A special case of the in-LTJ arms with the search variable at level 0 —
+but only at level 0. Placing it deeper is something only `interleave` and
+`memo` can do. `memo` at level 0 is the same shape with the domain
+memoised, which is why it beats `pre` by an order of magnitude below:
+same single global walk, one join instead of one per neighbour.
 
 ## What to measure
 
-**`nn_pops` per accepted result.** With a selective pattern the
-interleaving arms walk a proximity graph built over the *whole* corpus, so
-reaching a candidate that also satisfies the pattern can cost a large
-fraction of layer 0. This is the classic filtered-ANN failure mode.
-Post-filter degrades gracefully exactly where those two blow up.
+**`nn_pops` per accepted result.** With a selective pattern the arms that
+consult a corpus-wide ranking walk a proximity graph built over the
+*whole* corpus, so reaching a candidate that also satisfies the pattern
+can cost a large fraction of layer 0. This is the classic filtered-ANN
+failure mode. Post-filter degrades gracefully exactly where those blow
+up.
+
+Read it **against wall clock**, never instead of it. The first result
+below is that `nn_pops` and latency can move in opposite directions.
 
 `VecStats` also records **which arm executed**, not which was requested: a
 precondition miss falls back, and reporting the requested arm would lie.
@@ -293,8 +373,58 @@ precondition miss falls back, and reporting the requested arm would lie.
 cargo run --release --bin vec_bench -- --items 50000 --dim 128 --ks 1,10,100 --levels 0,1,2
 ```
 
-CSV columns: `items,dim,k,mode,selectivity,strategy,index,level,median_ms,
-recall,nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,rows`.
+CSV columns: `items,dim,k,mode,selectivity,strategy,source,level,median_ms,
+recall,nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,resumes,rows`.
+
+## Results
+
+20 000 items, dim 32, `k` = 10, distinct-binding mode, 5 query vectors ×
+5 iterations, median. Same data, same seed, one binary.
+
+| arm | level | ms | `nn_pops` | candidates | resumes |
+|---|---|---|---|---|---|
+| `interleave+localsort` | 0 | **2.95** | 11 | 8 659 | — |
+| `interleave+globalsort` | 0 | 3.40 | 4 163 | 8 659 | — |
+| `interleave+hnsw` | 0 | 4.28 | 4 163 | 8 659 | — |
+| `memo+localsort` | 0 | 5.59 | 11 | 8 659 | 10 |
+| `memo+globalsort` | 0 | 5.64 | 4 163 | 8 659 | 10 |
+| `memo+hnsw` | 0 | 6.59 | 4 163 | 8 659 | 10 |
+| `interleave+localsort` | 1 | **11.71** | 1 050 | 20 000 | — |
+| `interleave+globalsort` | 1 | 12.87 | **198 964** | 20 000 | — |
+| `interleave+hnsw` | 1 | 15.77 | **198 713** | 20 000 | — |
+| `memo+globalsort` | 1 | 18.47 | **4 163** | 20 000 | 12 |
+| `memo+hnsw` | 1 | 18.58 | **4 163** | 20 000 | 12 |
+| `memo+localsort` | 1 | 18.67 | **11** | 20 000 | 12 |
+| `post+globalsort` | 0 | 44.69 | 4 162 | 8 659 | — |
+| `post+hnsw` | 0 | 45.59 | 4 162 | 8 659 | — |
+| `pre+globalsort` | 0 | 55.87 | 4 163 | — | — |
+| `pre+hnsw` | 0 | 59.02 | 4 163 | — | — |
+
+**The re-walk is real, and fixing it does not pay here.** Off level 0,
+`interleave` pops 198 964 neighbours where `memo` pops 4 163 — 48× fewer,
+exactly the cost the two-phase shape was written to remove. `memo` is
+still 1.4× slower in wall clock. The join dominates: phase 1 collects
+20 000 candidates and the neighbour order then completes 12 of them, so
+the ranking was never the bottleneck it looked like.
+
+`interleave+localsort` at level 1 is the cleanest demonstration. It pops
+1 050 against `memo+localsort`'s 11, a 95× gap on the headline metric,
+and it is 1.6× *faster*.
+
+**At level 0 `memo` cannot win, and does not.** One visit means nothing to
+re-walk, so identical `nn_pops` and a table built for nothing: 3.40 ms
+against 5.64 ms, same source, same 4 163 pops.
+
+**Both in-LTJ arms beat both baselines by a wide margin**, which is the
+result that was being looked for: 2.95 ms against 44.69 ms (post) and
+55.87 ms (pre). And `memo` at level 0 beats `pre` roughly 10× on the same
+single global walk, the difference being one join instead of one per
+neighbour (`pattern_runs`).
+
+Caveat: one fixture, one shape, one scale. The crossover where
+materialising a prefix costs less than re-walking a ranking should move
+with corpus size, selectivity, and how much join sits below the search
+level. None of that is charted yet.
 
 ## Equivalence
 
@@ -315,9 +445,9 @@ reason.
 
 | Var | Effect |
 |---|---|
-| `FROGQL_VEC_STRATEGY=post\|pre\|inltj` | which strategy to run (default `post`) |
+| `FROGQL_VEC_STRATEGY=post\|pre\|interleave\|memo` | which strategy to run (default `post`). `inltj` is an accepted alias for `interleave` |
 | `FROGQL_VEC_SOURCE=hnsw\|localsort\|globalsort` | where the ranking comes from (default `hnsw`) |
-| `FROGQL_VEC_LEVEL=<n>` | VEO position of the search variable; in-LTJ only, clamped |
+| `FROGQL_VEC_LEVEL=<n>` | VEO position of the search variable; `interleave` / `memo` only, clamped |
 | `FROGQL_VEC_TAU_EPS=<f>` | relative slack on the threshold cut (default 0) |
 | `FROGQL_DISABLE_VECTORS` | ignore every sidecar; queries see no vector attribute |
 | `FROGQL_DEBUG_VEC` | print the executed arm and its counters |

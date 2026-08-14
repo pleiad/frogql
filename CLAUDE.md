@@ -86,9 +86,9 @@ Runtime/store toggles for A/B testing and tracing (all read at query/open time; 
 | `FROGQL_ORDERBY_FORCE=pdqsort\|topk` | force one ORDER BY strategy (bypass the btree-LTJ-real top-k) |
 | `FROGQL_DEBUG_INDEXES` | print auto-built indexes + pinned variables |
 | `FROGQL_TRACE_OPEN` | print per-phase open latency (see *Open-time performance*) |
-| `FROGQL_VEC_STRATEGY=post\|pre\|inltj` | which vector-search evaluation strategy runs (default `post`); see `docs/internals/vector-search.md` |
+| `FROGQL_VEC_STRATEGY=post\|pre\|interleave\|memo` | which vector-search evaluation strategy runs (default `post`). `interleave` and `memo` are the two in-LTJ algorithms; `inltj` is an accepted alias for `interleave`. See `docs/internals/vector-search.md` |
 | `FROGQL_VEC_SOURCE=hnsw\|localsort\|globalsort` | where the nearest-first ranking comes from. `hnsw` and `globalsort` share the same walk and differ only in build cost + exactness; `localsort` ranks just the current visit's candidates and never re-scans. The two exact sources are what the strategies are pinned equivalent in |
-| `FROGQL_VEC_LEVEL=<n>` | VEO position of the vector-search variable (in-LTJ only, clamped to just before the first lonely var) |
+| `FROGQL_VEC_LEVEL=<n>` | VEO position of the vector-search variable (`interleave` / `memo` only, clamped to just before the first lonely var) |
 | `FROGQL_VEC_TAU_EPS=<f>` | relative slack on the top-k threshold cut; an approximate cursor's order is only approximately sorted |
 | `FROGQL_DISABLE_VECTORS` | ignore every vector sidecar; queries see no vector attribute |
 | `FROGQL_DEBUG_VEC` | print the executed vector-search arm and its counters |
@@ -484,26 +484,44 @@ testing membership); they differ only in build cost and exactness.
 outside the level. Pre-filter has no per-visit set and serves `LocalSort`
 as `GlobalSort`, reporting the source that actually ran.
 
-The two axes generate **eight runnable arms**, covering the four
-algorithms under study: post-filter (1), in-LTJ (2), the global pre-sort
-variant of in-LTJ (3, `inltj+globalsort`), and pre-filter (4). Algorithms
+The two axes generate **eleven runnable arms**, covering five algorithms:
+post-filter (1), `interleave` (2), the global pre-sort variant of it
+(3, `interleave+globalsort`), pre-filter (4), and `memo` (5). Algorithms
 2 and 3 share one module and differ only in the source — which is why the
 source is a first-class axis and not an index/no-index flag.
 
 Strategies in `src/runtime/vsearch/`: `post_filter` (run then rank; the
 universal fallback and, with an exact source, the recall oracle),
-`pre_filter` (pin the search variable per neighbour and re-run), `in_ltj`
-(bind the variable from the neighbour stream at a chosen VEO level, with
-`DistThreshold` pruning each visit). All three return `IntermediateResult`
-so everything downstream is identical across arms.
+`pre_filter` (pin the search variable per neighbour and re-run), and
+`in_ltj`, which holds **two** algorithms selected by `NnMode`. All return
+`IntermediateResult` so everything downstream is identical across arms.
+
+`interleave` and `memo` bind the same variable at the same VEO level and
+differ only in **when the ranking is consulted**, which is the axis under
+study — hence two named strategies rather than one with a flag. The level
+is reached once per binding of everything above it. `interleave` walks
+the ranking inside each visit; the visits are each sorted but their
+concatenation is not, so the cut is per visit and the ranking is
+re-walked. `memo` hoists it out: phase 1 collects every candidate with
+**all** the prefixes reaching it (one node is reachable by many paths, so
+a key holds several and phase 2 must resume every one), phase 2 walks the
+ranking once and resumes only what it accepts, making the cut global.
+
+Measured on 20 000 items (`docs/internals/vector-search.md` §Results):
+off level 0 `memo` pops 4 163 neighbours against `interleave`'s 198 964,
+**48× fewer, and is still 1.4× slower in wall clock** — the join
+dominates, so the ranking was never the bottleneck it looked like. At
+level 0 there is one visit, nothing to re-walk, and `memo`'s table is
+pure overhead. Both in-LTJ arms beat post-filter and pre-filter by 10×+.
+Do not delete either arm: the pair is the result.
 
 Two invariants worth not breaking: the sidecar **fingerprint** (ids are
 graph-internal and `save()` renumbers them, so a stale sidecar points at
 the wrong nodes — `vectors()` also returns `None` under unsaved node
 insert/delete), and the **VEO override happening before filter placement**
 (reordering afterwards leaves filters reading unbound variables, which is
-silently wrong). `tests/vector_strategy_equiv_test.rs` pins the three
-strategies equal under `FROGQL_VEC_INDEX=brute`.
+silently wrong). `tests/vector_strategy_equiv_test.rs` pins all four
+strategies equal under the exact sources, at every VEO level.
 
 ### Optimizer
 
