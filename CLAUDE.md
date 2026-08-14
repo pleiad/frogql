@@ -234,7 +234,7 @@ All node/edge IDs are `u32` internally (`pub type Id = u32` in `model/value.rs`)
 
 The runtime is generic over `GraphAccess`. Node and edge methods are separate: `node_labels(id)` / `edge_labels(id)`, `node_props(id)` / `edge_props(id)`. The runtime knows which to call from context (filtering nodes vs edges). Three backends:
 - `MemoryGraphStore` — in-memory from JSON, all data in RAM. Full read + DML backend: implements `GraphAccess` and `GraphAccessMut` via the same `RefCell<MutationOverlay>` as `LazyGraphStore` (reads merge base + overlay; mutations stage in the overlay). Parity covered by `tests/memory_mut_test.rs`.
-- `LazyGraphStore` — topology (edge_src/tgt) + label index in RAM, labels/props read from disk via LRU page cache. No string names in memory.
+- `LazyGraphStore` — topology (edge_src/tgt) + label index in RAM, labels/props read from disk via LRU page cache. **The string table is fully resident**: `StringTable::load` fills `id_to_str` at open, and it holds one entry per node *and per edge* (the external name) plus labels, property keys, and every distinct string property value. At SF0.3 that is 219.5 MiB of the store's 473.2 — 90% of its 6.1 M entries are element names, and 139.9 MiB of it is `String` headers rather than text. `heap_report()` prints the split; an arena and not loading edge names are the two open levers. (The `str_to_id` dedup map *is* lazy and stays empty on a read-only session; anything that interns doubles the string cost.)
 - `DiskGraphStore` — topology in RAM, everything else from disk
 
 ### Parser grammar hierarchy

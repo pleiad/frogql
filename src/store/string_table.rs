@@ -74,6 +74,28 @@ impl Default for StringTable {
 }
 
 impl StringTable {
+    /// Resident bytes. `id_to_str` is the unavoidable half; the `str_to_id`
+    /// dedup map is built lazily and is zero for a read-only session (see
+    /// the field comment), which is worth reporting separately because it
+    /// silently doubles the string cost the moment anything interns.
+    /// Every interned string, in id order. For diagnostics that need to
+    /// attribute the table's cost: it holds four different populations
+    /// (element names, labels, property keys, and string property
+    /// values) and only a sample tells them apart.
+    pub fn iter_strings(&self) -> impl Iterator<Item = &str> {
+        self.id_to_str.iter().map(|s| s.as_str())
+    }
+
+    pub fn heap_bytes(&self) -> (usize, usize) {
+        let ptr = std::mem::size_of::<String>();
+        let owned: usize = self.id_to_str.iter().map(|s| ptr + s.capacity()).sum();
+        let dedup = match &*self.str_to_id.borrow() {
+            Some(m) => m.keys().map(|k| ptr + k.capacity() + 4 + 16).sum(),
+            None => 0,
+        };
+        (owned + self.pages.len() * 4, dedup)
+    }
+
     /// Create a new empty string table. Call `init` to allocate its first page.
     pub fn new() -> Self {
         Self::default()

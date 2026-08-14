@@ -42,6 +42,54 @@ fn main() {
     }
     std::env::remove_var("FROGQL_LTJ_COMPACT");
 
+    // The store's own resident cost, component by component. Reported
+    // alongside the index because the two are what an open database is:
+    // quoting one without the other has repeatedly produced numbers that
+    // do not add up to the measured RSS.
+    let report = store.heap_report();
+    let store_total: usize = report.iter().map(|(_, b)| b).sum();
+    println!("store heap (MiB)");
+    for (name, bytes) in &report {
+        if *bytes > 0 {
+            println!("  {name:<26} {:>8.1}", mib(*bytes));
+        }
+    }
+    println!("  {:<26} {:>8.1}", "TOTAL", mib(store_total));
+    println!();
+
+    // The string table is usually the biggest single store component, and
+    // it holds four different populations. Attributing it matters: element
+    // names are one per node and edge and unavoidable, while string
+    // property values are the part a graph without them simply does not
+    // pay.
+    {
+        let mut count = 0usize;
+        let mut content = 0usize;
+        let mut longest = 0usize;
+        for st in store.iter_strings() {
+            count += 1;
+            content += st.len();
+            longest = longest.max(st.len());
+        }
+        let elements = store.node_count() as usize + store.edge_count() as usize;
+        println!("string table");
+        println!("  {:<26} {:>8}", "entries", count);
+        println!("  {:<26} {:>8}", "nodes + edges", elements);
+        println!(
+            "  {:<26} {:>8.1}",
+            "avg bytes/entry",
+            content as f64 / count.max(1) as f64
+        );
+        println!("  {:<26} {:>8}", "longest entry (bytes)", longest);
+        println!("  {:<26} {:>8.1}", "content MiB", mib(content));
+        println!(
+            "  {:<26} {:>8.1}",
+            "String headers MiB",
+            mib(count * std::mem::size_of::<String>())
+        );
+        println!();
+    }
+
     println!("index    build_s   heap_MiB   triples");
     for (name, secs, bytes, len, _, _) in &results {
         println!("{name:<8} {secs:>7.2}   {:>8.1}   {len}", mib(*bytes));

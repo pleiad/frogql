@@ -34,6 +34,12 @@ struct CacheEntry {
 }
 
 impl Pager {
+    /// Resident bytes held by the LRU page cache. One `Page` per entry
+    /// plus the map's own slot; the page payload dominates.
+    pub fn cache_heap_bytes(&self) -> usize {
+        self.cache.len() * (std::mem::size_of::<CacheEntry>() + std::mem::size_of::<u32>() + 16)
+    }
+
     /// Create a new database file. Fails if the file already exists.
     pub fn create(path: &Path) -> io::Result<Self> {
         Self::create_with_cache(path, DEFAULT_CACHE_SIZE)

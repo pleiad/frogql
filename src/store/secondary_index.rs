@@ -77,6 +77,29 @@ pub struct SecondaryIndex {
 }
 
 impl SecondaryIndex {
+    /// Resident bytes across every hash and btree entry. Keys are counted
+    /// by their own size; the posting lists dominate on unique-valued
+    /// columns, where each key maps to a single id.
+    pub fn heap_bytes(&self) -> usize {
+        let key = std::mem::size_of::<IndexKey>();
+        let mut total = 0usize;
+        for ((a, b), m) in &self.hashes {
+            total += a.capacity() + b.capacity();
+            total += m
+                .values()
+                .map(|v| key + 24 + v.capacity() * 4 + 16)
+                .sum::<usize>();
+        }
+        for ((a, b), m) in &self.btrees {
+            total += a.capacity() + b.capacity();
+            total += m
+                .values()
+                .map(|v| key + 24 + v.capacity() * 4)
+                .sum::<usize>();
+        }
+        total
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

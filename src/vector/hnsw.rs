@@ -29,6 +29,20 @@ pub struct Hnsw {
 }
 
 impl Hnsw {
+    /// Resident bytes of the proximity graph. Three levels of `Vec`
+    /// nesting, so the per-`Vec` header is counted, not just the ids —
+    /// on layer 0 with `m0` neighbours it is a real fraction of the total.
+    pub fn heap_bytes(&self) -> usize {
+        let hdr = std::mem::size_of::<Vec<u32>>();
+        self.levels
+            .iter()
+            .map(|layer| {
+                hdr + layer.capacity() * hdr
+                    + layer.iter().map(|nbrs| nbrs.capacity() * 4).sum::<usize>()
+            })
+            .sum()
+    }
+
     pub fn len(&self) -> usize {
         self.levels.len()
     }

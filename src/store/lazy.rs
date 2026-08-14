@@ -159,6 +159,62 @@ pub struct LazyGraphStore {
 }
 
 impl LazyGraphStore {
+    /// Where the resident memory of an open database goes, component by
+    /// component, in bytes.
+    ///
+    /// Exists because "the store costs ~580 MiB" is not an answer you can
+    /// act on: the parts have very different fixes. The record-location
+    /// tables and the CSR adjacency scale with the graph and are the price
+    /// of not touching disk per lookup; the string table scales with
+    /// distinct string content and is the one that grows fastest on LDBC,
+    /// where most of it is node id strings nothing queries by name; the
+    /// page cache is a fixed budget, not a graph property.
+    ///
+    /// Sums are computed, not measured — they account for the containers
+    /// this struct owns and will read lower than RSS, which also carries
+    /// allocator slack and every transient buffer the process has touched.
+    /// Every interned string. Diagnostics only — see
+    /// `StringTable::iter_strings`.
+    pub fn iter_strings(&self) -> impl Iterator<Item = &str> {
+        self.strings.iter_strings()
+    }
+
+    pub fn heap_report(&self) -> Vec<(&'static str, usize)> {
+        let (strings_owned, strings_dedup) = self.strings.heap_bytes();
+        let csr = |c: &AdjCsr| c.offsets.capacity() * 4 + c.flat.capacity() * 4;
+        let label_map = |m: &HashMap<String, Vec<u32>>| -> usize {
+            m.iter()
+                .map(|(k, v)| k.capacity() + std::mem::size_of::<String>() + v.capacity() * 4 + 40)
+                .sum()
+        };
+        vec![
+            ("string table", strings_owned),
+            ("string dedup map (lazy)", strings_dedup),
+            (
+                "record locations",
+                (self.node_locs.capacity() + self.edge_locs.capacity())
+                    * std::mem::size_of::<RecordLoc>(),
+            ),
+            (
+                "edge topology",
+                self.edge_src.capacity() * 4
+                    + self.edge_tgt.capacity() * 4
+                    + self.edge_directed.capacity(),
+            ),
+            (
+                "CSR adjacency",
+                csr(&self.outgoing_csr) + csr(&self.incoming_csr) + csr(&self.undirected_csr),
+            ),
+            (
+                "label indexes",
+                label_map(&self.label_to_nodes) + label_map(&self.label_to_edges),
+            ),
+            ("secondary indexes", self.secondary.borrow().heap_bytes()),
+            ("page cache", self.pager.borrow().cache_heap_bytes()),
+            ("vector sidecars", self.vectors.heap_bytes()),
+        ]
+    }
+
     /// Open a .gql database file with lazy loading.
     /// Scans all pages to build compact indexes, but does NOT load record data.
     pub fn open(db_path: &Path) -> io::Result<Self> {

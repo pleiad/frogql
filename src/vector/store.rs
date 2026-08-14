@@ -35,6 +35,16 @@ pub struct VectorSet {
 }
 
 impl VectorSet {
+    /// Resident bytes: the raw rows dominate (`count × dim × 4`), with
+    /// the HNSW proximity graph next when one was built.
+    pub fn heap_bytes(&self) -> usize {
+        self.attr.capacity()
+            + self.ids.capacity() * 4
+            + self.data.capacity() * 4
+            + self.norms.capacity() * 4
+            + self.hnsw.as_ref().map_or(0, |h| h.heap_bytes())
+    }
+
     /// Build from raw rows. `ids` must be strictly ascending and `data`
     /// row-major `ids.len() × dim`; the sidecar decoder enforces both, so
     /// this is debug-asserted rather than validated.
@@ -278,6 +288,16 @@ pub struct VectorStore {
 }
 
 impl VectorStore {
+    /// Resident bytes across every loaded sidecar. Zero when none are
+    /// present, which is the common case — sidecars are opt-in per
+    /// attribute and built offline by `vec_build`.
+    pub fn heap_bytes(&self) -> usize {
+        self.sets
+            .iter()
+            .map(|(k, v)| k.capacity() + v.heap_bytes())
+            .sum()
+    }
+
     pub fn empty() -> VectorStore {
         VectorStore {
             sets: HashMap::new(),
