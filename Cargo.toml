@@ -24,6 +24,17 @@ include = [
     "/LICENSE",
 ]
 
+# What `dist` ships in the CLI release archives. Only the REPL binary is
+# user-facing; the bench/dev bins stay out. `bench` is off for the same
+# reason the Python crate turns it off — it pulls ureq → ring, which does
+# not cross-compile to aarch64-linux.
+[package.metadata.dist]
+default-features = false
+features = ["repl"]
+
+[package.metadata.dist.binaries]
+"*" = ["frogql"]
+
 [features]
 # Defaults keep `cargo build` and CI behaviour identical to before.
 # The Python crate (`python/`) opts out via `default-features = false`
@@ -62,7 +73,8 @@ proptest = "1"
 
 # Bins that need optional deps. Auto-discovery still picks up the
 # remaining bins (bench_queries, bench_repeat, convert_edgelist,
-# internal_bench) which use only the always-on dependencies.
+# dml_bench, orderby_bench, ltj_index_stats, pattern_typecheck) which
+# use only the always-on dependencies.
 [[bin]]
 name = "frogql"
 path = "src/bin/frogql.rs"
@@ -78,6 +90,13 @@ name = "ldbc_bench"
 path = "src/bin/ldbc_bench.rs"
 required-features = ["bench"]
 
+# Also uses sysinfo. Auto-discovery left it ungated, which only showed up
+# once the CLI release started building --no-default-features --features repl.
+[[bin]]
+name = "internal_bench"
+path = "src/bin/internal_bench.rs"
+required-features = ["bench"]
+
 [workspace]
 members = [".", "python", "node", "wasm"]
 # resolver = "2" computes features per-target instead of unifying them
@@ -87,3 +106,8 @@ members = [".", "python", "node", "wasm"]
 # frogql — which pulls ring (via ureq) and breaks aarch64
 # cross-builds inside the manylinux2014 container.
 resolver = "2"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

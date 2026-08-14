@@ -61,13 +61,33 @@ Benchmark charts from the LDBC Social Network Benchmark are coming here as the n
 
 ## Install
 
+**CLI (macOS / Linux)**:
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/pleiad/frogql/releases/latest/download/frogql-installer.sh | sh
+```
+
+**CLI (Windows)**:
+```powershell
+powershell -c "irm https://github.com/pleiad/frogql/releases/latest/download/frogql-installer.ps1 | iex"
+```
+
+The installer drops the `frogql` binary in `~/.local/bin` (override with
+`FROGQL_INSTALL_DIR`). Prebuilt binaries also hang off every
+[GitHub release](https://github.com/pleiad/frogql/releases) for macOS
+(x86_64, arm64), Linux (x86_64, aarch64), and Windows (x86_64).
+
+**CLI (with Rust already installed)**:
+```bash
+cargo install frogql
+```
+
 **Python (PyPI)**:
 ```bash
 pip install frogql
 ```
 Wheels ship for CPython 3.8+ on Linux (x86_64, aarch64), macOS (x86_64, arm64), and Windows (x86_64).
 
-**CLI / library (build from source)**:
+**Library / from source**:
 ```bash
 cargo build --release
 ```
@@ -83,6 +103,10 @@ cargo build --release
 
 # Skip the typechecker for the session
 ./target/release/frogql movies.gdb --no-typecheck
+
+# Version and the full flag list
+frogql --version
+frogql --help
 ```
 
 ```
