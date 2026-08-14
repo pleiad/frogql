@@ -4,7 +4,21 @@ use super::page::{Page, PageType, PAGE_SIZE};
 pub const MAGIC: &[u8; 6] = b"GQLDB\0";
 
 /// Current file format version.
-pub const FORMAT_VERSION: u16 = 1;
+///
+/// Bumped to 2 when element names moved out of the shared string table
+/// into their own chain (`names_root`). That change is **not** readable
+/// by a version-1 binary: a node record's `user_id_str_id` now indexes
+/// the name table, and an older reader resolves it against the shared
+/// table, where ids past its end make `resolve().unwrap()` panic. Only
+/// `node_name` / `edge_name` are affected, so queries would look fine
+/// and `.save` / `.dump-json` would abort — the worst shape for a
+/// compatibility break, which is why `open` now checks this rather than
+/// leaving the field decorative.
+pub const FORMAT_VERSION: u16 = 2;
+
+/// Oldest format this build can read. Version 1 files are still opened:
+/// they carry `names_root == 0` and resolve names from the shared table.
+pub const MIN_READABLE_VERSION: u16 = 1;
 
 /// The file header lives on page 0 and stores database-level metadata.
 ///

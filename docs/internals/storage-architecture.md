@@ -119,6 +119,14 @@ node *and per edge*, so on LDBC SF0.3 they were 5 491 342 of the table's
 (behind `.save`) and the dump utilities. Loading them at open cost
 197 MiB to serve two batch operations that walk the whole graph anyway.
 
+**Files carrying this layout are `format_version = 2`.** A version-1
+binary cannot read one: `user_id_str_id` indexes the name table, and
+resolving it against the shared table panics once the id passes that
+table's end. Only `node_name` / `edge_name` are affected, so queries
+would look fine and `.save` / `.dump-json` would abort. `Pager::open`
+now rejects any file newer than it supports with a message saying so —
+the field had been written since v1 and never read.
+
 `LazyGraphStore` and `DiskGraphStore` therefore read only the name
 chain's *page numbers* at open. The first `node_name` call loads the
 whole table in one sequential pass and caches it — there is no offset

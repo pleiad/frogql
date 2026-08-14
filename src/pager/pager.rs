@@ -3,7 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use super::header::FileHeader;
+use super::header::{FileHeader, FORMAT_VERSION, MIN_READABLE_VERSION};
 use super::page::{Page, PageType, PAGE_SIZE};
 
 /// Default page cache size (number of pages).
@@ -83,6 +83,35 @@ impl Pager {
         let page0 = Page::from_bytes(buf);
         let header = FileHeader::from_page(&page0)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        // The version was written but never read, so a newer file opened
+        // by an older build failed deep inside name resolution instead of
+        // here. Refuse it up front and say what to do about it.
+        if header.format_version > FORMAT_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}: database format version {} is newer than this build supports \
+                     (max {}). Upgrade frogql, or re-save the database with a build \
+                     that can read it.",
+                    path.display(),
+                    header.format_version,
+                    FORMAT_VERSION
+                ),
+            ));
+        }
+        if header.format_version < MIN_READABLE_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}: database format version {} is older than this build supports \
+                     (min {}).",
+                    path.display(),
+                    header.format_version,
+                    MIN_READABLE_VERSION
+                ),
+            ));
+        }
 
         Ok(Pager {
             file,
@@ -294,7 +323,7 @@ mod tests {
         {
             let pager = Pager::open(&path).unwrap();
             assert_eq!(pager.page_count(), 1);
-            assert_eq!(pager.header.format_version, 1);
+            assert_eq!(pager.header.format_version, FORMAT_VERSION);
         }
 
         cleanup(&path);

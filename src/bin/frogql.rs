@@ -130,7 +130,16 @@ fn main() {
     // Open
     eprintln!("Opening {}...", db_path.display());
     let t0 = Instant::now();
-    let store = LazyGraphStore::open_or_create(db_path).expect("failed to open database");
+    // Reported, not panicked: the commonest reason to land here is a
+    // database written by a newer build, and a backtrace helps nobody
+    // read the version message it already carries.
+    let store = match LazyGraphStore::open_or_create(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cannot open {}: {e}", db_path.display());
+            std::process::exit(1);
+        }
+    };
     eprintln!(
         "Loaded {} nodes, {} edges in {:.2}s",
         store.node_count(),
