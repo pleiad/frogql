@@ -590,7 +590,7 @@ mod tests {
             (2, 1, 3, 102),
             (1, 0, 2, 103),
         ];
-        let idx = CompactTripleIndex::from_raw(&raw);
+        let idx = CompactTripleIndex::from_raw(raw);
 
         // (?s, ?p, ?o): all matches, S then P then O.
         let mut it = CompactLtjIterator::new(
@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn test_compact_iterator_constants() {
         let raw = vec![(1, 0, 2, 100), (1, 0, 3, 101), (2, 1, 3, 102)];
-        let idx = CompactTripleIndex::from_raw(&raw);
+        let idx = CompactTripleIndex::from_raw(raw);
 
         // (1, 0, ?o)
         let mut it = CompactLtjIterator::new(
@@ -661,7 +661,7 @@ mod tests {
         // subtree, so the level goes dead: the P leap below it must return
         // None, and the state must revive on up().
         let raw = vec![(1, 0, 2, 100), (2, 0, 1, 101), (3, 0, 3, 102)];
-        let idx = CompactTripleIndex::from_raw(&raw);
+        let idx = CompactTripleIndex::from_raw(raw);
         let mut it = CompactLtjIterator::new(
             pattern(Term::Variable(0), Term::Variable(1), Term::Variable(0)),
             &idx,
@@ -697,7 +697,7 @@ mod tests {
             (1, 1, 2, 102),
             (2, 1, 3, 103),
         ];
-        let idx = CompactTripleIndex::from_raw(&raw);
+        let idx = CompactTripleIndex::from_raw(raw);
         let mut it = CompactLtjIterator::new(
             pattern(Term::Constant(1), Term::Variable(0), Term::Variable(1)),
             &idx,

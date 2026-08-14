@@ -47,19 +47,21 @@ impl SelectBitVec {
     /// Build from the set of zero positions over a domain of `len` bits
     /// (all other bits are ones). `zero_positions` must be strictly
     /// ascending.
-    pub fn from_zero_positions(len: usize, zero_positions: &[usize]) -> Self {
+    ///
+    /// Positions are `u32`, not `usize`: `len` is asserted below
+    /// `u32::MAX`, so a position never needs eight bytes, and this vector
+    /// has one entry per trie node — at SF0.3 that is the difference
+    /// between 18 MiB and 37 MiB of build scratch, per trie, six times.
+    pub fn from_zero_positions(len: usize, zero_positions: &[u32]) -> Self {
         assert!(len < u32::MAX as usize, "bitvector too large");
         let n_words = (len + 63) / 64;
         let mut words = vec![!0u64; n_words];
         for &p in zero_positions {
+            let p = p as usize;
             debug_assert!(p < len);
             words[p / 64] &= !(1u64 << (p % 64));
         }
-        let samples = zero_positions
-            .iter()
-            .step_by(SAMPLE)
-            .map(|&p| p as u32)
-            .collect();
+        let samples = zero_positions.iter().step_by(SAMPLE).copied().collect();
         SelectBitVec {
             words,
             len,
@@ -196,46 +198,72 @@ impl CompactTrie {
     /// Build from triples sorted by the trie's component order. Duplicate
     /// triples are tolerated (they collapse into one leaf), mirroring the
     /// reference `sym_level` walk.
+    /// Build scratch is the dominant term in the compact index's peak
+    /// memory, so it is kept to two vectors, both `u32`, both reserved
+    /// exactly by a counting pre-pass. The earlier version grew three
+    /// vectors by doubling — `syms`, a `Vec<usize>` of child counts, and a
+    /// `Vec<usize>` of their running sum — which cost more scratch than
+    /// the whole finished trie and made the compact index resident-larger
+    /// than the arrays it replaces.
+    ///
+    /// The child-count vector is redundant: its running sum is exactly the
+    /// zero positions, so the sum is accumulated in place and the counts
+    /// never stored.
     pub fn from_sorted(sorted: &[[u32; 3]]) -> Self {
-        let mut syms: Vec<u32> = Vec::new();
-        let mut lengths: Vec<usize> = Vec::new();
+        // Pre-pass: the node count per level, so both vectors are
+        // allocated once at their final size. Counting is a pointer walk
+        // with no allocation, and it removes every reallocation spike.
+        let mut nodes = 0usize;
+        if !sorted.is_empty() {
+            for l in 0..3usize {
+                nodes += 1;
+                for i in 1..sorted.len() {
+                    if sorted[i - 1][..=l] != sorted[i][..=l] {
+                        nodes += 1;
+                    }
+                }
+            }
+        }
+
+        let mut syms: Vec<u32> = Vec::with_capacity(nodes);
+        // One leading zero, then a zero at each cumulative child count.
+        let mut zeros: Vec<u32> = Vec::with_capacity(nodes + 1);
+        zeros.push(0);
+        let mut cum = 0u32;
         let mut leaf_base = 0usize;
+
         if !sorted.is_empty() {
             for l in 0..3usize {
                 if l == 2 {
                     leaf_base = syms.len();
                 }
-                let mut children = 1usize;
+                let mut children = 0u32;
                 for i in 1..sorted.len() {
                     let (prev, curr) = (&sorted[i - 1], &sorted[i]);
                     if prev[..=l] != curr[..=l] {
                         syms.push(prev[l]);
+                        children += 1;
                         if prev[..l] != curr[..l] {
-                            lengths.push(children);
-                            children = 1;
-                        } else {
-                            children += 1;
+                            cum += children;
+                            zeros.push(cum);
+                            children = 0;
                         }
                     }
                 }
                 syms.push(sorted[sorted.len() - 1][l]);
-                lengths.push(children);
+                children += 1;
+                cum += children;
+                zeros.push(cum);
             }
         }
-        // bv: one leading zero, then a zero at each cumulative child count.
-        let mut zeros = Vec::with_capacity(lengths.len() + 1);
-        zeros.push(0usize);
-        let mut cum = 0usize;
-        for &len in &lengths {
-            cum += len;
-            zeros.push(cum);
-        }
-        debug_assert_eq!(cum, syms.len());
-        CompactTrie {
-            bv: SelectBitVec::from_zero_positions(syms.len() + 1, &zeros),
-            seq: IntSeq::from_slice(&syms),
-            leaf_base,
-        }
+        debug_assert_eq!(cum as usize, syms.len());
+        debug_assert_eq!(syms.len(), nodes, "the pre-pass must count exactly");
+
+        let bv = SelectBitVec::from_zero_positions(syms.len() + 1, &zeros);
+        drop(zeros);
+        let seq = IntSeq::from_slice(&syms);
+        drop(syms);
+        CompactTrie { bv, seq, leaf_base }
     }
 
     /// Root handle.
@@ -324,16 +352,32 @@ const ORDERS: [[usize; 3]; 6] = [
 
 impl CompactTripleIndex {
     /// Build from raw `(s, p, o, eid)` triples (unsorted, duplicates kept).
-    pub fn from_raw(raw: &[(u32, u32, u32, u32)]) -> Self {
+    ///
+    /// Takes the vector **by value** and works one buffer at a time. The
+    /// point of the compact representation is to hold less memory than
+    /// the six arrays, and it cannot deliver that if building it costs
+    /// more than the arrays it replaces. Three things keep the peak down:
+    ///
+    /// 1. The caller's triples are consumed, not copied, so the raw
+    ///    vector and a sorted duplicate never coexist.
+    /// 2. The eid column is dropped as soon as the leaf table is built —
+    ///    the tries only need `(s, p, o)` — which is a quarter of the
+    ///    remaining working set.
+    /// 3. **One** working buffer is permuted in place across all six
+    ///    orderings instead of deriving a fresh one per trie. Going from
+    ///    ordering `a` to ordering `b` is a column permutation, so the
+    ///    buffer is re-sorted rather than rebuilt and never reallocated.
+    pub fn from_raw(mut raw: Vec<(u32, u32, u32, u32)>) -> Self {
+        let raw_len = raw.len();
+
         // SPO with eids: sorted once, feeds both the SPO trie and the
         // leaf-eid table.
-        let mut spo: Vec<(u32, u32, u32, u32)> = raw.to_vec();
-        spo.sort_unstable();
+        raw.sort_unstable();
 
         let mut leaf_offsets: Vec<u32> = Vec::new();
-        let mut leaf_eids: Vec<u32> = Vec::with_capacity(spo.len());
+        let mut leaf_eids: Vec<u32> = Vec::with_capacity(raw.len());
         let mut prev: Option<(u32, u32, u32)> = None;
-        for &(s, p, o, e) in &spo {
+        for &(s, p, o, e) in &raw {
             if prev != Some((s, p, o)) {
                 leaf_offsets.push(leaf_eids.len() as u32);
                 prev = Some((s, p, o));
@@ -342,26 +386,42 @@ impl CompactTripleIndex {
         }
         leaf_offsets.push(leaf_eids.len() as u32);
 
-        let build = |order: usize| -> CompactTrie {
-            let perm = &ORDERS[order];
-            let mut v: Vec<[u32; 3]> = spo
-                .iter()
-                .map(|&(s, p, o, _)| {
-                    let c = [s, p, o];
-                    [c[perm[0]], c[perm[1]], c[perm[2]]]
-                })
-                .collect();
+        // Shed the eid column, then the source vector.
+        let mut work: Vec<[u32; 3]> = Vec::with_capacity(raw.len());
+        work.extend(raw.iter().map(|&(s, p, o, _)| [s, p, o]));
+        drop(raw);
+
+        // `work` is in ordering `cur`; re-permute its columns into the
+        // next ordering and re-sort. `inv` inverts the current order so a
+        // component can be found by its SPO identity.
+        let mut cur = ORDERS[0];
+        let mut tries: Vec<CompactTrie> = Vec::with_capacity(6);
+        for (order, next) in ORDERS.iter().enumerate() {
             if order != 0 {
-                v.sort_unstable();
+                let mut inv = [0usize; 3];
+                for (i, &c) in cur.iter().enumerate() {
+                    inv[c] = i;
+                }
+                let map = [inv[next[0]], inv[next[1]], inv[next[2]]];
+                for row in work.iter_mut() {
+                    *row = [row[map[0]], row[map[1]], row[map[2]]];
+                }
+                work.sort_unstable();
+                cur = *next;
             }
-            CompactTrie::from_sorted(&v)
-        };
+            tries.push(CompactTrie::from_sorted(&work));
+        }
+        drop(work);
+
+        let tries: [CompactTrie; 6] = tries
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("ORDERS has six entries"));
 
         CompactTripleIndex {
-            tries: [build(0), build(1), build(2), build(3), build(4), build(5)],
+            tries,
             leaf_offsets,
             leaf_eids,
-            raw_len: raw.len(),
+            raw_len,
         }
     }
 
@@ -432,10 +492,10 @@ mod tests {
     #[test]
     fn test_select_bitvec() {
         // bv = [0,1,0,1,0,0,1,0,0,0] (the worked LOUDS example)
-        let zeros = [0usize, 2, 4, 5, 7, 8, 9];
+        let zeros = [0u32, 2, 4, 5, 7, 8, 9];
         let bv = SelectBitVec::from_zero_positions(10, &zeros);
         for (k, &p) in zeros.iter().enumerate() {
-            assert_eq!(bv.select0(k + 1), p, "select0({})", k + 1);
+            assert_eq!(bv.select0(k + 1), p as usize, "select0({})", k + 1);
         }
         assert_eq!(bv.succ0(0), 0);
         assert_eq!(bv.succ0(1), 2);
@@ -458,20 +518,20 @@ mod tests {
             x ^= x >> 7;
             x ^= x << 17;
             if x % 3 == 0 {
-                zeros.push(i);
+                zeros.push(i as u32);
             }
         }
         let bv = SelectBitVec::from_zero_positions(len, &zeros);
         for (k, &p) in zeros.iter().enumerate() {
-            assert_eq!(bv.select0(k + 1), p);
+            assert_eq!(bv.select0(k + 1), p as usize);
         }
         // succ0 spot checks
         let mut zi = 0;
         for i in (0..len).step_by(97) {
-            while zi < zeros.len() && zeros[zi] < i {
+            while zi < zeros.len() && (zeros[zi] as usize) < i {
                 zi += 1;
             }
-            let expect = zeros.get(zi).copied().unwrap_or(len);
+            let expect = zeros.get(zi).map(|&z| z as usize).unwrap_or(len);
             assert_eq!(bv.succ0(i), expect, "succ0({i})");
         }
     }
@@ -566,7 +626,7 @@ mod tests {
             (3, 1, 3, 13),
             (3, 1, 3, 13),
         ];
-        let idx = CompactTripleIndex::from_raw(&raw);
+        let idx = CompactTripleIndex::from_raw(raw);
         assert_eq!(idx.len(), 5);
         assert_eq!(idx.eids_for(1, 0, 2), &[10, 11]);
         assert_eq!(idx.eids_for(2, 0, 3), &[12]);
@@ -576,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_compact_index_empty() {
-        let idx = CompactTripleIndex::from_raw(&[]);
+        let idx = CompactTripleIndex::from_raw(Vec::new());
         assert!(idx.is_empty());
         assert_eq!(idx.eids_for(0, 0, 0), &[] as &[u32]);
     }

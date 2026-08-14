@@ -127,7 +127,7 @@ impl TripleIndex {
         }
 
         let repr = if Self::compact_selected() {
-            IndexRepr::Compact(Box::new(CompactTripleIndex::from_raw(&raw_triples)))
+            IndexRepr::Compact(Box::new(CompactTripleIndex::from_raw(raw_triples)))
         } else {
             // Build 6 orderings
             let spo = Self::build_ordering(&raw_triples, |&(s, p, o, e)| (s, p, o, e));
