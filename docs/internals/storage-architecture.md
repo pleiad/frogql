@@ -103,8 +103,47 @@ without bumping the format version.
 
 ### 3.2 String Table
 
-All label names, property names, and string values are **deduplicated**
-into a string table. Each unique string gets a u32 ID (SID).
+Label names, property names, and string values are **deduplicated** into
+a string table. Each unique string gets a u32 ID (SID).
+
+**Element names live in a second, separate table.** The external name of
+a node or edge is interned into its own page chain (`PageType::NameTable`,
+rooted at `header.names_root`) rather than the shared one. Same layout,
+same code — `StringTable::new_names()` only changes which page type it
+allocates.
+
+The split is about resident memory, not disk. Names are one entry per
+node *and per edge*, so on LDBC SF0.3 they were 5 491 342 of the table's
+6 111 631 entries — 90% — and nothing in the query path resolves them:
+`node_name` / `edge_name` are called only by `materialize_to_graph`
+(behind `.save`) and the dump utilities. Loading them at open cost
+197 MiB to serve two batch operations that walk the whole graph anyway.
+
+`LazyGraphStore` and `DiskGraphStore` therefore read only the name
+chain's *page numbers* at open. The first `node_name` call loads the
+whole table in one sequential pass and caches it — there is no offset
+directory to seek with, and none is needed, because every caller is a
+full scan. A legacy file has `names_root == 0`; readers fall back to
+resolving names from the shared table, and re-saving migrates it.
+
+What stays resident is the shared dictionary. At SF0.3 that is 43.7 MiB
+over 620 289 entries, and it is almost entirely string *property values*:
+
+| entry length | entries | content | share | example |
+|---|---|---|---|---|
+| 1-8 B | 3 727 | 0.0 MiB | 0.1% | `"Comment"`, `"id"` |
+| 9-16 B | 45 924 | 0.6 MiB | 1.9% | `"198.50.19.91"` |
+| 17-32 B | 312 930 | 6.4 MiB | 21.8% | `"Internet Explorer"` |
+| 33-64 B | 27 425 | 1.2 MiB | 3.9% | forum titles |
+| 65-128 B | 205 192 | 17.3 MiB | 58.7% | post / comment text |
+| 129-512 B | 25 074 | 4.0 MiB | 13.5% | longer text |
+| 513+ B | 17 | 0.0 MiB | 0.1% | biographies |
+
+Post and comment content is 72% of it. The part a pattern match actually
+touches on every element — labels and property keys — is 3 727 entries
+and 0.1%. A further 14.2 MiB is `String` headers rather than text: 24
+bytes of bookkeeping around an average 13.6 bytes of content, 620 289
+times, which an arena would reclaim.
 
 ```
 String Table:
@@ -423,6 +462,50 @@ Source: .gql file
 Query speed: fast for topology, slower when accessing labels/props
 Best for: large graphs where labels/props are sparse in queries
 ```
+
+#### Where the resident memory goes
+
+`LazyGraphStore::heap_report()` accounts for the containers the struct
+owns; `ltj_index_stats <db>` prints it next to the LTJ index, since the
+two together are what an open database costs. LDBC SF0.3 (908 224 nodes,
+4 583 118 edges, 430 MiB on disk), auto indexes off:
+
+| component | MiB |
+|---|---|
+| CSR adjacency | 45.4 |
+| string table (shared dictionary) | 43.7 |
+| record locations | 41.9 |
+| edge topology | 39.3 |
+| label indexes | 21.0 |
+| page cache | 7.9 |
+| **total** | **199.1** |
+
+Auto-built secondary indexes add ~122 MiB on top when enabled.
+
+**Reserve exactly; do not shrink afterwards.** These arrays are built
+once during `open` and never written again — `insert_node` /
+`insert_edge` stage into the `MutationOverlay`, and the only writers of
+the base fields are `index_nodes_from_page` / `index_edges_from_page`,
+which run inside `open`. So growth slack is dead for the life of the
+store, and `Vec` doubling leaves a lot of it: the three per-element
+groups measured 220 MiB against 127 MiB of content.
+
+The fast-index path makes it worse than it looks, because
+`raw.into_iter().map(...).collect()` **reuses the source allocation**
+when element size and alignment match — so the slack from reading the
+chain survives into the final array.
+
+Calling `shrink_to_fit()` afterwards does **not** recover it. Measured at
+SF0.3: 796 MiB RSS before, 792 after. Shrinking reallocates and the freed
+pages go to the allocator's free list, not back to the OS; it only makes
+the accounting look better. The loaders therefore take an expected-count
+hint from the header (`read_node_locs`, `read_edge_topo`) and
+`read_u32_chain` walks the chain twice — once to total the entry counts,
+once to fill an exactly-sized vector. The second walk is nearly free
+because the pages are already cached.
+
+Combined with the name split and the compact LTJ index, SF0.3 opens in
+594 MiB against 1002 before this series.
 
 ### 4.3 DiskGraphStore
 

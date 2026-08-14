@@ -25,17 +25,24 @@ just repl movies.gdb [--import-csv dir/ | --no-typecheck]   # rebuild + open REP
 # unqualified form so the set never drifts as tests are added:
 cargo test                       # everything (lib + all tests/*.rs)
 cargo test --lib                 # just the in-crate unit tests (fast)
-# A full sweep is ~7-8 min wall clock, and almost none of that is your
-# code. Measured breakdown on macOS (2026-08):
-#   ~365 s  macOS first-run scan of 85 freshly linked test binaries
-#           (~4.3 s each; a second run of the same binary is 0.17 s)
-#    ~45 s  bench_test — the one target doing real work (generates
-#           10k-50k-node graphs, measures RSS). Passes; just slow.
-#    ~62 s  compile + link
-#    ~14 s  every other test, actual execution
-# So: run the targets you touched during iteration, and take the sweep
-# once before committing. Excluding your terminal from the macOS scan
-# (Settings > Privacy & Security > Developer Tools) removes the 365 s.
+# Sweep wall clock is dominated by a first-execution cost per binary,
+# not by your code. Measured on macOS (2026-08, same commit, back to back):
+#   7.5 min  after relinking every target
+#    55  s   with the same binaries already run once
+# The tests themselves total 5.5 s of that (bench_test 3.1, the vector
+# equivalence suite 0.9, everything else under 0.1 each). The gap is
+# ~5-8 s per freshly linked file, spent at 0% CPU — the process is
+# blocked, not computing. A byte-identical copy at a new path pays it
+# again, so it is keyed on the file, not its contents.
+#
+# It only bites when many targets relink at once — touching store/,
+# pager/ or model/ rebuilds everything. The checks serialise because
+# `cargo test` runs targets one at a time, so warming them in parallel
+# first collapses it (~29 s for ~200 binaries against ~30 min serial):
+#   find target/debug/deps -type f -perm +111 ! -name '*.d' \
+#     | xargs -P 16 -I{} sh -c '{} --list >/dev/null 2>&1'
+# Do NOT re-diagnose this as "macOS rescanning" without measuring — an
+# earlier version of this note claimed that and was wrong.
 cargo test --test runtime_test --test typecheck_test --test parser_test
 
 # Single test / single file
@@ -234,7 +241,7 @@ All node/edge IDs are `u32` internally (`pub type Id = u32` in `model/value.rs`)
 
 The runtime is generic over `GraphAccess`. Node and edge methods are separate: `node_labels(id)` / `edge_labels(id)`, `node_props(id)` / `edge_props(id)`. The runtime knows which to call from context (filtering nodes vs edges). Three backends:
 - `MemoryGraphStore` — in-memory from JSON, all data in RAM. Full read + DML backend: implements `GraphAccess` and `GraphAccessMut` via the same `RefCell<MutationOverlay>` as `LazyGraphStore` (reads merge base + overlay; mutations stage in the overlay). Parity covered by `tests/memory_mut_test.rs`.
-- `LazyGraphStore` — topology (edge_src/tgt) + label index in RAM, labels/props read from disk via LRU page cache. **The string table is fully resident**: `StringTable::load` fills `id_to_str` at open, and it holds one entry per node *and per edge* (the external name) plus labels, property keys, and every distinct string property value. At SF0.3 that is 219.5 MiB of the store's 473.2 — 90% of its 6.1 M entries are element names, and 139.9 MiB of it is `String` headers rather than text. `heap_report()` prints the split; an arena and not loading edge names are the two open levers. (The `str_to_id` dedup map *is* lazy and stays empty on a read-only session; anything that interns doubles the string cost.)
+- `LazyGraphStore` — topology (edge_src/tgt) + label index in RAM, labels/props read from disk via LRU page cache. **Element names are not resident**: node and edge external names live in their own page chain (`PageType::NameTable`, `header.names_root`) and `open` reads only its page numbers. They are ~90% of a graph's string data and no query resolves them — the only callers of `node_name` / `edge_name` are `materialize_to_graph` (behind `.save`) and the dump utilities, all full graph walks. The first such call loads the whole table in one pass and caches it; a query session never pays it. A legacy file has `names_root == 0` and keeps names in the main string table, so resolution falls back there. What *is* resident is the shared dictionary: labels, property keys, and every distinct string property value — 43.7 MiB at SF0.3 against 219.5 before the split, of which the labels and keys a match actually touches are 3 727 entries and 0.1%. (The `str_to_id` dedup map is lazy on top of that and stays empty on a read-only session; anything that interns doubles the dictionary's cost.)
 - `DiskGraphStore` — topology in RAM, everything else from disk
 
 ### Parser grammar hierarchy
@@ -421,7 +428,7 @@ Tests in `tests/named_path_test.rs`. Full ISO context + roadmap in `docs/interna
 
 ### Storage format (.gdb files)
 
-4 KB pages, slotted-page layout for variable-length records. Header page 0 stores root pointers to string table, label indexes, adjacency index, and (since recently) a CSR adjacency root. Node/edge records reference strings by string table ID. Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6).
+4 KB pages, slotted-page layout for variable-length records. Header page 0 stores root pointers to string table, label indexes, adjacency index, a CSR adjacency root, and an **element-name table root** (`names_root`, bytes 104-107). Node/edge records reference strings by ID; the `user_id_str_id` field indexes the *name* table, everything else the shared string table. The split exists so `open` can skip the names — see *GraphAccess trait* above. `names_root == 0` marks a legacy file whose names sit in the shared table. Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6).
 
 Adjacency has two on-disk representations. The current writer emits **only CSR**; the legacy format is read-only-supported for backward compat:
 
