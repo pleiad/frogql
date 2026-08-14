@@ -82,6 +82,46 @@ fn main() {
         );
         println!("  {:<26} {:>8}", "longest entry (bytes)", longest);
         println!("  {:<26} {:>8.1}", "content MiB", mib(content));
+
+        // Where the bytes sit by entry length. The table mixes a handful
+        // of labels and property keys (short, and read on every element
+        // during matching) with every distinct string property value
+        // (long, and read only when a predicate or projection touches
+        // it), so the histogram is what separates them.
+        const EDGES: [usize; 7] = [8, 16, 32, 64, 128, 512, usize::MAX];
+        const NAMES: [&str; 7] = ["1-8", "9-16", "17-32", "33-64", "65-128", "129-512", "513+"];
+        let mut counts = [0usize; 7];
+        let mut bytes = [0usize; 7];
+        let mut samples: [Vec<String>; 7] = Default::default();
+        for st in store.iter_strings() {
+            let b = EDGES.iter().position(|&e| st.len() <= e).unwrap_or(6);
+            counts[b] += 1;
+            bytes[b] += st.len();
+            if samples[b].len() < 2 {
+                let short: String = st.chars().take(46).collect();
+                samples[b].push(short);
+            }
+        }
+        println!();
+        println!(
+            "  {:<10} {:>10} {:>12} {:>10}",
+            "bytes", "entries", "content MiB", "% content"
+        );
+        for i in 0..7 {
+            if counts[i] == 0 {
+                continue;
+            }
+            println!(
+                "  {:<10} {:>10} {:>12.1} {:>9.1}%",
+                NAMES[i],
+                counts[i],
+                mib(bytes[i]),
+                100.0 * bytes[i] as f64 / content.max(1) as f64
+            );
+            for ex in &samples[i] {
+                println!("  {:<10} {:?}", "", ex);
+            }
+        }
         println!(
             "  {:<26} {:>8.1}",
             "String headers MiB",
