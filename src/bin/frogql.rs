@@ -5,6 +5,7 @@
 //!   frogql <database.gdb> --import-csv <dir> [--no-typecheck]       # create from CSV (spanner_import_config.json)
 //!   frogql <database.gdb> --import-ldbc-csv <dir> [--no-typecheck]  # create from LDBC SNB CsvBasic dataset
 //!   frogql <database.gdb> --import-json <file> [--no-typecheck]     # create from JSON
+//!   frogql --help | --version
 //!
 //! `--no-auto-indexes` is CLI sugar for `FROGQL_DISABLE_AUTO_INDEXES=1`
 //! (see `docs/modes-options.md`): it skips the secondary-index auto-build
@@ -34,8 +35,51 @@ use frogql::typing::simple_type::SimpleType;
 use frogql::typing::validate::{validate_against_data, ElementKind, ValidationReport};
 use frogql::typing::variable_type::{Schema, VariableType};
 
+/// The usage block, shared by `--help` (stdout, exit 0) and the
+/// no-arguments error (stderr, exit 1).
+fn usage(prog: &str) -> String {
+    format!(
+        "Usage:
+  {prog} <database.gdb> [--no-typecheck]                          # open existing
+  {prog} <database.gdb> --import-csv <dir> [--no-typecheck]       # create from CSV (spanner_import_config.json)
+  {prog} <database.gdb> --import-ldbc-csv <dir> [--no-typecheck]  # create from LDBC SNB CsvBasic dataset
+  {prog} <database.gdb> --import-json <file> [--no-typecheck]     # create from JSON
+
+A database that does not exist yet is created empty, sqlite3-style.
+
+Options:
+  --no-typecheck      skip the typechecker for this session (default: on)
+  --no-auto-indexes   skip the secondary-index auto-build at open (default: on)
+  -h, --help          print this help and exit
+  -V, --version       print the version and exit"
+    )
+}
+
 fn main() {
     let mut args: Vec<String> = env::args().collect();
+
+    // The binary name as invoked, so the usage block reads `frogql ...`
+    // rather than the installer's absolute path.
+    let prog = args
+        .first()
+        .and_then(|a| Path::new(a).file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("frogql")
+        .to_string();
+
+    // `--version` / `--help` answer and exit before anything touches the
+    // filesystem. Without this they fell through to the positional dispatch
+    // below and were taken as the database path — and since the open is
+    // create-on-open (sqlite3-style), `frogql --version` created a database
+    // file literally named `--version` in the working directory.
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("frogql {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{}", usage(&prog));
+        return;
+    }
 
     // Strip the mode flags so positional dispatch below stays simple.
     let typecheck = !args.iter().any(|a| a == "--no-typecheck");
@@ -53,30 +97,17 @@ fn main() {
     }
 
     if args.len() < 2 {
-        eprintln!("Usage:");
-        eprintln!(
-            "  {} <database.gdb> [--no-typecheck]                        # open existing",
-            args[0]
-        );
-        eprintln!(
-            "  {} <database.gdb> --import-csv <dir> [--no-typecheck]       # create from CSV (spanner_import_config.json)",
-            args[0]
-        );
-        eprintln!(
-            "  {} <database.gdb> --import-ldbc-csv <dir> [--no-typecheck]  # create from LDBC SNB CsvBasic dataset",
-            args[0]
-        );
-        eprintln!(
-            "  {} <database.gdb> --import-json <file> [--no-typecheck]     # create from JSON",
-            args[0]
-        );
-        eprintln!();
-        eprintln!("Options:");
-        eprintln!("  --no-typecheck      skip the typechecker for this session (default: on)");
-        eprintln!(
-            "  --no-auto-indexes   skip the secondary-index auto-build at open (default: on)"
-        );
+        eprintln!("{}", usage(&prog));
         std::process::exit(1);
+    }
+
+    // Same trap as `--version`: any unrecognised flag in the path position
+    // would otherwise be created as a database file named after the flag.
+    if args[1].starts_with('-') {
+        eprintln!("Unknown option: {}", args[1]);
+        eprintln!();
+        eprintln!("{}", usage(&prog));
+        std::process::exit(2);
     }
 
     let db_path = Path::new(&args[1]);
