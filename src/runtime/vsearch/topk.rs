@@ -1,6 +1,6 @@
 //! The shared top-k sink.
 //!
-//! All three strategies funnel their accepted results through this, for
+//! Every arm funnels its accepted results through this, for
 //! two reasons. It is what makes the benchmark a comparison of
 //! strategies rather than of three different ways to rank; and its
 //! `threshold` is the pruning signal the in-LTJ strategy cuts on.

@@ -5,11 +5,52 @@
 The question is: **which nodes satisfy a graph pattern and are also among
 the `k` nearest to a query vector?**
 
-The goal is not a vector-database feature. It is to measure three ways of
-answering that question against each other, inside GQL, on RDF-shaped
+The goal is not a vector-database feature. It is to measure several ways
+of answering that question against each other, inside GQL, on RDF-shaped
 queries — directed edges, no properties, no any-direction — which always
-take the LTJ path. Everything here is built so the three arms are
+take the LTJ path. Everything here is built so the arms are
 interchangeable and so a latency comparison between them means something.
+
+## The algorithms being compared
+
+Four, as originally specified:
+
+| # | algorithm | metric index? |
+|---|---|---|
+| 1 | **post-filter** — run the pattern, then rank what it produced | with or without |
+| 2 | **in-LTJ** — at VEO level `x`, hash that level's candidates and iterate the neighbour index nearest-first, descending into hits with backtracking | with or without |
+| 3 | **global pre-sort** — rank the whole attribute once, then at level `x` walk that ranking testing membership in the candidates | exact by construction |
+| 4 | **pre-filter** — for each neighbour the index yields, substitute it as a constant for `x` and re-run the query | with or without |
+
+They are not four independent code paths. Two axes generate them:
+`Strategy` (post / in-LTJ / pre) crossed with `VecSource` (where the
+nearest-first ranking comes from). Algorithms 2 and 3 share the same
+`search()` — the only difference is the source — which is exactly why the
+source is a first-class axis rather than an index/no-index flag.
+
+| # | `FROGQL_VEC_STRATEGY` | `FROGQL_VEC_SOURCE` | `stats.arm` |
+|---|---|---|---|
+| 1 without index | `post` | `localsort` | `post+localsort` |
+| 1 with index | `post` | `hnsw` | `post+hnsw` |
+| 2 without index | `inltj` | `localsort` | `inltj+localsort` |
+| 2 with index | `inltj` | `hnsw` | `inltj+hnsw` |
+| 3 | `inltj` | `globalsort` | `inltj+globalsort` |
+| 4 without index | `pre` | `globalsort` | `pre+globalsort` |
+| 4 with index | `pre` | `hnsw` | `pre+hnsw` |
+
+`vec_bench` sweeps all eight itself and sets them programmatically; the
+env vars are for the REPL and one-off runs. Read `stats.arm` (or the
+`strategy` / `source` columns of the CSV) rather than the request —
+an arm that could not be honoured degrades and says so.
+
+Eight runnable arms in total: `post` × 3 sources, `inltj` × 3, and `pre`
+× 2 (pre-filter has no per-visit candidate set, so `localsort` there is
+the same walk as `globalsort`). `post+globalsort` is not in the original
+four; it is a control — post-filtering that reads a corpus-wide ranking
+instead of ranking only what the pattern produced.
+
+Algorithm 3 is the one predicted to be bad, and the prediction is about
+level `x > 0`: see *Where the ranking comes from* below.
 
 ## Surface
 
@@ -173,11 +214,14 @@ candidate set — its candidates are the whole corpus — so `LocalSort`
 there is the same walk as `GlobalSort`, and `stats.arm` reports
 `pre+globalsort` so a benchmark row cannot claim otherwise.
 
-## The three strategies
+## The strategies
 
-All three enter through `vsearch::run_nearest` and leave as an
+Every arm enters through `vsearch::run_nearest` and leaves as an
 `IntermediateResult`, so projection, DISTINCT, ORDER BY, and LIMIT
-downstream are identical across arms.
+downstream are identical, which is what makes the latencies comparable.
+
+Three modules, because algorithms 2 and 3 share one: they differ only in
+`VecSource`.
 
 ### 1. post-filter (`vsearch/post_filter.rs`)
 
@@ -255,9 +299,9 @@ recall,nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,rows`.
 ## Equivalence
 
 `tests/vector_strategy_equiv_test.rs` is what makes the benchmark
-legitimate. Under the **exact** cursor all three strategies return
+legitimate. Under either **exact** source every strategy returns
 identical answers across VEO levels, `k` values, both k-modes, and four
-query shapes. If they could disagree, comparing their latency would be
+query shapes — algorithms 1, 2, 3, and 4 all agree. If they could disagree, comparing their latency would be
 comparing three different queries.
 
 Under HNSW recall genuinely differs by arm — that is a result, not a bug —

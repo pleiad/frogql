@@ -484,6 +484,12 @@ testing membership); they differ only in build cost and exactness.
 outside the level. Pre-filter has no per-visit set and serves `LocalSort`
 as `GlobalSort`, reporting the source that actually ran.
 
+The two axes generate **eight runnable arms**, covering the four
+algorithms under study: post-filter (1), in-LTJ (2), the global pre-sort
+variant of in-LTJ (3, `inltj+globalsort`), and pre-filter (4). Algorithms
+2 and 3 share one module and differ only in the source — which is why the
+source is a first-class axis and not an index/no-index flag.
+
 Strategies in `src/runtime/vsearch/`: `post_filter` (run then rank; the
 universal fallback and, with an exact source, the recall oracle),
 `pre_filter` (pin the search variable per neighbour and re-run), `in_ltj`
