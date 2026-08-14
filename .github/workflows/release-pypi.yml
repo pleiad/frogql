@@ -1,7 +1,11 @@
-name: Release
+name: Release PyPI + crates.io
 
 # Build wheels and publish to PyPI when a tag like v0.1.0 is pushed.
 # Uses abi3-py38 so one wheel per (os, arch) supports CPython 3.8+.
+#
+# The name has to differ from the dist-generated release.yml, which is
+# also called "Release" — two same-named workflows are indistinguishable
+# in the Actions UI and in `gh run list`.
 #
 # Setup: add MATURIN_PYPI_TOKEN as a repo secret (the API token from
 # python/pypi_token, never commit it).
