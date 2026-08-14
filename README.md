@@ -176,6 +176,7 @@ Regenerate from CSV: `./target/release/frogql examples/movies.gdb --import-csv <
 | Query | `MATCH`, `OPTIONAL MATCH`, comma-joins, `WHERE`, `RETURN`, `EXISTS`, repetition `{n,m}`, label algebra. | [`docs/query-language.md`](docs/query-language.md) |
 | Mutate | `INSERT`, `SET`, `REMOVE`, `[DETACH] DELETE` (ISO §13 MVP-1). In-RAM overlay until `.save`. | [`docs/data-modification.md`](docs/data-modification.md) |
 | Schemas | Persistent named graph types with `CREATE / USE / DROP / SHOW / VALIDATE GRAPH TYPE`; reserved `DEFAULT` is auto-inferred. | [`docs/graph-types.md`](docs/graph-types.md) |
+| Vector search | `NEAREST k x.attr TO <vector>` — nodes that satisfy the pattern **and** are among the k nearest. Vectors live in sidecar files built offline. | [`docs/internals/vector-search.md`](docs/internals/vector-search.md) |
 | Indexes | Auto-built hash + btree on every uniquely-keyed `(label, prop)` (rebuilt on open); explicit `CREATE [HASH \| BTREE] INDEX` for the rest, persisted in the `.gdb` header chain so they survive close/reopen. | [`docs/secondary-indexes.md`](docs/secondary-indexes.md) |
 
 ## Storage
@@ -202,6 +203,27 @@ Speedups on `soc-LiveJournal1-100k` (limit 1000) range from
 **14× (3-clique) to 4097× (4-path)**, with a 4-clique going from "hung"
 to 43 ms. See [`docs/internals/JOIN_STRATEGY_NOTES.md`](docs/internals/JOIN_STRATEGY_NOTES.md)
 and `CLAUDE.md` for the algorithm in detail.
+
+## Vector search
+
+`NEAREST k x.attr TO <vector> [AS dist]` restricts a pattern to the nodes
+nearest a query vector. Vectors are per-node side data in a sidecar file
+per attribute (`<db>.vec.<attr>`), built offline by `vec_build` together
+with an HNSW graph, and read-only at query time.
+
+```
+MATCH (u:User)-[:likes]->(i:Item)
+NEAREST 10 i.emb TO VECTOR(1234, 'emb') AS dist
+RETURN i, dist ORDER BY dist
+```
+
+Three interchangeable evaluation strategies are implemented — post-filter,
+pre-filter, and an in-LTJ arm that drives the neighbour stream from inside
+the join at a configurable variable-elimination level — crossed with three
+ranking sources (`hnsw`, `localsort`, `globalsort`). Under either exact
+source all three strategies return identical answers, which is what makes
+comparing their latency meaningful. See
+[`docs/internals/vector-search.md`](docs/internals/vector-search.md).
 
 ## Optimizer
 
@@ -248,24 +270,24 @@ cargo build --release                    # build all binaries
 # Strict clippy (run before every commit)
 cargo clippy --workspace --all-targets -- -D clippy::all
 
-# Lib + integration sweep (bench_test is excluded — pre-existing failures)
-cargo test --lib
-cargo test --test parser_test --test runtime_test --test store_runtime_test \
-           --test text2gql_test --test parse_and_run_test --test count_test \
-           --test null_test --test record_test --test list_test \
-           --test compile_diagnostics --test elaborate_test --test float_test \
-           --test graph_type_test --test typecheck_smoke --test typecheck_test \
-           --test optional_match_test --test multi_match_test \
-           --test aggregates_proptest --test lattice_proptest --test multi_match_proptest \
-           --test exists_fold_test --test exists_runtime_test \
-           --test parser_dm_test --test lazy_mut_test --test dm_runtime_test \
-           --test dm_persistence_test --test dm_schema_test --test dm_default_test \
-           --test dump_test --test dm_set_test --test dm_remove_test \
-           --test dm_label_test --test dm_delete_expr_test
+# Everything. Use the unqualified form so the set never drifts as tests
+# are added.
+cargo test
 
-# Single test
+# Just the in-crate unit tests (~8 s)
+cargo test --lib
+
+# Single target / single test
+cargo test --test runtime_test
 cargo test --test runtime_test test_join_star_any_label -- --exact
 ```
+
+A full sweep is ~7-8 minutes, and on macOS most of that is the OS
+scanning each of the ~85 freshly linked test binaries on first run
+(~4.3 s each; the same binary re-runs in 0.17 s). Excluding your terminal
+under Settings > Privacy & Security > Developer Tools removes it. Of the
+rest, `bench_test` is ~45 s of real work — it generates 10k-50k-node
+graphs and measures RSS — and every other test together is ~14 s.
 
 Other binaries in `src/bin/`:
 - `bench_queries` — generic benchmark runner
@@ -273,6 +295,8 @@ Other binaries in `src/bin/`:
 - `ldbc_bench` — LDBC interactive-complete driver, queries in `bench/ldbc-queries/*.toml`
 - `internal_bench` — gqlite-only diagnostic bench (typechecker on/off, lazy/disk backend)
 - `convert_edgelist` — edge-list format converter
+- `vec_build` — builds a vector-attribute sidecar (`<db>.vec.<attr>`) + its HNSW, offline
+- `vec_bench` — vector-search strategy harness (post-filter vs pre-filter vs in-LTJ)
 
 ## Documentation
 

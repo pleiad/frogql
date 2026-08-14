@@ -25,10 +25,17 @@ just repl movies.gdb [--import-csv dir/ | --no-typecheck]   # rebuild + open REP
 # unqualified form so the set never drifts as tests are added:
 cargo test                       # everything (lib + all tests/*.rs)
 cargo test --lib                 # just the in-crate unit tests (fast)
-# `bench_test` is the slow target (~1 min; it opens the committed example
-# .gdb files and measures memory). It currently passes but dominates the
-# wall-clock, so during tight iteration run the specific targets you touched
-# instead, e.g.:
+# A full sweep is ~7-8 min wall clock, and almost none of that is your
+# code. Measured breakdown on macOS (2026-08):
+#   ~365 s  macOS first-run scan of 85 freshly linked test binaries
+#           (~4.3 s each; a second run of the same binary is 0.17 s)
+#    ~45 s  bench_test — the one target doing real work (generates
+#           10k-50k-node graphs, measures RSS). Passes; just slow.
+#    ~62 s  compile + link
+#    ~14 s  every other test, actual execution
+# So: run the targets you touched during iteration, and take the sweep
+# once before committing. Excluding your terminal from the macOS scan
+# (Settings > Privacy & Security > Developer Tools) removes the 365 s.
 cargo test --test runtime_test --test typecheck_test --test parser_test
 
 # Single test / single file
@@ -278,6 +285,19 @@ Two key environment operators (`src/typing/type_environment.rs`):
 
 The `refine` operation (the `S ⊢ T ▷ T'` judgment) is `VariableType::refine(schema, &meet)`: meet first, then refine against the schema. Used inside both env operators.
 
+`VariableType` has two **terminal** variants that carry no descriptor,
+never refine against the schema, and stay inert under every lattice
+operation: `Path` (a named path variable, §16.6) and `Scalar(SimpleType)`
+(a value bound by a clause rather than by the pattern — today only the
+distance of `NEAREST ... AS d`). Both exist so such a variable is
+projectable and orderable like any other; adding one is ~8 small arms
+across `variable_type.rs`, `path_type.rs`, `checker.rs`, `format.rs`, and
+a registration in `tests/lattice_proptest.rs`. Reach for a terminal
+`VariableType` before a new `SimpleType`: a new terminal *value* type
+ripples through the whole lattice and is only warranted when the language
+must actually distinguish it (vectors, for instance, stay plain float
+lists).
+
 ### Join strategy: Leapfrog Triejoin (LTJ)
 
 Primary strategy for joins and concatenations of directed/undirected edges. Worst-case-optimal multi-way join: each directed edge is a triple `(src, label, tgt)` indexed in six sorted orderings (`TripleIndex`: SPO, SOP, POS, PSO, OSP, OPS); LTJ binds variables one at a time by leapfrog-intersecting candidate lists across triples, no intermediate materialisation. CompactLTJ paper (Arroyuelo et al., VLDBJ 2025). Module structure: `runtime/ltj/{triple_index, compact, iterator, veo, algorithm, pattern_extract}.rs`. Full algorithm walkthrough, examples, and benchmark numbers in `docs/internals/JOIN_STRATEGY_NOTES.md`.
@@ -287,6 +307,16 @@ Primary strategy for joins and concatenations of directed/undirected edges. Wors
 - **Compact CLTJ** (`FROGQL_LTJ_COMPACT=1`): a port of the reference `cltj_index_spo_basic` — six LOUDS succinct tries (`compact.rs`: topology bitvector with sampled select-0 + bit-packed symbol sequence), navigated by a stateful handle-stack iterator (`CompactLtjIterator`, ported from `ltj_iterator_basic.hpp`). Property-graph divergence from the RDF reference: parallel edges collapse into one trie leaf, so the index keeps an SPO-ordered eid side table (`leaf_offsets`/`leaf_eids`) that the base case consults for ISO bag multiplicity. At SF0.1 (1.49 M triples): 47.6 MiB vs 136.6 MiB (**2.87× smaller**), build 1.13 s vs 0.92 s, IC medians 1.4–2.1× slower (succinct-navigation trade-off; IC11 runs 1.5× *faster* compact). Equivalence pinned by `tests/compact_ltj_test.rs`; per-repr size/build stats via the `ltj_index_stats` bin. The metatrie tier (root-sharing across ordering pairs) and the paper's RDF/BGP benchmark remain open in #66.
 
 **Activation** (`run_join`, `run_concat_pattern`): kicks in automatically when the pattern decomposes into triples — chains / comma-joins of directed (`-[]->`), reverse (`<-[]-`), and undirected (`~[e]~`) edges, with or without labels. **Any-direction** (`-[e]-`) chains / comma-joins also run through LTJ — pure *and* mixed with directed / `~` edges. `try_ltj_mixed` decomposes with a per-triple `EdgeKind::AnyDir` tag and routes each iterator to the index its edge kind selects: any-direction triples query a separate mirrored index (`TripleIndex::from_graph_anydir`, every edge stored in both senses), the rest the plain index. The leapfrog intersection joins candidates across the two indexes transparently (node ids are global; both indexes assign label ids in the same edge order). `has_any_direction` gates the choice between `try_ltj` (plain only, mirror stays lazy) and `try_ltj_mixed`; `FROGQL_DISABLE_ANYDIR_LTJ=1` forces the fallback. Falls back to pairwise hash-join only for Unions and Repeats not handled by the unroll optimiser.
+
+**Base-case validation is load-bearing.** The leapfrog only descends into
+values the index holds, so a tuple reaching the base case is a real match
+*by construction* — nothing downstream re-checks it. That guarantee
+disappears when every variable is fixed before the search (the
+secondary-index constant fold plus caller pins), because then there is no
+leapfrog at all. The base case therefore rejects any tuple whose iterator
+reports no edge id. Removing that check silently invents edges:
+`(a)-[:follows]->(b) WHERE a.id = 0 AND b.id = 3` returned a match whether
+or not the edge existed. Pinned by `tests/ltj_all_pinned_test.rs`.
 
 **ISO bag multiplicity** (issue #71): the base case (`algorithm.rs`) emits one result row per physical edge at the bound `(s, p, o)` — parallel edges sharing `(src, label, tgt)` are distinct matches even when the edge variable is not projected, and a directed edge yields two matches under `-[e]-` (one per endpoint binding). `RETURN DISTINCT` is the way to set-dedup. Oracles: `tests/{iso_multiplicity,anydir_iso}_test.rs`. The scan/hash-join and seeded-repetition paths iterate physical edge ids and are ISO-consistent with LTJ across shapes (`tests/anydir_path_consistency_test.rs`).
 
@@ -536,6 +566,8 @@ Run + chart: `bench_setup` (downloads LDBC SF0.1) → `install_python_deps.sh` �
 
 - **New DML op** (e.g. `MERGE`): lexer (token), grammar (`parse_*` arm), `src/syntax/dm.rs` (variant in `DmOp`), `src/runtime/dm.rs` (`apply_*` per binding), `GraphAccessMut` (if it touches disk), test file `tests/dm_<op>_test.rs`. The MATCH chain must run through `elaborate::elaborate_query` before iteration so descriptor `value_filters` lower into WHERE.
 - **New built-in expression**: `Token` + lexer arm, parser of `factor` / `call`, `Expr::*`, runtime in `engine.rs::run_expr`, typechecker in `typing/` if it returns a non-trivial type.
+- **New query clause** (e.g. `NEAREST`): field on `Query` in `src/syntax/query.rs`, parsed in `grammar.rs::finish_query_after_matches`, recursed in `elaborate::elaborate_query`, validated in `checker::check_query`, dispatched in `engine::run_query`. Every `Query { .. }` literal ends with `..Query::empty()` for exactly this reason — adding a field should not touch a dozen construction sites. Prefer a **grammar-level soft keyword** (`eat_keyword`, the `TRAIL`/`SHORTEST` treatment) over a lexer token, so the word stays usable as a variable, label, or property name.
+- **New clause-bound scalar**: goes in `Assignment.scalars`, not a new `PathValue` variant. `PathValue` models graph elements and is matched exhaustively in a dozen places that have nothing sensible to do with a float; `scalars` is confined to `assignment.rs` plus one branch in `engine.rs`'s `Expr::Var`.
 - **ISO syntactic sugar**: lives in `src/elaborate/`. Anything that changes *which* rows the query produces. The optimizer is reserved for performance-preserving transforms only.
 - **Persisting something new in `.gdb`**: `pager/header.rs` (root `u32`), `store/io.rs::save_graph_*` (write side), `store/lazy.rs::open` (load side), `docs/internals/storage-architecture.md` (spec), and `fig:layout` in `latex/main.tex` if it ships in the paper.
 
