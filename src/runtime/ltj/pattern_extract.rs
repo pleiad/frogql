@@ -537,7 +537,7 @@ fn fold_indexed_constants<G: GraphAccess>(graph: &G, decomp: &mut Decomposition)
     // constraint is already checked.
     let resolved_set: std::collections::HashSet<usize> =
         resolved_filter_indices.into_iter().collect();
-    let drained: Vec<ExtractedFilter> = decomp.filters.drain(..).collect();
+    let drained = std::mem::take(&mut decomp.filters);
     decomp.filters = drained
         .into_iter()
         .enumerate()
