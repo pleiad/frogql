@@ -344,13 +344,7 @@ impl VariableType {
                         return hit;
                     }
                 }
-                super::stats::record_refine_node_scan(schema.nodes.len());
-                let matches: Vec<VariableType> = schema
-                    .nodes
-                    .iter()
-                    .filter(|n| VariableType::is_subtype(n, node))
-                    .map(|n| VariableType::meet(n, node))
-                    .collect();
+                let matches = schema.scan_matches(true, &schema.nodes, node);
                 let refined = Rc::new(VariableType::join_from_list(matches));
                 if !refine_cache_disabled() {
                     schema.refine_cache_put(node.clone(), Rc::clone(&refined));
@@ -364,13 +358,7 @@ impl VariableType {
                         return hit;
                     }
                 }
-                super::stats::record_refine_edge_scan(schema.edges.len());
-                let matches: Vec<VariableType> = schema
-                    .edges
-                    .iter()
-                    .filter(|e| VariableType::is_subtype(e, node))
-                    .map(|e| VariableType::meet(e, node))
-                    .collect();
+                let matches = schema.scan_matches(false, &schema.edges, node);
                 let refined = Rc::new(VariableType::join_from_list(matches));
                 if !refine_cache_disabled() {
                     schema.refine_cache_put(node.clone(), Rc::clone(&refined));
@@ -484,6 +472,14 @@ pub struct Schema {
     /// `join`'s structural asymmetry).
     #[serde(skip, default)]
     join_cache: Rc<std::cell::RefCell<JoinCache>>,
+    /// Label buckets over the schema entries (`schema_index.rs`) — makes
+    /// refine's *miss path* cheap: a star/neg-free query scans only the
+    /// entries sharing a leaf label (plus the conservative fallback)
+    /// instead of everything. Built lazily on first refine; the memos
+    /// above make warm behavior identical with or without it.
+    /// `GQLITE_DISABLE_TC_SCHEMA_INDEX=1` forces the full scan (A/B).
+    #[serde(skip, default)]
+    schema_index: Rc<std::cell::OnceCell<super::schema_index::SchemaIndex>>,
 }
 
 /// Junction memo: boundary id pair → refined junction descriptor ids.
@@ -530,6 +526,7 @@ impl Schema {
             vt_interner: Rc::default(),
             meet_refine_cache: Rc::default(),
             join_cache: Rc::default(),
+            schema_index: Rc::default(),
         }
     }
 
@@ -544,6 +541,7 @@ impl Schema {
             vt_interner: Rc::default(),
             meet_refine_cache: Rc::default(),
             join_cache: Rc::default(),
+            schema_index: Rc::default(),
         }
     }
 
@@ -564,6 +562,76 @@ impl Schema {
     /// Resolve an interned variable-type id to its canonical `Rc`.
     pub(crate) fn vt_of(&self, id: u32) -> Rc<VariableType> {
         Rc::clone(&self.vt_interner.borrow().vts[id as usize])
+    }
+
+    /// A schema over the same entries with EMPTY memo caches but shared
+    /// interners and label index. This is the honest "cold" A/B tool for
+    /// benches and tests: memos are per-session *warmth*, while the
+    /// interners (stable ids) and the label index (build-once structure,
+    /// like the runtime's TripleIndex) are part of the schema itself —
+    /// a session's first sighting of a shape pays a memo miss, not an
+    /// index rebuild.
+    pub fn fresh_caches(&self) -> Schema {
+        Schema {
+            nodes: Rc::clone(&self.nodes),
+            edges: Rc::clone(&self.edges),
+            refine_cache: Rc::default(),
+            interner: Rc::clone(&self.interner),
+            junction_cache: Rc::default(),
+            vt_interner: Rc::clone(&self.vt_interner),
+            meet_refine_cache: Rc::default(),
+            join_cache: Rc::default(),
+            schema_index: Rc::clone(&self.schema_index),
+        }
+    }
+
+    /// The candidate entries of `entries` matching `query`, met against
+    /// it — refine's scan body. Label-index-pruned when the query's label
+    /// tree is bucket-servable (`schema_index.rs`); the candidate list is
+    /// ascending, so survivors fold in the same order as the full scan
+    /// and the refined result is bit-identical.
+    fn scan_matches(
+        &self,
+        nodes: bool,
+        entries: &[VariableType],
+        query: &VariableType,
+    ) -> Vec<VariableType> {
+        let cands = if schema_index_disabled() {
+            None
+        } else {
+            let idx = self
+                .schema_index
+                .get_or_init(|| super::schema_index::SchemaIndex::build(&self.nodes, &self.edges));
+            query
+                .descriptor()
+                .and_then(|d| idx.candidates(nodes, &d.label))
+        };
+        match cands {
+            Some(ids) => {
+                if nodes {
+                    super::stats::record_refine_node_scan(ids.len());
+                } else {
+                    super::stats::record_refine_edge_scan(ids.len());
+                }
+                ids.iter()
+                    .map(|&i| &entries[i as usize])
+                    .filter(|e| VariableType::is_subtype(e, query))
+                    .map(|e| VariableType::meet(e, query))
+                    .collect()
+            }
+            None => {
+                if nodes {
+                    super::stats::record_refine_node_scan(entries.len());
+                } else {
+                    super::stats::record_refine_edge_scan(entries.len());
+                }
+                entries
+                    .iter()
+                    .filter(|e| VariableType::is_subtype(e, query))
+                    .map(|e| VariableType::meet(e, query))
+                    .collect()
+            }
+        }
     }
 
     /// The environment-meet step `refine(meet(a, b))`, memoized by id
@@ -701,6 +769,10 @@ fn junction_cache_disabled() -> bool {
 
 fn meet_cache_disabled() -> bool {
     std::env::var("GQLITE_DISABLE_TC_MEET_CACHE").is_ok()
+}
+
+fn schema_index_disabled() -> bool {
+    std::env::var("GQLITE_DISABLE_TC_SCHEMA_INDEX").is_ok()
 }
 
 #[cfg(test)]

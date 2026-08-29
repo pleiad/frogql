@@ -6,6 +6,7 @@ pub mod label_type;
 pub mod path_summary;
 pub mod path_type;
 pub mod property_type;
+mod schema_index;
 pub mod simple_type;
 pub mod stats;
 pub mod type_environment;

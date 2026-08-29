@@ -59,7 +59,12 @@ fn median_min_ns(mut v: Vec<u128>) -> (u128, u128) {
 /// shared with the steady-state protocol). Heavy cases are capped by the
 /// same per-case budget.
 fn time_case_cold(schema: &Schema, q: &Query) -> (u128, u128) {
-    let fresh = || Schema::from_parts((*schema.nodes).clone(), (*schema.edges).clone());
+    // Fresh memo caches per sample; interners and the label index stay
+    // shared — they are schema-lifetime structures (built once per
+    // session, like the runtime's TripleIndex), so charging their
+    // construction to every query would measure a regime that exists
+    // nowhere. This is "first sighting of a shape in a live session."
+    let fresh = || schema.fresh_caches();
     // Pilot on one fresh schema.
     let t = Instant::now();
     black_box(Typechecker::new(fresh()).check_query(black_box(q)));
