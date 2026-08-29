@@ -7,7 +7,7 @@ use super::property_type::PropertyType;
 
 /// Combines a label constraint with a property constraint.
 /// Used to describe the type of a node or edge.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DescriptorType {
     pub label: LabelType,
     pub props: PropertyType,

@@ -7,7 +7,8 @@ use super::descriptor_type::DescriptorType;
 use super::simple_type::SimpleType;
 
 /// Types for pattern variables (nodes, edges, unions, lists, bottom).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `Hash` keys the per-schema refine memo cache.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VariableType {
     Node(DescriptorType),
     EdgeDirectional {
@@ -304,6 +305,12 @@ impl VariableType {
     pub fn refine(schema: &Schema, node: &VariableType) -> VariableType {
         match node {
             VariableType::Node(_) => {
+                if !refine_cache_disabled() {
+                    if let Some(hit) = schema.refine_cache_get(node) {
+                        super::stats::record_refine_cache_hit();
+                        return hit;
+                    }
+                }
                 super::stats::record_refine_node_scan(schema.nodes.len());
                 let matches: Vec<VariableType> = schema
                     .nodes
@@ -311,9 +318,19 @@ impl VariableType {
                     .filter(|n| VariableType::is_subtype(n, node))
                     .map(|n| VariableType::meet(n, node))
                     .collect();
-                VariableType::join_from_list(matches)
+                let refined = VariableType::join_from_list(matches);
+                if !refine_cache_disabled() {
+                    schema.refine_cache_put(node.clone(), refined.clone());
+                }
+                refined
             }
             VariableType::EdgeDirectional { .. } | VariableType::EdgeNonDirectional { .. } => {
+                if !refine_cache_disabled() {
+                    if let Some(hit) = schema.refine_cache_get(node) {
+                        super::stats::record_refine_cache_hit();
+                        return hit;
+                    }
+                }
                 super::stats::record_refine_edge_scan(schema.edges.len());
                 let matches: Vec<VariableType> = schema
                     .edges
@@ -321,7 +338,11 @@ impl VariableType {
                     .filter(|e| VariableType::is_subtype(e, node))
                     .map(|e| VariableType::meet(e, node))
                     .collect();
-                VariableType::join_from_list(matches)
+                let refined = VariableType::join_from_list(matches);
+                if !refine_cache_disabled() {
+                    schema.refine_cache_put(node.clone(), refined.clone());
+                }
+                refined
             }
             VariableType::Union(t1, t2) => VariableType::join(
                 VariableType::refine(schema, t1),
@@ -388,7 +409,22 @@ impl fmt::Display for VariableType {
 pub struct Schema {
     pub nodes: Rc<Vec<VariableType>>,
     pub edges: Rc<Vec<VariableType>>,
+    /// Memo for `VariableType::refine`'s Node/Edge scan arms, keyed by the
+    /// pattern type being refined. Shared across `Schema::clone` (so every
+    /// `Typechecker::new(schema.clone())` reuses it — transparently
+    /// cross-query for REPL/Connection lifetimes) and safely invalidated by
+    /// construction: DDL and inference replace the whole `Schema`, never
+    /// mutate one in place, so a cache can never outlive its entries.
+    /// Skipped by serde — a deserialized schema starts cold.
+    /// `GQLITE_DISABLE_TC_REFINE_CACHE=1` bypasses it (A/B kill switch).
+    #[serde(skip, default)]
+    refine_cache: Rc<std::cell::RefCell<std::collections::HashMap<VariableType, VariableType>>>,
 }
+
+/// Safety valve for adversarial/degenerate sessions: the cache resets when
+/// it grows past this many distinct pattern descriptors (real queries stay
+/// in the dozens).
+const REFINE_CACHE_CAP: usize = 4096;
 
 impl Schema {
     /// Permissive schema that allows anything.
@@ -399,6 +435,7 @@ impl Schema {
                 VariableType::edge_directional(DescriptorType::star()),
                 VariableType::edge_non_directional(DescriptorType::star()),
             ]),
+            refine_cache: Rc::default(),
         }
     }
 
@@ -407,8 +444,25 @@ impl Schema {
         Schema {
             nodes: Rc::new(nodes),
             edges: Rc::new(edges),
+            refine_cache: Rc::default(),
         }
     }
+
+    fn refine_cache_get(&self, key: &VariableType) -> Option<VariableType> {
+        self.refine_cache.borrow().get(key).cloned()
+    }
+
+    fn refine_cache_put(&self, key: VariableType, value: VariableType) {
+        let mut m = self.refine_cache.borrow_mut();
+        if m.len() >= REFINE_CACHE_CAP {
+            m.clear();
+        }
+        m.insert(key, value);
+    }
+}
+
+fn refine_cache_disabled() -> bool {
+    std::env::var("GQLITE_DISABLE_TC_REFINE_CACHE").is_ok()
 }
 
 #[cfg(test)]

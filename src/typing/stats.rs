@@ -16,6 +16,8 @@ use std::cell::Cell;
 pub struct TcStats {
     /// Calls to `VariableType::refine` that hit a scan arm (Node or Edge).
     pub refine_calls: u64,
+    /// Scan-arm refine calls answered from the schema's memo cache.
+    pub refine_cache_hits: u64,
     /// Total `schema.nodes` entries walked across all refine Node-arm scans.
     pub node_entries_scanned: u64,
     /// Total `schema.edges` entries walked across all refine Edge-arm scans.
@@ -36,6 +38,7 @@ pub struct TcStats {
 
 const ZERO: TcStats = TcStats {
     refine_calls: 0,
+    refine_cache_hits: 0,
     node_entries_scanned: 0,
     edge_entries_scanned: 0,
     refine_to_nodes_calls: 0,
@@ -83,6 +86,11 @@ pub(crate) fn record_refine_edge_scan(entries: usize) {
         s.refine_calls += 1;
         s.edge_entries_scanned += entries as u64;
     });
+}
+
+#[inline]
+pub(crate) fn record_refine_cache_hit() {
+    bump(|s| s.refine_cache_hits += 1);
 }
 
 #[inline]

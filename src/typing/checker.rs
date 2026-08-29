@@ -127,6 +127,10 @@ impl Typechecker {
         let t = self.phase_start();
         let mut r = if q.has_any_optional() {
             self.check_match_chain(&q.matches)
+        } else if let [only] = q.matches.as_slice() {
+            // Single non-optional MATCH: `collapsed_pattern()` would just
+            // deep-clone this one pattern — check it in place instead.
+            self.check_path_pattern(only.pattern())
         } else {
             self.check_path_pattern(&q.collapsed_pattern())
         };
@@ -636,10 +640,8 @@ impl Typechecker {
                 let filter_env = match self.ambient_env.last() {
                     Some(outer) => {
                         let mut merged = outer.clone();
-                        for k in r.env.keys() {
-                            if let Some(v) = r.env.get(k) {
-                                merged.set(k, v.clone());
-                            }
+                        for (k, v) in r.env.iter() {
+                            merged.set_shared(k, std::rc::Rc::clone(v));
                         }
                         merged
                     }
@@ -1069,7 +1071,10 @@ impl Typechecker {
     /// checker. Returns the inner result for use by the optimisation
     /// step (Phase 2); callers that only need Bool can ignore it.
     fn check_subquery_body(&mut self, q: &Query, outer: &TypeEnvironment) -> TypecheckResult {
-        let mut env = outer.clone();
+        // `env` stays `None` until the first meet/join — the fold seeds
+        // from `outer` directly, so the only up-front clone is the one
+        // pushed onto the ambient stack.
+        let mut env: Option<TypeEnvironment> = None;
         let mut path: Option<PathType> = None;
         // Make the outer environment available to the body's `Filter`
         // predicates so a correlated WHERE (e.g. `WHERE x IN NODES(path)`)
@@ -1081,24 +1086,29 @@ impl Typechecker {
             if path.is_none() {
                 path = Some(r.path.clone());
             }
-            env = match m {
+            let base = env.as_ref().unwrap_or(outer);
+            let next = match m {
                 MatchStatement::Simple { .. } => {
-                    match TypeEnvironment::meet(&self.schema, &env, &r.env) {
-                        Ok(e) => e,
+                    match TypeEnvironment::meet(&self.schema, base, &r.env) {
+                        Ok(e) => Some(e),
                         Err(msg) => {
                             self.errors.push(format!(
                                 "EXISTS body: concatenation of contexts failed: {msg}"
                             ));
-                            env
+                            None // keep the previous environment
                         }
                     }
                 }
                 MatchStatement::Optional { .. } => {
-                    TypeEnvironment::outer_join(&self.schema, &env, &r.env)
+                    Some(TypeEnvironment::outer_join(&self.schema, base, &r.env))
                 }
             };
+            if next.is_some() {
+                env = next;
+            }
         }
         self.ambient_env.pop();
+        let env = env.unwrap_or_else(|| outer.clone());
         let path = path.unwrap_or(PathType::Zero);
         let mut r = TypecheckResult::new(path, env);
         r.empty = r.path.is_unsatisfiable() || r.env.is_empty();
@@ -1184,11 +1194,7 @@ impl Typechecker {
         left: &TypeEnvironment,
         right: &TypeEnvironment,
     ) {
-        for var in merged.keys() {
-            let merged_t = match merged.get(var) {
-                Some(t) => t,
-                None => continue,
-            };
+        for (var, merged_t) in merged.iter() {
             if !merged_t.is_empty() {
                 continue;
             }

@@ -345,10 +345,10 @@ fn main() {
     }
 
     println!(
-        "\n{:<26}{:<11}{:>7}{:>9}{:>13}{:>9}{:>11}",
-        "case", "category", "exp", "got", "check_med_us", "refines", "edge_scan"
+        "\n{:<26}{:<11}{:>7}{:>9}{:>13}{:>9}{:>7}{:>11}",
+        "case", "category", "exp", "got", "check_med_us", "refines", "hits", "edge_scan"
     );
-    println!("{}", "-".repeat(86));
+    println!("{}", "-".repeat(93));
     let mut rows: Vec<Row> = Vec::new();
     let mut mismatches = 0usize;
     for (id, category, expected, q) in &cases {
@@ -387,13 +387,14 @@ fn main() {
             mismatches += 1;
         }
         println!(
-            "{:<26}{:<11}{:>7}{:>9}{:>13.3}{:>9}{:>11}{}",
+            "{:<26}{:<11}{:>7}{:>9}{:>13.3}{:>9}{:>7}{:>11}{}",
             id,
             category,
             expected,
             got,
             med as f64 / 1000.0,
             st.refine_calls,
+            st.refine_cache_hits,
             st.edge_entries_scanned,
             if ok { "" } else { "  <-- VERDICT MISMATCH" }
         );
@@ -409,13 +410,13 @@ fn main() {
             ok,
         });
     }
-    println!("{}", "-".repeat(86));
+    println!("{}", "-".repeat(93));
 
     let mut f = File::create(&out).unwrap_or_else(|e| panic!("create {out}: {e}"));
     writeln!(
         f,
         "case,category,expected,got,check_med_ns,check_min_ns,\
-         refine_calls,node_scanned,edge_scanned,refine_to_nodes,\
+         refine_calls,refine_cache_hits,node_scanned,edge_scanned,refine_to_nodes,\
          env_meets,env_unions,env_outer_joins,env_to_groups,pt_meets,\
          phase_pattern_ns,phase_rep_ns,phase_group_by_ns,phase_returns_ns,phase_order_by_ns,\
          status"
@@ -424,7 +425,7 @@ fn main() {
     for r in &rows {
         writeln!(
             f,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             r.id,
             r.category,
             r.expected,
@@ -432,6 +433,7 @@ fn main() {
             r.med,
             r.min,
             r.st.refine_calls,
+            r.st.refine_cache_hits,
             r.st.node_entries_scanned,
             r.st.edge_entries_scanned,
             r.st.refine_to_nodes_calls,
