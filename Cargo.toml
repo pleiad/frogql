@@ -78,6 +78,11 @@ name = "ldbc_bench"
 path = "src/bin/ldbc_bench.rs"
 required-features = ["bench"]
 
+[[bin]]
+name = "scenario_bench"
+path = "src/bin/scenario_bench.rs"
+required-features = ["bench"]
+
 [workspace]
 members = [".", "python", "node", "wasm"]
 # resolver = "2" computes features per-target instead of unifying them
