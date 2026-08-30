@@ -8,11 +8,20 @@
 //!     `union_W`, `repeat_bounded`, `subq`, `anon_unlabeled_N`) that expose
 //!     how cost scales with pattern size against a real schema.
 //!
-//!   cargo run --release --bin pattern_typecheck -- [path.gdb] [out.csv] [--star-schema]
+//!   cargo run --release --bin pattern_typecheck -- \
+//!       [path.gdb] [out.csv] [--star-schema] [--wide-schema N] [--cold]
 //!
 //! `--star-schema` checks against `Schema::star()` instead of the file's
 //! active schema — the small-schema control for separating scan cost
-//! (O(schema)) from walk cost (O(pattern)).
+//! (O(schema)) from walk cost (O(pattern)). `--wide-schema N` checks
+//! against a synthetic N-label schema (its own case set) — the schema-
+//! SCALE axis, where the label index shows its value (−43–57% cold at
+//! N=500 vs 0±3% at LDBC's 36 entries). `--cold` times first-sighting
+//! cost: fresh memo caches per sample via `Schema::fresh_caches()`
+//! (interners and label index stay shared — they are schema-lifetime
+//! structures). Measurement discipline for A/B on this hardware: run
+//! configs interleaved in BOTH orders within one invocation session —
+//! cross-run comparisons carry ±30% thermal noise.
 //!
 //! Per case it emits the timed median/min (hot loop, profiling off), one
 //! counter snapshot (`typing::stats`), and one per-phase split
@@ -194,16 +203,92 @@ fn union_case(w: usize) -> String {
         .join(" | ")
 }
 
+/// Synthetic schema with `n` node types (`L0..Ln`, two props each) and
+/// `n` edge types (`e0..en`, directed, star endpoints) — the schema-
+/// SCALE axis: LDBC's 36 entries cannot show how per-position cost
+/// grows with schema size (or whether the label index flattens it).
+fn wide_schema(n: usize) -> Schema {
+    use frogql::typing::descriptor_type::DescriptorType;
+    use frogql::typing::label_type::LabelType;
+    use frogql::typing::property_type::PropertyType;
+    use frogql::typing::simple_type::SimpleType;
+    use frogql::typing::variable_type::VariableType;
+    let nodes = (0..n)
+        .map(|i| {
+            let props: std::collections::BTreeMap<String, SimpleType> = [
+                (format!("id{i}"), SimpleType::Z),
+                ("name".to_string(), SimpleType::S),
+            ]
+            .into_iter()
+            .collect();
+            VariableType::Node(DescriptorType::new(
+                LabelType::Label(format!("L{i}")),
+                PropertyType::Open(props),
+            ))
+        })
+        .collect();
+    let edges = (0..n)
+        .map(|i| {
+            VariableType::edge_directional(DescriptorType::new(
+                LabelType::Label(format!("e{i}")),
+                PropertyType::open_empty(),
+            ))
+        })
+        .collect();
+    Schema::from_parts(nodes, edges)
+}
+
+/// Cases for the wide schema (the LDBC-labelled sets would all be
+/// schema-empty against it).
+fn wide_cases() -> Vec<(String, String, String, String)> {
+    vec![
+        (
+            "wide_node".into(),
+            "wide".into(),
+            "valid".into(),
+            "(x: L0)".into(),
+        ),
+        (
+            "wide_chain_2".into(),
+            "wide".into(),
+            "valid".into(),
+            "(a: L0)-[:e0]->(b: L1)-[:e1]->(c: L2)".into(),
+        ),
+        (
+            "wide_reject_edge".into(),
+            "wide".into(),
+            "empty".into(),
+            "(a: L0)-[:noSuchEdge]->(b: L1)".into(),
+        ),
+        (
+            "wide_reject_label".into(),
+            "wide".into(),
+            "empty".into(),
+            "(x: NoSuchLabel)".into(),
+        ),
+        (
+            "wide_anon_edge".into(),
+            "wide".into(),
+            "valid".into(),
+            "(a: L0)-[]->(b)".into(),
+        ),
+    ]
+}
+
 fn main() {
     let mut gdb: Option<String> = None;
     let mut out: Option<String> = None;
     let mut star_schema = false;
+    let mut wide: Option<usize> = None;
     let mut cold = false;
-    for arg in std::env::args().skip(1) {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
         if arg == "--star-schema" {
             star_schema = true;
         } else if arg == "--cold" {
             cold = true;
+        } else if arg == "--wide-schema" {
+            wide = args.next().and_then(|v| v.parse().ok());
         } else if gdb.is_none() {
             gdb = Some(arg);
         } else if out.is_none() {
@@ -215,7 +300,9 @@ fn main() {
     let gdb = gdb.unwrap_or_else(|| DEFAULT_GDB.to_string());
     let out = out.unwrap_or_else(|| "results_rust_typecheck.csv".to_string());
 
-    let schema = if star_schema {
+    let schema = if let Some(n) = wide {
+        wide_schema(n)
+    } else if star_schema {
         Schema::star()
     } else {
         let lazy =
@@ -223,9 +310,14 @@ fn main() {
         let schema = lazy.catalog().active_schema();
         schema
     };
+    let schema_desc = match wide {
+        Some(n) => format!("wide({n})"),
+        None if star_schema => "star".to_string(),
+        None => gdb.clone(),
+    };
     println!(
         "schema: {} ({} node entries, {} edge entries)",
-        if star_schema { "star" } else { gdb.as_str() },
+        schema_desc,
         schema.nodes.len(),
         schema.edges.len()
     );
@@ -301,7 +393,8 @@ fn main() {
         ),
     ];
 
-    // (id, category, expected, query)
+    // (id, category, expected, query). Wide-schema mode swaps in its own
+    // case set — the LDBC-labelled cases would all be schema-empty there.
     let mut cases: Vec<(String, String, String, String)> = bench_cases
         .iter()
         .map(|(id, exp, q)| {
@@ -382,6 +475,7 @@ fn main() {
          OPTIONAL MATCH (f)<-[:hasCreator]-(m: Post) RETURN p.id"
             .into(),
     ));
+    let cases = if wide.is_some() { wide_cases() } else { cases };
 
     struct Row {
         id: String,
