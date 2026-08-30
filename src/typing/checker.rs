@@ -444,15 +444,16 @@ impl Typechecker {
             let r = self.check_path_pattern(m.pattern());
             env = match m {
                 MatchStatement::Simple { .. } => {
-                    match TypeEnvironment::meet(&self.schema, &env, &r.env) {
+                    let left_shared = shared_bindings(&env, &r.env);
+                    match TypeEnvironment::meet_owned(&self.schema, env, &r.env) {
                         Ok(e) => {
-                            self.warn_for_collapsed_bindings(&e, &env, &r.env);
+                            self.warn_for_collapsed_bindings_shared(&e, &left_shared, &r.env);
                             e
                         }
-                        Err(e) => {
+                        Err((prev, e)) => {
                             self.errors
                                 .push(format!("Concatenation of contexts failed: {}", e));
-                            env
+                            prev
                         }
                     }
                 }
@@ -578,7 +579,7 @@ impl Typechecker {
         match node {
             PathPattern::Node(desc) => {
                 let t = self.refine_pattern_node(desc);
-                let p = PathSummary::from_variable(&t, EdgeDir::Any);
+                let p = PathSummary::from_variable(&self.schema, &t, EdgeDir::Any);
                 let env = create_context(desc, t);
                 TypecheckResult::new(p, env)
             }
@@ -594,16 +595,22 @@ impl Typechecker {
                 let r1 = self.check_path_pattern(p1);
                 let r2 = self.check_path_pattern(p2);
 
-                let cm = match TypeEnvironment::meet(&self.schema, &r1.env, &r2.env) {
+                // The warning pass only needs the SHARED keys' originals;
+                // meet_owned consumes r1's env without cloning it, so
+                // stash the left-side bindings for vars the right also
+                // binds (few, usually zero or one).
+                let left_shared = shared_bindings(&r1.env, &r2.env);
+
+                let cm = match TypeEnvironment::meet_owned(&self.schema, r1.env, &r2.env) {
                     Ok(env) => env,
-                    Err(e) => {
+                    Err((env, e)) => {
                         self.errors
                             .push(format!("Concatenation of contexts failed: {}", e));
-                        r1.env.clone()
+                        env
                     }
                 };
 
-                self.warn_for_collapsed_bindings(&cm, &r1.env, &r2.env);
+                self.warn_for_collapsed_bindings_shared(&cm, &left_shared, &r2.env);
 
                 let p = PathSummary::meet(&self.schema, &r1.path, &r2.path);
                 TypecheckResult::new(p, cm)
@@ -618,16 +625,17 @@ impl Typechecker {
                 let r1 = self.check_path_pattern(p1);
                 let r2 = self.check_path_pattern(p2);
 
-                let cm = match TypeEnvironment::meet(&self.schema, &r1.env, &r2.env) {
+                let left_shared = shared_bindings(&r1.env, &r2.env);
+                let cm = match TypeEnvironment::meet_owned(&self.schema, r1.env, &r2.env) {
                     Ok(env) => env,
-                    Err(e) => {
+                    Err((env, e)) => {
                         self.errors
                             .push(format!("Concatenation of contexts failed: {}", e));
-                        r1.env.clone()
+                        env
                     }
                 };
 
-                self.warn_for_collapsed_bindings(&cm, &r1.env, &r2.env);
+                self.warn_for_collapsed_bindings_shared(&cm, &left_shared, &r2.env);
 
                 let p = if r1.path.is_unsatisfiable() || r2.path.is_unsatisfiable() {
                     PathSummary::zero()
@@ -670,7 +678,7 @@ impl Typechecker {
                 let r2 = self.check_path_pattern(p2);
                 TypecheckResult::new(
                     PathSummary::union(r1.path, r2.path),
-                    TypeEnvironment::union(&r1.env, &r2.env),
+                    TypeEnvironment::union(&self.schema, &r1.env, &r2.env),
                 )
             }
 
@@ -732,7 +740,7 @@ impl Typechecker {
 
     fn check_edge(&mut self, dir: EdgeDir, desc: &Option<Descriptor>) -> TypecheckResult {
         let t = self.refine_pattern_edge(dir, desc);
-        let p = PathSummary::from_variable(&t, dir);
+        let p = PathSummary::from_variable(&self.schema, &t, dir);
         let env = create_context(desc, t);
         TypecheckResult::new(p, env)
     }
@@ -1091,20 +1099,32 @@ impl Typechecker {
             if path.is_none() {
                 path = Some(r.path.clone());
             }
-            let base = env.as_ref().unwrap_or(outer);
             let next = match m {
-                MatchStatement::Simple { .. } => {
-                    match TypeEnvironment::meet(&self.schema, base, &r.env) {
+                MatchStatement::Simple { .. } => match env.take() {
+                    // Owned accumulator: meet without cloning; the error
+                    // path hands the previous environment back.
+                    Some(base) => match TypeEnvironment::meet_owned(&self.schema, base, &r.env) {
+                        Ok(e) => Some(e),
+                        Err((prev, msg)) => {
+                            self.errors.push(format!(
+                                "EXISTS body: concatenation of contexts failed: {msg}"
+                            ));
+                            Some(prev)
+                        }
+                    },
+                    // First fold step: the base is the borrowed outer env.
+                    None => match TypeEnvironment::meet(&self.schema, outer, &r.env) {
                         Ok(e) => Some(e),
                         Err(msg) => {
                             self.errors.push(format!(
                                 "EXISTS body: concatenation of contexts failed: {msg}"
                             ));
-                            None // keep the previous environment
+                            None // keep the previous (outer) environment
                         }
-                    }
-                }
+                    },
+                },
                 MatchStatement::Optional { .. } => {
+                    let base = env.as_ref().unwrap_or(outer);
                     Some(TypeEnvironment::outer_join(&self.schema, base, &r.env))
                 }
             };
@@ -1124,21 +1144,25 @@ impl Typechecker {
     // Refinement helpers
     // -----------------------------------------------
 
-    fn refine_pattern_node(&mut self, desc: &Option<Descriptor>) -> VariableType {
+    fn refine_pattern_node(&mut self, desc: &Option<Descriptor>) -> std::rc::Rc<VariableType> {
         let dtype = descriptor_type_of(desc);
         if let Some(d) = desc {
             self.assert_filters_drained(d);
         }
         let vt = VariableType::Node(dtype.clone());
-        let refined = VariableType::refine(&self.schema, &vt);
-        if matches!(refined, VariableType::Zero) {
+        let refined = VariableType::refine_rc(&self.schema, &vt);
+        if matches!(&*refined, VariableType::Zero) {
             self.warnings
                 .push(diagnose_node_mismatch(&self.schema, &dtype));
         }
         refined
     }
 
-    fn refine_pattern_edge(&mut self, dir: EdgeDir, desc: &Option<Descriptor>) -> VariableType {
+    fn refine_pattern_edge(
+        &mut self,
+        dir: EdgeDir,
+        desc: &Option<Descriptor>,
+    ) -> std::rc::Rc<VariableType> {
         let dtype = descriptor_type_of(desc);
         if let Some(d) = desc {
             self.assert_filters_drained(d);
@@ -1148,10 +1172,11 @@ impl Typechecker {
         // as directional silently drops every undirected schema entry — e.g.
         // `knows` in LDBC, which is registered as non-directional.
         let refined = match dir {
-            EdgeDir::Right | EdgeDir::Left => {
-                VariableType::refine(&self.schema, &VariableType::edge_directional(dtype.clone()))
-            }
-            EdgeDir::None => VariableType::refine(
+            EdgeDir::Right | EdgeDir::Left => VariableType::refine_rc(
+                &self.schema,
+                &VariableType::edge_directional(dtype.clone()),
+            ),
+            EdgeDir::None => VariableType::refine_rc(
                 &self.schema,
                 &VariableType::edge_non_directional(dtype.clone()),
             ),
@@ -1164,10 +1189,10 @@ impl Typechecker {
                     &self.schema,
                     &VariableType::edge_non_directional(dtype.clone()),
                 );
-                VariableType::join(t_fwd, t_und)
+                std::rc::Rc::new(VariableType::join(t_fwd, t_und))
             }
         };
-        if matches!(refined, VariableType::Zero) {
+        if matches!(&*refined, VariableType::Zero) {
             self.warnings
                 .push(diagnose_edge_mismatch(&self.schema, &dtype, dir));
         }
@@ -1188,47 +1213,38 @@ impl Typechecker {
         }
     }
 
-    /// After meeting two pattern contexts, surface any variable whose
-    /// type collapsed to bottom. Each side's contribution is shown so
-    /// the user can see the conflict directly. Pre-existing empties
-    /// (already empty in `left` or `right`) are skipped to avoid
-    /// double-warning.
-    fn warn_for_collapsed_bindings(
+    /// After meeting two pattern contexts, surface any SHARED variable
+    /// whose type collapsed to bottom. Only shared keys can collapse: a
+    /// one-sided key passes through `meet` untouched, so if its merged
+    /// binding is empty it was already empty on its own side — which the
+    /// previous all-keys walk skipped as a "pre-existing empty" (its
+    /// one-sided message arms were unreachable for exactly this reason).
+    /// Each side's contribution is shown so the user can see the
+    /// conflict directly.
+    fn warn_for_collapsed_bindings_shared(
         &mut self,
         merged: &TypeEnvironment,
-        left: &TypeEnvironment,
+        left_shared: &[(String, std::rc::Rc<VariableType>)],
         right: &TypeEnvironment,
     ) {
-        for (var, merged_t) in merged.iter() {
-            if !merged_t.is_empty() {
+        for (var, l) in left_shared {
+            let merged_t = match merged.get(var) {
+                Some(t) => t,
+                None => continue,
+            };
+            if !merged_t.is_empty() || l.is_empty() {
                 continue;
             }
-            let l_t = left.get(var);
-            let r_t = right.get(var);
-            let l_was_empty = l_t.is_some_and(VariableType::is_empty);
-            let r_was_empty = r_t.is_some_and(VariableType::is_empty);
-            if l_was_empty || r_was_empty {
-                continue;
-            }
-            match (l_t, r_t) {
-                (Some(l), Some(r)) => self.warnings.push(format!(
-                    "variable {} cannot be both {} and {} under the active schema",
-                    var,
-                    short_var_type(l),
-                    short_var_type(r)
-                )),
-                (Some(l), None) => self.warnings.push(format!(
-                    "variable {} bound to {} collapses to empty under the active schema",
-                    var,
-                    short_var_type(l)
-                )),
-                (None, Some(r)) => self.warnings.push(format!(
-                    "variable {} bound to {} collapses to empty under the active schema",
-                    var,
-                    short_var_type(r)
-                )),
-                (None, None) => {}
-            }
+            let r = match right.get(var) {
+                Some(r) if !r.is_empty() => r,
+                _ => continue,
+            };
+            self.warnings.push(format!(
+                "variable {} cannot be both {} and {} under the active schema",
+                var,
+                short_var_type(l),
+                short_var_type(r)
+            ));
         }
     }
 
@@ -1249,9 +1265,26 @@ fn descriptor_type_of(desc: &Option<Descriptor>) -> DescriptorType {
 
 /// Build the binding environment for a pattern position. Anonymous patterns
 /// contribute no bindings.
-fn create_context(desc: &Option<Descriptor>, t: VariableType) -> TypeEnvironment {
+/// The left side's bindings for every key the right side also binds —
+/// the inputs `warn_for_collapsed_bindings_shared` needs after
+/// `meet_owned` has consumed the left environment. Usually empty or a
+/// single entry, so the `Vec` rarely allocates.
+fn shared_bindings(
+    left: &TypeEnvironment,
+    right: &TypeEnvironment,
+) -> Vec<(String, std::rc::Rc<VariableType>)> {
+    right
+        .iter()
+        .filter_map(|(k, _)| {
+            left.get_shared(k)
+                .map(|v| (k.clone(), std::rc::Rc::clone(v)))
+        })
+        .collect()
+}
+
+fn create_context(desc: &Option<Descriptor>, t: std::rc::Rc<VariableType>) -> TypeEnvironment {
     match desc {
-        Some(d) => TypeEnvironment::create_context(d, t),
+        Some(d) => TypeEnvironment::create_context_shared(d, t),
         None => TypeEnvironment::new(),
     }
 }

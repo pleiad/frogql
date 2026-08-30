@@ -148,11 +148,11 @@ fn live_len(p: &PathType) -> Option<usize> {
 }
 
 fn hom_checks(schema: &Schema, p: &PathType, q: &PathType) -> Result<(), TestCaseError> {
-    let sp = PathSummary::summarize(p);
-    let sq = PathSummary::summarize(q);
+    let sp = PathSummary::summarize(schema, p);
+    let sq = PathSummary::summarize(schema, q);
 
     // Homomorphism: meet and union commute with summarize.
-    let spec_meet = PathSummary::summarize(&PathType::meet(schema, p, q));
+    let spec_meet = PathSummary::summarize(schema, &PathType::meet(schema, p, q));
     let eval_meet = PathSummary::meet(schema, &sp, &sq);
     prop_assert_eq!(
         spec_meet,
@@ -162,7 +162,7 @@ fn hom_checks(schema: &Schema, p: &PathType, q: &PathType) -> Result<(), TestCas
         q
     );
 
-    let spec_union = PathSummary::summarize(&PathType::union(p.clone(), q.clone()));
+    let spec_union = PathSummary::summarize(schema, &PathType::union(p.clone(), q.clone()));
     let eval_union = PathSummary::union(sp.clone(), sq.clone());
     prop_assert_eq!(
         spec_union,

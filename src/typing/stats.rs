@@ -34,6 +34,12 @@ pub struct TcStats {
     pub env_to_group_calls: u64,
     /// Calls to `PathType::meet` (every Concat, recursing through Unions).
     pub pathtype_meet_calls: u64,
+    /// Calls to `VariableType::meet` (incl. recursion into Union arms).
+    pub vt_meet_calls: u64,
+    /// Calls to `VariableType::join` (incl. list folds).
+    pub vt_join_calls: u64,
+    /// Bindings copied by env clones/merges (`String` key + `Rc` bump each).
+    pub env_bindings_copied: u64,
 }
 
 const ZERO: TcStats = TcStats {
@@ -47,6 +53,9 @@ const ZERO: TcStats = TcStats {
     env_outer_join_calls: 0,
     env_to_group_calls: 0,
     pathtype_meet_calls: 0,
+    vt_meet_calls: 0,
+    vt_join_calls: 0,
+    env_bindings_copied: 0,
 };
 
 thread_local! {
@@ -121,4 +130,19 @@ pub(crate) fn record_env_to_group() {
 #[inline]
 pub(crate) fn record_pathtype_meet() {
     bump(|s| s.pathtype_meet_calls += 1);
+}
+
+#[inline]
+pub(crate) fn record_vt_meet() {
+    bump(|s| s.vt_meet_calls += 1);
+}
+
+#[inline]
+pub(crate) fn record_vt_join() {
+    bump(|s| s.vt_join_calls += 1);
+}
+
+#[inline]
+pub(crate) fn record_env_bindings_copied(n: usize) {
+    bump(|s| s.env_bindings_copied += n as u64);
 }

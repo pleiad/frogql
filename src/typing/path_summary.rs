@@ -30,15 +30,15 @@
 //! pattern length, so concatenation cost is independent of chain position
 //! and the exponential disappears.
 //!
-//! Representation note: arms live in flat `Vec`s deduplicated by linear
-//! equality scan, NOT hash sets. Queries users actually type summarize to
-//! 1–3 arms, where a hash structure loses twice: allocation/setup per
-//! operation, and hashing must walk the *entire* rich descriptor
-//! (label + property `BTreeMap`) on every insert and lookup, while an
-//! equality probe fails fast on the label. The linear scan is O(w²) in
-//! arm width, bounded by the schema as above; the synthetic unlabeled
-//! families are cliff guards, not tuning targets. Set semantics are
-//! preserved by a manual order-insensitive `PartialEq`.
+//! Representation note: boundaries are **interned descriptor ids**
+//! (`Schema::intern_desc`) — each distinct descriptor pays one hash at
+//! intern time, after which dedup, equality, and the junction-cache key
+//! are integer operations. Arms live in flat `Vec`s deduplicated by
+//! linear scan (typical queries summarize to 1–3 arms; the synthetic
+//! unlabeled families are cliff guards, not tuning targets). Set
+//! semantics are preserved by a manual order-insensitive `PartialEq`;
+//! ids are schema-scoped, so summaries only compare within one schema —
+//! which is the only place the checker ever compares them.
 //!
 //! Correspondence with the spec type: `PathSummary` is the image of the
 //! abstraction `summarize : PathType → PathSummary`, and the lattice
@@ -63,14 +63,13 @@ use super::descriptor_type::DescriptorType;
 use super::path_type::{EdgeDir, PathType};
 use super::variable_type::{Schema, VariableType};
 
-/// Boundary summary: zero-length arms as a node-descriptor set, edge-
-/// bearing arms as `(first, last, min edge count)`. Both empty ⇔ the
-/// path is unsatisfiable (`PathType::Zero`). Set semantics with `Vec`
-/// storage — see the module's representation note.
+/// Boundary summary: zero-length arms as a set of interned node-
+/// descriptor ids, edge-bearing arms as `(first, last, min edge count)`
+/// id triples. Both empty ⇔ the path is unsatisfiable (`PathType::Zero`).
 #[derive(Debug, Clone, Default)]
 pub struct PathSummary {
-    nodes: Vec<DescriptorType>,
-    pairs: Vec<(DescriptorType, DescriptorType, usize)>,
+    nodes: Vec<u32>,
+    pairs: Vec<(u32, u32, usize)>,
 }
 
 /// Order-insensitive set equality (arm order is an artifact of
@@ -80,12 +79,7 @@ impl PartialEq for PathSummary {
         self.nodes.len() == other.nodes.len()
             && self.pairs.len() == other.pairs.len()
             && self.nodes.iter().all(|d| other.nodes.contains(d))
-            && self.pairs.iter().all(|(f, l, n)| {
-                other
-                    .pairs
-                    .iter()
-                    .any(|(f2, l2, n2)| f == f2 && l == l2 && n == n2)
-            })
+            && self.pairs.iter().all(|p| other.pairs.contains(p))
     }
 }
 impl Eq for PathSummary {}
@@ -97,34 +91,35 @@ impl PathSummary {
     }
 
     /// A single-node path. Mirrors `PathType::Node`.
-    pub fn node(desc: DescriptorType) -> Self {
+    pub fn node(schema: &Schema, desc: &DescriptorType) -> Self {
+        let id = schema.intern_desc(desc);
         PathSummary {
-            nodes: vec![desc],
+            nodes: vec![id],
             pairs: Vec::new(),
         }
     }
 
     /// Mirrors `PathType::default()`: the anonymous star node.
-    pub fn star_node() -> Self {
-        PathSummary::node(DescriptorType::star())
+    pub fn star_node(schema: &Schema) -> Self {
+        PathSummary::node(schema, &DescriptorType::star())
     }
 
     /// Mirrors `PathType::from_variable`: build from a (refined) variable
     /// type and the direction the edge is observed at.
-    pub fn from_variable(t: &VariableType, dir: EdgeDir) -> Self {
+    pub fn from_variable(schema: &Schema, t: &VariableType, dir: EdgeDir) -> Self {
         match t {
-            VariableType::Node(d) => PathSummary::node(d.clone()),
+            VariableType::Node(d) => PathSummary::node(schema, d),
             VariableType::EdgeDirectional { left, right, .. } => {
-                directed_edge_pairs(left, right, dir)
+                directed_edge_pairs(schema, left, right, dir)
             }
             // Undirected: both orientations regardless of dir (as the
             // spec's `from_variable` does).
             VariableType::EdgeNonDirectional { left, right, .. } => {
-                directed_edge_pairs(left, right, EdgeDir::Any)
+                directed_edge_pairs(schema, left, right, EdgeDir::Any)
             }
             VariableType::Union(t1, t2) => PathSummary::union(
-                PathSummary::from_variable(t1, dir),
-                PathSummary::from_variable(t2, dir),
+                PathSummary::from_variable(schema, t1, dir),
+                PathSummary::from_variable(schema, t2, dir),
             ),
             VariableType::Group(_)
             | VariableType::Null
@@ -153,13 +148,13 @@ impl PathSummary {
         self.nodes.is_empty() && self.pairs.is_empty()
     }
 
-    fn insert_node(&mut self, d: DescriptorType) {
-        if !self.nodes.contains(&d) {
-            self.nodes.push(d);
+    fn insert_node(&mut self, id: u32) {
+        if !self.nodes.contains(&id) {
+            self.nodes.push(id);
         }
     }
 
-    fn insert_pair(&mut self, f: DescriptorType, l: DescriptorType, len: usize) {
+    fn insert_pair(&mut self, f: u32, l: u32, len: usize) {
         debug_assert!(len >= 1, "edge-bearing pair with zero length");
         for (f2, l2, n) in self.pairs.iter_mut() {
             if *f2 == f && *l2 == l {
@@ -197,61 +192,40 @@ impl PathSummary {
     pub fn meet(schema: &Schema, a: &PathSummary, b: &PathSummary) -> PathSummary {
         super::stats::record_pathtype_meet();
         let mut out = PathSummary::zero();
-        // The junction only depends on (a.last, b.first). Memoized by
-        // pointer identity of the operand descriptors — w×w arm combos
-        // cost w distinct refinements; a value-equal miss just recomputes.
-        let mut junctions: Vec<(
-            *const DescriptorType,
-            *const DescriptorType,
-            Vec<DescriptorType>,
-        )> = Vec::new();
-        let mut junction = |l1: &DescriptorType, f2: &DescriptorType| -> Vec<DescriptorType> {
-            let key = (l1 as *const _, f2 as *const _);
-            if let Some((_, _, rs)) = junctions.iter().find(|(p1, p2, _)| (*p1, *p2) == key) {
-                return rs.clone();
-            }
-            let met = VariableType::Node(DescriptorType::meet(l1, f2));
-            let rs: Vec<DescriptorType> = VariableType::refine_to_nodes(schema, &met)
-                .into_iter()
-                .filter_map(|v| match v {
-                    VariableType::Node(d) => Some(d),
-                    _ => None,
-                })
-                .collect();
-            junctions.push((key.0, key.1, rs.clone()));
-            rs
-        };
+        // The junction only depends on (a.last, b.first) and is memoized
+        // on the Schema (`Schema::junction_ids`, keyed by id pair) —
+        // cross-hop AND cross-query. A hit is an `Rc` bump.
 
         // pairs × pairs: junction interior, outer boundaries survive.
-        for (f1, l1, len1) in &a.pairs {
-            for (f2, l2, len2) in &b.pairs {
-                if !junction(l1, f2).is_empty() {
-                    out.insert_pair(f1.clone(), l2.clone(), len1 + len2);
+        for &(f1, l1, len1) in &a.pairs {
+            for &(f2, l2, len2) in &b.pairs {
+                if !schema.junction_ids(l1, f2).is_empty() {
+                    out.insert_pair(f1, l2, len1 + len2);
                 }
             }
         }
         // pairs × nodes: the zero-length right is the junction; the
         // refined junction becomes the result's last boundary.
-        for (f1, l1, len1) in &a.pairs {
-            for d in &b.nodes {
-                for r in junction(l1, d) {
-                    out.insert_pair(f1.clone(), r, *len1);
+        for &(f1, l1, len1) in &a.pairs {
+            for &d in &b.nodes {
+                for &r in schema.junction_ids(l1, d).iter() {
+                    out.insert_pair(f1, r, len1);
                 }
             }
         }
         // nodes × pairs: symmetric — refined junction becomes first.
-        for d in &a.nodes {
-            for (f2, l2, len2) in &b.pairs {
-                for r in junction(d, f2) {
-                    out.insert_pair(r, l2.clone(), *len2);
+        for &d in &a.nodes {
+            for &(f2, l2, len2) in &b.pairs {
+                for &r in schema.junction_ids(d, f2).iter() {
+                    out.insert_pair(r, l2, len2);
                 }
             }
         }
         // nodes × nodes: both are the junction; result is the refined
         // node itself.
-        for d1 in &a.nodes {
-            for d2 in &b.nodes {
-                for r in junction(d1, d2) {
+        for &d1 in &a.nodes {
+            for &d2 in &b.nodes {
+                for &r in schema.junction_ids(d1, d2).iter() {
                     out.insert_node(r);
                 }
             }
@@ -263,7 +237,7 @@ impl PathSummary {
     /// the checker's `pow_path_type`.
     pub fn pow(schema: &Schema, p: &PathSummary, n: u64) -> PathSummary {
         match n {
-            0 => PathSummary::star_node(),
+            0 => PathSummary::star_node(schema),
             1 => p.clone(),
             _ => PathSummary::meet(schema, p, &PathSummary::pow(schema, p, n - 1)),
         }
@@ -274,49 +248,58 @@ impl PathSummary {
     /// (it became interior when the edge was appended); a dead arm
     /// (empty descriptor or `Zero` prefix) contributes nothing, giving
     /// the live semantics documented above.
-    pub fn summarize(p: &PathType) -> PathSummary {
+    pub fn summarize(schema: &Schema, p: &PathType) -> PathSummary {
         match p {
             PathType::Zero => PathSummary::zero(),
             PathType::Node(n) => {
                 if n.desc.is_empty() {
                     PathSummary::zero()
                 } else {
-                    PathSummary::node(n.desc.clone())
+                    PathSummary::node(schema, &n.desc)
                 }
             }
             PathType::Edge(e) => {
                 if e.n2.desc.is_empty() {
                     return PathSummary::zero();
                 }
-                let prefix = PathSummary::summarize(&e.p1);
+                let prefix = PathSummary::summarize(schema, &e.p1);
+                let n2 = schema.intern_desc(&e.n2.desc);
                 let mut out = PathSummary::zero();
-                for d in &prefix.nodes {
-                    out.insert_pair(d.clone(), e.n2.desc.clone(), 1);
+                for &d in &prefix.nodes {
+                    out.insert_pair(d, n2, 1);
                 }
-                for (f, _, len) in &prefix.pairs {
-                    out.insert_pair(f.clone(), e.n2.desc.clone(), len + 1);
+                for &(f, _, len) in &prefix.pairs {
+                    out.insert_pair(f, n2, len + 1);
                 }
                 out
             }
-            PathType::Union(p1, p2) => {
-                PathSummary::union(PathSummary::summarize(p1), PathSummary::summarize(p2))
-            }
+            PathType::Union(p1, p2) => PathSummary::union(
+                PathSummary::summarize(schema, p1),
+                PathSummary::summarize(schema, p2),
+            ),
         }
     }
 }
 
 /// Mirrors `path_type.rs::directed_edge_to_path` in pair form.
-fn directed_edge_pairs(left: &VariableType, right: &VariableType, dir: EdgeDir) -> PathSummary {
+fn directed_edge_pairs(
+    schema: &Schema,
+    left: &VariableType,
+    right: &VariableType,
+    dir: EdgeDir,
+) -> PathSummary {
     let (l, r) = match (left, right) {
         (VariableType::Node(l), VariableType::Node(r)) => (l, r),
         _ => return PathSummary::zero(),
     };
+    let l_id = schema.intern_desc(l);
+    let r_id = schema.intern_desc(r);
     let mut out = PathSummary::zero();
     if matches!(dir, EdgeDir::Right | EdgeDir::Any | EdgeDir::None) {
-        out.insert_pair(l.clone(), r.clone(), 1);
+        out.insert_pair(l_id, r_id, 1);
     }
     if matches!(dir, EdgeDir::Left | EdgeDir::Any | EdgeDir::None) {
-        out.insert_pair(r.clone(), l.clone(), 1);
+        out.insert_pair(r_id, l_id, 1);
     }
     out
 }
