@@ -26,6 +26,22 @@ pub enum BinOp {
 }
 
 impl BinOp {
+    /// Whether `=` has anything to compare: the operands share a type, or one
+    /// of them is wholly null.
+    ///
+    /// The null case is separate because `Null` is terminal in the lattice
+    /// (`Null <: Star`, `Null <: Null`, nothing else), so `meet(int, Null)` is
+    /// ⊥ even though `x.age = null` is perfectly well-typed and simply yields
+    /// null. Note it tests for the type *being* `Null`, not for `has_null`:
+    /// `[1, null] = 'foo'` shares nothing with a string and is inconsistent,
+    /// which is what the runtime does too (`EqVerdict::Mismatch`), whereas
+    /// `has_null` would wrongly call it comparable.
+    fn eq_consistent(ty1: &SimpleType, ty2: &SimpleType) -> bool {
+        *ty1 == SimpleType::Null
+            || *ty2 == SimpleType::Null
+            || !SimpleType::meet(ty1, ty2).is_empty()
+    }
+
     /// Returns (expected_left_type, expected_right_type, result_type) for the operator.
     pub fn delta(
         &self,
@@ -55,37 +71,35 @@ impl BinOp {
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                 (orn(num.clone()), orn(num), res(SimpleType::B))
             }
-            // ISO 3VL: comparing anything against null yields *null*, so the
-            // result is `B ∪ Null` exactly when a null can reach either
-            // operand — including one nested inside a list or record, since
-            // equality descends into composites (`runtime::eq_3vl`).
-            // `[1, null] = [1, null]` unfolds to `1 = 1 AND null = null` and
-            // is therefore unknown, never a definite bool.
+            // `=` is total on values, so its domain is the top type: it never
+            // rejects an operand. What varies is whether the answer means
+            // anything, and that is carried entirely by the result — which
+            // makes the signature mirror the runtime's three outcomes
+            // (`runtime::EqVerdict`) one for one:
+            //
+            //   consistent, no null  ->  B          (Definite)
+            //   consistent, null     ->  B | Null   (Definite or Unknown)
+            //   inconsistent         ->  ⊥          (Mismatch)
+            //
+            // Putting the whole decision in the codomain is what removes the
+            // carve-out an operand-domain formulation needs: `meet(int, Null)`
+            // is ⊥, so a domain built from the meet would push the *other*
+            // operand out and report `x.age = null` as an error. With a ⊤
+            // domain there is nothing to push anything out of.
+            //
+            // NB the ⊥ result is what `check_expr` reports on — the domain
+            // check cannot fire here, since everything meets ⊤.
             BinOp::Eq | BinOp::Ne => {
-                let result = if ty1.has_null() || ty2.has_null() {
-                    SimpleType::union(&SimpleType::B, &SimpleType::Null)
+                let result = if Self::eq_consistent(ty1, ty2) {
+                    if ty1.has_null() || ty2.has_null() {
+                        SimpleType::union(&SimpleType::B, &SimpleType::Null)
+                    } else {
+                        SimpleType::B
+                    }
                 } else {
-                    SimpleType::B
+                    SimpleType::Zero
                 };
-                // `=` demands a common type for its operands, so the domain
-                // is their meet — a genuine mismatch collapses it to ⊥ and no
-                // value passes the domain check, which is the type error.
-                //
-                // A wholly-null operand is carved out: `meet(int, Null)` is ⊥,
-                // which would put the *other* operand outside the domain and
-                // report `x.age = null` as an error, when it is well-typed and
-                // simply yields null. There the common type is just the other
-                // operand's. The domain is then made nullable so the null side
-                // fits through it too.
-                let iota = if *ty1 == SimpleType::Null {
-                    ty2.clone()
-                } else if *ty2 == SimpleType::Null {
-                    ty1.clone()
-                } else {
-                    SimpleType::meet(ty1, ty2)
-                };
-                let domain = SimpleType::union(&iota, &SimpleType::Null);
-                (domain.clone(), domain, result)
+                (SimpleType::Star, SimpleType::Star, result)
             }
             // The connectives take the SQL truth tables, where an absorbing
             // operand still decides the result (`false AND null` is false).

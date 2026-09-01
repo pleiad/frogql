@@ -179,24 +179,35 @@ fn test_ne_follows_eq() {
 // --- Comparing against null must stay well-typed ---
 
 #[test]
-fn test_comparing_a_typed_operand_to_null_is_defined() {
-    // `WHERE x.age = null` must not collapse the derivation. This is why the
-    // literal used to be typed `Star`; with a real `Null` the comparison rule
-    // has to grant it explicitly, since `meet(int, Null)` is bottom.
-    assert!(eq_defined(&SimpleType::Z, &SimpleType::Null));
-    assert!(eq_defined(&SimpleType::Null, &SimpleType::S));
-    assert!(eq_defined(&SimpleType::Null, &SimpleType::Null));
+fn test_comparing_a_typed_operand_to_null_is_well_typed() {
+    // `WHERE x.age = null` must not collapse the derivation. Under a ⊤ domain
+    // "well-typed" means the *result* is not ⊥ — the domain cannot reject
+    // anything, so it is no longer where this is decided.
+    for (l, r) in [
+        (SimpleType::Z, SimpleType::Null),
+        (SimpleType::Null, SimpleType::S),
+        (SimpleType::Null, SimpleType::Null),
+    ] {
+        assert!(
+            !eq_result(&l, &r).is_empty(),
+            "{l} = {r} must stay well-typed"
+        );
+    }
 }
 
 #[test]
-fn test_genuinely_incompatible_operands_stay_undefined() {
-    // Nulls must not blanket-disable the compatibility check: two operands
-    // that share no value are still a type error, nulls inside or not.
-    assert!(!eq_defined(&SimpleType::Z, &SimpleType::S));
-    assert!(!eq_defined(
-        &list(union(SimpleType::Z, SimpleType::Null)),
-        &SimpleType::S
-    ));
+fn test_genuinely_incompatible_operands_are_bottom_not_rejected() {
+    // Nulls must not blanket-license every comparison: two operands sharing no
+    // value are still a type error. It now shows up as a ⊥ *result* rather
+    // than a failed domain check, which is what `check_expr` warns on.
+    for (l, r) in [
+        (SimpleType::Z, SimpleType::S),
+        (list(union(SimpleType::Z, SimpleType::Null)), SimpleType::S),
+    ] {
+        assert!(eq_result(&l, &r).is_empty(), "{l} = {r} must be ⊥");
+        // ...and the domain had nothing to do with it.
+        assert!(eq_defined(&l, &r), "the ⊤ domain still accepts {l} = {r}");
+    }
 }
 
 #[test]
@@ -207,13 +218,13 @@ fn test_bool_or_null_still_passes_as_a_filter_condition() {
     assert!(!SimpleType::meet(&cond, &SimpleType::B).is_empty());
 }
 
-// --- The domain: ι + Null, with the wholly-null carve-out ---
+// --- The domain is ⊤; the whole decision rides in the result -------------
 //
-// `BinOp::delta` returns `(expected_lhs, expected_rhs, result)`. The first two
-// are the domain, and `=` is a *function* only because that domain is the meet
-// rather than a polymorphic `ι × ι → B`. These pin the domain itself, since
-// the checker currently consumes it as a yes/no and would not otherwise notice
-// it drifting.
+// `=` is total on values, so nothing is ever rejected by the domain check.
+// "These operands share nothing" is said by a ⊥ *result*, which mirrors the
+// runtime's `EqVerdict::Mismatch`. These pin that shape, since `check_expr`
+// consumes the pair as a pass/fail and would not otherwise notice it drifting
+// back to an operand-domain formulation.
 
 fn eq_domain(lhs: &SimpleType, rhs: &SimpleType) -> (SimpleType, SimpleType) {
     let (a, b, _) = BinOp::Eq.delta(lhs, rhs);
@@ -221,54 +232,65 @@ fn eq_domain(lhs: &SimpleType, rhs: &SimpleType) -> (SimpleType, SimpleType) {
 }
 
 #[test]
-fn test_eq_domain_is_the_meet_made_nullable() {
-    // Matching base types keep the common type; the domain is it plus null,
-    // so a null value still fits through.
-    let (a, b) = eq_domain(&SimpleType::Z, &SimpleType::Z);
-    assert_eq!(a, union(SimpleType::Z, SimpleType::Null));
-    assert_eq!(a, b, "the domain is symmetric");
+fn test_eq_domain_is_top_and_rejects_nothing() {
+    for (l, r) in [
+        (SimpleType::Z, SimpleType::Z),
+        (SimpleType::Z, SimpleType::Null),
+        (SimpleType::Z, SimpleType::S),
+        (list(SimpleType::Null), SimpleType::B),
+    ] {
+        let (a, b) = eq_domain(&l, &r);
+        assert_eq!(a, SimpleType::Star, "domain of {l} = {r}");
+        assert_eq!(b, SimpleType::Star, "the domain is symmetric");
+        // Whatever the operands, they meet ⊤, so the domain never decides.
+        assert!(eq_defined(&l, &r), "the domain must never reject {l} = {r}");
+    }
 }
 
 #[test]
-fn test_eq_domain_against_a_null_operand_is_the_other_type() {
-    // The carve-out: `meet(int, Null)` is bottom, which would push the *other*
-    // operand out of the domain and report `x.age = null` as a type error. So
-    // when one operand is wholly null the common type is the other's. The
-    // domain stays a real constraint — it is `int + Null`, not the wildcard.
-    let (a, b) = eq_domain(&SimpleType::Z, &SimpleType::Null);
-    assert_eq!(a, union(SimpleType::Z, SimpleType::Null));
-    assert_eq!(b, a);
-
-    let (a, _) = eq_domain(&SimpleType::Null, &SimpleType::S);
-    assert_eq!(a, union(SimpleType::S, SimpleType::Null));
-
-    // Not the wildcard: `Star` now means only "type unknown", and letting it
-    // back in here would re-conflate the two senses this variant separated.
-    assert_ne!(
-        eq_domain(&SimpleType::Z, &SimpleType::Null).0,
-        SimpleType::Star
+fn test_inconsistent_operands_give_a_bottom_result() {
+    // No shared type and neither side is wholly null: nothing to compare, so
+    // the *result* is ⊥. That is the type error, and it is what `check_expr`
+    // warns on now that the domain cannot.
+    assert_eq!(eq_result(&SimpleType::Z, &SimpleType::S), SimpleType::Zero);
+    assert_eq!(
+        eq_result(&SimpleType::Z, &list(SimpleType::Z)),
+        SimpleType::Zero
     );
 }
 
 #[test]
-fn test_eq_domain_collapses_on_a_genuine_mismatch() {
-    // A real disagreement leaves the meet at bottom, so the domain is just
-    // `Null` and neither operand passes: that is the type error.
-    let (a, b) = eq_domain(&SimpleType::Z, &SimpleType::S);
-    assert_eq!(a, SimpleType::Null);
-    assert_eq!(b, SimpleType::Null);
-    assert!(!eq_defined(&SimpleType::Z, &SimpleType::S));
+fn test_a_wholly_null_operand_is_consistent_with_anything() {
+    // `meet(int, Null)` is ⊥ because `Null` is terminal, yet `x.age = null` is
+    // well-typed and simply yields null. The consistency test carves that out
+    // explicitly.
+    let want = union(SimpleType::B, SimpleType::Null);
+    assert_eq!(eq_result(&SimpleType::Z, &SimpleType::Null), want);
+    assert_eq!(eq_result(&SimpleType::Null, &SimpleType::S), want);
+    assert_eq!(eq_result(&SimpleType::Null, &list(SimpleType::Z)), want);
+}
+
+#[test]
+fn test_a_null_buried_in_a_composite_does_not_make_it_comparable() {
+    // The carve-out tests for the type *being* `Null`, not for `has_null`.
+    // `[1, null]` and a string share nothing, so this is ⊥ — matching the
+    // runtime, where the pair is `EqVerdict::Mismatch` however the list is
+    // filled. Reading `has_null` here instead would wrongly call it `B | Null`.
+    let t = list(union(SimpleType::Z, SimpleType::Null));
+    assert_eq!(eq_result(&t, &SimpleType::S), SimpleType::Zero);
+    assert!(
+        t.has_null(),
+        "the premise: the list really does carry a null"
+    );
 }
 
 #[test]
 fn test_two_nullable_operands_meet_on_their_null_halves() {
-    // `int?` vs `string?` share only null, so the comparison is well-typed
-    // (both sides can be null, and then the answer is null) even though their
-    // non-null halves are disjoint.
+    // `int?` vs `string?` share only null, so they are comparable (both can be
+    // null, and then the answer is null) even though their non-null halves are
+    // disjoint. The meet finds this without needing the carve-out.
     let l = union(SimpleType::Z, SimpleType::Null);
     let r = union(SimpleType::S, SimpleType::Null);
-    assert_eq!(eq_domain(&l, &r).0, SimpleType::Null);
-    assert!(eq_defined(&l, &r));
     assert_eq!(eq_result(&l, &r), union(SimpleType::B, SimpleType::Null));
 }
 

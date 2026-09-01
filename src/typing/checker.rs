@@ -843,7 +843,15 @@ impl Typechecker {
                     ok1 && ok2
                 };
 
-                if defined {
+                // Two ways an operator can turn out undefined, and both have to
+                // report. An operand can fail the *domain* check (`'a' + 1`),
+                // or the signature can hand back ⊥ as its *result* — which is
+                // how `=` says its operands share nothing, since its domain is
+                // ⊤ and so can never reject anything (see `BinOp::delta`).
+                // Warning on either keeps the diagnostic attached to the ⊥
+                // wherever it came from; checking only the domain would let
+                // `1 = 'a'` type as ⊥ in silence.
+                if defined && !result_t.is_empty() {
                     result_t
                 } else {
                     self.warnings.push(format!(
