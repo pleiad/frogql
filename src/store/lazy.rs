@@ -1779,7 +1779,12 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_path(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("gqlrust_test");
+        // Per-process sandbox. The file names below are derived from the
+        // test's own inputs, so two concurrent `cargo test` runs (or two
+        // checkouts) would otherwise pick the same path and `cleanup` each
+        // other's database mid-read — a race that surfaces as an unrelated
+        // NotFound or a wrong row count, in a different test each run.
+        let dir = std::env::temp_dir().join(format!("gqlrust_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
     }

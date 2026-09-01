@@ -8,7 +8,9 @@ use frogql::model::graph::MemoryGraphStore;
 use frogql::runtime::engine::Runtime;
 
 fn temp_path(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("gqlrust_test");
+    // Per-process sandbox: two concurrent `cargo test` runs would otherwise
+    // pick the same path and `cleanup` each other's database mid-read.
+    let dir = std::env::temp_dir().join(format!("gqlrust_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir.join(name)
 }
