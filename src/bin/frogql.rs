@@ -1532,6 +1532,7 @@ fn color_simple_type(t: &SimpleType) -> String {
         SimpleType::S => format!("{C_GREEN}STRING{C_RESET}"),
         SimpleType::Star => format!("{C_MAGENTA}ANY{C_RESET}"),
         SimpleType::Zero => format!("{C_DIM}⊥{C_RESET}"),
+        SimpleType::Null => format!("{C_MAGENTA}NULL{C_RESET}"),
         SimpleType::Date => format!("{C_GREEN}DATE{C_RESET}"),
         SimpleType::LocalDatetime => format!("{C_GREEN}LOCAL DATETIME{C_RESET}"),
         SimpleType::Union(a, b) => format!(

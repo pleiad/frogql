@@ -306,6 +306,10 @@ fn arb_simple_type() -> impl Strategy<Value = SimpleType> {
         arb_simple_atom(),
         Just(SimpleType::Star),
         Just(SimpleType::Zero),
+        // The 3VL null type. Terminal (`Null <: Star`, `Null <: Null`, and
+        // nothing else), so it is a leaf here and the lattice laws below have
+        // to hold for it like any other atom.
+        Just(SimpleType::Null),
     ];
     leaf.prop_recursive(3, 32, 4, |inner| {
         prop_oneof![

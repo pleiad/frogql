@@ -44,6 +44,38 @@ pub enum PathPattern {
 }
 
 impl PathPattern {
+    /// Collect the variables with *group* degree of reference (ISO §4.11.5):
+    /// those declared inside a `<quantified path primary>`. Referenced from
+    /// outside the quantifier, each denotes the whole list of elements bound
+    /// over the repetitions, so an expression over it evaluates element-wise
+    /// into a list (§22.7) and an aggregate over it reduces *within* the match
+    /// rather than across rows.
+    ///
+    /// Everything below a `Repeat` qualifies, however deeply nested: a group
+    /// of groups is still a group. The bounds do not matter either — `{1,1}`
+    /// confers group degree exactly as `{1,2}` does.
+    pub fn group_vars(&self) -> HashSet<String> {
+        match self {
+            PathPattern::Repeat { pattern, .. } => pattern.freevars(),
+            PathPattern::Concat(p1, p2)
+            | PathPattern::Union(p1, p2)
+            | PathPattern::Join(p1, p2) => {
+                let mut s = p1.group_vars();
+                s.extend(p2.group_vars());
+                s
+            }
+            PathPattern::Filter(p, _) | PathPattern::Questioned(p) => p.group_vars(),
+            PathPattern::Selected { pattern, .. } | PathPattern::Named { pattern, .. } => {
+                pattern.group_vars()
+            }
+            PathPattern::Node(_)
+            | PathPattern::EdgeRight(_)
+            | PathPattern::EdgeLeft(_)
+            | PathPattern::EdgeUndirected(_)
+            | PathPattern::EdgeAnyDirection(_) => HashSet::new(),
+        }
+    }
+
     /// Collect all free variable names in this pattern.
     pub fn freevars(&self) -> HashSet<String> {
         match self {

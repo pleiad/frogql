@@ -162,6 +162,7 @@ fn format_simple_type(t: &SimpleType) -> String {
         SimpleType::S => "STRING".to_string(),
         SimpleType::Star => "ANY".to_string(),
         SimpleType::Zero => "⊥".to_string(),
+        SimpleType::Null => "NULL".to_string(),
         SimpleType::Union(a, b) => format!(
             "{} | {}",
             format_simple_type_atom(a),

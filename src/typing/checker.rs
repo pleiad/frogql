@@ -536,14 +536,25 @@ impl Typechecker {
             Aggregator::CountStar => SimpleType::Z,
             Aggregator::GeneralSet { kind, expr, .. } => {
                 let inner = self.check_expr(expr, env);
+                // A `group<T>` argument is a group reference (ISO §4.11.5):
+                // the reducer folds the group's own list, so what it consumes
+                // is `T`, exactly as a row aggregate consumes the per-row
+                // element type. Unwrapping here keeps the result types of the
+                // element-preserving reducers honest — `MIN` over a group of
+                // ints is an int, and `COLLECT_LIST` is `list<int>`, not
+                // `group<int>` / `list<group<int>>`.
+                let elem = match inner {
+                    SimpleType::Group(t) => *t,
+                    other => other,
+                };
                 match kind {
                     GeneralSetKind::Count => SimpleType::Z,
                     GeneralSetKind::Avg => SimpleType::F,
                     GeneralSetKind::Sum => num,
                     // MIN/MAX preserve the element type.
-                    GeneralSetKind::Min | GeneralSetKind::Max => inner,
+                    GeneralSetKind::Min | GeneralSetKind::Max => elem,
                     // COLLECT_LIST gathers the element type into a list.
-                    GeneralSetKind::CollectList => SimpleType::List(Box::new(inner)),
+                    GeneralSetKind::CollectList => SimpleType::List(Box::new(elem)),
                 }
             }
         }
@@ -1287,7 +1298,13 @@ fn simple_type_of_value(v: &Value) -> SimpleType {
         // the purpose of static checks. Mapping to `Star` keeps comparisons
         // like `x.attr = null` from collapsing the surrounding type
         // derivation to bottom; the runtime still drops the row via 3VL.
-        Value::Null => SimpleType::Star,
+        // The `null` literal has its own type. It used to be `Star` so that
+        // `WHERE x = null` would not collapse the surrounding derivation;
+        // `BinOp::delta` now grants that explicitly for every null-propagating
+        // operator, so the literal no longer has to borrow the wildcard's
+        // permissiveness — and `Star` goes back to meaning only "type
+        // unknown".
+        Value::Null => SimpleType::Null,
         Value::Int(_) => SimpleType::Z,
         Value::Float(_) => SimpleType::F,
         Value::Str(_) => SimpleType::S,
@@ -1480,6 +1497,10 @@ fn is_orderable_per_iso_22_14(t: &SimpleType) -> bool {
         | SimpleType::Date
         | SimpleType::LocalDatetime => true,
         SimpleType::Zero => false,
+        // ISO §22.14: null sorts (NULLS FIRST/LAST), it just has no ordering
+        // *among* nulls. A `T ∪ Null` key stays orderable on its `T` half, so
+        // Null must not veto the union arm below.
+        SimpleType::Null => true,
         SimpleType::Union(a, b) => is_orderable_per_iso_22_14(a) && is_orderable_per_iso_22_14(b),
         // ISO §4.4.4 says reference values of the same base type are
         // *equality*-comparable, not ordering-comparable; without GA04

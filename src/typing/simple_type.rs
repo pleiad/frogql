@@ -15,6 +15,17 @@ pub enum SimpleType {
     S,
     /// Imprecise/unknown type (wildcard) — matches any type
     Star,
+    /// ISO 3VL null type: the static type of the `null` literal, inhabited by
+    /// exactly the null value. **Terminal in the lattice**, and deliberately
+    /// minimal: `Null <: Star` and `Null <: Null`, nothing else. It never
+    /// meets a base type (`meet(Null, int) = ⊥`), never refines against a
+    /// schema, and is not a persisted property type.
+    ///
+    /// It exists so `=` can report `B ∪ Null` instead of plain `B`: comparing
+    /// anything against null yields null, and before this variant the literal
+    /// typed as `Star`, which conflated "is the null value" with "type
+    /// unknown" and left the comparison rule unable to tell them apart.
+    Null,
     /// Bottom type — contradiction/conflict
     Zero,
     /// Union of two types
@@ -130,6 +141,25 @@ impl SimpleType {
         }
     }
 
+    /// Whether a null value can reach an expression of this type.
+    ///
+    /// Recursive through the composite constructors because equality descends
+    /// into them (`runtime::eq_3vl`): `[1, null] = [1, null]` unfolds to
+    /// `1 = 1 AND null = null`, so a null nested in a list or record is just
+    /// as reachable as a top-level one. `Star` reports true because the
+    /// wildcard admits every value, null included — under-reporting there
+    /// would make the comparison rule claim a definite bool for an operand
+    /// that may well be null.
+    pub fn has_null(&self) -> bool {
+        match self {
+            SimpleType::Null | SimpleType::Star => true,
+            SimpleType::Union(a, b) => a.has_null() || b.has_null(),
+            SimpleType::List(t) | SimpleType::Group(t) => t.has_null(),
+            SimpleType::Record(fields) => fields.values().any(SimpleType::has_null),
+            _ => false,
+        }
+    }
+
     /// True if the type is empty (bottom or composed of bottoms).
     pub fn is_empty(&self) -> bool {
         match self {
@@ -151,6 +181,7 @@ impl fmt::Display for SimpleType {
             SimpleType::B => write!(f, "bool"),
             SimpleType::S => write!(f, "str"),
             SimpleType::Star => write!(f, "*"),
+            SimpleType::Null => write!(f, "null"),
             SimpleType::Zero => write!(f, "⊥"),
             SimpleType::Union(a, b) => write!(f, "{a} | {b}"),
             SimpleType::Group(t) => write!(f, "group<{t}>"),

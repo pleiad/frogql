@@ -35,20 +35,74 @@ impl BinOp {
         // Arithmetic and ordering accept either int or float; the runtime widens mixed
         // Int/Float operands to f64 in `eval_binop`.
         let num = SimpleType::Union(Box::new(SimpleType::Z), Box::new(SimpleType::F));
+        // ISO 3VL, mirrored from the runtime (`eval_binop`'s null guard):
+        // arithmetic, ordering and comparison all *propagate* null — one null
+        // operand makes the whole result null. So two things follow for every
+        // such operator. The result type gains `Null` exactly when a null can
+        // reach an operand, and the *expected* operand type must admit `Null`
+        // too, or `null + 1` would be reported as a type error when it is in
+        // fact well-defined (and yields null). Widening the expectation does
+        // not weaken the check: `'foo' + 1` still fails, because `S` meets
+        // neither `num` nor `Null`.
+        let nullable = ty1.has_null() || ty2.has_null();
+        let orn = |t: SimpleType| SimpleType::union(&t, &SimpleType::Null);
+        let res = |t: SimpleType| if nullable { orn(t) } else { t };
         match self {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => (num.clone(), num.clone(), num),
-            BinOp::Mod => (SimpleType::Z, SimpleType::Z, SimpleType::Z),
-            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => (num.clone(), num, SimpleType::B),
-            BinOp::Eq | BinOp::Ne => {
-                let m = SimpleType::meet(ty1, ty2);
-                (m.clone(), m, SimpleType::B)
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                (orn(num.clone()), orn(num.clone()), res(num))
             }
-            BinOp::And | BinOp::Or => (SimpleType::B, SimpleType::B, SimpleType::B),
+            BinOp::Mod => (orn(SimpleType::Z), orn(SimpleType::Z), res(SimpleType::Z)),
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                (orn(num.clone()), orn(num), res(SimpleType::B))
+            }
+            // ISO 3VL: comparing anything against null yields *null*, so the
+            // result is `B ∪ Null` exactly when a null can reach either
+            // operand — including one nested inside a list or record, since
+            // equality descends into composites (`runtime::eq_3vl`).
+            // `[1, null] = [1, null]` unfolds to `1 = 1 AND null = null` and
+            // is therefore unknown, never a definite bool.
+            BinOp::Eq | BinOp::Ne => {
+                let result = if ty1.has_null() || ty2.has_null() {
+                    SimpleType::union(&SimpleType::B, &SimpleType::Null)
+                } else {
+                    SimpleType::B
+                };
+                // `=` demands a common type for its operands, so the domain
+                // is their meet — a genuine mismatch collapses it to ⊥ and no
+                // value passes the domain check, which is the type error.
+                //
+                // A wholly-null operand is carved out: `meet(int, Null)` is ⊥,
+                // which would put the *other* operand outside the domain and
+                // report `x.age = null` as an error, when it is well-typed and
+                // simply yields null. There the common type is just the other
+                // operand's. The domain is then made nullable so the null side
+                // fits through it too.
+                let iota = if *ty1 == SimpleType::Null {
+                    ty2.clone()
+                } else if *ty2 == SimpleType::Null {
+                    ty1.clone()
+                } else {
+                    SimpleType::meet(ty1, ty2)
+                };
+                let domain = SimpleType::union(&iota, &SimpleType::Null);
+                (domain.clone(), domain, result)
+            }
+            // The connectives take the SQL truth tables, where an absorbing
+            // operand still decides the result (`false AND null` is false).
+            // The result is only *possibly* null, so it gains `Null` on the
+            // same condition as the rest.
+            BinOp::And | BinOp::Or => (orn(SimpleType::B), orn(SimpleType::B), res(SimpleType::B)),
+            // The type predicate and the type assertion answer a question
+            // *about* a value rather than computing with it, so a null
+            // operand gives a definite answer: `null is int` is false.
             BinOp::Is | BinOp::As => (SimpleType::Star, SimpleType::Star, SimpleType::B),
+            // Membership expands to `x = a OR x = b OR …`, so it inherits the
+            // 3VL of `=`: a null needle, or a null anywhere in the haystack,
+            // makes it unknown (`runtime::eval_binop`'s `In` arm).
             BinOp::In => (
                 SimpleType::Star,
                 SimpleType::List(Box::new(SimpleType::Star)),
-                SimpleType::B,
+                res(SimpleType::B),
             ),
         }
     }
@@ -237,6 +291,59 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// Visit every `Expr::Agg` in the tree. Callers that need to
+    /// *classify* the aggregates (rather than just detect one) use this;
+    /// `contains_agg` is the detect-only shorthand. Traversal matches
+    /// `contains_agg` exactly, subquery bodies included: an aggregate
+    /// inside one is self-contained and belongs to that body, so it is
+    /// not visited here.
+    pub fn walk_aggs(&self, f: &mut impl FnMut(&Aggregator)) {
+        match self {
+            Expr::Agg(agg) => f(agg),
+            Expr::Binop { left, right, .. } => {
+                left.walk_aggs(f);
+                right.walk_aggs(f);
+            }
+            Expr::Unop { operand, .. } | Expr::IsNull { operand, .. } => operand.walk_aggs(f),
+            Expr::FieldAccess { base, .. } => base.walk_aggs(f),
+            Expr::Coalesce(args) | Expr::Call { args, .. } => {
+                for a in args {
+                    a.walk_aggs(f);
+                }
+            }
+            Expr::Case {
+                branches,
+                else_expr,
+            } => {
+                for (cond, value) in branches {
+                    cond.walk_aggs(f);
+                    value.walk_aggs(f);
+                }
+                if let Some(e) = else_expr.as_deref() {
+                    e.walk_aggs(f);
+                }
+            }
+            Expr::Record { fields } => {
+                for (_, e) in fields {
+                    e.walk_aggs(f);
+                }
+            }
+            Expr::ListComprehension {
+                source,
+                filter,
+                body,
+                ..
+            } => {
+                source.walk_aggs(f);
+                if let Some(e) = filter.as_deref() {
+                    e.walk_aggs(f);
+                }
+                body.walk_aggs(f);
+            }
+            _ => {}
+        }
+    }
+
     /// True when the expression tree contains an aggregate function
     /// anywhere. Drives the grouping/aggregation path: a RETURN item
     /// whose expr contains an aggregate is projected per-group, not used

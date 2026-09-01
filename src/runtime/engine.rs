@@ -23,11 +23,13 @@ use crate::typing::simple_type::SimpleType;
 
 use super::assignment::Assignment;
 use super::cmp_values;
+use super::eq_verdict;
 use super::ltj::pattern_extract;
 use super::ltj::triple_index::TripleIndex;
 use super::path_select::apply_path_prefix;
 use super::path_select::path_satisfies_mode;
 use super::result::{ExprResult, IntermediateResult, QueryResult, ResultRow};
+use super::EqVerdict;
 use crate::syntax::path_prefix::{PathMode, PathPrefix, PathSearch, UnboundedSupport};
 
 /// Finite evaluation policy for unbounded repetition inside `Selected`.
@@ -345,6 +347,14 @@ pub struct Runtime<'g, G: GraphAccess> {
     value_subquery_cache: RefCell<HashMap<usize, ValueSubqueryCache>>,
     /// Set only while evaluating `PathPattern::Selected`.
     unbounded_policy: Cell<UnboundedPolicy>,
+    /// Variables with *group* degree of reference (ISO §4.11.5) in the query
+    /// being executed: those declared inside a quantified path primary. Set
+    /// at the top of `run_query` from the MATCH chain and consulted when
+    /// classifying an aggregate — `SUM(x.p)` over a group reduces the group's
+    /// own list *within* each match (§22.7, NOTE 78), while `SUM(x.p)` over a
+    /// singleton is the ordinary row aggregate that collapses the rows. The
+    /// two produce different row counts, so the choice cannot be deferred.
+    group_vars: RefCell<HashSet<String>>,
     /// Local bindings introduced by an enclosing list comprehension
     /// (`[x IN ... | ...]`), used as a scope stack. `Expr::Var` /
     /// `Expr::AttrLookup` consult it before the pattern `Assignment`, so a
@@ -425,6 +435,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             exists_cache: RefCell::new(HashMap::new()),
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
+            group_vars: RefCell::new(HashSet::new()),
             comprehension_scope: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
             vec_cfg: RefCell::new(crate::runtime::vsearch::VecCfg::from_env()),
@@ -444,6 +455,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             exists_cache: RefCell::new(HashMap::new()),
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
+            group_vars: RefCell::new(HashSet::new()),
             comprehension_scope: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
             vec_cfg: RefCell::new(crate::runtime::vsearch::VecCfg::from_env()),
@@ -599,6 +611,13 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // probe. Scope memoization to one top-level execution.
         self.exists_cache.borrow_mut().clear();
         self.value_subquery_cache.borrow_mut().clear();
+        // ISO §4.11.5 group degree of reference, collected once per execution
+        // so aggregate classification below is a set lookup, not a re-walk.
+        *self.group_vars.borrow_mut() = query
+            .matches
+            .iter()
+            .flat_map(|m| m.pattern().group_vars())
+            .collect();
         // ISO §LIMIT: `Some(0)` is "return zero rows", distinct from
         // the runtime's `0 = unbounded`. Honor it before any pattern work.
         if query.limit == Some(0) {
@@ -672,7 +691,10 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             Some(items) => items,
         };
 
-        let has_aggs = return_items.iter().any(|i| i.is_aggregate());
+        // An element-wise aggregate (ISO §22.7, argument is a group reference)
+        // reduces inside its own match, so it does not pull the projection
+        // into the grouping machinery — only a *row* aggregate does.
+        let has_aggs = return_items.iter().any(|i| self.item_has_row_aggregate(i));
         // An explicit GROUP BY with no aggregate still groups: it collapses
         // each partition to one representative row (dedup-by-key). Route it
         // through `run_aggregated` so the grouping happens.
@@ -1327,8 +1349,16 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 ExprResult::Success(v) => v,
                 ExprResult::Failure(_) => Value::Null,
             },
+            // An element-wise aggregate is a per-row expression (§22.7), so
+            // it is projected here rather than by `run_aggregated`.
+            ReturnItem::Aggregate { agg, .. } if self.agg_is_elementwise(agg) => {
+                match self.apply_aggregator_elementwise(agg, mu) {
+                    ExprResult::Success(v) => v,
+                    ExprResult::Failure(_) => Value::Null,
+                }
+            }
             ReturnItem::Aggregate { .. } => {
-                unreachable!("aggregate items must be projected via run_aggregated")
+                unreachable!("row aggregates must be projected via run_aggregated")
             }
         }
     }
@@ -1430,6 +1460,10 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// aggregate-free expression `run_expr` can evaluate directly.
     fn fold_aggs(&self, expr: &Expr, row_idxs: &[usize], rows: &[ResultRow]) -> Expr {
         match expr {
+            // An element-wise aggregate is not reduced over the group's rows:
+            // it reduces its own group list on the representative row, so it
+            // is left in place for `run_expr` to evaluate there.
+            Expr::Agg(agg) if self.agg_is_elementwise(agg) => expr.clone(),
             Expr::Agg(agg) => Expr::Const(self.apply_aggregator(agg, row_idxs, rows)),
             Expr::Binop { op, left, right } => Expr::Binop {
                 op: *op,
@@ -1467,28 +1501,98 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 expr,
             } => {
                 let values = self.collect_aggregate_values(expr, *quantifier, row_idxs, rows);
-                match kind {
-                    GeneralSetKind::Count => Value::Int(values.len() as i64),
-                    GeneralSetKind::Sum => sum_values(&values),
-                    GeneralSetKind::Avg => avg_values(&values),
-                    GeneralSetKind::Min => min_values(&values),
-                    GeneralSetKind::Max => max_values(&values),
-                    // COLLECT_LIST gathers the group's values into a list
-                    // instead of reducing. `collect_aggregate_values`
-                    // already dropped scalar nulls and applied DISTINCT.
-                    // Additionally drop all-null records: those come from
-                    // the empty side of an OPTIONAL MATCH (every projected
-                    // field is null), carry no information, and would
-                    // otherwise pad the list with empty entries.
-                    GeneralSetKind::CollectList => Value::List(
-                        values
-                            .into_iter()
-                            .filter(|v| !is_all_null_record(v))
-                            .collect(),
-                    ),
-                }
+                reduce_general_set(*kind, values)
             }
         }
+    }
+
+    /// ISO §22.7 + NOTE 78: reduce an aggregate whose argument is a **group**
+    /// reference. The argument evaluates element-wise to a list within the
+    /// single match (`attr_of_pathvalue`'s group arm), and the reducer folds
+    /// *that* list — so the query keeps one output row per match instead of
+    /// collapsing every match into one. `SUM(E.P)` in NOTE 78 is exactly this
+    /// shape, and it is read inside a `WHERE` over the same match, which only
+    /// makes sense under the per-match reading.
+    ///
+    /// Null elimination and DISTINCT apply across the group's elements, which
+    /// is the same rule `collect_aggregate_values` applies across a group's
+    /// rows; only the source of the multiset differs.
+    fn apply_aggregator_elementwise(&self, agg: &Aggregator, mu: &Assignment) -> ExprResult {
+        let Aggregator::GeneralSet {
+            kind,
+            quantifier,
+            expr,
+        } = agg
+        else {
+            // COUNT(*) takes no argument, so it is never a group reference and
+            // never reaches here (`agg_is_elementwise` returns false for it).
+            return ExprResult::Failure("COUNT(*) is not an element-wise aggregate".into());
+        };
+        let elements = match self.run_expr(mu, expr) {
+            ExprResult::Success(Value::List(items)) => items,
+            // §20.12: a group reference whose value is neither a list nor null
+            // is data exception 22G13. froGQL has no exception channel yet, so
+            // this surfaces as null (the row survives, the cell is empty).
+            ExprResult::Success(Value::Null) => Vec::new(),
+            ExprResult::Success(_) => return ExprResult::Success(Value::Null),
+            ExprResult::Failure(e) => return ExprResult::Failure(e),
+        };
+        let mut values: Vec<Value> = Vec::with_capacity(elements.len());
+        let mut seen: HashSet<GroupKey> = HashSet::new();
+        for v in elements {
+            if v.is_null() {
+                continue; // null-eliminated, as in the row-wise regime
+            }
+            if matches!(quantifier, SetQuantifier::Distinct) {
+                let key = GroupKey::from_values(vec![v.clone()]);
+                if !seen.insert(key) {
+                    continue;
+                }
+            }
+            values.push(v);
+        }
+        ExprResult::Success(reduce_general_set(*kind, values))
+    }
+
+    /// Whether this aggregate reduces *within* a match rather than across
+    /// rows: true exactly when its argument mentions a group variable. The
+    /// classification is static (it depends only on where the variable was
+    /// declared), so it is stable across every row of one execution.
+    fn agg_is_elementwise(&self, agg: &Aggregator) -> bool {
+        match agg {
+            // COUNT(*) counts rows by definition; it has no argument that
+            // could carry group degree.
+            Aggregator::CountStar => false,
+            Aggregator::GeneralSet { expr, .. } => {
+                let groups = self.group_vars.borrow();
+                if groups.is_empty() {
+                    return false;
+                }
+                let mut referenced = std::collections::BTreeSet::new();
+                expr.referenced_vars(&mut referenced);
+                referenced.iter().any(|v| groups.contains(v))
+            }
+        }
+    }
+
+    /// Whether a RETURN item still needs the grouping machinery. An
+    /// element-wise aggregate does not: it is a per-row expression, so a
+    /// projection made only of those keeps one row per match.
+    fn item_has_row_aggregate(&self, item: &ReturnItem) -> bool {
+        match item {
+            ReturnItem::Aggregate { agg, .. } => !self.agg_is_elementwise(agg),
+            ReturnItem::Expr { expr, .. } => self.expr_has_row_aggregate(expr),
+        }
+    }
+
+    fn expr_has_row_aggregate(&self, expr: &Expr) -> bool {
+        let mut found = false;
+        expr.walk_aggs(&mut |agg| {
+            if !self.agg_is_elementwise(agg) {
+                found = true;
+            }
+        });
+        found
     }
 
     /// Evaluate inner expr per row, drop ISO nulls (Failure), optionally
@@ -3270,6 +3374,27 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// Property/edge attribute read on a `PathValue` (the shared body of
     /// `AttrLookup` over a binding-table or correlated binding).
     fn attr_of_pathvalue(&self, pv: &PathValue, var: &str, attr: &str) -> ExprResult {
+        // ISO §22.7, evaluation of an expression on a group variable: a
+        // variable declared inside a quantified path primary and referenced
+        // from outside it has *group* degree of reference, and the expression
+        // evaluates element-wise into a LIST. `x.p` over a group of two edges
+        // is `[1, 2]`, not an error. Nested quantifiers nest the groups, and
+        // the recursion nests the lists to match — the shape the typechecker
+        // already predicts via `VariableType::Group(t).get_attribute(a)`.
+        // Element-wise evaluation cannot fail as a whole: a per-element
+        // `Failure` becomes a null cell, keeping the list's length equal to
+        // the group's (issue #90; before this, the whole read was a `Failure`
+        // that `WHERE` silently dropped and aggregates silently null-eliminated).
+        if let PathValue::Group(items) = pv {
+            let elems = items
+                .iter()
+                .map(|item| match self.attr_of_pathvalue(item, var, attr) {
+                    ExprResult::Success(v) => v,
+                    ExprResult::Failure(_) => Value::Null,
+                })
+                .collect();
+            return ExprResult::Success(Value::List(elems));
+        }
         let id = match pv.id() {
             Some(id) => id,
             None => return ExprResult::Failure(format!("variable '{var}' has no id")),
@@ -3599,6 +3724,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             // `Agg` node to a constant before calling `run_expr`. Reaching
             // here means an aggregate appeared outside an aggregated
             // projection (e.g. in a WHERE) — treat as null (3VL).
+            Expr::Agg(agg) if self.agg_is_elementwise(agg) => {
+                self.apply_aggregator_elementwise(agg, mu)
+            }
             Expr::Agg(_) => {
                 ExprResult::Failure("aggregate not valid outside a RETURN projection".into())
             }
@@ -4368,10 +4496,28 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 }
                 _ => ExprResult::Failure("<= requires numeric operands".into()),
             },
-            // Non-null Eq/Ne are structural (the null cases were handled by the
-            // 3VL guard above: `null = x` / `x = null` -> null).
-            BinOp::Eq => ExprResult::Success(Value::Bool(lv == rv)),
-            BinOp::Ne => ExprResult::Success(Value::Bool(lv != rv)),
+            // Eq/Ne recurse into composite values under 3VL: a null *inside*
+            // a list or record makes that position unknown, so
+            // `[1, null] = [1, null]` is null, not true (see `eq_verdict`).
+            // The top-level null cases were already handled by the 3VL guard
+            // above.
+            //
+            // This is the *top level*, so a mismatch is a type error rather
+            // than `false`: `1 = 'a'` has no common domain. The error does not
+            // abort the query — it reduces to `Failure` and propagates, which
+            // drops the row in `WHERE` and gives a null cell in `RETURN`.
+            // Inside a list the same pair is `false`, because down there no
+            // domain check exists to report the mismatch against.
+            BinOp::Eq | BinOp::Ne => match eq_verdict(lv, rv) {
+                EqVerdict::Definite(b) => {
+                    let b = if matches!(op, BinOp::Ne) { !b } else { b };
+                    ExprResult::Success(Value::Bool(b))
+                }
+                EqVerdict::Unknown => ExprResult::Success(Value::Null),
+                EqVerdict::Mismatch => {
+                    ExprResult::Failure(format!("{op} is not defined between {lv} and {rv}"))
+                }
+            },
             // 3VL membership: `null IN xs` -> null; found -> true; not found but
             // the list carries a null -> null (unknown); else false. NB: `IN` as
             // a membership predicate is a froGQL extension — neither ISO GQL nor
@@ -4379,11 +4525,33 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             // docs/internals/iso-gql-gaps.md §3.4.
             BinOp::In => match rv {
                 Value::List(items) => {
-                    if lv.is_null() {
-                        ExprResult::Success(Value::Null)
-                    } else if items.iter().any(|x| x == lv) {
+                    // OR-fold of `lv = item` under 3VL: a definite hit wins,
+                    // otherwise any unknown comparison (a null item, or an item
+                    // whose composite contents disagree only at a null) makes
+                    // the membership unknown.
+                    // A definite hit is absorbing (this is an OR-fold), so
+                    // it wins over a later unknown or mismatch. Otherwise a
+                    // mismatch is a type error, for the same reason it is one
+                    // under a bare `=`: `1 IN ['a']` compares across domains.
+                    let mut unknown = false;
+                    let mut mismatch: Option<&Value> = None;
+                    let mut found = false;
+                    for item in items {
+                        match eq_verdict(lv, item) {
+                            EqVerdict::Definite(true) => {
+                                found = true;
+                                break;
+                            }
+                            EqVerdict::Definite(false) => {}
+                            EqVerdict::Unknown => unknown = true,
+                            EqVerdict::Mismatch => mismatch = Some(item),
+                        }
+                    }
+                    if found {
                         ExprResult::Success(Value::Bool(true))
-                    } else if items.iter().any(Value::is_null) {
+                    } else if let Some(item) = mismatch {
+                        ExprResult::Failure(format!("IN is not defined between {lv} and {item}"))
+                    } else if unknown {
                         ExprResult::Success(Value::Null)
                     } else {
                         ExprResult::Success(Value::Bool(false))
@@ -4620,6 +4788,31 @@ fn is_all_null_record(v: &Value) -> bool {
 
 /// Int-preserving when all inputs are Int; promotes to Float on any
 /// Float input. Non-numeric skipped (gradual tolerance). Empty → null.
+/// Fold a collected multiset with one of the ISO §20.9 general-set
+/// reducers. Shared by the row-wise regime (values gathered across a group's
+/// rows) and the element-wise regime (values gathered from one group
+/// reference's list) — the reducers are identical, only the source differs.
+fn reduce_general_set(kind: GeneralSetKind, values: Vec<Value>) -> Value {
+    match kind {
+        GeneralSetKind::Count => Value::Int(values.len() as i64),
+        GeneralSetKind::Sum => sum_values(&values),
+        GeneralSetKind::Avg => avg_values(&values),
+        GeneralSetKind::Min => min_values(&values),
+        GeneralSetKind::Max => max_values(&values),
+        // COLLECT_LIST gathers the values into a list instead of reducing.
+        // The caller already dropped scalar nulls and applied DISTINCT.
+        // Additionally drop all-null records: those come from the empty side
+        // of an OPTIONAL MATCH (every projected field is null), carry no
+        // information, and would otherwise pad the list with empty entries.
+        GeneralSetKind::CollectList => Value::List(
+            values
+                .into_iter()
+                .filter(|v| !is_all_null_record(v))
+                .collect(),
+        ),
+    }
+}
+
 fn sum_values(values: &[Value]) -> Value {
     let mut int_acc: i64 = 0;
     let mut float_acc: f64 = 0.0;
