@@ -36,17 +36,65 @@ impl LabelType {
         }
     }
 
-    /// Greatest lower bound under logical entailment.
+    /// Greatest lower bound under logical entailment: `ℓ₁ ⊓ ℓ₂ = ℓ₁ & ℓ₂`.
+    ///
+    /// **There is no special case for `Star`.** The clause `ℓ ⊓ ★ = ℓ`
+    /// looks harmless and is not: `★` is the *unknown* label, not a top,
+    /// so dropping it throws away the imprecision the program wrote and
+    /// the meet stops being monotone in precision. Keeping the conjunct
+    /// costs nothing at query time, because `is_subtype` is optimistic on
+    /// `★` and `A & ★` therefore admits everything `A` admits.
+    ///
+    /// The same argument rules out shortcutting on `is_subtype`: that
+    /// relation is *consistent* subtyping, so `A|B <: A` holds, and
+    /// `(A|B) ⊓ A = A|B` would not be below `A`.
+    ///
+    /// `Top` keeps its clause. It is the genuine top of label subtyping,
+    /// so `ℓ & 1 = ℓ` is a sound simplification rather than a guess.
     pub fn meet(a: &LabelType, b: &LabelType) -> LabelType {
         match (a, b) {
-            (LabelType::Star, _) => b.clone(),
-            (_, LabelType::Star) => a.clone(),
             (LabelType::Top, _) => b.clone(),
             (_, LabelType::Top) => a.clone(),
-            _ if LabelType::is_subtype(a, b) => a.clone(),
-            _ if LabelType::is_subtype(b, a) => b.clone(),
-            _ => LabelType::And(Box::new(a.clone()), Box::new(b.clone())),
+            _ => {
+                let mut parts = Vec::new();
+                a.push_conjuncts(&mut parts);
+                b.push_conjuncts(&mut parts);
+                LabelType::and_of(parts)
+            }
         }
+    }
+
+    /// Flatten an `&`-chain into its conjuncts, left to right.
+    fn push_conjuncts<'a>(&'a self, out: &mut Vec<&'a LabelType>) {
+        match self {
+            LabelType::And(x, y) => {
+                x.push_conjuncts(out);
+                y.push_conjuncts(out);
+            }
+            _ => out.push(self),
+        }
+    }
+
+    /// Rebuild a right-nested `&`-chain, dropping repeated conjuncts.
+    ///
+    /// Idempotence (`ℓ & ℓ = ℓ`) is a genuine identity of the boolean
+    /// algebra *and* of precision, so collapsing duplicates is a
+    /// normalisation rather than a guess — unlike `ℓ & ★ = ℓ`, which
+    /// throws away imprecision the program wrote. Without it a long
+    /// concat chain keeps re-conjoining the same `★` and the label tree
+    /// grows once per meet.
+    fn and_of(parts: Vec<&LabelType>) -> LabelType {
+        let mut uniq: Vec<&LabelType> = Vec::with_capacity(parts.len());
+        for p in parts {
+            if !uniq.contains(&p) {
+                uniq.push(p);
+            }
+        }
+        let mut iter = uniq.into_iter().rev();
+        let last = iter.next().expect("meet operands contribute a conjunct");
+        iter.fold(last.clone(), |acc, p| {
+            LabelType::And(Box::new(p.clone()), Box::new(acc))
+        })
     }
 
     /// Subtyping under label entailment.
@@ -207,15 +255,33 @@ mod tests {
         assert_eq!(LabelType::meet(&a, &a), a);
     }
     #[test]
-    fn test_meet_drops_left_star() {
-        // §4.1 explicit: ★ ⊓ ℓ = ℓ.
+    fn test_meet_keeps_left_star() {
+        // The paper prints `★ ⊓ ℓ = ℓ`; that clause is what makes the
+        // static gradual guarantee false, and the Lean development drops
+        // it. `★` is the *unknown* label, not a top, so the meet keeps it
+        // as a conjunct and the result stays as imprecise as written.
         let a = LabelType::Label("A".into());
-        assert_eq!(LabelType::meet(&LabelType::Star, &a), a);
+        assert_eq!(
+            LabelType::meet(&LabelType::Star, &a),
+            LabelType::And(Box::new(LabelType::Star), Box::new(a))
+        );
     }
     #[test]
-    fn test_meet_drops_right_star() {
+    fn test_meet_keeps_right_star() {
         let a = LabelType::Label("A".into());
-        assert_eq!(LabelType::meet(&a, &LabelType::Star), a);
+        assert_eq!(
+            LabelType::meet(&a, &LabelType::Star),
+            LabelType::And(Box::new(a), Box::new(LabelType::Star))
+        );
+    }
+    #[test]
+    fn test_meet_with_star_still_admits_what_the_operand_admits() {
+        // Keeping the conjunct costs no matching power: subtyping is
+        // optimistic on `★`, so `A & ★` accepts everything `A` accepts.
+        let a = LabelType::Label("A".into());
+        let m = LabelType::meet(&LabelType::Star, &a);
+        assert!(LabelType::is_subtype(&m, &a));
+        assert!(LabelType::is_subtype(&a, &m));
     }
     #[test]
     fn test_meet_distinct_atoms_yields_and() {

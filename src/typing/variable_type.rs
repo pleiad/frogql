@@ -21,7 +21,19 @@ pub enum VariableType {
         right: Box<VariableType>,
     },
     Union(Box<VariableType>, Box<VariableType>),
-    Group(Box<VariableType>),
+    /// The list type a quantified pattern binds: `[T]ₙ`, where `n` is the
+    /// **minimal** number of elements the list is guaranteed to hold — the
+    /// repetition's lower bound.
+    ///
+    /// The index is load-bearing in all three lattice operations, and it is
+    /// a *minimal* cardinality, so a longer guarantee is the stronger type:
+    ///   - `empty([T]ₙ) = empty(T) ∧ n > 0` — with `n = 0` the empty list
+    ///     inhabits the type whatever `T` is, so `P{0,m}` still matches by
+    ///     taking zero laps even when `P` matches nothing.
+    ///   - `[T₁]n₁ ⊓ [T₂]n₂ = [T₁ ⊓ T₂]max(n₁,n₂)`
+    ///   - `[T₁]n₁ <: [T₂]n₂` requires `n₂ ≤ n₁`, which is what makes the
+    ///     meet above a lower bound.
+    Group(Box<VariableType>, u64),
     /// The singleton type for the null value. Introduced when a variable
     /// appears in only one branch of a `TypeEnvironment` join, per the rule
     /// `Γ₁ ⊔ Γ₂` for keys present on a single side.
@@ -44,6 +56,11 @@ pub enum VariableType {
 impl VariableType {
     pub fn node_star() -> Self {
         VariableType::Node(DescriptorType::star())
+    }
+
+    /// `[T]ₙ` — the list type a repetition with lower bound `n` binds.
+    pub fn group(t: VariableType, min: u64) -> Self {
+        VariableType::Group(Box::new(t), min)
     }
 
     pub fn edge_directional(desc: DescriptorType) -> Self {
@@ -81,8 +98,12 @@ impl VariableType {
             VariableType::Union(t1, t2) => {
                 SimpleType::union(&t1.get_attribute(attr), &t2.get_attribute(attr))
             }
-            VariableType::Group(t) => SimpleType::Group(Box::new(t.get_attribute(attr))),
-            VariableType::Null => SimpleType::Zero,
+            VariableType::Group(t, _) => SimpleType::Group(Box::new(t.get_attribute(attr))),
+            // `Nothing(a) = Nothing`. The ⊥ filler makes type safety for
+            // expressions false: ⊔ then drops exactly the summand that had
+            // to carry the null, so an optionally-bound variable projects
+            // to a type that claims it can never be null.
+            VariableType::Null => SimpleType::Null,
             // A path has no attributes — `path.attr` is undefined.
             VariableType::Path => SimpleType::Zero,
             VariableType::Scalar(_) => SimpleType::Zero,
@@ -122,8 +143,10 @@ impl VariableType {
 
     pub fn meet(a: &VariableType, b: &VariableType) -> VariableType {
         match (a, b) {
-            (VariableType::Group(ta), VariableType::Group(tb)) => {
-                VariableType::Group(Box::new(VariableType::meet(ta, tb)))
+            // `[T₁]n₁ ⊓ [T₂]n₂ = [T₁ ⊓ T₂]max(n₁,n₂)`. The index is a
+            // minimal cardinality, so the meet keeps the longer guarantee.
+            (VariableType::Group(ta, na), VariableType::Group(tb, nb)) => {
+                VariableType::group(VariableType::meet(ta, tb), *na.max(nb))
             }
             (VariableType::Node(da), VariableType::Node(db)) => Self::meet_node(da, db),
             (
@@ -280,7 +303,12 @@ impl VariableType {
                 Self::edge_directional_subtype(d1, l1, r1, d2, l2, r2)
                     || Self::edge_directional_subtype(d1, l1, r1, d2, r2, l2)
             }
-            (VariableType::Group(a), VariableType::Group(b)) => VariableType::is_subtype(a, b),
+            // `[T₁]n₁ <: [T₂]n₂` needs `n₂ ≤ n₁`: a longer guarantee is
+            // the stronger type. This is what makes the meet above a lower
+            // bound.
+            (VariableType::Group(a, na), VariableType::Group(b, nb)) => {
+                nb <= na && VariableType::is_subtype(a, b)
+            }
             (VariableType::Union(a, b), _) => {
                 VariableType::is_subtype(a, t2) || VariableType::is_subtype(b, t2)
             }
@@ -312,6 +340,18 @@ impl VariableType {
 
     // --- Refine ---
 
+    /// `S ⊢ T ▷ T'` — meet the type against every schema entry it is
+    /// consistently below, and join what survives.
+    ///
+    /// **The fold skips an empty contribution.** Consistent subtyping is
+    /// optimistic, so an entry can pass the `is_subtype` gate while its
+    /// meet describes nothing: `[⊥] | int <: [bool]` holds by the `⊥ <:
+    /// bool` branch, and the meet is `[⊥]`, which `is_empty` calls empty
+    /// but which is not syntactically `⊥`. Keeping it would leave the two
+    /// emptiness tests disagreeing on types the system actually derives,
+    /// and every consumer that checks `== Zero` would then miss a dead
+    /// branch. Dropping it costs no precision: a branch below an empty
+    /// type describes nothing.
     pub fn refine(schema: &Schema, node: &VariableType) -> VariableType {
         match node {
             VariableType::Node(_) => {
@@ -320,6 +360,7 @@ impl VariableType {
                     .iter()
                     .filter(|n| VariableType::is_subtype(n, node))
                     .map(|n| VariableType::meet(n, node))
+                    .filter(|m| !m.is_empty())
                     .collect();
                 VariableType::join_from_list(matches)
             }
@@ -329,6 +370,7 @@ impl VariableType {
                     .iter()
                     .filter(|e| VariableType::is_subtype(e, node))
                     .map(|e| VariableType::meet(e, node))
+                    .filter(|m| !m.is_empty())
                     .collect();
                 VariableType::join_from_list(matches)
             }
@@ -336,9 +378,7 @@ impl VariableType {
                 VariableType::refine(schema, t1),
                 VariableType::refine(schema, t2),
             ),
-            VariableType::Group(t) => {
-                VariableType::Group(Box::new(VariableType::refine(schema, t)))
-            }
+            VariableType::Group(t, n) => VariableType::group(VariableType::refine(schema, t), *n),
             VariableType::Null => VariableType::Null,
             VariableType::Path => VariableType::Path,
             VariableType::Scalar(t) => VariableType::Scalar(t.clone()),
@@ -357,7 +397,10 @@ impl VariableType {
                 desc.is_empty() || left.is_empty() || right.is_empty()
             }
             VariableType::Union(t1, t2) => t1.is_empty() && t2.is_empty(),
-            VariableType::Group(t) => t.is_empty(),
+            // `empty([T]ₙ) = empty(T) ∧ n > 0`. With `n = 0` the empty
+            // list inhabits the type whatever T is, so a `{0,m}` repetition
+            // over an impossible inner still matches by taking zero laps.
+            VariableType::Group(t, n) => *n > 0 && t.is_empty(),
             VariableType::Null => false,
             // A path binding is always inhabited; it never empties an env.
             VariableType::Path => false,
@@ -377,7 +420,8 @@ impl fmt::Display for VariableType {
                 write!(f, "{left}-[{desc}]-{right}")
             }
             VariableType::Union(t1, t2) => write!(f, "{t1} + {t2}"),
-            VariableType::Group(t) => write!(f, "group<{t}>"),
+            VariableType::Group(t, 0) => write!(f, "group<{t}>"),
+            VariableType::Group(t, n) => write!(f, "group<{t}>[{n}..]"),
             VariableType::Null => write!(f, "Null"),
             VariableType::Path => write!(f, "path"),
             VariableType::Scalar(t) => write!(f, "{t}"),

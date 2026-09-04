@@ -155,10 +155,14 @@ impl TypeEnvironment {
         self.bindings.values().any(|v| v.is_empty())
     }
 
-    /// Wrap each binding in `VariableType::Group`. Used for repeated/quantified
-    /// patterns where variables become groups of values. (Mirrors fppc's
-    /// `to_list` — gqlite uses `Group` for the same role.)
-    pub fn to_group(&self) -> TypeEnvironment {
+    /// Wrap each binding in `[T]ₘᵢₙ` — the list type a quantified pattern
+    /// binds, where `min` is the repetition's lower bound. (Mirrors fppc's
+    /// `to_list`; gqlite calls the constructor `Group`.)
+    ///
+    /// `min` is not decoration. `empty([T]ₙ)` is `empty(T) ∧ n > 0`, so a
+    /// `{0,m}` repetition over an inner that matches nothing keeps a
+    /// non-empty environment: zero laps is still a match.
+    pub fn to_group(&self, min: u64) -> TypeEnvironment {
         TypeEnvironment {
             bindings: self
                 .bindings
@@ -166,7 +170,7 @@ impl TypeEnvironment {
                 .map(|(k, v)| {
                     (
                         k.clone(),
-                        Rc::new(VariableType::Group(Box::new(v.as_ref().clone()))),
+                        Rc::new(VariableType::group(v.as_ref().clone(), min)),
                     )
                 })
                 .collect(),

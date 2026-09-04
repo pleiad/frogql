@@ -44,6 +44,52 @@ pub enum PathPattern {
 }
 
 impl PathPattern {
+    /// A lower bound on the number of edges any path this pattern matches
+    /// traverses. Purely syntactic: it carries no schema.
+    ///
+    /// This is what the repetition rule's premise reads, and it has to be
+    /// the pattern rather than the derived `PathType` for two reasons.
+    ///
+    /// On the path type it is not monotone in precision. The path type
+    /// comes out of the refinement against the schema, `P ⊑ P | Q` holds
+    /// by the optimistic union rules, and the length of a union is the
+    /// minimum, so the same pattern loses its length on the way to a less
+    /// precise schema and the static gradual guarantee fails. `min_len`
+    /// carries no schema and is invariant under precision, so that case
+    /// becomes a rewrite.
+    ///
+    /// It is also the more faithful test. An edge whose label the schema
+    /// rejects refines to `⊥`, so its path type has no edges at all,
+    /// and the old gate reported a length problem for a pattern that
+    /// plainly traverses an edge. Such a repetition is empty, but it is
+    /// empty because the label is unknown.
+    ///
+    /// `Join` has no counterpart in the formal grammar: it pairs two
+    /// paths rather than producing one, so there is no single length to
+    /// report. The minimum is the conservative answer — it can only make
+    /// the premise reject more.
+    pub fn min_len(&self) -> usize {
+        match self {
+            PathPattern::Node(_) => 0,
+            PathPattern::EdgeRight(_)
+            | PathPattern::EdgeLeft(_)
+            | PathPattern::EdgeUndirected(_)
+            | PathPattern::EdgeAnyDirection(_) => 1,
+            PathPattern::Concat(p1, p2) => p1.min_len() + p2.min_len(),
+            PathPattern::Union(p1, p2) | PathPattern::Join(p1, p2) => {
+                p1.min_len().min(p2.min_len())
+            }
+            PathPattern::Filter(p, _) => p.min_len(),
+            PathPattern::Repeat { pattern, lb, .. } => lb * pattern.min_len(),
+            // `P?` is `P{0,1}`: zero laps is a match, so it guarantees
+            // nothing.
+            PathPattern::Questioned(_) => 0,
+            PathPattern::Selected { pattern, .. } | PathPattern::Named { pattern, .. } => {
+                pattern.min_len()
+            }
+        }
+    }
+
     /// Collect the variables with *group* degree of reference (ISO §4.11.5):
     /// those declared inside a `<quantified path primary>`. Referenced from
     /// outside the quantifier, each denotes the whole list of elements bound

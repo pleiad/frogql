@@ -116,6 +116,29 @@ fn extract_label(t: &VariableType) -> Option<&LabelType> {
     }
 }
 
+/// Assert that a label type means exactly `name`, without pinning its
+/// syntax.
+///
+/// `⊓` on label types is plain `&`: it has no clause `ℓ ⊓ ★ = ℓ`, because
+/// `★` is the *unknown* label rather than a top and dropping it loses the
+/// imprecision the program wrote (the clause is what makes the static
+/// gradual guarantee fail). So refining `(x)` against `(x: Account)`
+/// leaves `★ & Account`, not the bare `Account` the old assertions looked
+/// for. What has to hold is the meaning: the two are mutually consistent
+/// subtypes, and the label index still narrows to `Account`.
+fn assert_means_label(label: &LabelType, name: &str) {
+    let atom = LabelType::Label(name.into());
+    assert!(
+        LabelType::is_subtype(label, &atom) && LabelType::is_subtype(&atom, label),
+        "{label:?} should mean {name}"
+    );
+    assert_eq!(
+        label.required_labels(),
+        vec![name],
+        "{label:?} should still drive the label index to {name}"
+    );
+}
+
 /// Compatible labels collapse to the more specific one. `(x: Account)`
 /// meeting `(x)` (Star label) refines `x` to `Label("Account")`.
 #[test]
@@ -127,10 +150,7 @@ fn meet_shared_var_takes_label_intersection() {
 
     let x_ty = r.env.get("x").expect("x must be bound");
     let label = extract_label(x_ty).expect("x must be a Node");
-    assert!(
-        matches!(label, LabelType::Label(s) if s == "Account"),
-        "x label should be Account after meet, got {label:?}"
-    );
+    assert_means_label(label, "Account");
 }
 
 /// Disjoint variables across matches are unaffected by the meet. Each
@@ -144,8 +164,8 @@ fn meet_disjoint_vars_each_keep_own_type() {
 
     let x_label = extract_label(r.env.get("x").unwrap()).unwrap();
     let y_label = extract_label(r.env.get("y").unwrap()).unwrap();
-    assert!(matches!(x_label, LabelType::Label(s) if s == "Account"));
-    assert!(matches!(y_label, LabelType::Label(s) if s == "Person"));
+    assert_means_label(x_label, "Account");
+    assert_means_label(y_label, "Person");
 }
 
 /// Three-way chain converges via left-associative meet:
@@ -158,7 +178,7 @@ fn meet_three_way_match_chain_converges() {
     assert!(r.ok, "errors: {:?}", tc.errors);
 
     let x_label = extract_label(r.env.get("x").unwrap()).unwrap();
-    assert!(matches!(x_label, LabelType::Label(s) if s == "Account"));
+    assert_means_label(x_label, "Account");
 }
 
 /// Property filters across matches don't affect the env binding shape
@@ -178,7 +198,7 @@ fn meet_shared_var_with_property_filters_does_not_collapse() {
     let x_ty = r.env.get("x").expect("x must be bound");
     assert!(!x_ty.is_empty(), "meet must not collapse x to Zero");
     let label = extract_label(x_ty).expect("x must be a Node");
-    assert!(matches!(label, LabelType::Label(s) if s == "Account"));
+    assert_means_label(label, "Account");
 }
 
 // ===== Runtime: shared-var natural join, beyond the 2-way case =====

@@ -538,6 +538,11 @@ impl Expr {
                         .iter()
                         .all(|(k, v)| t_fields.get(k).is_some_and(|ty| Expr::value_is_type(v, ty)))
             }
+            // `null ⇒ τ` holds exactly when `Null <: τ`, i.e. against the
+            // null type itself, against `*`, and inside a union carrying
+            // one of those. The `*` and union cases fall through to the
+            // arms below.
+            (Value::Null, SimpleType::Null) => true,
             (Value::Node(_), SimpleType::Node) => true,
             (Value::Edge(_), SimpleType::Edge) => true,
             (Value::Path(_), SimpleType::Path) => true,

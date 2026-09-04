@@ -1430,7 +1430,7 @@ fn color_variable(vt: &VariableType) -> String {
         VariableType::Union(a, b) => {
             format!("({}) | ({})", color_variable(a), color_variable(b))
         }
-        VariableType::Group(t) => format!("group<{}>", color_variable(t)),
+        VariableType::Group(t, _) => format!("group<{}>", color_variable(t)),
         VariableType::Null => "Null".to_string(),
         VariableType::Path => format!("{C_GREEN}PATH{C_RESET}"),
         VariableType::Scalar(t) => format!("{C_GREEN}{t}{C_RESET}"),

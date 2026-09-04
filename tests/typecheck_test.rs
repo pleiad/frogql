@@ -326,7 +326,15 @@ fn test_zero_path() {
 
 #[test]
 fn test_repetition_1() {
-    assert!(check("(x: {a int}){1,2}").0.ok);
+    // Flipped against the fppc suite. A bare node body traverses no
+    // edge, so it can never complete a lap; with a lower bound of 1 no
+    // iteration count in `[1, 2]` produces a result and the pattern
+    // matches nothing in any graph. (Trep)'s premise
+    // `n = 0 ∨ len(patts) > 0` rejects it outright instead of deriving a
+    // type for a query that cannot match. `{0,2}` is still fine — that
+    // is what the guard at `n = 0` is for.
+    assert!(!check("(x: {a int}){1,2}").0.ok);
+    assert!(check("(x: {a int}){0,2}").0.ok);
 }
 #[test]
 fn test_repetition_2() {

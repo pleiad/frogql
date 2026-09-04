@@ -215,7 +215,7 @@ mod canon {
                     right: Box::new(variable(right)),
                 }
             }
-            VariableType::Group(inner) => VariableType::Group(Box::new(variable(inner))),
+            VariableType::Group(inner, n) => VariableType::group(variable(inner), *n),
             VariableType::Null => VariableType::Null,
             VariableType::Path => VariableType::Path,
             VariableType::Scalar(t) => VariableType::Scalar(simple(t)),
@@ -387,7 +387,10 @@ fn arb_variable_type() -> impl Strategy<Value = VariableType> {
         prop_oneof![
             (inner.clone(), inner.clone())
                 .prop_map(|(a, b)| VariableType::Union(Box::new(a), Box::new(b))),
-            inner.prop_map(|t| VariableType::Group(Box::new(t))),
+            // The list index is part of the lattice: `empty`, `meet` and
+            // subtyping all read it, so the laws have to be checked over
+            // a range of bounds, 0 included.
+            (inner, 0u64..=3).prop_map(|(t, n)| VariableType::group(t, n)),
         ]
     })
 }
@@ -841,10 +844,26 @@ mod label_type {
             assert_consistent!(LabelType::is_subtype, ab, ba);
         }
 
+        // The paper prints `★ ⊓ ℓ = ℓ`; the Lean development drops that
+        // clause because it makes the static gradual guarantee false, and
+        // the meet is plain `&` at every pair. What survives is the
+        // weaker, correct statement: keeping the `★` conjunct changes no
+        // matching power, since subtyping is optimistic on `★`.
         #[test]
-        fn star_is_meet_identity(t in arb_label_type()) {
-            prop_assert_eq!(LabelType::meet(&LabelType::Star, &t), t,
-                "Star ⊓ t = t");
+        fn star_meet_is_consistent_with_the_operand(t in arb_label_type()) {
+            let m = LabelType::meet(&LabelType::Star, &t);
+            assert_consistent!(LabelType::is_subtype, m, t);
+        }
+
+        // The property the `★` clause broke: the meet has to sit below
+        // both operands.
+        #[test]
+        fn meet_is_a_lower_bound(a in arb_label_type(), b in arb_label_type()) {
+            let m = LabelType::meet(&a, &b);
+            prop_assert!(LabelType::is_subtype(&m, &a),
+                "meet({a}, {b}) = {m} is not below {a}");
+            prop_assert!(LabelType::is_subtype(&m, &b),
+                "meet({a}, {b}) = {m} is not below {b}");
         }
     }
 }

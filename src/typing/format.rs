@@ -65,7 +65,7 @@ pub fn format_variable(vt: &VariableType) -> String {
         // though CREATE syntax doesn't accept them at the top level.
         // Render best-effort so SHOW never blanks out.
         VariableType::Union(a, b) => format!("({}) | ({})", format_variable(a), format_variable(b)),
-        VariableType::Group(t) => format!("group<{}>", format_variable(t)),
+        VariableType::Group(t, _) => format!("group<{}>", format_variable(t)),
         VariableType::Null => "Null".to_string(),
         VariableType::Path => "PATH".to_string(),
         VariableType::Scalar(t) => format_simple_type(t),

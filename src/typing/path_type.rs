@@ -81,7 +81,7 @@ impl PathType {
                 PathType::from_variable(t1, dir),
                 PathType::from_variable(t2, dir),
             ),
-            VariableType::Group(_)
+            VariableType::Group(..)
             | VariableType::Null
             | VariableType::Path
             | VariableType::Scalar(_)
@@ -115,6 +115,59 @@ impl PathType {
             PathType::Node(n) => n.desc.is_empty(),
             PathType::Edge(e) => e.p1.is_unsatisfiable() || e.n2.desc.is_empty(),
             PathType::Union(p1, p2) => p1.is_unsatisfiable() && p2.is_unsatisfiable(),
+        }
+    }
+
+    /// `fst(P)` — the node type the path starts at.
+    ///
+    /// Returns a **variable** type, not a `NodePathType`. `⊔` is one
+    /// operator, and node types have neither a `⊥` nor a union, so they
+    /// cannot be its codomain. Reading these as node types forces a join
+    /// of node types, whose record part has to fall back to the open
+    /// empty record when the two records differ; that throws away every
+    /// key and is not monotone in precision, and the repetition case of
+    /// the static gradual guarantee fails.
+    pub fn first(&self) -> VariableType {
+        match self {
+            PathType::Node(n) => VariableType::Node(n.desc.clone()),
+            PathType::Edge(e) => e.p1.first(),
+            PathType::Union(a, b) => VariableType::join(a.first(), b.first()),
+            PathType::Zero => VariableType::Zero,
+        }
+    }
+
+    /// `lst(P)` — the node type the path ends at. Same codomain argument
+    /// as [`PathType::first`].
+    pub fn last(&self) -> VariableType {
+        match self {
+            PathType::Node(n) => VariableType::Node(n.desc.clone()),
+            PathType::Edge(e) => VariableType::Node(e.n2.desc.clone()),
+            PathType::Union(a, b) => VariableType::join(a.last(), b.last()),
+            PathType::Zero => VariableType::Zero,
+        }
+    }
+
+    /// `P ⌢ T` — extend a path by one edge landing on `T`.
+    ///
+    /// This is the `Edge` constructor with a **variable** type on the
+    /// right, which is what a node refinement can hand back: refining one
+    /// node type against the schema produces a join of every entry it
+    /// meets, so the right operand is routinely a union and sometimes
+    /// `⊥`. The plain constructor takes a single node type and has
+    /// nowhere to put either.
+    pub fn cons(p: PathType, t: &VariableType) -> PathType {
+        match t {
+            VariableType::Node(d) => nf(PathType::Edge(EdgePathType {
+                p1: Box::new(p),
+                n2: NodePathType::new(d.clone()),
+            })),
+            VariableType::Union(a, b) => {
+                PathType::union(PathType::cons(p.clone(), a), PathType::cons(p, b))
+            }
+            VariableType::Group(inner, _) => PathType::cons(p, inner),
+            // An edge, a null, a path, a scalar or ⊥ is not a node to land
+            // on, so there is no path to build.
+            _ => PathType::Zero,
         }
     }
 
@@ -171,10 +224,10 @@ impl PathType {
                 )
             }
 
-            (_, PathType::Edge(p2_edge)) => PathType::Edge(EdgePathType {
+            (_, PathType::Edge(p2_edge)) => nf(PathType::Edge(EdgePathType {
                 p1: Box::new(PathType::meet(schema, p1, &p2_edge.p1)),
                 n2: p2_edge.n2.clone(),
-            }),
+            })),
 
             (_, PathType::Union(u1, u2)) => {
                 let m1 = PathType::meet(schema, p1, u1);
@@ -200,6 +253,22 @@ impl PathType {
                 PathType::union(m1, m2)
             }
         }
+    }
+}
+
+/// `⌊·⌋nf` — send a path type that describes nothing to `⊥`.
+///
+/// Every cons the meet builds goes through this. Without it a `Concat`
+/// whose prefix is dead produces a live-looking `Edge` wrapped around a
+/// `⊥`, so `is_unsatisfiable` and `== Zero` disagree on a type the system
+/// derives. Normalising here is what lets emptiness of a path type be
+/// read off its shape, and what turns the emptiness theorem into a
+/// two-line corollary of soundness instead of a separate induction.
+fn nf(p: PathType) -> PathType {
+    if p.is_unsatisfiable() {
+        PathType::Zero
+    } else {
+        p
     }
 }
 

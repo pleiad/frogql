@@ -307,6 +307,65 @@ ripples through the whole lattice and is only warranted when the language
 must actually distinguish it (vectors, for instance, stay plain float
 lists).
 
+#### Alignment with the Lean mechanisation (`latex/fppcLean.tex`)
+
+The Lean 4 development found several printed rules that do not carry the
+metatheory. Where froGQL now follows Lean rather than the paper, each
+divergence is pinned by `tests/lean_alignment_test.rs` and carries the
+argument in a doc comment at the definition. The ones that change
+observable behaviour:
+
+- **A missing key on a closed record projects to `Null`, not `⊥`**
+  (`PropertyType::get`, and `VariableType::Null::get_attribute` for the
+  same reason). A closed record says the element definitely has no such
+  property, so the projection is definitely *null*. With `⊥` the join in
+  `VariableType::get_attribute` swallowed exactly the summand carrying the
+  null, so a union over one branch that has the key and one that does not
+  reported the bare value type while the runtime handed back NULL. The
+  "attribute not found" diagnostic now keys off the null rather than off
+  emptiness.
+- **`VariableType::Group` carries the repetition's lower bound**, and
+  `empty([T]ₙ)` is `empty(T) ∧ n > 0`. Without the index a `{0,m}`
+  repetition over an impossible inner was short-circuited to zero rows,
+  though zero laps is a match. The index is a *minimal* cardinality, so
+  the meet takes `max(n₁,n₂)` and subtyping requires `n₂ ≤ n₁`.
+- **`LabelType::meet` is plain `&`.** The clause `ℓ ⊓ ★ = ℓ` is what makes
+  the static gradual guarantee false; `★` is the unknown label, not a top.
+  Shortcutting on `is_subtype` is the same mistake, since that relation is
+  *consistent* subtyping (`A|B <: A` holds). `Top` keeps its clause, and
+  repeated conjuncts are deduplicated — idempotence is a genuine identity,
+  unlike the `★` clause. Diagnostics therefore print `(Person & *)` where
+  they used to print `Person`; assert on `required_labels()` or mutual
+  subtyping, not on the syntax.
+- **`e as τ` types as `τ ⊓ τ'`** rather than the target alone. Returning
+  the target let a value survive a cast to a type that rejects it.
+  `Expr::value_is_type` (the runtime cast) already walks a list
+  element-wise, which is what agrees with the meet.
+- **`refine` skips an empty contribution and `PathType::meet` normalises
+  through `⌊·⌋nf`**, so `is_empty` and `== Zero` coincide on every type
+  the system derives. Consistent subtyping is optimistic, so an entry can
+  pass the gate while its meet describes nothing.
+- **(Trep) is two judgments, not `Path^min(n,2)`.** A gate
+  `⨆_{k=min(n,2)}^{min(m,2)} Path^k` answers *can it match at all*, and
+  the endpoints come from the body (`fst`/`lst`/`⌢`) with no iteration, so
+  an unbounded upper bound is free. At `n = 0` the empty path is joined in
+  as a branch of its own; the old rule collapsed to it and forgot that the
+  repetition can traverse edges. `fst`/`lst` return **variable** types —
+  `⊔` is one operator and node types have neither a `⊥` nor a union.
+- **The (Trep) premise `n = 0 ∨ len(patts) > 0` reads the length off the
+  *pattern*** (`PathPattern::min_len`), not the path type, which is not
+  monotone in precision. Consequence: `(x){1,3}` is now a **type error**
+  rather than a warning, since a body that traverses no edge can never
+  complete a lap. `(x){0,3}` and `(x)?` stay fine.
+
+Known remaining divergence: the formal semantics requires each lap of a
+repetition to have positive length (`R n..m`'s `len(pathv₂) > 0`
+premise); froGQL's evaluator does not enforce it, so
+`compile_query_unchecked` on `(x){1,3}` still yields singleton groups.
+The typechecker rejects that pattern, so the gap is unreachable through
+the normal path. The unbounded-with-empty-inner error is a froGQL-specific
+termination guard, not a premise of the rule.
+
 ### Join strategy: Leapfrog Triejoin (LTJ)
 
 Primary strategy for joins and concatenations of directed/undirected edges. Worst-case-optimal multi-way join: each directed edge is a triple `(src, label, tgt)` indexed in six sorted orderings (`TripleIndex`: SPO, SOP, POS, PSO, OSP, OPS); LTJ binds variables one at a time by leapfrog-intersecting candidate lists across triples, no intermediate materialisation. CompactLTJ paper (Arroyuelo et al., VLDBJ 2025). Module structure: `runtime/ltj/{triple_index, compact, iterator, veo, algorithm, pattern_extract}.rs`. Full algorithm walkthrough, examples, and benchmark numbers in `docs/internals/JOIN_STRATEGY_NOTES.md`.

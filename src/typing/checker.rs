@@ -292,7 +292,7 @@ impl Typechecker {
         match e {
             Expr::Const(v) => const_order_type(v),
             Expr::Var(name) => match env.get(name) {
-                Some(VariableType::Group(_)) => SimpleType::Group(Box::new(SimpleType::Star)),
+                Some(VariableType::Group(..)) => SimpleType::Group(Box::new(SimpleType::Star)),
                 _ => self.check_expr(e, env),
             },
             _ => self.check_expr(e, env),
@@ -735,42 +735,13 @@ impl Typechecker {
 
             PathPattern::Repeat { pattern, lb, ub } => {
                 let r = self.check_path_pattern(pattern);
-                let raw_lb = *lb as u64;
-
-                let effective_lb = if !r.path.is_empty() {
-                    raw_lb.min(3)
-                } else if ub.is_none() {
-                    // An empty-matching inner under *unbounded* repetition is
-                    // non-terminating at runtime (every extra lap adds zero
-                    // length, so a SHORTEST-GROUPS / TRAIL search never fills
-                    // its budget). This must be a hard error, not a warning:
-                    // the runtime's finite-evaluation path relies on each
-                    // application contributing at least one edge.
-                    self.errors.push(
-                        "Unbounded repetition (`*`, `+`, `{n,}`) requires an inner pattern \
-                         of length > 0; an inner that can match the empty path makes the \
-                         repetition non-terminating."
-                            .to_string(),
-                    );
-                    raw_lb
-                } else {
-                    // Bounded repetition with an empty-matching inner is
-                    // degenerate but terminates, so it stays a warning.
-                    self.warnings
-                        .push("Repeat expression must have length > 0".to_string());
-                    raw_lb
-                };
-
-                TypecheckResult::new(self.pow_path_type(&r.path, effective_lb), r.env.to_group())
+                self.check_repetition(pattern, r, *lb as u64, ub.map(|u| u as u64))
             }
 
+            // `P?` is `P{0,1}`.
             PathPattern::Questioned(p) => {
                 let r = self.check_path_pattern(p);
-                if r.path.is_empty() {
-                    self.warnings
-                        .push("Repeat expression must have length > 0".to_string());
-                }
-                TypecheckResult::new(self.pow_path_type(&r.path, 0), r.env.to_group())
+                self.check_repetition(p, r, 0, Some(1))
             }
         }
     }
@@ -824,7 +795,14 @@ impl Typechecker {
                         return SimpleType::Zero;
                     }
                     let at = t.get_attribute(attr);
-                    if at.is_empty() {
+                    // A closed record that does not hold `attr` projects to
+                    // `Null`, not `⊥` — the value is definitely absent, and
+                    // absent reads as null. So the diagnostic keys off the
+                    // null rather than off emptiness: a typo still deserves
+                    // a warning, it just no longer empties the pattern.
+                    // `⊥` stays reportable too, for the record types that
+                    // really have no inhabitant.
+                    if at.is_empty() || at == SimpleType::Null {
                         self.warnings
                             .push(format!("Attribute {} not found in {}", attr, t));
                     }
@@ -869,9 +847,17 @@ impl Typechecker {
                             return SimpleType::B;
                         }
                     }
+                    // (Tas): `e as τ : τ ⊓ τ'`, with `τ'` the operand's
+                    // type. Returning the target alone lets a value survive
+                    // a cast to a type that rejects it — the nested cast
+                    // `(x.a as [int]) as [bool]` would report `[bool]`
+                    // where the meet says `[⊥]`, and nothing downstream
+                    // catches it. The runtime cast (`Expr::value_is_type`)
+                    // walks the value structurally and already agrees with
+                    // the meet; this is the static half.
                     BinOp::As => {
                         if let Expr::Type(t) = right.as_ref() {
-                            return t.clone();
+                            return SimpleType::meet(t, &t1);
                         }
                     }
                     _ => {}
@@ -1303,6 +1289,96 @@ impl Typechecker {
     }
 
     /// p^0 = identity (default node path), p^1 = p, p^n = meet(p, p^(n-1)).
+    /// (Trep). The premise, then the two judgments the repetition splits
+    /// into.
+    ///
+    /// The paper answers two questions with one type, `Path^min(n,2)`:
+    /// *can the repetition match at all?* and *where does it start and
+    /// end?* It has to be precise in the middle for the first and correct
+    /// at the ends for the second, and it fails at the second — at
+    /// `n = 0` it collapses to the empty path and forgets that the
+    /// repetition can traverse edges, so a matched path does not conform
+    /// to its own type.
+    ///
+    /// Splitting them makes the emptiness gate the only place an
+    /// iteration is computed, and the endpoints come from the body with
+    /// no iteration at all, so an unbounded upper bound costs nothing.
+    fn check_repetition(
+        &mut self,
+        pattern: &PathPattern,
+        r: TypecheckResult,
+        lb: u64,
+        ub: Option<u64>,
+    ) -> TypecheckResult {
+        // Premise: `n = 0 ∨ len(patts) > 0`, read off the *pattern*.
+        // A body that traverses no edge can never complete a lap, so with
+        // a positive lower bound no iteration count in range produces a
+        // result and the pattern returns nothing in every graph.
+        let body_len = pattern.min_len();
+        if lb > 0 && body_len == 0 {
+            self.errors.push(
+                "Repetition with a lower bound of 1 or more requires an inner pattern \
+                 that traverses at least one edge; an inner that matches only the empty \
+                 path can never complete a lap, so the repetition matches nothing in any \
+                 graph."
+                    .to_string(),
+            );
+        } else if ub.is_none() && body_len == 0 {
+            // Not a premise of the rule — a froGQL-specific guard. The
+            // formal semantics requires each lap to have positive length,
+            // which makes `(x)*` terminate with only the zero-lap result;
+            // froGQL's evaluator does not enforce that, so an unbounded
+            // repetition over an empty-matching inner would not terminate.
+            self.errors.push(
+                "Unbounded repetition (`*`, `+`, `{n,}`) requires an inner pattern \
+                 of length > 0; an inner that can match the empty path makes the \
+                 repetition non-terminating."
+                    .to_string(),
+            );
+        }
+
+        TypecheckResult::new(self.rep_path_type(&r.path, lb, ub), r.env.to_group(lb))
+    }
+
+    /// The gate `X = ⨆_{k=min(n,2)}^{min(m,2)} Path^k`. It answers only
+    /// *can the repetition match at all?*, so the bounds are clamped at 2:
+    /// one lap shows the body is inhabited, two show that laps compose.
+    /// Nothing above that changes the answer, which is why an unbounded
+    /// upper bound is free.
+    fn rep_gate(&self, p: &PathType, lb: u64, ub: Option<u64>) -> PathType {
+        let lo = lb.min(2);
+        let hi = ub.map(|u| u.min(2)).unwrap_or(2).max(lo);
+        (lo..=hi).fold(PathType::Zero, |acc, k| {
+            PathType::union(acc, self.pow_path_type(p, k))
+        })
+    }
+
+    /// The endpoints judgment: *where does the repetition start and end?*
+    /// Once the gate has said the repetition can match, the answer comes
+    /// straight from the body — first node, one edge, last node — with no
+    /// iteration at all.
+    fn rep_endpoints(&self, p: &PathType, lb: u64, ub: Option<u64>) -> PathType {
+        if ub == Some(0) {
+            return PathType::Zero;
+        }
+        if self.rep_gate(p, lb, ub).is_unsatisfiable() {
+            return PathType::Zero;
+        }
+        PathType::cons(PathType::from_variable(&p.first(), EdgeDir::Any), &p.last())
+    }
+
+    /// The path type (Trep) returns. At `n = 0` the empty path is a
+    /// branch of its own and has to be joined in: the repetition can take
+    /// zero laps *or* traverse the body.
+    fn rep_path_type(&self, p: &PathType, lb: u64, ub: Option<u64>) -> PathType {
+        let q = self.rep_endpoints(p, lb, ub);
+        if lb == 0 {
+            PathType::union(PathType::default(), q)
+        } else {
+            q
+        }
+    }
+
     fn pow_path_type(&self, p: &PathType, n: u64) -> PathType {
         match n {
             0 => PathType::default(),
@@ -1402,7 +1478,7 @@ fn variable_type_to_simple_type(t: &VariableType) -> SimpleType {
         // typing it as Star defers the runtime check (`Expr::Var` on
         // a Group produces a Failure → Null, which is acceptable for
         // expressions but not yet for projection).
-        VariableType::Group(_) => SimpleType::Star,
+        VariableType::Group(..) => SimpleType::Star,
     }
 }
 
@@ -1536,7 +1612,7 @@ fn short_var_type(t: &VariableType) -> String {
         VariableType::EdgeDirectional { desc, .. } => format!("-[:{}]->", desc.label),
         VariableType::EdgeNonDirectional { desc, .. } => format!("~[:{}]~", desc.label),
         VariableType::Union(a, b) => format!("{} or {}", short_var_type(a), short_var_type(b)),
-        VariableType::Group(inner) => format!("group<{}>", short_var_type(inner)),
+        VariableType::Group(inner, _) => format!("group<{}>", short_var_type(inner)),
         VariableType::Null => "Null".to_string(),
         VariableType::Path => "path".to_string(),
         VariableType::Scalar(t) => t.to_string(),

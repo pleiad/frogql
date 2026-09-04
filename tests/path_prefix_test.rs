@@ -580,10 +580,15 @@ fn edge_inner_under_unbounded_is_accepted() {
 }
 
 #[test]
-fn bounded_zero_length_inner_still_compiles() {
-    // Bounded repetition with an empty-matching inner is degenerate but
-    // terminates, so it stays a warning (compiles successfully).
-    assert!(compile_query("MATCH (x){1,3} RETURN x").is_ok());
+fn zero_length_inner_needs_a_zero_lower_bound() {
+    // A body that traverses no edge cannot complete a lap. With a
+    // positive lower bound there is no iteration count that produces a
+    // result, so the pattern matches nothing in any graph and (Trep)'s
+    // premise `n = 0 ∨ len(patts) > 0` rejects it. At `n = 0` the empty
+    // path is a branch of its own and the pattern is perfectly typeable,
+    // which is what the guard protects.
+    assert!(compile_query("MATCH (x){1,3} RETURN x").is_err());
+    assert!(compile_query("MATCH (x){0,3} RETURN x").is_ok());
     assert!(compile_query("MATCH (x)? RETURN x").is_ok());
 }
 

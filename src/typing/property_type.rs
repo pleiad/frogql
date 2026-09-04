@@ -36,10 +36,23 @@ impl PropertyType {
     }
 
     /// Get the type of an attribute.
+    ///
+    /// A **closed** record that does not mention `attr` says the element
+    /// definitely has no such property, so the projection is definitely
+    /// *null* — not an error. The filler is `Null`, not `Zero`: with `Zero`
+    /// the join in `VariableType::get_attribute` swallows exactly the
+    /// summand that had to carry the null, so a union over one branch that
+    /// has the key and one that does not reports the bare value type while
+    /// the runtime hands back NULL. `empty(·)` would also report as
+    /// unsatisfiable a projection that merely evaluates to null.
+    ///
+    /// An **open** record admits the key and merely does not know its type,
+    /// hence `Star`. `Zero` (the bottom property type) has no inhabitants at
+    /// all, so every projection through it stays `Zero`.
     pub fn get(&self, attr: &str) -> SimpleType {
         match self {
             PropertyType::Open(m) => m.get(attr).cloned().unwrap_or(SimpleType::Star),
-            PropertyType::Closed(m) => m.get(attr).cloned().unwrap_or(SimpleType::Zero),
+            PropertyType::Closed(m) => m.get(attr).cloned().unwrap_or(SimpleType::Null),
             PropertyType::Zero => SimpleType::Zero,
         }
     }
