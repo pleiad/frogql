@@ -33,10 +33,7 @@ fn run_projected(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
 fn parser_coalesce_two_args_produces_coalesce_expr() {
     let q = compile_query_unchecked("MATCH (x) RETURN COALESCE(x.email, x.name)").unwrap();
     let items = q.returns.unwrap();
-    let expr = match &items[0] {
-        frogql::syntax::query::ReturnItem::Expr { expr, .. } => expr,
-        _ => panic!("expected Expr return item"),
-    };
+    let frogql::syntax::query::ReturnItem::Expr { expr, .. } = &items[0];
     match expr {
         Expr::Coalesce(args) => assert_eq!(args.len(), 2),
         other => panic!("expected Expr::Coalesce, got {other:?}"),

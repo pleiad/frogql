@@ -45,12 +45,12 @@ pub fn elaborate_query(q: Query) -> Query {
     let returns = q.returns.map(|items| {
         items
             .into_iter()
-            .map(|it| match it {
-                ReturnItem::Expr { expr, alias } => ReturnItem::Expr {
+            .map(|it| {
+                let ReturnItem::Expr { expr, alias } = it;
+                ReturnItem::Expr {
                     expr: elaborate_expr(expr),
                     alias,
-                },
-                other => other,
+                }
             })
             .collect()
     });
@@ -117,10 +117,17 @@ fn resolve_group_key(
             return g;
         }
         if let Some(items) = returns {
-            if let Some(ReturnItem::Expr { expr, .. }) =
-                items.iter().find(|it| it.alias() == Some(name.as_str()))
-            {
-                return expr.clone();
+            // An alias naming an aggregate is not a grouping key: the
+            // aggregate is computed *over* the groups, so it cannot define
+            // them. Leaving the name unresolved is what surfaces it as an
+            // error. (This used to fall out of aggregates being a separate
+            // `ReturnItem` variant that this lookup silently skipped; it is
+            // stated outright now that they are ordinary expressions.)
+            if let Some(item) = items.iter().find(|it| it.alias() == Some(name.as_str())) {
+                if !item.is_aggregate() {
+                    let ReturnItem::Expr { expr, .. } = item;
+                    return expr.clone();
+                }
             }
         }
         return g;

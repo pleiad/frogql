@@ -194,8 +194,6 @@ fn fold_runs_on_return_expression() {
     )
     .expect("compile failed");
     let returns = q.returns.expect("returns must be present");
-    let ReturnItem::Expr { expr, .. } = &returns[0] else {
-        panic!("expected expr return item, got {:?}", returns[0]);
-    };
+    let ReturnItem::Expr { expr, .. } = &returns[0];
     assert_eq!(*expr, Expr::Const(Value::Bool(false)));
 }

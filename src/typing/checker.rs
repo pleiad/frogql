@@ -212,12 +212,12 @@ impl Typechecker {
         for spec in specs {
             let t = match &spec.key {
                 SortKey::Expr(e) => self.order_key_type(e, env),
+                // An aggregate column types as its reducer's result (via
+                // `check_expr`'s `Expr::Agg` arm), so a non-orderable result
+                // (COLLECT_LIST -> List) is rejected below instead of being
+                // laundered through Star, which is reserved for base types.
                 SortKey::Column(idx) => match returns.and_then(|rs| rs.get(*idx)) {
                     Some(ReturnItem::Expr { expr, .. }) => self.order_key_type(expr, env),
-                    // Type the aggregate by its result type so a non-orderable
-                    // result (e.g. COLLECT_LIST -> List) is rejected below instead
-                    // of being laundered through Star (reserved for base types).
-                    Some(ReturnItem::Aggregate { agg, .. }) => self.check_aggregator(agg, env),
                     None => {
                         self.errors.push(format!(
                             "ORDER BY column reference #{idx} is out of bounds for the \
@@ -242,7 +242,6 @@ impl Typechecker {
                     // Type the projected column, then walk the record path.
                     let mut t = match returns.and_then(|rs| rs.get(*col)) {
                         Some(ReturnItem::Expr { expr, .. }) => self.order_key_type(expr, env),
-                        Some(ReturnItem::Aggregate { agg, .. }) => self.check_aggregator(agg, env),
                         None => {
                             self.errors.push(format!(
                                 "ORDER BY column reference #{col} is out of bounds for the \
@@ -495,18 +494,14 @@ impl Typechecker {
     /// agree, or the typechecker demands a GROUP BY the runtime then has no
     /// rows to collapse with.
     fn item_has_row_aggregate(&self, item: &ReturnItem) -> bool {
-        match item {
-            ReturnItem::Aggregate { agg, .. } => !self.agg_is_elementwise(agg),
-            ReturnItem::Expr { expr, .. } => {
-                let mut found = false;
-                expr.walk_aggs(&mut |agg| {
-                    if !self.agg_is_elementwise(agg) {
-                        found = true;
-                    }
-                });
-                found
+        let ReturnItem::Expr { expr, .. } = item;
+        let mut found = false;
+        expr.walk_aggs(&mut |agg| {
+            if !self.agg_is_elementwise(agg) {
+                found = true;
             }
-        }
+        });
+        found
     }
 
     fn agg_is_elementwise(&self, agg: &Aggregator) -> bool {
@@ -551,27 +546,26 @@ impl Typechecker {
             })
             .collect();
         for item in items {
-            if let ReturnItem::Expr { expr, .. } = item {
-                // Reduced over the group (`COUNT(x)+COUNT(y)`) or evaluated
-                // on the representative row (`VALUE { ... }`, `EXISTS { ... }`)
-                // — neither needs to be a grouping key.
-                if expr.contains_agg() || expr.contains_subquery() {
-                    continue;
-                }
-                if group_by.iter().any(|g| g == expr) {
-                    continue;
-                }
-                let mut refs = std::collections::BTreeSet::new();
-                expr.referenced_vars(&mut refs);
-                if !refs.is_empty() && refs.iter().all(|v| grouped_node_vars.contains(v)) {
-                    continue;
-                }
-                self.errors.push(format!(
-                    "RETURN item `{expr}` is not functionally determined by the GROUP BY \
-                     keys; a non-aggregate projection must match a grouping key or depend \
-                     only on grouped binding variables."
-                ));
+            let ReturnItem::Expr { expr, .. } = item;
+            // Reduced over the group (a bare `SUM(x)`, or `COUNT(x)+COUNT(y)`)
+            // or evaluated on the representative row (`VALUE { ... }`,
+            // `EXISTS { ... }`) — neither needs to be a grouping key.
+            if expr.contains_agg() || expr.contains_subquery() {
+                continue;
             }
+            if group_by.iter().any(|g| g == expr) {
+                continue;
+            }
+            let mut refs = std::collections::BTreeSet::new();
+            expr.referenced_vars(&mut refs);
+            if !refs.is_empty() && refs.iter().all(|v| grouped_node_vars.contains(v)) {
+                continue;
+            }
+            self.errors.push(format!(
+                "RETURN item `{expr}` is not functionally determined by the GROUP BY \
+                 keys; a non-aggregate projection must match a grouping key or depend \
+                 only on grouped binding variables."
+            ));
         }
     }
 
@@ -579,14 +573,8 @@ impl Typechecker {
     /// discarded — only errors/warnings (e.g. unbound vars) are collected.
     fn check_returns(&mut self, items: &[ReturnItem], env: &TypeEnvironment) {
         for item in items {
-            match item {
-                ReturnItem::Expr { expr, .. } => {
-                    let _ = self.check_expr(expr, env);
-                }
-                ReturnItem::Aggregate { agg, .. } => {
-                    let _ = self.check_aggregator(agg, env);
-                }
-            }
+            let ReturnItem::Expr { expr, .. } = item;
+            let _ = self.check_expr(expr, env);
         }
     }
 
@@ -1127,7 +1115,6 @@ impl Typechecker {
                 let r = self.check_subquery_body(body, env);
                 match body.returns.as_deref().and_then(|items| items.first()) {
                     Some(ReturnItem::Expr { expr, .. }) => self.check_expr(expr, &r.env),
-                    Some(ReturnItem::Aggregate { agg, .. }) => self.check_aggregator(agg, &r.env),
                     None => {
                         self.errors
                             .push("VALUE subquery has no RETURN item".to_string());

@@ -1402,22 +1402,17 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// Evaluate an `Expr`-shaped return item; aggregates require the
     /// group-and-aggregate path and would be a runtime bug here.
     fn eval_expr_item(&self, item: &ReturnItem, mu: &Assignment) -> Value {
-        match item {
-            ReturnItem::Expr { expr, .. } => match self.run_expr(mu, expr) {
-                ExprResult::Success(v) => v,
-                ExprResult::Failure(_) => Value::Null,
-            },
-            // An element-wise aggregate is a per-row expression (§22.7), so
-            // it is projected here rather than by `run_aggregated`.
-            ReturnItem::Aggregate { agg, .. } if self.agg_is_elementwise(agg) => {
-                match self.apply_aggregator_elementwise(agg, mu) {
-                    ExprResult::Success(v) => v,
-                    ExprResult::Failure(_) => Value::Null,
-                }
-            }
-            ReturnItem::Aggregate { .. } => {
-                unreachable!("row aggregates must be projected via run_aggregated")
-            }
+        let ReturnItem::Expr { expr, .. } = item;
+        debug_assert!(
+            !self.expr_has_row_aggregate(expr),
+            "row aggregates must be projected via run_aggregated"
+        );
+        // An element-wise aggregate (§22.7) is a per-row expression, and
+        // `run_expr` reduces it within the match — so a bare one is
+        // projected here, exactly like the same aggregate inside arithmetic.
+        match self.run_expr(mu, expr) {
+            ExprResult::Success(v) => v,
+            ExprResult::Failure(_) => Value::Null,
         }
     }
 
@@ -1470,42 +1465,25 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         for row_idxs in &group_indices {
             let row_vals: Vec<Value> = items
                 .iter()
-                .map(|item| match item {
-                    // An expression carrying aggregates (`COUNT(x)+COUNT(y)`)
-                    // is reduced over the group; a plain key expression is
-                    // evaluated on the group's representative row.
-                    ReturnItem::Expr { expr, .. } if expr.contains_agg() => {
-                        self.eval_grouped_expr(expr, row_idxs, rows)
+                .map(|item| {
+                    let ReturnItem::Expr { expr, .. } = item;
+                    // An expression carrying a *row* aggregate
+                    // (`COUNT(x)+COUNT(y)`, or a bare `COUNT(x)`) is reduced
+                    // over the group. Everything else — a plain key
+                    // expression, and an aggregate over a group variable,
+                    // which reduces within one match (§22.7) — is a per-row
+                    // value read off the group's representative row.
+                    if expr.contains_agg() {
+                        return self.eval_grouped_expr(expr, row_idxs, rows);
                     }
-                    ReturnItem::Expr { expr, .. } => {
-                        let mu = match row_idxs.first() {
-                            Some(&i) => &rows[i].assignment,
-                            None => return Value::Null,
-                        };
-                        match self.run_expr(mu, expr) {
-                            ExprResult::Success(v) => v,
-                            ExprResult::Failure(_) => Value::Null,
-                        }
+                    let mu = match row_idxs.first() {
+                        Some(&i) => &rows[i].assignment,
+                        None => return Value::Null,
+                    };
+                    match self.run_expr(mu, expr) {
+                        ExprResult::Success(v) => v,
+                        ExprResult::Failure(_) => Value::Null,
                     }
-                    // An aggregate over a group variable reduces within one
-                    // match (§22.7), so it is a per-row value like any other
-                    // key expression — evaluated on the group's
-                    // representative row, which is what the sibling
-                    // `ReturnItem::Expr` arm above already does for the same
-                    // aggregate wrapped in arithmetic. Reducing it across the
-                    // group instead fed a list to a scalar reducer and
-                    // produced a silent NULL.
-                    ReturnItem::Aggregate { agg, .. } if self.agg_is_elementwise(agg) => {
-                        let mu = match row_idxs.first() {
-                            Some(&i) => &rows[i].assignment,
-                            None => return Value::Null,
-                        };
-                        match self.apply_aggregator_elementwise(agg, mu) {
-                            ExprResult::Success(v) => v,
-                            ExprResult::Failure(_) => Value::Null,
-                        }
-                    }
-                    ReturnItem::Aggregate { agg, .. } => self.apply_aggregator(agg, row_idxs, rows),
                 })
                 .collect();
             out.push(row_vals);
@@ -1655,10 +1633,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// element-wise aggregate does not: it is a per-row expression, so a
     /// projection made only of those keeps one row per match.
     fn item_has_row_aggregate(&self, item: &ReturnItem) -> bool {
-        match item {
-            ReturnItem::Aggregate { agg, .. } => !self.agg_is_elementwise(agg),
-            ReturnItem::Expr { expr, .. } => self.expr_has_row_aggregate(expr),
-        }
+        let ReturnItem::Expr { expr, .. } = item;
+        self.expr_has_row_aggregate(expr)
     }
 
     fn expr_has_row_aggregate(&self, expr: &Expr) -> bool {
@@ -4135,10 +4111,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             return None;
         }
         let items = body.returns.as_deref().unwrap_or(&[]);
-        if items.iter().any(|it| match it {
-            ReturnItem::Aggregate { .. } => true,
-            ReturnItem::Expr { expr, .. } => expr.contains_agg(),
-        }) {
+        if items.iter().any(|it| it.is_aggregate()) {
             return None;
         }
         let mut pins: Vec<(&str, u32)> = Vec::with_capacity(keys.len());
@@ -4191,11 +4164,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         self.correlation_scope.borrow_mut().pop();
 
         let items = body.returns.as_deref().unwrap_or(&[]);
-        let needs_grouping = body.group_by.is_some()
-            || items.iter().any(|it| match it {
-                ReturnItem::Aggregate { .. } => true,
-                ReturnItem::Expr { expr, .. } => expr.contains_agg(),
-            });
+        let needs_grouping = body.group_by.is_some() || items.iter().any(|it| it.is_aggregate());
         let mut projected = if needs_grouping {
             self.run_aggregated(items, body.group_by.as_deref(), &ir.rows)
         } else {
@@ -4732,9 +4701,8 @@ fn query_referenced_expr_vars(q: &Query) -> HashSet<String> {
     }
     if let Some(items) = &q.returns {
         for it in items {
-            if let ReturnItem::Expr { expr, .. } = it {
-                expr.referenced_vars(&mut acc);
-            }
+            let ReturnItem::Expr { expr, .. } = it;
+            expr.referenced_vars(&mut acc);
         }
     }
     if let Some(gb) = &q.group_by {

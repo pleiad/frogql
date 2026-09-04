@@ -813,14 +813,19 @@ fn test_multi_match_compiles_end_to_end() {
 // Aggregate functions (ISO 39075 §20.9)
 // =======================================================================
 
-/// Helper: parse a query and return the single aggregate item it produces.
+/// Helper: parse a query and return the single aggregate it projects. A
+/// bare aggregate is an ordinary expression — a lone `Expr::Agg` — not a
+/// `ReturnItem` variant of its own.
 fn single_agg(q: &str) -> Aggregator {
     let parsed = frogql::compile_query(q).unwrap();
     let returns = parsed.returns.expect("expected RETURN clause");
     assert_eq!(returns.len(), 1, "expected exactly one return item");
     match returns.into_iter().next().unwrap() {
-        ReturnItem::Aggregate { agg, .. } => agg,
-        other => panic!("expected Aggregate item, got {other:?}"),
+        ReturnItem::Expr {
+            expr: Expr::Agg(agg),
+            ..
+        } => *agg,
+        other => panic!("expected a bare aggregate item, got {other:?}"),
     }
 }
 
@@ -902,11 +907,14 @@ fn test_parse_aggregate_with_alias() {
     let returns = parsed.returns.unwrap();
     assert_eq!(returns.len(), 1);
     match &returns[0] {
-        ReturnItem::Aggregate { agg, alias } => {
-            assert_eq!(*agg, Aggregator::CountStar);
+        ReturnItem::Expr {
+            expr: Expr::Agg(agg),
+            alias,
+        } => {
+            assert_eq!(**agg, Aggregator::CountStar);
             assert_eq!(alias.as_deref(), Some("total"));
         }
-        other => panic!("expected Aggregate, got {other:?}"),
+        other => panic!("expected a bare aggregate, got {other:?}"),
     }
 }
 
@@ -920,8 +928,16 @@ fn test_parse_mixed_aggregate_and_expr() {
     let parsed = frogql::compile_query_unchecked("MATCH (x) RETURN x.country, COUNT(*)").unwrap();
     let returns = parsed.returns.unwrap();
     assert_eq!(returns.len(), 2);
-    assert!(matches!(returns[0], ReturnItem::Expr { .. }));
-    assert!(matches!(returns[1], ReturnItem::Aggregate { .. }));
+    // Both are `ReturnItem::Expr`; what distinguishes them is the shape of
+    // the expression each carries.
+    assert!(!returns[0].is_aggregate());
+    assert!(matches!(
+        returns[1],
+        ReturnItem::Expr {
+            expr: Expr::Agg(_),
+            ..
+        }
+    ));
 }
 
 #[test]

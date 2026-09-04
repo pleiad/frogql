@@ -92,34 +92,38 @@ pub enum Aggregator {
     },
 }
 
+/// One projected column. Aggregates are ordinary expressions
+/// (`Expr::Agg`), not a variant of their own: `SUM(x)` and `SUM(x) + 0`
+/// differ only in the shape of the expression they carry, which is a
+/// distinction no consumer needs. A separate `Aggregate` variant existed
+/// while aggregates lived outside the expression grammar; every site that
+/// received it immediately re-unified the two (`is_aggregate()` below is
+/// what is left of that), and keeping the two arms in step is what #95
+/// failed at.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReturnItem {
-    Expr {
-        expr: Expr,
-        alias: Option<String>,
-    },
-    Aggregate {
-        agg: Aggregator,
-        alias: Option<String>,
-    },
+    Expr { expr: Expr, alias: Option<String> },
 }
 
 impl ReturnItem {
     pub fn alias(&self) -> Option<&str> {
         match self {
-            ReturnItem::Expr { alias, .. } | ReturnItem::Aggregate { alias, .. } => {
-                alias.as_deref()
-            }
+            ReturnItem::Expr { alias, .. } => alias.as_deref(),
         }
     }
 
-    /// True when this item is reduced over a group: either a bare
-    /// aggregate (`ReturnItem::Aggregate`) or an expression carrying an
-    /// aggregate somewhere in its tree (`COUNT(x) + COUNT(y)`). Such
-    /// items are projected per-group, not used as grouping keys.
+    /// True when this item is reduced over a group — it carries an
+    /// aggregate anywhere in its tree, whether bare (`SUM(x)`) or inside
+    /// arithmetic (`COUNT(x) + COUNT(y)`). Such items are projected
+    /// per-group, not used as grouping keys.
+    ///
+    /// Note this asks the *coarse* question. Whether an aggregate actually
+    /// collapses rows depends on its argument: one over a group variable
+    /// reduces within a single match (§22.7) and keeps one row per match.
+    /// Sites that decide row arity must use the runtime's / typechecker's
+    /// `item_has_row_aggregate` instead.
     pub fn is_aggregate(&self) -> bool {
         match self {
-            ReturnItem::Aggregate { .. } => true,
             ReturnItem::Expr { expr, .. } => expr.contains_agg(),
         }
     }
@@ -364,12 +368,6 @@ impl fmt::Display for ReturnItem {
         match self {
             ReturnItem::Expr { expr, alias } => {
                 write!(f, "{expr}")?;
-                if let Some(a) = alias {
-                    write!(f, " AS {a}")?;
-                }
-            }
-            ReturnItem::Aggregate { agg, alias } => {
-                write!(f, "{agg}")?;
                 if let Some(a) = alias {
                     write!(f, " AS {a}")?;
                 }

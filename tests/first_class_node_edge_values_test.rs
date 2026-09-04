@@ -49,10 +49,7 @@ fn run_projected(g: &MemoryGraphStore, q: &str) -> Vec<Vec<Value>> {
 fn parser_bare_name_in_return_produces_expr_var() {
     let q = compile_query_unchecked("MATCH (n) RETURN n").unwrap();
     let items = q.returns.unwrap();
-    let expr = match &items[0] {
-        frogql::syntax::query::ReturnItem::Expr { expr, .. } => expr,
-        _ => panic!("expected Expr return item"),
-    };
+    let frogql::syntax::query::ReturnItem::Expr { expr, .. } = &items[0];
     assert!(matches!(expr, Expr::Var(name) if name == "n"));
 }
 
@@ -68,10 +65,7 @@ fn parser_bare_name_in_where_produces_expr_var() {
 fn parser_bare_name_followed_by_dot_still_attr_lookup() {
     let q = compile_query_unchecked("MATCH (n) RETURN n.name").unwrap();
     let items = q.returns.unwrap();
-    let expr = match &items[0] {
-        frogql::syntax::query::ReturnItem::Expr { expr, .. } => expr,
-        _ => panic!("expected Expr return item"),
-    };
+    let frogql::syntax::query::ReturnItem::Expr { expr, .. } = &items[0];
     assert!(matches!(expr, Expr::AttrLookup { .. }));
 }
 
@@ -375,10 +369,7 @@ fn return_bare_var_keeps_var_in_ast_for_implicit_alias() {
     let q = compile_query_unchecked("MATCH (n) RETURN n").unwrap();
     let items = q.returns.unwrap();
     assert_eq!(items.len(), 1);
-    if let frogql::syntax::query::ReturnItem::Expr { expr, alias } = &items[0] {
-        assert!(matches!(expr, Expr::Var(name) if name == "n"));
-        assert!(alias.is_none(), "implicit alias is applied at projection");
-    } else {
-        panic!("expected Expr return item");
-    }
+    let frogql::syntax::query::ReturnItem::Expr { expr, alias } = &items[0];
+    assert!(matches!(expr, Expr::Var(name) if name == "n"));
+    assert!(alias.is_none(), "implicit alias is applied at projection");
 }

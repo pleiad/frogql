@@ -285,9 +285,10 @@ fn test_elementwise_aggregate_beside_another_item_needs_no_group_by() {
 
 #[test]
 fn test_elementwise_aggregate_does_not_depend_on_arithmetic_around_it() {
-    // `SUM(x.p)` parses to `ReturnItem::Aggregate`; `SUM(x.p) + 0` parses to
-    // a `ReturnItem::Expr` holding `Expr::Agg`. The two paths must agree —
-    // they differed by `NULL` vs `3`, decided by nothing but the `+ 0`.
+    // These once took different projection paths — `SUM(x.p)` parsed to a
+    // `ReturnItem::Aggregate` variant, `SUM(x.p) + 0` to a `ReturnItem::Expr`
+    // — and answered `NULL` vs `3`, decided by nothing but the `+ 0`. Both
+    // are plain expressions now, but the equality is worth keeping pinned.
     let g = chain();
     let bare = run(
         &g,

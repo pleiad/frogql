@@ -19,7 +19,7 @@
 use crate::model::value::Value;
 use crate::syntax::expr::Expr;
 use crate::syntax::path_pattern::PathPattern;
-use crate::syntax::query::{Aggregator, MatchStatement, Query, ReturnItem};
+use crate::syntax::query::{MatchStatement, Query, ReturnItem};
 use crate::typing::checker::Typechecker;
 use crate::typing::variable_type::Schema;
 
@@ -45,13 +45,10 @@ pub fn fold_empty_existentials(q: &mut Query, schema: &Schema) {
     }
     if let Some(returns) = &mut q.returns {
         for item in returns {
-            match item {
-                ReturnItem::Expr { expr, .. } => fold_in_expr(expr, schema),
-                ReturnItem::Aggregate { agg, .. } => match agg {
-                    Aggregator::CountStar => {}
-                    Aggregator::GeneralSet { expr, .. } => fold_in_expr(expr, schema),
-                },
-            }
+            // `fold_in_expr` descends into `Expr::Agg`'s argument itself,
+            // so a bare aggregate needs no arm of its own.
+            let ReturnItem::Expr { expr, .. } = item;
+            fold_in_expr(expr, schema);
         }
     }
 }

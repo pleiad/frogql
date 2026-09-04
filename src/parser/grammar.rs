@@ -454,9 +454,13 @@ impl Parser {
         if returns.is_some() && self.peek_aggregate_kind().is_some() {
             let agg = self.aggregate_function()?;
             if let Some(items) = returns {
+                // A sort key written as the aggregate itself resolves to the
+                // column projecting that same aggregate — bare, so the whole
+                // RETURN expression is the aggregate.
                 for (idx, item) in items.iter().enumerate() {
-                    if let ReturnItem::Aggregate { agg: ret_agg, .. } = item {
-                        if *ret_agg == agg {
+                    let ReturnItem::Expr { expr, .. } = item;
+                    if let Expr::Agg(ret_agg) = expr {
+                        if **ret_agg == agg {
                             return Ok(SortKey::Column(idx));
                         }
                     }
@@ -475,10 +479,9 @@ impl Parser {
             }
             if items.iter().any(|it| it.is_aggregate()) {
                 for (idx, item) in items.iter().enumerate() {
-                    if let ReturnItem::Expr { expr: ret_expr, .. } = item {
-                        if *ret_expr == expr {
-                            return Ok(SortKey::Column(idx));
-                        }
+                    let ReturnItem::Expr { expr: ret_expr, .. } = item;
+                    if *ret_expr == expr {
+                        return Ok(SortKey::Column(idx));
                     }
                 }
             }
@@ -677,18 +680,15 @@ impl Parser {
 
     // return_item = expr alias?
     //
-    // Aggregates are parsed as part of the expression grammar (see
-    // `primary_expr`), so `COUNT(x) + COUNT(y)` lands here as a
-    // `Binop` over two `Expr::Agg` operands. A *bare* top-level
-    // aggregate is re-folded into `ReturnItem::Aggregate` so the
-    // existing aggregate-projection and ORDER BY-matching paths stay
-    // unchanged.
+    // Aggregates are part of the expression grammar (see `primary_expr`),
+    // so `COUNT(x) + COUNT(y)` lands here as a `Binop` over two `Expr::Agg`
+    // operands and a bare `COUNT(x)` as a lone `Expr::Agg`. Both stay
+    // expressions: the difference is not one any consumer needs, and the
+    // bare form used to get re-folded into a variant of its own that every
+    // site then had to re-unify.
     fn return_item(&mut self) -> Result<ReturnItem, String> {
         let expr = self.return_expr()?;
         let alias = self.maybe_alias();
-        if let Expr::Agg(agg) = expr {
-            return Ok(ReturnItem::Aggregate { agg: *agg, alias });
-        }
         Ok(ReturnItem::Expr { expr, alias })
     }
 
@@ -1757,8 +1757,7 @@ impl Parser {
     fn primary_expr(&mut self) -> Result<Expr, String> {
         // An aggregate call (`COUNT(...)`, `SUM(...)`, ...) is a primary so
         // it can be an operand of arithmetic: `COUNT(x) + COUNT(y)`. A bare
-        // top-level aggregate in RETURN is re-folded into a
-        // `ReturnItem::Aggregate` by `return_item` for backward compat.
+        // one in RETURN stays exactly this — a lone `Expr::Agg`.
         if self.peek_aggregate_kind().is_some() {
             let agg = self.aggregate_function()?;
             return Ok(Expr::Agg(Box::new(agg)));
