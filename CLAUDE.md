@@ -148,8 +148,8 @@ Dev: `proptest` (used by `aggregates_proptest`, `lattice_proptest`, `multi_match
 One git tag fires all four registries (crates.io crate, PyPI wheel, native npm, browser WASM npm) plus the standalone CLI binaries. Pushing `v*` triggers:
 - `.github/workflows/release.yml` → **owned by [`dist`](https://axodotdev.github.io/cargo-dist) (cargo-dist); do not hand-edit.** Builds the `frogql` CLI for five targets on native runners (`macos-14`, `macos-15-intel`, `ubuntu-22.04`, `ubuntu-22.04-arm`, `windows-2022` — no cross-compilation), packages `.tar.xz` / `.zip` archives, emits `frogql-installer.sh` + `frogql-installer.ps1`, and creates the GitHub Release every other artifact hangs off. Config lives in `dist-workspace.toml` (workspace-level: targets, installers, `install-path = "~/.local/bin"`) and `[package.metadata.dist]` in the root `Cargo.toml` (package-level: `default-features = false`, `features = ["repl"]`, and `binaries."*" = ["frogql"]` so the bench/dev bins stay out of the archives). Turning off `bench` here is load-bearing for the same reason the Python crate does it — it pulls `ureq → ring`. Regenerate with `dist init` (bumps `cargo-dist-version` and rewrites the workflow) after editing either config; `dist plan` reports drift, `dist build` builds the host target locally.
 - `.github/workflows/release-pypi.yml` → builds wheels (Linux x86_64+aarch64, macOS x86_64+arm64, Windows x86_64; manylinux2014, abi3-py38) + sdist, uploads via `MATURIN_PYPI_TOKEN`, runs in the `pypi` GitHub Environment for required-reviewers gating. **Also** carries the `crates-io` job: publishes the root library crate (`frogql` on crates.io) via `cargo publish --locked` with `CARGO_REGISTRY_TOKEN`, runs in the `crates-io` GitHub Environment, idempotent (skips if the version is already on crates.io). The crate ships only the library half via the `include` whitelist in the root `Cargo.toml` (no `examples/*.gdb`, `tests/`, or `bench/` — those blow past crates.io's 10 MiB compressed limit).
-- `.github/workflows/release-npm.yml` → 5-target build matrix (mac arm64 native, mac x64 cross-compiled from arm64, linux x64 native, linux arm64 via zig, windows x64 native), publishes the host `frogql` package plus the 5 platform sub-packages via `NPM_TOKEN`, runs in the `npm` GitHub Environment. Pre-release versions (any with a `-` like `0.2.0-rc.3`) land on dist-tag `next`; clean `v0.2.0` lands on `latest`.
-- `.github/workflows/release-wasm.yml` → single platform-independent build (`wasm-pack build wasm --target web`), publishes the **`frogql-wasm`** npm package (unscoped, consumed as `import init, { open_json } from "frogql-wasm"`). Reuses the `npm` Environment + `NPM_TOKEN`. WebAssembly is portable, so there's no build matrix. Same dist-tag logic and idempotent skip-if-exists as the napi job. The `web` target (not `bundler`) is deliberate: it needs no `vite-plugin-wasm` in the consumer.
+- `.github/workflows/release-npm.yml` → 5-target build matrix (mac arm64 native, mac x64 cross-compiled from arm64, linux x64 native, linux arm64 via zig, windows x64 native), publishes the host `frogql` package plus the 5 platform sub-packages via **trusted publishing** (see below), runs in the `npm` GitHub Environment. Pre-release versions (any with a `-` like `0.2.0-rc.3`) land on dist-tag `next`; clean `v0.2.0` lands on `latest`.
+- `.github/workflows/release-wasm.yml` → single platform-independent build (`wasm-pack build wasm --target web`), publishes the **`frogql-wasm`** npm package (unscoped, consumed as `import init, { open_json } from "frogql-wasm"`). Reuses the `npm` Environment and the same trusted-publishing setup. WebAssembly is portable, so there's no build matrix. Same dist-tag logic and idempotent skip-if-exists as the napi job. The `web` target (not `bundler`) is deliberate: it needs no `vite-plugin-wasm` in the consumer.
 
 Cut a release by bumping **six files** in lock-step plus regenerating `Cargo.lock` (auto on any `cargo build`):
 - `Cargo.toml` (root crate, semver — this is the version `cargo publish` ships to crates.io; the source of truth)
@@ -160,6 +160,40 @@ Cut a release by bumping **six files** in lock-step plus regenerating `Cargo.loc
 - `wasm/Cargo.toml` (semver; the published `frogql-wasm` version is derived from it by wasm-pack)
 
 Then `git tag vX.Y.Z && git push origin vX.Y.Z`. All four registries reject re-publishing, so always bump. The npm release also requires `node/index.js` + `node/index.d.ts` to be committed at the tagged SHA; regenerate them with `npm run build` inside `node/` whenever the API surface changes and commit the diff.
+
+**npm auth is trusted publishing (OIDC), not a token.** All seven npm
+packages have a trusted publisher configured on npmjs.com, each pinned to
+three things: the repo `pleiad/frogql`, the **workflow filename**
+(`release-npm.yml` for the six native packages, `release-wasm.yml` for
+`frogql-wasm`), and the GitHub Environment `npm`. At publish time the npm
+CLI trades the job's OIDC identity for a short-lived, package-scoped
+token, so there is no `NPM_TOKEN` secret in either workflow.
+
+What breaks it, all of it silently until a release runs:
+- **Renaming either workflow file.** The publisher is keyed on the
+  filename. The config is immutable on npm's side, so recovery is delete
+  and recreate, once per package.
+- **Dropping `environment: npm` from the publish job, or `id-token:
+  write` from the workflow permissions.** Both are part of the identity
+  the publisher matches.
+- **Pinning npm below 11.5.1.** OIDC publishing landed there, and Node 20
+  ships npm 10 — `check-latest: true` tracks the latest Node 20.x, not a
+  newer npm, so each publish job runs `npm install -g npm@latest` first.
+  Without it npm falls back to looking for a token and fails **E404**,
+  which reads as a permissions problem rather than a too-old client.
+- **A new platform sub-package.** It needs its own trusted publisher
+  before its first publish, with **Allow `npm publish`** ticked: the
+  workflows run `npm publish`, and the default grant only covers
+  `npm stage publish`.
+
+Historical note, because the error is misleading: npm answers an
+unauthorised `PUT` with **404, not 403**, so as not to leak whether a
+package exists. A `404 Not Found - PUT .../frogql` on a package you own
+means the credential was rejected, not that the name is wrong. That is
+how the v0.4.0 release failed on all seven packages at once, when the
+granular token minted 2026-05-20 hit its 90-day ceiling between the
+0.3.0 release (2026-08-14, day 86) and 0.4.0 (2026-09-04, day 107).
+Trusted publishing removes that expiry class entirely.
 
 **npm publish quirks** to know about:
 - The host's `npm publish` runs with `--ignore-scripts`. A `prepublishOnly` hook would call `napi pre-publish` (3.x; `prepublish` in 2.x) which recursively re-publishes every platform sub-package and trips 409s on re-runs.

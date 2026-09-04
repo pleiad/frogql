@@ -4,8 +4,22 @@ name: Release npm
 # v0.2.0 or v0.2.0-rc.1 is pushed. Mirrors `release.yml` (PyPI) so a
 # single tag fires both: PyPI workflow + this one.
 #
-# Setup: a repo secret named `NPM_TOKEN` (npm Automation token) must
-# exist. Never commit the value.
+# Auth is npm **trusted publishing** (OIDC): no secret. Each of the six
+# packages this workflow ships (`frogql` plus the five platform
+# sub-packages) has a trusted publisher on npm pinned to
+# `pleiad/frogql`, THIS workflow filename, and the `npm` environment.
+# The npm CLI trades the job's OIDC identity for a short-lived,
+# package-scoped token at publish time.
+#
+# Consequences worth knowing before editing:
+#   - Renaming this file breaks the trust on all six packages. The
+#     publisher config is immutable, so it has to be deleted and
+#     recreated on npm, per package.
+#   - Same for dropping `environment: npm` from the publish job, or
+#     `id-token: write` below.
+#   - A new platform sub-package needs its own trusted publisher on npm
+#     before its first publish, with `Allow npm publish` ticked (the
+#     workflow runs `npm publish`, not `npm stage publish`).
 
 on:
   push:
@@ -110,6 +124,16 @@ jobs:
           cache: npm
           cache-dependency-path: node/package-lock.json
 
+      # Trusted publishing (OIDC) landed in npm 11.5.1; Node 20 ships
+      # npm 10, and `check-latest` only tracks the latest Node 20.x, not
+      # a newer npm. Without this the publish falls back to looking for a
+      # token and fails with E404, which reads as a permissions problem
+      # rather than a too-old client.
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
       - name: Install dependencies
         working-directory: ${{ env.NAPI_WORKDIR }}
         # `npm install`, not `ci`. The host's `optionalDependencies`
@@ -161,12 +185,15 @@ jobs:
       - name: Publish platform packages + host
         working-directory: ${{ env.NAPI_WORKDIR }}
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
           DIST_TAG: ${{ steps.dist.outputs.tag }}
+        # No NODE_AUTH_TOKEN. Every package here has a trusted publisher
+        # configured on npm (pleiad/frogql, this workflow filename,
+        # environment `npm`), so the npm CLI exchanges the job's OIDC
+        # identity for a short-lived, package-scoped token at publish
+        # time. `id-token: write` above is what makes that identity
+        # available; it was already there for provenance.
         run: |
-          npm config set "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}"
-
           # Helper: skip if version already exists, soft-fail on spam
           # detector (npm flags new platform packages occasionally and
           # support has to whitelist them — block host publish on that).

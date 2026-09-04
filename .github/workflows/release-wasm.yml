@@ -11,8 +11,13 @@ name: Release wasm
 # publish is idempotent (skips if the version already exists on npm).
 #
 # Unlike the napi package there are no per-platform binaries: WebAssembly
-# is portable, so this is one build + one publish. Reuses the `npm`
-# GitHub Environment and the `NPM_TOKEN` secret.
+# is portable, so this is one build + one publish.
+#
+# Auth is npm **trusted publishing** (OIDC): no secret. `frogql-wasm` has
+# a trusted publisher on npm pinned to `pleiad/frogql`, THIS workflow
+# filename, and the `npm` environment — so renaming this file, dropping
+# `environment: npm`, or dropping `id-token: write` all break it, and the
+# publisher config is immutable (delete and recreate on npm).
 
 on:
   push:
@@ -49,6 +54,16 @@ jobs:
           check-latest: true
           registry-url: https://registry.npmjs.org
 
+      # Trusted publishing (OIDC) landed in npm 11.5.1; Node 20 ships
+      # npm 10, and `check-latest` only tracks the latest Node 20.x, not
+      # a newer npm. Without this the publish falls back to looking for a
+      # token and fails with E404, which reads as a permissions problem
+      # rather than a too-old client.
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
       - name: Build package
         # `web` target (not `bundler`): it fetches the .wasm via
         # `import.meta.url`, which Vite/Rollup/esbuild handle natively with
@@ -60,10 +75,15 @@ jobs:
       - name: Publish to npm (idempotent)
         working-directory: wasm/pkg
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
+        # No NODE_AUTH_TOKEN. `frogql-wasm` has a trusted publisher
+        # configured on npm (pleiad/frogql, this workflow filename,
+        # environment `npm`), so the npm CLI exchanges the job's OIDC
+        # identity for a short-lived, package-scoped token at publish
+        # time. Note the publisher is keyed on the workflow *filename*,
+        # so renaming this file breaks the trust and the connection has
+        # to be deleted and recreated on npm.
         run: |
-          npm config set "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}"
           name=$(node -p "require('./package.json').name")
           version=$(node -p "require('./package.json').version")
           # dist-tag from the version itself (not the git ref), so manual
