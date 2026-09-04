@@ -420,7 +420,23 @@ impl Typechecker {
         };
 
         for m in iter {
-            let r = self.check_path_pattern(m.pattern());
+            // An OPTIONAL clause may reference variables the clauses before
+            // it bound (§14.3: the incoming working table is the previous
+            // statement's output). Its predicate cannot be hoisted to the
+            // chain — that would turn the left join into an inner one — so
+            // the accumulated environment is made ambient instead, the same
+            // way a correlated subquery body sees its outer scope. The
+            // runtime matches this by evaluating such a clause per outer
+            // row. A simple clause needs nothing here: elaboration has
+            // already hoisted its predicates to a scope that binds them.
+            let r = if m.is_optional() {
+                self.ambient_env.push(env.clone());
+                let r = self.check_path_pattern(m.pattern());
+                self.ambient_env.pop();
+                r
+            } else {
+                self.check_path_pattern(m.pattern())
+            };
             env = match m {
                 MatchStatement::Simple { .. } => {
                     match TypeEnvironment::meet(&self.schema, &env, &r.env) {

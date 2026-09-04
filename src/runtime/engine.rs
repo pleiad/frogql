@@ -1171,15 +1171,26 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     natural_join(&acc, &ir_new, 0)
                 }
                 MatchStatement::Optional { .. } => {
-                    let pushed = if !pattern.has_selected() {
-                        self.optional_via_bind_pushdown(&acc, pattern, &bound_vars, &new_vars)
+                    // A predicate inside the optional may reference a
+                    // variable an earlier clause bound (§14.3). Elaboration
+                    // cannot hoist it — a predicate lifted out of an
+                    // OPTIONAL turns its left join into an inner one — so
+                    // the clause is evaluated per outer row with that row
+                    // ambient, the same correlation a subquery body gets.
+                    let correlated = self.optional_correlation_vars(pattern, &bound_vars);
+                    if !correlated.is_empty() {
+                        self.optional_via_correlation(&acc, pattern, &bound_vars, &new_vars)
                     } else {
-                        None
-                    };
-                    pushed.unwrap_or_else(|| {
-                        let ir_new = self.run_path_pattern(pattern, 0);
-                        left_outer_join(&acc, &ir_new, &bound_vars, &new_vars)
-                    })
+                        let pushed = if !pattern.has_selected() {
+                            self.optional_via_bind_pushdown(&acc, pattern, &bound_vars, &new_vars)
+                        } else {
+                            None
+                        };
+                        pushed.unwrap_or_else(|| {
+                            let ir_new = self.run_path_pattern(pattern, 0);
+                            left_outer_join(&acc, &ir_new, &bound_vars, &new_vars)
+                        })
+                    }
                 }
             };
             bound_vars.extend(new_vars);
@@ -1199,6 +1210,53 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         }
 
         acc
+    }
+
+    /// Variables an OPTIONAL clause references in its predicates, does not
+    /// bind itself, and the rows so far do bind — the correlation the
+    /// per-outer-row evaluation exists for. Empty when the clause is
+    /// self-contained (the common case), which keeps every uncorrelated
+    /// optional on the existing bind-pushdown / global-join path.
+    fn optional_correlation_vars(
+        &self,
+        pattern: &PathPattern,
+        bound_vars: &HashSet<String>,
+    ) -> Vec<String> {
+        if pattern_filters_contain_subquery(pattern) {
+            return Vec::new();
+        }
+        let declared = pattern.freevars();
+        let mut acc = std::collections::BTreeSet::new();
+        walk_pattern_expr_vars(pattern, &mut acc);
+        acc.into_iter()
+            .filter(|v| !declared.contains(v) && bound_vars.contains(v))
+            .collect()
+    }
+
+    /// Evaluate a correlated OPTIONAL clause one outer row at a time, with
+    /// that row's bindings ambient so its predicates resolve the outer
+    /// variables, then left-join the row against what the clause produced.
+    /// A row the clause does not match is still null-extended, which is what
+    /// separates this from hoisting the predicate to the chain.
+    fn optional_via_correlation(
+        &self,
+        acc: &IntermediateResult,
+        pattern: &PathPattern,
+        bound_vars: &HashSet<String>,
+        new_vars: &HashSet<String>,
+    ) -> IntermediateResult {
+        let mut rows = Vec::new();
+        for row in &acc.rows {
+            self.correlation_scope
+                .borrow_mut()
+                .push(row.assignment.clone());
+            let inner = self.run_path_pattern(pattern, 0);
+            self.correlation_scope.borrow_mut().pop();
+
+            let single = IntermediateResult::new(vec![row.clone()]);
+            rows.extend(left_outer_join(&single, &inner, bound_vars, new_vars).rows);
+        }
+        IntermediateResult::new(rows)
     }
 
     /// OPTIONAL MATCH bind-pushdown. The naive path evaluates the inner
@@ -4609,24 +4667,47 @@ fn query_freevars(q: &Query) -> HashSet<String> {
 /// / ORDER BY exprs. `Expr::referenced_vars` does not descend into nested
 /// subqueries (those handle their own correlation), so a returned name is
 /// either bound locally or correlated from an enclosing scope.
-fn query_referenced_expr_vars(q: &Query) -> HashSet<String> {
-    fn walk_pattern(p: &PathPattern, acc: &mut std::collections::BTreeSet<String>) {
-        match p {
-            PathPattern::Filter(inner, expr) => {
-                expr.referenced_vars(acc);
-                walk_pattern(inner, acc);
-            }
-            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
-                walk_pattern(a, acc);
-                walk_pattern(b, acc);
-            }
-            PathPattern::Repeat { pattern, .. }
-            | PathPattern::Questioned(pattern)
-            | PathPattern::Selected { pattern, .. }
-            | PathPattern::Named { pattern, .. } => walk_pattern(pattern, acc),
-            _ => {}
+fn walk_pattern_expr_vars(p: &PathPattern, acc: &mut std::collections::BTreeSet<String>) {
+    match p {
+        PathPattern::Filter(inner, expr) => {
+            expr.referenced_vars(acc);
+            walk_pattern_expr_vars(inner, acc);
         }
+        PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+            walk_pattern_expr_vars(a, acc);
+            walk_pattern_expr_vars(b, acc);
+        }
+        PathPattern::Repeat { pattern, .. }
+        | PathPattern::Questioned(pattern)
+        | PathPattern::Selected { pattern, .. }
+        | PathPattern::Named { pattern, .. } => walk_pattern_expr_vars(pattern, acc),
+        _ => {}
     }
+}
+
+/// Whether any predicate inside `p` contains a subquery. Such a pattern is
+/// kept off the per-outer-row correlation path: the EXISTS / VALUE caches
+/// are keyed by the body's address and the correlation tuple drawn from the
+/// local assignment, neither of which distinguishes one ambient outer row
+/// from the next.
+fn pattern_filters_contain_subquery(p: &PathPattern) -> bool {
+    match p {
+        PathPattern::Filter(inner, expr) => {
+            expr.contains_subquery() || pattern_filters_contain_subquery(inner)
+        }
+        PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+            pattern_filters_contain_subquery(a) || pattern_filters_contain_subquery(b)
+        }
+        PathPattern::Repeat { pattern, .. }
+        | PathPattern::Questioned(pattern)
+        | PathPattern::Selected { pattern, .. }
+        | PathPattern::Named { pattern, .. } => pattern_filters_contain_subquery(pattern),
+        _ => false,
+    }
+}
+
+fn query_referenced_expr_vars(q: &Query) -> HashSet<String> {
+    let walk_pattern = walk_pattern_expr_vars;
     let mut acc = std::collections::BTreeSet::new();
     for m in &q.matches {
         walk_pattern(m.pattern(), &mut acc);

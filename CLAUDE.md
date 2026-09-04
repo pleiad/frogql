@@ -175,7 +175,9 @@ Local downstream dev:
 
 ### Compiler pipeline
 
-`parse → elaborate → typecheck → optimize → run`. Elaboration (`src/elaborate/`) performs ISO-mandated semantic lowering: `(x:L {k: v})` becomes `(x:L) WHERE x.k = v`. The `:` vs `is` split inside descriptors distinguishes value filters from type ascriptions — `{name is str}` stays in the descriptor's `PropertyType`, while `{name: 'Alice'}` is hoisted. Descriptors carry a `value_filters` field that the parser populates and elaboration drains; after elaboration it is always empty. The optimizer is reserved for performance-preserving transforms (predicate pushdown, label-index selection, LTJ join rewriting).
+`parse → elaborate → typecheck → optimize → run`. Elaboration (`src/elaborate/`) performs ISO-mandated semantic lowering: `(x:L {k: v})` becomes `(x:L) WHERE x.k = v`. The `:` vs `is` split inside descriptors distinguishes value filters from type ascriptions — `{name is str}` stays in the descriptor's `PropertyType`, while `{name: 'Alice'}` is hoisted. Descriptors carry a `value_filters` field that the parser populates and elaboration drains; after elaboration it is always empty. Elaboration also **hoists every filter to the scope ISO evaluates it in** (`src/elaborate/hoist.rs`, issue #99): a descriptor lowers to a filter on its own element, but §16.4 GR 9 / §22.6 evaluate it over the combined multi-path binding, so `Join(n, Filter(m, m.k = n.k))` becomes `Filter(Join(n, m), m.k = n.k)` and a run of simple clauses merges when a predicate crosses the boundary between them (§14.3). Union arms, repetitions and `Selected` are opaque to it; an unplaceable filter stays put so an unbound reference is still a type error. Because it runs last in `elaborate_query`, both the typechecker and the runtime see the corrected scope without a special case of their own.
+
+The optimizer is reserved for performance-preserving transforms (predicate pushdown, label-index selection, LTJ join rewriting).
 
 ### Entry points
 

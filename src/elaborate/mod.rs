@@ -9,8 +9,14 @@
 //! - Hoist `{name: expr}` value filters inside descriptors into WHERE.
 //!   `(x:L {k: v})` becomes `(x:L) WHERE x.k = v`.
 //!
+//! - Hoist each filter to the scope the standard evaluates it in, so a
+//!   predicate may reference a sibling operand's or an earlier clause's
+//!   variables (issue #99). See `hoist`.
+//!
 //! Future home for: record/list literal normalization, path-binding sugar,
 //! default-MATCH insertion, etc.
+
+mod hoist;
 
 use std::cell::Cell;
 
@@ -82,14 +88,17 @@ pub fn elaborate_query(q: Query) -> Query {
         n.query = elaborate_expr(n.query);
         n
     });
-    Query {
+    // Last, because it reads the filters the descriptor lowering above
+    // produces: put every predicate at the scope ISO evaluates it in
+    // (§16.4 GR 9, §22.6, §14.3). See `hoist`.
+    hoist::hoist_query(Query {
         matches,
         nearest,
         returns,
         group_by,
         order_by,
         ..q
-    }
+    })
 }
 
 /// Lower one GROUP BY element. A bare `Expr::Var(name)` that is *not* a

@@ -116,10 +116,31 @@ fn correlated_body_typechecks() {
 }
 
 #[test]
-fn uncorrelated_cross_clause_where_still_rejected() {
-    // A top-level cross-MATCH-clause WHERE is *not* in scope (the runtime
-    // does not evaluate it either), so it must still be a type error.
-    assert!(compile_query("MATCH (a:P) MATCH (b:P) WHERE a.id = b.id RETURN a.id").is_err());
+fn cross_clause_where_is_in_scope() {
+    // A later clause sees what an earlier one bound (ISO §14.3; issue #99).
+    // This used to be a type error — the carve-out this file's original
+    // fix deliberately left open — and is now hoisted to the scope the
+    // standard evaluates it in. Full coverage in `cross_clause_scope_test`.
+    let g = graph();
+    let rows = proj(
+        &g,
+        "MATCH (a:P) MATCH (b:P) WHERE a.id = b.id RETURN a.id AS id ORDER BY id",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Int(1)],
+            vec![Value::Int(2)],
+            vec![Value::Int(3)]
+        ]
+    );
+}
+
+#[test]
+fn a_reference_to_nothing_is_still_rejected() {
+    // Hoisting must not swallow a genuine unbound reference: no clause
+    // binds `zzz`.
+    assert!(compile_query("MATCH (a:P) MATCH (b:P) WHERE a.id = zzz.id RETURN a.id").is_err());
 }
 
 /// p1 ~knows~ p3 ~knows~ p2; p1 authored a comment replying to a post by
