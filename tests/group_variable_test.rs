@@ -242,3 +242,100 @@ fn test_scalar_aggregate_still_reduces_across_rows() {
     let rows = run(&g, "MATCH (s: N)-[x: R]->(t: N) RETURN SUM(x.p) AS total");
     assert_eq!(rows, vec![vec![Value::Int(3)]]);
 }
+
+// --- Issue #95: an element-wise aggregate beside any other RETURN item ---
+//
+// An element-wise aggregate reduces *within* a match, so a projection that
+// contains one keeps one row per match — it does not collapse rows the way
+// a row aggregate does. Two older code paths still assumed "aggregate ⇒
+// collapses rows", and they were written before group variables existed:
+// the typechecker's implicit-GROUP-BY rule, and `run_aggregated`'s handling
+// of a bare `ReturnItem::Aggregate`.
+
+#[test]
+fn test_elementwise_aggregate_beside_another_item_needs_no_group_by() {
+    // One row per match, each carrying its own group's sum. Requiring a
+    // GROUP BY here would be wrong: nothing is being collapsed.
+    let g = chain();
+    let rows = sorted(run(
+        &g,
+        "MATCH (s: N)-[x: R]->{1,2}(t: N) RETURN s.name AS s, t.name AS t, SUM(x.p) AS m",
+    ));
+    assert_eq!(
+        rows,
+        sorted(vec![
+            vec![
+                Value::Str("a".into()),
+                Value::Str("b".into()),
+                Value::Int(1)
+            ],
+            vec![
+                Value::Str("b".into()),
+                Value::Str("c".into()),
+                Value::Int(2)
+            ],
+            vec![
+                Value::Str("a".into()),
+                Value::Str("c".into()),
+                Value::Int(3)
+            ],
+        ])
+    );
+}
+
+#[test]
+fn test_elementwise_aggregate_does_not_depend_on_arithmetic_around_it() {
+    // `SUM(x.p)` parses to `ReturnItem::Aggregate`; `SUM(x.p) + 0` parses to
+    // a `ReturnItem::Expr` holding `Expr::Agg`. The two paths must agree —
+    // they differed by `NULL` vs `3`, decided by nothing but the `+ 0`.
+    let g = chain();
+    let bare = run(
+        &g,
+        "MATCH (s: N {name: 'a'})-[x: R]->{2}(t: N) RETURN t.name AS n, SUM(x.p) AS m GROUP BY t.name",
+    );
+    let wrapped = run(
+        &g,
+        "MATCH (s: N {name: 'a'})-[x: R]->{2}(t: N) RETURN t.name AS n, SUM(x.p) + 0 AS m GROUP BY t.name",
+    );
+    assert_eq!(bare, wrapped);
+    assert_eq!(bare, vec![vec![Value::Str("c".into()), Value::Int(3)]]);
+}
+
+#[test]
+fn test_path_length_and_group_sum_in_one_row() {
+    // The query issue #95 was filed for: measure the path the engine found.
+    // `path_length(p)` is not an aggregate and `SUM(x.p)` is element-wise,
+    // so the two belong in one row with no grouping.
+    let g = chain();
+    let rows = run(
+        &g,
+        "MATCH p = SHORTEST 1 (s: N {name: 'a'})-[x: R]->*(t: N {name: 'c'}) \
+         RETURN path_length(p) AS len, SUM(x.p) AS m",
+    );
+    assert_eq!(rows, vec![vec![Value::Int(2), Value::Int(3)]]);
+}
+
+#[test]
+fn test_elementwise_count_counts_the_group_not_the_rows() {
+    let g = chain();
+    let rows = run(
+        &g,
+        "MATCH p = SHORTEST 1 (s: N {name: 'a'})-[x: R]->*(t: N {name: 'c'}) \
+         RETURN path_length(p) AS len, COUNT(x) AS hops",
+    );
+    assert_eq!(rows, vec![vec![Value::Int(2), Value::Int(2)]]);
+}
+
+#[test]
+fn test_row_aggregate_beside_another_item_still_needs_group_by() {
+    // Non-regression: the implicit-grouping rule is unchanged for a real row
+    // aggregate, which does collapse rows. `x` here is a singleton.
+    assert!(
+        frogql::compile_query("MATCH (s: N)-[x: R]->(t: N) RETURN t.name AS n, SUM(x.p) AS m")
+            .is_err()
+    );
+    assert!(frogql::compile_query(
+        "MATCH (s: N)-[x: R]->{1,2}(t: N) RETURN t.name AS n, COUNT(*) AS c"
+    )
+    .is_err());
+}

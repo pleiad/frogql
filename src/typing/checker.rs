@@ -4,7 +4,7 @@
 //! fppc's `Typechecker` / `TypecheckResult`; the differences are documented
 //! in `docs/internals/typechecker_migration.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::model::value::Value;
 use crate::syntax::descriptor::Descriptor;
@@ -60,6 +60,12 @@ pub struct Typechecker {
     /// support nesting. Empty outside subquery bodies, so a top-level
     /// per-clause WHERE keeps its strict pattern-local scope.
     ambient_env: Vec<TypeEnvironment>,
+    /// Variables declared inside a quantified path primary (ISO §4.11.5).
+    /// An aggregate over one of these reduces *within* a match rather than
+    /// across rows, so it does not collapse the result and must not trip the
+    /// implicit-GROUP-BY rule. Purely syntactic, exactly as the runtime
+    /// classifies it; refreshed per `check_query`.
+    group_vars: HashSet<String>,
 }
 
 impl Typechecker {
@@ -70,6 +76,7 @@ impl Typechecker {
             warnings: Vec::new(),
             comprehension_scope: Vec::new(),
             ambient_env: Vec::new(),
+            group_vars: HashSet::new(),
         }
     }
 
@@ -88,6 +95,11 @@ impl Typechecker {
     pub fn check_query(&mut self, q: &Query) -> TypecheckResult {
         self.errors.clear();
         self.warnings.clear();
+        self.group_vars = q
+            .matches
+            .iter()
+            .flat_map(|m| m.pattern().group_vars())
+            .collect();
 
         let mut r = if q.has_any_optional() {
             self.check_match_chain(&q.matches)
@@ -465,14 +477,51 @@ impl Typechecker {
     /// because patterns like `RETURN x.name, COUNT(*)` silently gave
     /// useless per-row counts. `compile_query_unchecked` bypasses.
     fn check_no_implicit_group_by(&mut self, items: &[ReturnItem]) {
-        let has_agg = items.iter().any(|i| i.is_aggregate());
-        let has_expr = items.iter().any(|i| !i.is_aggregate());
+        let has_agg = items.iter().any(|i| self.item_has_row_aggregate(i));
+        let has_expr = items.iter().any(|i| !self.item_has_row_aggregate(i));
         if has_agg && has_expr {
             self.errors.push(
                 "RETURN mixes aggregate and non-aggregate items but no GROUP BY \
                  clause is present. Add `GROUP BY <expr>...` before the RETURN."
                     .to_string(),
             );
+        }
+    }
+
+    /// Whether this item collapses rows. An aggregate over a *group*
+    /// variable does not: §22.7 evaluates it element-wise within one match,
+    /// so a projection made only of those keeps one row per match and needs
+    /// no grouping. Mirrors `Runtime::item_has_row_aggregate` — the two must
+    /// agree, or the typechecker demands a GROUP BY the runtime then has no
+    /// rows to collapse with.
+    fn item_has_row_aggregate(&self, item: &ReturnItem) -> bool {
+        match item {
+            ReturnItem::Aggregate { agg, .. } => !self.agg_is_elementwise(agg),
+            ReturnItem::Expr { expr, .. } => {
+                let mut found = false;
+                expr.walk_aggs(&mut |agg| {
+                    if !self.agg_is_elementwise(agg) {
+                        found = true;
+                    }
+                });
+                found
+            }
+        }
+    }
+
+    fn agg_is_elementwise(&self, agg: &Aggregator) -> bool {
+        match agg {
+            // COUNT(*) counts rows by definition; it has no argument that
+            // could carry group degree.
+            Aggregator::CountStar => false,
+            Aggregator::GeneralSet { expr, .. } => {
+                if self.group_vars.is_empty() {
+                    return false;
+                }
+                let mut referenced = std::collections::BTreeSet::new();
+                expr.referenced_vars(&mut referenced);
+                referenced.iter().any(|v| self.group_vars.contains(v))
+            }
         }
     }
 

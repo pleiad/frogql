@@ -1487,6 +1487,24 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                             ExprResult::Failure(_) => Value::Null,
                         }
                     }
+                    // An aggregate over a group variable reduces within one
+                    // match (§22.7), so it is a per-row value like any other
+                    // key expression — evaluated on the group's
+                    // representative row, which is what the sibling
+                    // `ReturnItem::Expr` arm above already does for the same
+                    // aggregate wrapped in arithmetic. Reducing it across the
+                    // group instead fed a list to a scalar reducer and
+                    // produced a silent NULL.
+                    ReturnItem::Aggregate { agg, .. } if self.agg_is_elementwise(agg) => {
+                        let mu = match row_idxs.first() {
+                            Some(&i) => &rows[i].assignment,
+                            None => return Value::Null,
+                        };
+                        match self.apply_aggregator_elementwise(agg, mu) {
+                            ExprResult::Success(v) => v,
+                            ExprResult::Failure(_) => Value::Null,
+                        }
+                    }
                     ReturnItem::Aggregate { agg, .. } => self.apply_aggregator(agg, row_idxs, rows),
                 })
                 .collect();
