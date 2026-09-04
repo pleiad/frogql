@@ -130,8 +130,15 @@ jobs:
       # token and fails with E404, which reads as a permissions problem
       # rather than a too-old client.
       - name: Upgrade npm for trusted publishing
+        # `npm@11`, not `npm@latest`. OIDC publishing needs >= 11.5.1, but
+        # `latest` is npm 12, whose engines field is
+        # `^22.22.2 || ^24.15.0 || >=26.0.0` — it refuses to install on the
+        # Node 20 this job pins, with EBADENGINE. The 11.x line still
+        # supports `^20.17.0`, so it is the newest npm that satisfies both
+        # constraints. Raising `node-version` here would let `latest` back
+        # in; until then this pin and that pin move together.
         run: |
-          npm install -g npm@latest
+          npm install -g npm@11
           npm --version
 
       - name: Install dependencies
