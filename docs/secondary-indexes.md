@@ -55,6 +55,38 @@ The optimizer wires both kinds into the LTJ pre-pass:
   precomputed sorted set, replace the per-row property comparison with
   an O(log n) binary-search membership test (`FilterKind::NodeInSet`).
 
+## Which values can be keyed
+
+`IndexKey` covers `Int`, `Float`, `Str` and `Bool`. Lists and records are not
+indexable (no obvious total order), and a null property is absent from the
+node record altogether, so there is nothing to index and nothing to miss.
+
+**Numbers are one key domain, not two** (issue #96). A float whose value is an
+exact integer within `i64` is stored as an `Int` key, so `3` and `3.0` share
+one entry; every other float is held as its order-preserving bit image, which
+keeps the btree in float order. Comparing an `Int` key against a `Float` key
+widens to `f64` — the same widening the runtime's `cmp_values` applies.
+
+That last point is the invariant the whole feature rests on: **whether a
+predicate is answered from an index or from a scan must not change the
+answer.** The index does not need to be mathematically exact, it needs to
+agree with the runtime's own comparison. Anything that changes the engine's
+numeric comparison semantics has to change `IndexKey`'s ordering with it.
+
+Before this, floats were dropped at build time, which cost more than speed: a
+property mixing ints and floats produced a *partial* index that every consumer
+read as complete, so float-valued rows silently vanished from range filters,
+`ORDER BY` and equality (`p.m = 3` did not find a node holding `3.0`). The
+auto-builder was safe only by accident — it requires every node of the label
+to contribute an indexable value, so one float disabled it outright, which is
+also why a float property was never accelerated. `CREATE INDEX` had no such
+guard. Both halves were the same missing key type, seen from either side of
+that check.
+
+One residual: `build_declared` still has no completeness guard, so a manual
+index on a property holding a **list** or **record** value is partial in the
+same way. Floats were the only common case, but the guard is the general fix.
+
 ## Persistence
 
 Auto-built indexes are memory-only — they live in `RefCell<SecondaryIndex>`
