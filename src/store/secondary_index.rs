@@ -19,12 +19,50 @@ use crate::model::graph::MemoryGraphStore;
 use crate::model::graph_access::GraphAccess;
 use crate::model::value::{Id, Value};
 
-/// Subset of `Value` that is `Hash + Eq + Ord`. Floats, lists, records, and
-/// nulls are deliberately not indexable: floats need `NotNan` wrappers to be
-/// `Hash`, and the rest do not have an obvious total order.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Order-preserving `u64` image of an `f64`: flip the sign bit for
+/// non-negatives, invert every bit for negatives. The natural `u64` order of
+/// the result is the float order, which is what lets a `BTreeMap` range-scan
+/// floats. NaN lands above `+inf` (Postgres orders it greatest too) and every
+/// NaN payload is normalized to one bit pattern so a key is deterministic.
+fn encode_f64(f: f64) -> u64 {
+    let bits = if f.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        f.to_bits()
+    };
+    if bits & (1 << 63) != 0 {
+        !bits
+    } else {
+        bits ^ (1 << 63)
+    }
+}
+
+fn decode_f64(bits: u64) -> f64 {
+    let raw = if bits & (1 << 63) != 0 {
+        bits ^ (1 << 63)
+    } else {
+        !bits
+    };
+    f64::from_bits(raw)
+}
+
+/// Subset of `Value` a secondary index can key on. Lists, records and nulls
+/// stay out: they have no obvious total order, and a null property is absent
+/// from the record anyway, so excluding it is what the query semantics want.
+///
+/// Numbers are one domain, not two (issue #96). A float whose value is an
+/// exact integer is stored as `Int`, so `3` and `3.0` are the *same* key —
+/// which they must be, since `3 = 3.0` is true everywhere else in the engine
+/// (`eq_verdict`, `cmp_values`). Everything else becomes `Float`, and `Ord`
+/// compares an `Int` against a `Float` by widening to `f64`, exactly as
+/// `cmp_values` does. That agreement is the point: whether a predicate is
+/// answered from an index or from a scan must not change the answer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IndexKey {
     Int(i64),
+    /// A non-integral (or out-of-`i64`-range) float, held as its
+    /// order-preserving bit image so the key is `Hash + Eq + Ord`.
+    Float(u64),
     Str(String),
     Bool(bool),
 }
@@ -33,15 +71,70 @@ impl IndexKey {
     pub fn from_value(v: &Value) -> Option<Self> {
         match v {
             Value::Int(n) => Some(IndexKey::Int(*n)),
+            Value::Float(f) => Some(IndexKey::from_f64(*f)),
             Value::Str(s) => Some(IndexKey::Str(s.clone())),
             Value::Bool(b) => Some(IndexKey::Bool(*b)),
             _ => None,
         }
     }
+
+    /// Canonicalize a float: an exact integer within `i64` becomes `Int` so it
+    /// shares its key with the integer of the same value. `-0.0` normalizes to
+    /// `Int(0)` by the same rule.
+    fn from_f64(f: f64) -> Self {
+        // `i64::MAX as f64` rounds *up* to 2^63, so compare against the power
+        // of two directly rather than the rounded bound.
+        const LIMIT: f64 = 9_223_372_036_854_775_808.0; // 2^63
+        if f.is_finite() && f.fract() == 0.0 && (-LIMIT..LIMIT).contains(&f) {
+            IndexKey::Int(f as i64)
+        } else {
+            IndexKey::Float(encode_f64(f))
+        }
+    }
+
+    /// Where this key sits among the key categories, so unrelated types keep a
+    /// stable total order in one `BTreeMap`. Numbers share a rank because they
+    /// share a domain.
+    fn rank(&self) -> u8 {
+        match self {
+            IndexKey::Int(_) | IndexKey::Float(_) => 0,
+            IndexKey::Str(_) => 1,
+            IndexKey::Bool(_) => 2,
+        }
+    }
+}
+
+impl Ord for IndexKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self, other) {
+            (IndexKey::Int(a), IndexKey::Int(b)) => a.cmp(b),
+            // Both are order-preserving images, so the raw `u64` order is the
+            // float order.
+            (IndexKey::Float(a), IndexKey::Float(b)) => a.cmp(b),
+            // A `Float` is never integral here, so widening the `Int` cannot
+            // make them compare equal; the same widening `cmp_values` applies.
+            (IndexKey::Int(a), IndexKey::Float(b)) => (*a as f64)
+                .partial_cmp(&decode_f64(*b))
+                .unwrap_or(Ordering::Less), // NaN sorts last
+            (IndexKey::Float(a), IndexKey::Int(b)) => decode_f64(*a)
+                .partial_cmp(&(*b as f64))
+                .unwrap_or(Ordering::Greater),
+            (IndexKey::Str(a), IndexKey::Str(b)) => a.cmp(b),
+            (IndexKey::Bool(a), IndexKey::Bool(b)) => a.cmp(b),
+            _ => self.rank().cmp(&other.rank()),
+        }
+    }
+}
+
+impl PartialOrd for IndexKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Convert a `Bound<Value>` to a `Bound<IndexKey>` for BTree range queries.
-/// Returns None if the bound's value is not indexable (e.g. Float, Null).
+/// Returns None if the bound's value is not indexable (a list, record or null).
 fn bound_to_key(b: Bound<Value>) -> Option<Bound<IndexKey>> {
     match b {
         Bound::Included(v) => Some(Bound::Included(IndexKey::from_value(&v)?)),
