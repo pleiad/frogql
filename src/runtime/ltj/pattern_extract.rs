@@ -344,6 +344,16 @@ fn try_ltj_inner<G: GraphAccess>(
         }
     }
 
+    // A variable in no triple has no iterator to enumerate it: the search
+    // would bind it to nothing and the whole join would come back empty.
+    // That shape is a cartesian factor — a standalone operand comma-joined
+    // against a pattern with edges — and the hash-join fallback produces it
+    // correctly, so decline the pattern instead of answering it wrong. A
+    // pinned variable is exempt: its NodeId is already known.
+    if (0..num_vars).any(|v| var_to_iterators[v].is_empty() && !pinned_set.contains(&(v as u8))) {
+        return None;
+    }
+
     // Build VEO with selectivity-aware weights. Variables with strong filters
     // (equality on a constant, range comparison, label) bind early; the
     // lonely / non-lonely flag survives only as a tiebreaker for variables
