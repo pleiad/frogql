@@ -80,6 +80,7 @@ Runtime/store toggles for A/B testing and tracing (all read at query/open time; 
 
 | Var | Effect |
 |---|---|
+| `FROGQL_LTJ_SOURCE=build` | ignore `<db>.ltj` and rebuild the LTJ index from the graph (the kill switch the persistence differential test A/Bs against) |
 | `FROGQL_LTJ_COMPACT` | build the LTJ `TripleIndex` as compact CLTJ (six LOUDS succinct tries, issue #66) instead of the default six sorted arrays — ~2.9× smaller, 1.4–2.1× slower on IC latency (IC11 faster); differential suite `tests/compact_ltj_test.rs`, size/build stats via the `ltj_index_stats` bin |
 | `FROGQL_DISABLE_ANYDIR_LTJ` | force the hash-join fallback for any-direction (`-[e]-`) patterns instead of the mirrored-index LTJ (`try_ltj_mixed`); checked at the *call site* (`pattern_extract::anydir_ltj_disabled`) so the mirror is never built when disabled |
 | `FROGQL_DISABLE_SEEDED_REPEAT` | force the legacy global repetition path instead of the seeded adjacency traversal |
@@ -118,6 +119,8 @@ Cargo workspace with four members and `resolver = "2"`:
   - `ldbc_bench` — LDBC interactive-complete benchmark driver (queries in `bench/ldbc-queries/*.toml`). **Requires `bench` feature.**
   - `internal_bench` — gqlite-only diagnostic bench (typechecker on/off, lazy/disk backend, RSS, scaling)
   - `convert_edgelist` — edge-list format converter
+  - `ltj_build` — build the LTJ index once and write it to `<db>.ltj`, so
+    opening the database reads it instead of recomputing it
   - `import_ttl` — streaming N-Triples/Turtle importer for literal-free
     triple dumps (IMGpedia shape: `img:S img:Pnn img:O .`). Writes the
     modern format (CSR + name table + node locs + edge topo) record by
@@ -409,6 +412,29 @@ termination guard, not a premise of the rule.
 ### Join strategy: Leapfrog Triejoin (LTJ)
 
 Primary strategy for joins and concatenations of directed/undirected edges. Worst-case-optimal multi-way join: each directed edge is a triple `(src, label, tgt)` indexed in six sorted orderings (`TripleIndex`: SPO, SOP, POS, PSO, OSP, OPS); LTJ binds variables one at a time by leapfrog-intersecting candidate lists across triples, no intermediate materialisation. CompactLTJ paper (Arroyuelo et al., VLDBJ 2025). Module structure: `runtime/ltj/{triple_index, compact, iterator, veo, algorithm, pattern_extract}.rs`. Full algorithm walkthrough, examples, and benchmark numbers in `docs/internals/JOIN_STRATEGY_NOTES.md`.
+
+**Persisted to a sidecar** (`runtime/ltj/persist.rs`): `ltj_build <db.gdb>
+[--compact]` writes `<db>.ltj`, and `Runtime::load_or_build_triple_index`
+reads it back instead of rebuilding. Building is `O(E log E)` and lands
+entirely at open — 670 ms at SF0.1, and **252 s measured on a 617 M-edge
+RDF dump**, every session, for a pure function of a graph that did not
+change. Measured on a 3.85 M-edge graph: 1.69 s -> 0.07 s (array, 24×) and
+1.99 s -> 0.03 s (compact, 66×), with the 100 IMGpedia benchmark queries
+byte-identical either way. A sidecar, not a header root, so the `.gdb`
+format is untouched, the file can be deleted to force a rebuild, and the
+`.gdb` does not grow for users who never wanted it. The layout is
+little-endian with every array 8-byte aligned — not needed by this reader,
+which fills the same `Vec`s the builder produces, but it is what would let
+a later mmap hand out `&[u64]` views with no copy.
+
+**Every rejection is a rebuild, never an error**: absent, wrong magic,
+unknown version, other word size, other endianness, other representation,
+truncated, or a `(node_count, edge_count)` fingerprint that no longer
+matches. A stale index would answer with edges that are gone and miss
+edges that are new, and nothing downstream re-checks it. The reason prints
+under `FROGQL_TRACE_OPEN`, so a sidecar that is silently never used is
+diagnosable. `FROGQL_LTJ_SOURCE=build` forces the rebuild; tests in
+`tests/ltj_persist_test.rs`.
 
 **Two physical representations** (issue #66), selected at index-build time; both drive the same `LtjAlgorithm` through the `LtjIterator` enum:
 - **Array** (default): six fully-materialized sorted `Vec<(u32,u32,u32,u32)>`. The iterator recomputes its range from scratch per call (simple, cache-friendly).

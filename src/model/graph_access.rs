@@ -98,6 +98,25 @@ pub trait GraphAccess {
         None
     }
 
+    // --- Index sidecars ---
+
+    /// Where a persisted index for this store would live, and what graph
+    /// it would have to describe: `(db path, node count, edge count)`.
+    ///
+    /// Both halves travel together because neither is useful alone — the
+    /// path says which file to read and the counts say whether to believe
+    /// it — and because the counts are free on the backends that have a
+    /// path and would cost a full `nodes()` walk on the one that does not.
+    ///
+    /// `None` means "never look for a persisted index", which is right for
+    /// an in-RAM graph: there is no file for a sidecar to sit beside.
+    ///
+    /// On the trait, like `vectors`, because the caller that needs it —
+    /// `Runtime::triple_index` — is generic over the backend.
+    fn index_sidecar_key(&self) -> Option<(&std::path::Path, usize, usize)> {
+        None
+    }
+
     // --- Vector attributes ---
 
     /// The vectors stored for `attr`, or `None` when the backend has no

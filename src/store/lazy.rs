@@ -1457,6 +1457,18 @@ impl GraphAccess for LazyGraphStore {
     /// Same guard, and the same reasoning, as `lookup_node_eq` above.
     /// Property and label mutations are deliberately not a trigger —
     /// they cannot move a node's id, and a vector is not a property.
+    fn index_sidecar_key(&self) -> Option<(&std::path::Path, usize, usize)> {
+        // The base counts, not the overlay's: a session with pending DML
+        // must not match a sidecar written before it, and `node_count` /
+        // `edge_count` here are the on-disk figures the sidecar was
+        // fingerprinted against.
+        Some((
+            &self.db_path,
+            self.node_count as usize,
+            self.edge_count as usize,
+        ))
+    }
+
     fn vectors(&self, attr: &str) -> Option<&VectorSet> {
         let overlay = self.overlay.borrow();
         if !overlay.new_nodes.is_empty() || !overlay.deleted_nodes.is_empty() {

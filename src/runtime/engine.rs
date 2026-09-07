@@ -557,13 +557,51 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         self.value_subquery_cache.borrow_mut().clear();
     }
 
+    /// Read the persisted index if there is a usable one, else build it.
+    ///
+    /// Building is `O(E log E)` and lands entirely at open: 670 ms at LDBC
+    /// SF0.1 and 252 seconds, measured, on a 617 M-edge RDF dump — every
+    /// session, for a structure that is a pure function of a graph that
+    /// did not change. `ltj_build` writes it to `<db>.ltj` once; this
+    /// reads it back.
+    ///
+    /// A rejected sidecar is never an error. Every reason
+    /// `persist::Reject` can give — absent, stale, other endianness, other
+    /// representation — means the file cannot describe this index, and the
+    /// only correct response is to compute it. The reason is printed under
+    /// `FROGQL_TRACE_OPEN` so a silently-unused sidecar is diagnosable;
+    /// staying quiet about it is how a 25 GiB file gets written and never
+    /// read.
+    ///
+    /// `FROGQL_LTJ_SOURCE=build` forces the rebuild, which is what the
+    /// differential test needs to compare the two against each other.
+    fn load_or_build_triple_index(&self) -> TripleIndex {
+        use crate::runtime::ltj::persist;
+        let forced_build = std::env::var("FROGQL_LTJ_SOURCE").as_deref() == Ok("build");
+        if !forced_build {
+            if let Some((db, nodes, edges)) = self.graph.index_sidecar_key() {
+                let want_compact = TripleIndex::compact_selected();
+                match persist::read_for(db, nodes, edges, want_compact) {
+                    Ok(idx) => return idx,
+                    Err(persist::Reject::Missing) => {}
+                    Err(why) => {
+                        if std::env::var("FROGQL_TRACE_OPEN").is_ok() {
+                            eprintln!("  LTJ sidecar not used: {why}");
+                        }
+                    }
+                }
+            }
+        }
+        TripleIndex::from_graph(self.graph)
+    }
+
     /// Lazily build (or return) the cached LTJ TripleIndex. Idempotent —
     /// called from every `run_join` / `run_concat_pattern` site that needs
     /// the index, but the build only runs once per `Runtime` instance
     /// (and never if `with_triple_index` already provided one).
     fn triple_index(&self) -> Arc<TripleIndex> {
         if self.triple_index.borrow().is_none() {
-            let idx = Arc::new(TripleIndex::from_graph(self.graph));
+            let idx = Arc::new(self.load_or_build_triple_index());
             *self.triple_index.borrow_mut() = Some(idx);
         }
         self.triple_index
@@ -928,10 +966,19 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
 
         let pattern = query.collapsed_pattern();
         let index = self.triple_index();
+        // `cap` is the early-exit threshold, and `usize::MAX` is how "no
+        // LIMIT" spells "never stop early". It is not a size hint:
+        // reserving it panics with a capacity overflow, which is what an
+        // unlimited ORDER BY down this path used to do. Reserve nothing
+        // instead and let the vector grow.
         let cap = if limit == 0 { usize::MAX } else { limit };
         let single_spec = specs.len() == 1;
         let multi_label = cursors.len() > 1;
-        let mut out: Vec<ResultRow> = Vec::with_capacity(cap);
+        let mut out: Vec<ResultRow> = if limit == 0 {
+            Vec::new()
+        } else {
+            Vec::with_capacity(limit)
+        };
         // De-dup ids that appear in two different label cursors at
         // once (a node carrying both `Comment` and `Post`, say).
         // Single-cursor walks can't repeat an id, so skip the cost.

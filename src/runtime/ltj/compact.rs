@@ -129,6 +129,40 @@ impl SelectBitVec {
     pub fn heap_bytes(&self) -> usize {
         self.words.len() * 8 + self.samples.len() * 4
     }
+
+    // --- Serialization accessors ---
+    //
+    // The persisted index is a byte-for-byte image of these arrays, so
+    // the encoder needs to read them out and the decoder to hand them
+    // back without recomputing anything. `from_parts` therefore trusts
+    // its input: the file it comes from carries a magic, a version and a
+    // graph fingerprint, and a mismatch on any of those makes the caller
+    // rebuild instead of decoding.
+    pub(crate) fn words(&self) -> &[u64] {
+        &self.words
+    }
+    pub(crate) fn samples(&self) -> &[u32] {
+        &self.samples
+    }
+    pub(crate) fn bit_len(&self) -> usize {
+        self.len
+    }
+    pub(crate) fn num_zeros(&self) -> usize {
+        self.num_zeros
+    }
+    pub(crate) fn from_parts(
+        words: Vec<u64>,
+        len: usize,
+        samples: Vec<u32>,
+        num_zeros: usize,
+    ) -> Self {
+        SelectBitVec {
+            words,
+            len,
+            samples,
+            num_zeros,
+        }
+    }
 }
 
 /// Fixed-width bit-packed sequence of u32 symbols.
@@ -182,6 +216,21 @@ impl IntSeq {
 
     pub fn heap_bytes(&self) -> usize {
         self.data.len() * 8
+    }
+}
+
+impl IntSeq {
+    pub(crate) fn data(&self) -> &[u64] {
+        &self.data
+    }
+    pub(crate) fn width(&self) -> u32 {
+        self.width
+    }
+    pub(crate) fn seq_len(&self) -> usize {
+        self.len
+    }
+    pub(crate) fn from_parts(data: Vec<u64>, width: u32, len: usize) -> Self {
+        IntSeq { data, width, len }
     }
 }
 
@@ -336,6 +385,46 @@ pub struct CompactTripleIndex {
     /// Total raw triples including duplicates (parity with the array
     /// index's `len()`).
     raw_len: usize,
+}
+
+impl CompactTrie {
+    pub(crate) fn bv(&self) -> &SelectBitVec {
+        &self.bv
+    }
+    pub(crate) fn seq(&self) -> &IntSeq {
+        &self.seq
+    }
+    pub(crate) fn from_parts(bv: SelectBitVec, seq: IntSeq, leaf_base: usize) -> Self {
+        CompactTrie { bv, seq, leaf_base }
+    }
+}
+
+impl CompactTripleIndex {
+    pub(crate) fn tries(&self) -> &[CompactTrie; 6] {
+        &self.tries
+    }
+    pub(crate) fn leaf_offsets(&self) -> &[u32] {
+        &self.leaf_offsets
+    }
+    pub(crate) fn leaf_eids(&self) -> &[u32] {
+        &self.leaf_eids
+    }
+    pub(crate) fn raw_len(&self) -> usize {
+        self.raw_len
+    }
+    pub(crate) fn from_parts(
+        tries: [CompactTrie; 6],
+        leaf_offsets: Vec<u32>,
+        leaf_eids: Vec<u32>,
+        raw_len: usize,
+    ) -> Self {
+        CompactTripleIndex {
+            tries,
+            leaf_offsets,
+            leaf_eids,
+            raw_len,
+        }
+    }
 }
 
 /// Component permutations, indexed by `TrieOrder as usize`

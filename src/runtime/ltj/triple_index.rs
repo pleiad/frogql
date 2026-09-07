@@ -22,7 +22,7 @@ pub type IndexEntry = (u32, u32, u32, u32);
 /// simplified implementation (six fully-materialized sorted tuple arrays);
 /// `Compact` is the CLTJ port (six LOUDS succinct tries + an eid side table,
 /// issue #66). Selected at build time via `FROGQL_LTJ_COMPACT=1`.
-enum IndexRepr {
+pub(crate) enum IndexRepr {
     Array([Vec<IndexEntry>; 6]),
     Compact(Box<CompactTripleIndex>),
 }
@@ -36,6 +36,32 @@ pub struct TripleIndex {
 }
 
 impl TripleIndex {
+    /// The physical representation, for the serializer.
+    pub(crate) fn repr_ref(&self) -> &IndexRepr {
+        &self.repr
+    }
+
+    /// The label dictionary, in id order.
+    pub(crate) fn labels(&self) -> &[String] {
+        &self.id_to_label
+    }
+
+    /// Rebuild from a decoded sidecar. The label map is derived rather
+    /// than stored: it is exactly the inverse of `id_to_label`, so
+    /// persisting it would be a second copy that could disagree with it.
+    pub(crate) fn from_parts(repr: IndexRepr, id_to_label: Vec<String>) -> Self {
+        let label_to_id = id_to_label
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l.clone(), i as u32))
+            .collect();
+        TripleIndex {
+            repr,
+            label_to_id,
+            id_to_label,
+        }
+    }
+
     /// Build the standard index from a graph: directed edges in their
     /// physical sense only, undirected edges in both senses. This is the
     /// index for directed / `~`-undirected / leftward pattern edges.
@@ -148,7 +174,10 @@ impl TripleIndex {
 
     /// `FROGQL_LTJ_COMPACT=1` selects the compact CLTJ representation at
     /// build time; default stays on the array implementation.
-    fn compact_selected() -> bool {
+    /// Whether this process wants the succinct representation. Public so
+    /// `ltj_build` selects exactly what a session would, rather than
+    /// duplicating the rule and drifting from it.
+    pub fn compact_selected() -> bool {
         std::env::var("FROGQL_LTJ_COMPACT").is_ok_and(|v| v == "1")
     }
 
