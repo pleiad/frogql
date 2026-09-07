@@ -10,6 +10,11 @@
 //! `--no-auto-indexes` is CLI sugar for `FROGQL_DISABLE_AUTO_INDEXES=1`
 //! (see `docs/modes-options.md`): it skips the secondary-index auto-build
 //! at open, trading query acceleration for open latency and RSS.
+//! `--auto-indexes <both|hash|btree|none>` is the finer control, sugar for
+//! `FROGQL_AUTO_INDEX_KINDS`: the two kinds serve different predicates
+//! (`hash` for `=`, `btree` for ranges and ORDER BY) and cost about the
+//! same to hold, so a workload of pure equality can decline half the
+//! memory without losing a lookup.
 
 use std::env;
 use std::path::Path;
@@ -50,6 +55,8 @@ A database that does not exist yet is created empty, sqlite3-style.
 Options:
   --no-typecheck      skip the typechecker for this session (default: on)
   --no-auto-indexes   skip the secondary-index auto-build at open (default: on)
+  --auto-indexes <k>  which kinds to auto-build: both (default), hash, btree, none
+                      hash serves `=`; btree serves ranges and ORDER BY
   -h, --help          print this help and exit
   -V, --version       print the version and exit"
     )
@@ -94,6 +101,22 @@ fn main() {
     args.retain(|a| a != "--no-auto-indexes");
     if !auto_indexes {
         env::set_var("FROGQL_DISABLE_AUTO_INDEXES", "1");
+    }
+
+    // `--auto-indexes <kinds>`: same env-var-is-the-source-of-truth rule as
+    // above, so a differential run can A/B it without a rebuild.
+    if let Some(i) = args.iter().position(|a| a == "--auto-indexes") {
+        match args.get(i + 1) {
+            Some(kinds) => {
+                let kinds = kinds.clone();
+                env::set_var("FROGQL_AUTO_INDEX_KINDS", &kinds);
+                args.drain(i..=i + 1);
+            }
+            None => {
+                eprintln!("error: --auto-indexes needs one of both|hash|btree|none");
+                std::process::exit(2);
+            }
+        }
     }
 
     if args.len() < 2 {
@@ -149,10 +172,18 @@ fn main() {
     eprintln!("Typechecker: {}", if typecheck { "on" } else { "off" });
     eprintln!(
         "Secondary indexes: {}",
-        if auto_indexes {
-            "auto-built"
+        if !auto_indexes {
+            "off (--no-auto-indexes)".to_string()
         } else {
-            "off (--no-auto-indexes)"
+            // Report what was actually built, not what was asked for: an
+            // unrecognised kinds value falls back to both, and a run that
+            // names the requested setting would misreport it.
+            match frogql::store::secondary_index::auto_index_kinds() {
+                (true, true) => "auto-built (hash + btree)".to_string(),
+                (true, false) => "auto-built (hash only)".to_string(),
+                (false, true) => "auto-built (btree only)".to_string(),
+                (false, false) => "off (--auto-indexes none)".to_string(),
+            }
         }
     );
     match store.catalog().active_name() {

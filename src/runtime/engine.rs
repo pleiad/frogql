@@ -1820,9 +1820,22 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         IntermediateResult::new(rows)
     }
 
-    /// Get candidate node IDs — uses label index to pick the smallest set.
+    /// Get candidate node IDs — the smallest set the descriptor names.
+    ///
+    /// An indexed equality is consulted before the label index, because a
+    /// point lookup names a handful of nodes where a label names all of
+    /// them. Without this a lone node pattern had no route to the
+    /// secondary index at all: the only caller of `lookup_node_eq` was the
+    /// LTJ constant-folding pre-pass, which needs the pattern to decompose
+    /// into triples, and a pattern with no edges never does. So
+    /// `MATCH (a:img) WHERE a.id = 1164163` scanned every node carrying
+    /// the label — 0.6 s at a million of them, 56 s at a hundred and
+    /// sixty million, with a hash index sitting unused throughout.
     fn get_candidate_nodes(&self, desc: Option<&Descriptor>) -> Vec<Id> {
         if let Some(desc) = desc {
+            if let Some(ids) = self.indexed_candidates(desc) {
+                return ids;
+            }
             if let Some(best) =
                 self.smallest_label_set(&desc.dtype.label, |l| self.graph.nodes_with_label(l))
             {
@@ -1830,6 +1843,36 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             }
         }
         self.graph.nodes()
+    }
+
+    /// Node ids an indexed `=` predicate on this descriptor names, if any.
+    ///
+    /// Only a *narrowing* is claimed here, never a decision: `filter_node`
+    /// still runs over whatever comes back, so this may return a superset
+    /// and may not return a subset. Two things make it a superset:
+    ///
+    /// - `required_labels()` yields the labels the node must carry, and is
+    ///   empty for a disjunction, so `A|B` narrows to nothing rather than
+    ///   wrongly to `A`.
+    /// - An index on `(l, attr)` holds every `l`-node that carries `attr`.
+    ///   One that does not carry it reads as null, which no `=` satisfies,
+    ///   so its absence from the index costs no match.
+    fn indexed_candidates(&self, desc: &Descriptor) -> Option<Vec<Id>> {
+        let labels = desc.dtype.label.required_labels();
+        if labels.is_empty() {
+            return None;
+        }
+        for (attr, op, value) in &desc.value_preds {
+            if *op != BinOp::Eq {
+                continue;
+            }
+            for l in &labels {
+                if let Some(hits) = self.graph.lookup_node_eq(l, attr, value) {
+                    return Some(hits);
+                }
+            }
+        }
+        None
     }
 
     // --- Optimized edge pattern: uses label index when available ---

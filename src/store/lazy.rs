@@ -511,10 +511,10 @@ impl LazyGraphStore {
     /// 3. Label / prop names are resolved exactly once per pair at the end,
     ///    when emitting the final IndexSpec.
     pub fn build_auto_indexes_bulk(&self) -> SecondaryIndex {
-        use crate::store::secondary_index::{IndexKey, IndexKind};
+        use crate::store::secondary_index::{IndexKey, IndexKind, Posting};
         use std::collections::{BTreeMap, HashMap};
 
-        let mut per_label_prop: HashMap<(u32, u32), HashMap<IndexKey, Vec<Id>>> = HashMap::new();
+        let mut per_label_prop: HashMap<(u32, u32), HashMap<IndexKey, Posting>> = HashMap::new();
         let mut per_label_count: HashMap<u32, usize> = HashMap::new();
 
         for nid in 0..self.node_count {
@@ -530,12 +530,16 @@ impl LazyGraphStore {
                 *per_label_count.entry(label_sid).or_insert(0) += 1;
                 for (prop_sid, v) in &props_resolved {
                     if let Some(idx_k) = IndexKey::from_value(v) {
-                        per_label_prop
-                            .entry((label_sid, *prop_sid))
-                            .or_default()
-                            .entry(idx_k)
-                            .or_default()
-                            .push(nid);
+                        // Unique-valued columns are the only ones that
+                        // survive the filter below, so the common path is
+                        // a fresh single-id posting with no allocation.
+                        let bucket = per_label_prop.entry((label_sid, *prop_sid)).or_default();
+                        match bucket.get_mut(&idx_k) {
+                            Some(p) => p.push(nid),
+                            None => {
+                                bucket.insert(idx_k, Posting::One(nid));
+                            }
+                        }
                     }
                 }
             }
@@ -552,26 +556,33 @@ impl LazyGraphStore {
                 let entries = bucket.len();
                 let label = self.strings.resolve(label_sid).unwrap().to_string();
                 let prop = self.strings.resolve(prop_sid).unwrap().to_string();
-                let btree: BTreeMap<IndexKey, Vec<Id>> =
-                    bucket.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                idx.insert_prebuilt(
-                    &label,
-                    &prop,
-                    IndexKind::Hash,
-                    true,
-                    entries,
-                    Some(bucket),
-                    None,
-                );
-                idx.insert_prebuilt(
-                    &label,
-                    &prop,
-                    IndexKind::BTree,
-                    true,
-                    entries,
-                    None,
-                    Some(btree),
-                );
+                let (want_hash, want_btree) = crate::store::secondary_index::auto_index_kinds();
+                // The btree is built first, because it is a clone of the
+                // hash bucket and the hash insert consumes it.
+                if want_btree {
+                    let btree: BTreeMap<IndexKey, Posting> =
+                        bucket.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    idx.insert_prebuilt(
+                        &label,
+                        &prop,
+                        IndexKind::BTree,
+                        true,
+                        entries,
+                        None,
+                        Some(btree),
+                    );
+                }
+                if want_hash {
+                    idx.insert_prebuilt(
+                        &label,
+                        &prop,
+                        IndexKind::Hash,
+                        true,
+                        entries,
+                        Some(bucket),
+                        None,
+                    );
+                }
             }
         }
         idx

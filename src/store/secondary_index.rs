@@ -161,11 +161,158 @@ pub struct IndexSpec {
     pub entries: usize,
 }
 
+/// The node ids carrying one indexed value.
+///
+/// Most postings hold exactly one id, and on the index that matters most
+/// — the auto-built one — *every* posting does, because the auto-builder
+/// only indexes a `(label, prop)` whose values are unique within the
+/// label. A `Vec<Id>` for that costs 24 bytes of header plus a separate
+/// heap block the allocator rounds up to 32: 56 bytes to carry four, once
+/// per node, in two structures. At 160 M nodes that is ~9.6 GiB of
+/// allocator padding around 1.2 GiB of ids, spread over 320 M tiny
+/// allocations.
+///
+/// `One` stores the id where the `Vec` header would have gone. The whole
+/// enum is 16 bytes and touches the heap only when a value genuinely
+/// repeats, which is the case a declared index on a non-unique column
+/// still has to serve.
+///
+/// `as_slice` is what makes the substitution invisible to callers:
+/// `slice::from_ref` gives a one-element slice over the inline id without
+/// allocating, so every reader keeps the `&[Id]` it had.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Posting {
+    One(Id),
+    /// Boxed so the enum stays 16 bytes rather than 32: an inline `Vec`
+    /// would put its three-word header in every `One` as well, which is
+    /// the cost this type exists to avoid.
+    Many(Box<Vec<Id>>),
+}
+
+impl Posting {
+    pub fn as_slice(&self) -> &[Id] {
+        match self {
+            Posting::One(id) => std::slice::from_ref(id),
+            Posting::Many(v) => v,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Posting::One(_) => 1,
+            Posting::Many(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Add an id, promoting to the heap on the second one.
+    pub fn push(&mut self, id: Id) {
+        match self {
+            Posting::One(first) => {
+                *self = Posting::Many(Box::new(vec![*first, id]));
+            }
+            Posting::Many(v) => v.push(id),
+        }
+    }
+
+    /// Resident bytes: the enum itself plus whatever it owns.
+    fn heap_bytes(&self) -> usize {
+        std::mem::size_of::<Posting>()
+            + match self {
+                Posting::One(_) => 0,
+                // The `Vec` header lives behind the box, so both it and
+                // the buffer are heap.
+                Posting::Many(v) => 24 + v.capacity() * 4 + 16,
+            }
+    }
+}
+
+/// A map the posting builders can write into. Implemented for both the
+/// hash and btree bucket types so the promotion rule has one definition
+/// rather than one per builder.
+trait PostingMap {
+    fn get_posting_mut(&mut self, key: &IndexKey) -> Option<&mut Posting>;
+    fn insert_posting(&mut self, key: IndexKey, value: Posting);
+}
+
+impl PostingMap for HashMap<IndexKey, Posting> {
+    fn get_posting_mut(&mut self, key: &IndexKey) -> Option<&mut Posting> {
+        self.get_mut(key)
+    }
+    fn insert_posting(&mut self, key: IndexKey, value: Posting) {
+        self.insert(key, value);
+    }
+}
+
+impl PostingMap for BTreeMap<IndexKey, Posting> {
+    fn get_posting_mut(&mut self, key: &IndexKey) -> Option<&mut Posting> {
+        self.get_mut(key)
+    }
+    fn insert_posting(&mut self, key: IndexKey, value: Posting) {
+        self.insert(key, value);
+    }
+}
+
+/// Insert `id` under `key`, starting a new single-id posting when absent.
+fn add_posting<M: PostingMap>(bucket: &mut M, key: IndexKey, id: Id) {
+    match bucket.get_posting_mut(&key) {
+        Some(p) => p.push(id),
+        None => bucket.insert_posting(key, Posting::One(id)),
+    }
+}
+
+/// Which kinds the auto-builder produces, from `FROGQL_AUTO_INDEX_KINDS`.
+///
+/// Accepts `both` (the default), `hash`, `btree`, or `none`. The two
+/// kinds answer different questions and cost the same to hold, so which
+/// of them earns its memory depends on the workload rather than on the
+/// data:
+///
+/// | kind  | serves                                    |
+/// |-------|-------------------------------------------|
+/// | hash  | `x.p = v` (`lookup_eq`)                   |
+/// | btree | `x.p < v`, `ORDER BY x.p` (`lookup_range`, `ordered_ids`) |
+///
+/// A workload of pure equality predicates pays for the btree and never
+/// reads it. That is invisible at LDBC SF0.1, where the pair costs a few
+/// MiB; on a 160 M-node dump the btree is ~15 GiB, which is the
+/// difference between opening the database and being killed by the OOM
+/// reaper. `--no-auto-indexes` already existed but is all-or-nothing, and
+/// dropping the hash as well turns every `x.id = v` into a full scan.
+///
+/// Read once per process, like every other kill switch here: which
+/// indexes exist is a property of the open database, not of a statement.
+pub fn auto_index_kinds() -> (bool, bool) {
+    static KINDS: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+    *KINDS.get_or_init(|| {
+        match std::env::var("FROGQL_AUTO_INDEX_KINDS")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "both" | "all" => (true, true),
+            "hash" => (true, false),
+            "btree" => (false, true),
+            "none" => (false, false),
+            other => {
+                eprintln!(
+                    "warning: FROGQL_AUTO_INDEX_KINDS=`{other}` is not one of \
+                     both|hash|btree|none; building both"
+                );
+                (true, true)
+            }
+        }
+    })
+}
+
 /// In-memory collection of secondary indexes, keyed by (label, prop).
 #[derive(Debug, Default)]
 pub struct SecondaryIndex {
-    hashes: HashMap<(String, String), HashMap<IndexKey, Vec<Id>>>,
-    btrees: HashMap<(String, String), BTreeMap<IndexKey, Vec<Id>>>,
+    hashes: HashMap<(String, String), HashMap<IndexKey, Posting>>,
+    btrees: HashMap<(String, String), BTreeMap<IndexKey, Posting>>,
     specs: Vec<IndexSpec>,
 }
 
@@ -178,17 +325,11 @@ impl SecondaryIndex {
         let mut total = 0usize;
         for ((a, b), m) in &self.hashes {
             total += a.capacity() + b.capacity();
-            total += m
-                .values()
-                .map(|v| key + 24 + v.capacity() * 4 + 16)
-                .sum::<usize>();
+            total += m.values().map(|v| key + v.heap_bytes()).sum::<usize>();
         }
         for ((a, b), m) in &self.btrees {
             total += a.capacity() + b.capacity();
-            total += m
-                .values()
-                .map(|v| key + 24 + v.capacity() * 4)
-                .sum::<usize>();
+            total += m.values().map(|v| key + v.heap_bytes()).sum::<usize>();
         }
         total
     }
@@ -213,10 +354,20 @@ impl SecondaryIndex {
         let key = IndexKey::from_value(value)?;
         let lp = (label.to_string(), prop.to_string());
         if let Some(bucket) = self.hashes.get(&lp) {
-            return Some(bucket.get(&key).cloned().unwrap_or_default());
+            return Some(
+                bucket
+                    .get(&key)
+                    .map(|p| p.as_slice().to_vec())
+                    .unwrap_or_default(),
+            );
         }
         if let Some(bucket) = self.btrees.get(&lp) {
-            return Some(bucket.get(&key).cloned().unwrap_or_default());
+            return Some(
+                bucket
+                    .get(&key)
+                    .map(|p| p.as_slice().to_vec())
+                    .unwrap_or_default(),
+            );
         }
         None
     }
@@ -237,7 +388,7 @@ impl SecondaryIndex {
         let hi_k = bound_to_key(hi)?;
         let mut out = Vec::new();
         for (_, ids) in bucket.range((lo_k, hi_k)) {
-            out.extend_from_slice(ids);
+            out.extend_from_slice(ids.as_slice());
         }
         Some(out)
     }
@@ -258,11 +409,11 @@ impl SecondaryIndex {
         let mut out = Vec::with_capacity(bucket.values().map(|v| v.len()).sum());
         if ascending {
             for ids in bucket.values() {
-                out.extend_from_slice(ids);
+                out.extend_from_slice(ids.as_slice());
             }
         } else {
             for ids in bucket.values().rev() {
-                out.extend_from_slice(ids);
+                out.extend_from_slice(ids.as_slice());
             }
         }
         Some(out)
@@ -316,12 +467,12 @@ impl SecondaryIndex {
 
         match kind {
             IndexKind::Hash => {
-                let mut bucket: HashMap<IndexKey, Vec<Id>> = HashMap::new();
+                let mut bucket: HashMap<IndexKey, Posting> = HashMap::new();
                 for nid in candidates {
                     let props = store.node_props(nid);
                     if let Some(v) = props.get(prop) {
                         if let Some(k) = IndexKey::from_value(v) {
-                            bucket.entry(k).or_default().push(nid);
+                            add_posting(&mut bucket, k, nid);
                         }
                     }
                 }
@@ -339,12 +490,12 @@ impl SecondaryIndex {
                 Ok(spec)
             }
             IndexKind::BTree => {
-                let mut bucket: BTreeMap<IndexKey, Vec<Id>> = BTreeMap::new();
+                let mut bucket: BTreeMap<IndexKey, Posting> = BTreeMap::new();
                 for nid in candidates {
                     let props = store.node_props(nid);
                     if let Some(v) = props.get(prop) {
                         if let Some(k) = IndexKey::from_value(v) {
-                            bucket.entry(k).or_default().push(nid);
+                            add_posting(&mut bucket, k, nid);
                         }
                     }
                 }
@@ -376,8 +527,8 @@ impl SecondaryIndex {
         kind: IndexKind,
         auto: bool,
         entries: usize,
-        hash_bucket: Option<HashMap<IndexKey, Vec<Id>>>,
-        btree_bucket: Option<BTreeMap<IndexKey, Vec<Id>>>,
+        hash_bucket: Option<HashMap<IndexKey, Posting>>,
+        btree_bucket: Option<BTreeMap<IndexKey, Posting>>,
     ) {
         let lp = (label.to_string(), prop.to_string());
         let suffix = match kind {
@@ -435,7 +586,7 @@ impl SecondaryIndex {
     /// Single O(N) pass over nodes; works against any GraphAccess.
     pub fn auto_build<G: GraphAccess>(&mut self, store: &G) {
         // (label, prop) → value bucket. Built in one pass.
-        let mut per_label_prop: HashMap<(String, String), HashMap<IndexKey, Vec<Id>>> =
+        let mut per_label_prop: HashMap<(String, String), HashMap<IndexKey, Posting>> =
             HashMap::new();
         // (label) → node count, used to verify "every node has the prop".
         let mut per_label_count: HashMap<String, usize> = HashMap::new();
@@ -448,12 +599,13 @@ impl SecondaryIndex {
                 *per_label_count.entry(label.clone()).or_insert(0) += 1;
                 for (k, v) in &props {
                     if let Some(idx_k) = IndexKey::from_value(v) {
-                        per_label_prop
-                            .entry((label.clone(), k.clone()))
-                            .or_default()
-                            .entry(idx_k)
-                            .or_default()
-                            .push(nid);
+                        add_posting(
+                            per_label_prop
+                                .entry((label.clone(), k.clone()))
+                                .or_default(),
+                            idx_k,
+                            nid,
+                        );
                     }
                 }
             }
@@ -472,33 +624,41 @@ impl SecondaryIndex {
             let unique = bucket.values().all(|v| v.len() == 1);
             if unique && total_present == label_count && label_count > 0 {
                 let entries = bucket.len();
+                let (want_hash, want_btree) = auto_index_kinds();
                 // Hash auto-index.
-                let hash_name = format!("{}_{}_auto_hash", label, prop);
-                self.specs.push(IndexSpec {
-                    name: hash_name,
-                    label: label.clone(),
-                    prop: prop.clone(),
-                    kind: IndexKind::Hash,
-                    auto: true,
-                    entries,
-                });
+                if want_hash {
+                    let hash_name = format!("{}_{}_auto_hash", label, prop);
+                    self.specs.push(IndexSpec {
+                        name: hash_name,
+                        label: label.clone(),
+                        prop: prop.clone(),
+                        kind: IndexKind::Hash,
+                        auto: true,
+                        entries,
+                    });
+                }
                 // Mirror the same buckets into a BTree so range filters can
                 // skip the per-row property read. Same NodeIds, different
-                // structure — tiny duplication for a meaningful speedup on
-                // temporal range predicates.
-                let btree: BTreeMap<IndexKey, Vec<Id>> =
-                    bucket.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                let btree_name = format!("{}_{}_auto_btree", label, prop);
-                self.specs.push(IndexSpec {
-                    name: btree_name,
-                    label: label.clone(),
-                    prop: prop.clone(),
-                    kind: IndexKind::BTree,
-                    auto: true,
-                    entries,
-                });
-                self.hashes.insert((label.clone(), prop.clone()), bucket);
-                self.btrees.insert((label, prop), btree);
+                // structure — a meaningful speedup on temporal range
+                // predicates, and a full second copy of the postings, which
+                // is why it is declinable.
+                if want_btree {
+                    let btree: BTreeMap<IndexKey, Posting> =
+                        bucket.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    let btree_name = format!("{}_{}_auto_btree", label, prop);
+                    self.specs.push(IndexSpec {
+                        name: btree_name,
+                        label: label.clone(),
+                        prop: prop.clone(),
+                        kind: IndexKind::BTree,
+                        auto: true,
+                        entries,
+                    });
+                    self.btrees.insert((label.clone(), prop.clone()), btree);
+                }
+                if want_hash {
+                    self.hashes.insert((label, prop), bucket);
+                }
             }
         }
     }

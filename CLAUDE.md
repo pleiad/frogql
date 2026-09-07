@@ -90,6 +90,7 @@ Runtime/store toggles for A/B testing and tracing (all read at query/open time; 
 | `FROGQL_DISABLE_EXISTS_PIN` | force materialise-once for correlated EXISTS instead of pinned LTJ probes |
 | `FROGQL_DISABLE_VALUE_SUBQUERY_PIN` | force materialise-once for `VALUE { … }` subqueries |
 | `FROGQL_DISABLE_AUTO_INDEXES` | skip the secondary-index auto-build at open |
+| `FROGQL_AUTO_INDEX_KINDS=both\|hash\|btree\|none` | which kinds the auto-builder produces (default `both`). `hash` serves `=`, `btree` serves ranges and ORDER BY; the pair is two full copies of the postings, so an equality-only workload can decline half. CLI sugar: `--auto-indexes <k>` |
 | `FROGQL_ORDERBY_FORCE=pdqsort\|topk` | force one ORDER BY strategy (bypass the btree-LTJ-real top-k) |
 | `FROGQL_DEBUG_INDEXES` | print auto-built indexes + pinned variables |
 | `FROGQL_TRACE_OPEN` | print per-phase open latency (see *Open-time performance*) |
@@ -695,6 +696,28 @@ Before this, a mixed int/float property produced a *partial* index that every co
 DDL: `CREATE [HASH | BTREE] INDEX [<name>] ON :Label(prop) [USING HASH | BTREE]`, `DROP INDEX <name>`, `SHOW INDEXES` (or `.indexes`). Both prefix and suffix syntaxes work; HASH is the default kind. Re-declaring the same kind on the same `(label, prop)` is the only conflict.
 
 GraphAccess trait methods: `lookup_node_eq(label, prop, value) -> Option<Vec<Id>>`, `lookup_node_range(label, prop, lo, hi) -> Option<Vec<Id>>`, `lookup_node_ordered(label, prop, asc) -> Option<Vec<Id>>`. `MemoryGraphStore` (in-RAM JSON backend) returns `None` from all three and falls back to scan — it has no secondary index, so queries stay correct but unaccelerated.
+
+**Postings are inline when single** (`Posting`): a value's node ids are an
+`enum { One(Id), Many(Box<Vec<Id>>) }`, 16 bytes, heap-free in the `One`
+case. The auto-builder only indexes a `(label, prop)` whose values are
+*unique within the label*, so on an auto index every posting is `One` by
+construction — the `Vec<Id>` it replaced cost 24 bytes of header plus a
+heap block the allocator rounds to 32, to carry four, once per node, in
+both the hash and the btree. Free at SF0.1; ~9.6 GiB of allocator padding
+around 1.2 GiB of ids at 160 M nodes. `as_slice` uses `slice::from_ref`,
+so every reader keeps its `&[Id]` and cannot tell the two apart.
+
+**A node-only pattern reaches the index** via
+`Runtime::indexed_candidates` (`engine.rs`), consulted by
+`get_candidate_nodes` ahead of the label sets. Before it, `lookup_node_eq`
+had exactly one caller in the engine — the LTJ constant-folding pre-pass —
+which needs the pattern to decompose into triples, and a pattern with no
+edges never does. So `MATCH (a:img) WHERE a.id = 1164163` scanned every
+node carrying the label with a hash index sitting unused: 0.6 s at 1 M
+nodes, 56 s at 160 M. The narrowing is a superset claim only (`filter_node`
+still runs), and `required_labels()` is empty for a disjunction, so `A|B`
+narrows to nothing rather than wrongly to `A`. Pinned by
+`tests/auto_index_memory_test.rs`.
 
 **Persistence (commit `2153319`).** Auto entries are memory-only (rebuilt every open, deterministic). DDL entries (`auto = false`) ARE persisted in the `.gdb` via `header.secondary_index_root` → chained `PageType::SecondaryIndex` pages → JSON-encoded `Vec<PersistedSpec>`. Save side: `save_graph_with_catalog_and_indexes_atomic` (`store/io.rs`). Load side: `LazyGraphStore::open` reads the list and replays each entry via `build_declared` after the auto-build. See `store/secondary_index_io.rs` and `docs/secondary-indexes.md`.
 
