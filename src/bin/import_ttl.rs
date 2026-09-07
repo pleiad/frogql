@@ -169,22 +169,58 @@ fn local_name(term: &str) -> &str {
     }
 }
 
-/// Parse one `S P O .` line. `None` for directives, blanks, and anything
-/// whose subject or object is not a numeric image id.
-fn parse_triple(line: &str) -> Option<Triple<'_>> {
+/// What one input line turned out to be.
+///
+/// The three outcomes are kept apart because only one of them is
+/// harmless. A dropped triple is data the graph will not have, and a
+/// query against it then returns fewer rows with nothing to say why —
+/// so `Dropped` carries the reason and the caller reports it loudly.
+enum Line<'a> {
+    /// A directive, blank, or comment. Expected; not counted.
+    Ignored,
+    Triple(Triple<'a>),
+    Dropped(&'static str),
+}
+
+/// Parse one `S P O .` line.
+fn parse_triple(line: &str) -> Line<'_> {
     let line = line.trim();
-    if line.is_empty() || line.starts_with('#') || line.starts_with("@prefix") {
-        return None;
+    if line.is_empty() || line.starts_with('#') || line.starts_with('@') {
+        return Line::Ignored;
     }
     let line = line.strip_suffix('.').unwrap_or(line).trim_end();
     let mut parts = line.split_ascii_whitespace();
-    let s = parts.next()?;
-    let p = parts.next()?;
-    let o = parts.next()?;
-    Some(Triple {
-        subject: local_name(s).parse().ok()?,
+    let (s, p, o) = match (parts.next(), parts.next(), parts.next()) {
+        (Some(s), Some(p), Some(o)) => (s, p, o),
+        _ => return Line::Dropped("fewer than three terms"),
+    };
+    // An id wider than u32 is the failure mode worth naming: element ids
+    // are `u32` throughout the engine, so such a triple cannot be stored
+    // at all, and a dump carrying one would otherwise lose it in silence.
+    let subject = match local_name(s).parse::<u32>() {
+        Ok(v) => v,
+        Err(_) => {
+            return Line::Dropped(if local_name(s).bytes().all(|b| b.is_ascii_digit()) {
+                "subject id does not fit in u32"
+            } else {
+                "subject is not a numeric image id"
+            })
+        }
+    };
+    let object = match local_name(o).parse::<u32>() {
+        Ok(v) => v,
+        Err(_) => {
+            return Line::Dropped(if local_name(o).bytes().all(|b| b.is_ascii_digit()) {
+                "object id does not fit in u32"
+            } else {
+                "object is not a numeric image id (a literal?)"
+            })
+        }
+    };
+    Line::Triple(Triple {
+        subject,
         predicate: local_name(p),
-        object: local_name(o).parse().ok()?,
+        object,
     })
 }
 
@@ -367,25 +403,54 @@ fn main() {
     let mut triples: u64 = 0;
     let mut lines: u64 = 0;
 
+    let mut dropped: u64 = 0;
+    let mut drop_reasons: HashMap<&'static str, u64> = HashMap::new();
+    let mut first_dropped: Option<String> = None;
+
     for_each_line(&args.input, args.progress, "pass 1", |line| {
         lines += 1;
-        if let Some(t) = parse_triple(line) {
-            if t.subject == EMPTY || t.object == EMPTY {
-                eprintln!("error: id {} collides with the empty sentinel", u32::MAX);
-                process::exit(1);
+        match parse_triple(line) {
+            Line::Ignored => {}
+            Line::Dropped(why) => {
+                dropped += 1;
+                *drop_reasons.entry(why).or_insert(0) += 1;
+                if first_dropped.is_none() {
+                    first_dropped = Some(line.trim().chars().take(120).collect());
+                }
             }
-            nodes.insert(t.subject);
-            nodes.insert(t.object);
-            if !predicates.contains_key(t.predicate) {
-                predicates.insert(t.predicate.to_string(), ());
+            Line::Triple(t) => {
+                if t.subject == EMPTY || t.object == EMPTY {
+                    eprintln!("error: id {} collides with the empty sentinel", u32::MAX);
+                    process::exit(1);
+                }
+                nodes.insert(t.subject);
+                nodes.insert(t.object);
+                if !predicates.contains_key(t.predicate) {
+                    predicates.insert(t.predicate.to_string(), ());
+                }
+                triples += 1;
             }
-            triples += 1;
         }
         match args.max_edges {
             Some(m) => triples < m,
             None => true,
         }
     });
+
+    if dropped > 0 {
+        // Loud, and never fatal: a dump may legitimately carry lines this
+        // importer does not model. But the count has to be visible, or a
+        // query short of rows has nothing to point at.
+        eprintln!("warning: {dropped} line(s) dropped, none of them in the graph:");
+        let mut reasons: Vec<(&&str, &u64)> = drop_reasons.iter().collect();
+        reasons.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+        for (why, n) in reasons {
+            eprintln!("           {n:>12}  {why}");
+        }
+        if let Some(sample) = &first_dropped {
+            eprintln!("         first: {sample}");
+        }
+    }
 
     let externals = nodes.into_sorted_vec();
     let node_count = externals.len();
@@ -475,7 +540,7 @@ fn main() {
     let mut written: u64 = 0;
 
     for_each_line(&args.input, args.progress, "pass 2", |line| {
-        if let Some(t) = parse_triple(line) {
+        if let Line::Triple(t) = parse_triple(line) {
             let src = index.get(t.subject).expect("subject seen in pass 1");
             let tgt = index.get(t.object).expect("object seen in pass 1");
             let sid = *pred_sid.get(t.predicate).expect("predicate seen in pass 1");
