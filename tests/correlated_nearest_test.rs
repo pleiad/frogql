@@ -1,0 +1,283 @@
+//! Correlated `NEAREST`: the query vector comes out of the pattern.
+//!
+//! `NEAREST k y.emb TO VECTOR(x, 'emb')` asks a different question from
+//! the uncorrelated clause the four strategies answer. It is a similarity
+//! *join*: one ranking per distinct binding of `x`, not one ranking for
+//! the query. Before this arm existed the clause parsed and typechecked,
+//! then silently returned zero rows — `resolve_spec` evaluates the query
+//! vector against an empty assignment, so a pattern variable there is an
+//! unbound reference, and an unresolvable query vector is (correctly, for
+//! the uncorrelated case) an empty answer.
+//!
+//! The fixture is arithmetic rather than random so every expected answer
+//! can be read off by hand: candidates sit at `2i` along the diagonal of
+//! a 4-space, anchors sit at chosen points, and the L2-squared distance
+//! between two diagonal points `a` and `b` is `4(a-b)^2`.
+
+use std::path::{Path, PathBuf};
+
+use frogql::model::graph::MemoryGraphStore;
+use frogql::model::graph_access::GraphAccess;
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::result::QueryResult;
+use frogql::runtime::vsearch::{VecCfg, VecSource};
+use frogql::store::lazy::LazyGraphStore;
+use frogql::vector::hnsw::{Hnsw, HnswParams};
+use frogql::vector::metric::Metric;
+use frogql::vector::sidecar::{fingerprint, Sidecar};
+use frogql::vector::store::VectorSet;
+
+const DIM: usize = 4;
+/// Diagonal coordinate of each candidate, by index: `c0` at 0, `c1` at 2,
+/// and so on.
+const CANDIDATES: usize = 8;
+/// Diagonal coordinate of each anchor.
+const ANCHORS: [f32; 3] = [0.0, 10.0, -5.0];
+
+/// ```text
+/// (hub)-[:P69]->(cN)          candidates, all reachable from one hub
+/// (aN)-[:P69]->(anchorN)      each anchor image hangs off its own node
+/// ```
+///
+/// Both arms of the join are anchored on a constant so the pattern is
+/// deterministic and small; what varies per row is the anchor image,
+/// which is exactly the correlation under test.
+fn fixture_json() -> String {
+    let mut nodes = vec![r#"{"id":"hub","labels":["Img"],"props":{"idx":-1}}"#.to_string()];
+    for i in 0..CANDIDATES {
+        nodes.push(format!(
+            r#"{{"id":"c{i}","labels":["Img"],"props":{{"idx":{i}}}}}"#
+        ));
+    }
+    for (i, _) in ANCHORS.iter().enumerate() {
+        nodes.push(format!(
+            r#"{{"id":"anchor{i}","labels":["Img"],"props":{{"idx":{}}}}}"#,
+            100 + i
+        ));
+        nodes.push(format!(
+            r#"{{"id":"holder{i}","labels":["Img"],"props":{{"idx":{}}}}}"#,
+            200 + i
+        ));
+    }
+
+    let mut edges = Vec::new();
+    let mut e = 0usize;
+    for i in 0..CANDIDATES {
+        edges.push(format!(
+            r#"{{"id":"e{e}","labels":["P69"],"props":{{}},"endpoints":["hub","c{i}"],"directionality":"->"}}"#
+        ));
+        e += 1;
+    }
+    for i in 0..ANCHORS.len() {
+        edges.push(format!(
+            r#"{{"id":"e{e}","labels":["P69"],"props":{{}},"endpoints":["holder{i}","anchor{i}"],"directionality":"->"}}"#
+        ));
+        e += 1;
+    }
+
+    format!(
+        r#"{{"nodes":[{}],"edges":[{}]}}"#,
+        nodes.join(","),
+        edges.join(",")
+    )
+}
+
+fn build_db(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("frogql_corr_nearest_{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("t.gdb");
+
+    MemoryGraphStore::from_json_str(&fixture_json())
+        .unwrap()
+        .save(&db)
+        .unwrap();
+
+    let store = LazyGraphStore::open(&db).unwrap();
+    let fp = fingerprint(store.node_count() as usize, store.edge_count() as usize);
+    // Ids must ascend, and the coordinate must follow the node the id
+    // belongs to — the sidecar is positional, so pairing them by name is
+    // the only safe way to build it.
+    let mut rows: Vec<(u32, f32)> = Vec::new();
+    for id in store.nodes() {
+        let name = store.node_name(id).to_string();
+        if let Some(i) = name.strip_prefix("c").and_then(|s| s.parse::<usize>().ok()) {
+            rows.push((id, 2.0 * i as f32));
+        } else if let Some(i) = name
+            .strip_prefix("anchor")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            rows.push((id, ANCHORS[i]));
+        }
+    }
+    rows.sort_by_key(|(id, _)| *id);
+    let ids: Vec<u32> = rows.iter().map(|(id, _)| *id).collect();
+    let data: Vec<f32> = rows.iter().flat_map(|(_, x)| [*x; DIM]).collect();
+
+    let set = VectorSet::new("emb".to_string(), DIM, Metric::L2Sq, fp, ids, data);
+    let h = Hnsw::build(&set, HnswParams::default());
+    set.with_hnsw(h)
+        .to_sidecar()
+        .write_to_path(&Sidecar::path_for(&db, "emb"))
+        .unwrap();
+    db
+}
+
+/// Run `q` and return `(anchor idx, candidate idx, distance)` triples,
+/// deduplicated and sorted, so the assertion is on the answer rather than
+/// on how many pattern rows carried it.
+fn run(db: &Path, q: &str, source: VecSource) -> Vec<(i64, i64, f32)> {
+    let store = LazyGraphStore::open(db).unwrap();
+    let rt = Runtime::new(&store);
+    rt.set_vec_cfg(VecCfg {
+        source,
+        ..VecCfg::default()
+    });
+    let query = frogql::compile_query(q).unwrap_or_else(|e| panic!("compile `{q}`: {e}"));
+    let rows = match rt.run_query(&query, 0) {
+        QueryResult::Projected(rows) => rows,
+        other => panic!("expected a projection, got {other:?}"),
+    };
+    let mut out: Vec<(i64, i64, f32)> = rows
+        .iter()
+        .map(|r| {
+            use frogql::model::value::Value;
+            let int = |v: &Value| match v {
+                Value::Int(n) => *n,
+                other => panic!("expected an int, got {other:?}"),
+            };
+            let f = match &r[2] {
+                Value::Float(f) => *f as f32,
+                other => panic!("expected a float distance, got {other:?}"),
+            };
+            (int(&r[0]), int(&r[1]), f)
+        })
+        .collect();
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    out.dedup();
+    out
+}
+
+const QUERY: &str = "MATCH (h:Img)-[:P69]->(v00:Img), (hub:Img)-[:P69]->(v11:Img) \
+     WHERE h.idx >= 200 AND hub.idx = -1 \
+     NEAREST 2 v11.emb TO VECTOR(v00, 'emb') AS d \
+     RETURN v00.idx, v11.idx, d";
+
+/// The whole point: one ranking per anchor, each against its own vector.
+///
+/// Anchors sit at 0, 10 and -5; candidate `ci` sits at `2i`; the metric
+/// is L2-squared over four equal components, so a coordinate gap `g`
+/// costs `4g^2`.
+#[test]
+fn correlated_nearest_ranks_per_anchor() {
+    let db = build_db("per_anchor");
+    let got = run(&db, QUERY, VecSource::LocalSort);
+    let want = vec![
+        // anchor0 at 0  -> c0 (gap 0, d 0), c1 (gap 2, d 16)
+        (100, 0, 0.0),
+        (100, 1, 16.0),
+        // anchor1 at 10 -> c5 (gap 0, d 0), c4 (gap 2, d 16)
+        (101, 4, 16.0),
+        (101, 5, 0.0),
+        // anchor2 at -5 -> c0 (gap 5, d 100), c1 (gap 7, d 196)
+        (102, 0, 100.0),
+        (102, 1, 196.0),
+    ];
+    let mut want = want;
+    want.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(got, want);
+}
+
+/// The three ranking sources differ in where the nearest-first stream
+/// comes from, not in what the answer is. On an exact source that is an
+/// invariant; HNSW's recall is a measurement, but on a corpus this small
+/// its walk is exhaustive, so it must agree too.
+#[test]
+fn correlated_nearest_agrees_across_sources() {
+    let db = build_db("sources");
+    let local = run(&db, QUERY, VecSource::LocalSort);
+    let global = run(&db, QUERY, VecSource::GlobalSort);
+    let hnsw = run(&db, QUERY, VecSource::Hnsw);
+    assert_eq!(local, global, "the two exact sources must agree");
+    assert_eq!(local, hnsw, "HNSW is exhaustive on a corpus this small");
+}
+
+/// A `k` wider than the candidate set keeps every candidate, still ranked
+/// per anchor — the arm must not confuse "no more neighbours" with "no
+/// more anchors".
+#[test]
+fn correlated_nearest_k_beyond_candidates() {
+    let db = build_db("wide_k");
+    let q = QUERY.replace("NEAREST 2 ", "NEAREST 99 ");
+    let got = run(&db, &q, VecSource::LocalSort);
+    assert_eq!(
+        got.len(),
+        ANCHORS.len() * CANDIDATES,
+        "every anchor should keep every candidate"
+    );
+    for (anchor, _, _) in &got {
+        assert!((100..100 + ANCHORS.len() as i64).contains(anchor));
+    }
+}
+
+/// An uncorrelated clause on the same database must still take the
+/// ordinary arm. The correlation test is "does the query vector name a
+/// pattern variable", so a constant node id is not one.
+#[test]
+fn constant_query_vector_stays_uncorrelated() {
+    let db = build_db("uncorrelated");
+    let store = LazyGraphStore::open(&db).unwrap();
+    let rt = Runtime::new(&store);
+    let anchor0 = store
+        .nodes()
+        .into_iter()
+        .find(|id| store.node_name(*id) == "anchor0")
+        .expect("anchor0");
+    let q = format!(
+        "MATCH (hub:Img)-[:P69]->(v11:Img) WHERE hub.idx = -1 \
+         NEAREST 2 v11.emb TO VECTOR({anchor0}, 'emb') AS d \
+         RETURN v11.idx, d"
+    );
+    let query = frogql::compile_query(&q).unwrap();
+    let rows = match rt.run_query(&query, 0) {
+        QueryResult::Projected(rows) => rows,
+        other => panic!("expected a projection, got {other:?}"),
+    };
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rt.last_vec_stats().arm.starts_with("post")
+            || rt.last_vec_stats().arm.starts_with("interleave")
+            || rt.last_vec_stats().arm.starts_with("memo")
+            || rt.last_vec_stats().arm.starts_with("pre"),
+        "a constant query vector must not take the correlated arm, got {}",
+        rt.last_vec_stats().arm
+    );
+}
+
+/// One pattern evaluation for all anchors, and one ranking per anchor.
+/// Partitioning after a single run is the whole reason the arm is not
+/// "re-run the pattern pinned per anchor".
+#[test]
+fn correlated_nearest_runs_the_pattern_once() {
+    let db = build_db("stats");
+    let store = LazyGraphStore::open(&db).unwrap();
+    let rt = Runtime::new(&store);
+    rt.set_vec_cfg(VecCfg {
+        source: VecSource::LocalSort,
+        ..VecCfg::default()
+    });
+    let query = frogql::compile_query(QUERY).unwrap();
+    let _ = rt.run_query(&query, 0);
+    let stats = rt.last_vec_stats();
+    assert_eq!(stats.pattern_runs, 1, "the pattern must run exactly once");
+    assert_eq!(
+        stats.anchor_groups,
+        ANCHORS.len() as u64,
+        "one partition per distinct anchor binding"
+    );
+    assert!(
+        stats.arm.starts_with("correlated"),
+        "expected the correlated arm, got {}",
+        stats.arm
+    );
+}

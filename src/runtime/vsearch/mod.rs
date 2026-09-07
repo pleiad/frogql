@@ -24,6 +24,7 @@
 //! (projection, DISTINCT, ORDER BY, LIMIT) is identical across arms.
 //! That is what makes a latency comparison between them mean anything.
 
+pub mod correlated;
 pub mod in_ltj;
 pub mod post_filter;
 pub mod pre_filter;
@@ -243,6 +244,10 @@ pub struct VecStats {
     pub candidates_hashed: u64,
     /// Whole-pattern evaluations (pre-filter: one per candidate).
     pub pattern_runs: u64,
+    /// Distinct anchor bindings a correlated clause partitioned into —
+    /// the number of separate rankings it ran. Zero for every
+    /// uncorrelated arm.
+    pub anchor_groups: u64,
     /// Stored prefixes the in-LTJ arm resumed in phase 2. Read against
     /// `candidates_hashed`: the gap is what the neighbour order saved.
     pub suffix_resumes: u64,
@@ -256,7 +261,8 @@ impl VecStats {
     pub fn print(&self) {
         eprintln!(
             "vsearch arm={} accepted={} nn_pops={} nn_expanded={} pattern_runs={} \
-             ltj_visits={} candidates={} resumes={} replays={} extends={} buffered={} evicted={}{}",
+             ltj_visits={} candidates={} resumes={} replays={} extends={} buffered={} \
+             evicted={} anchor_groups={}{}",
             self.arm,
             self.accepted,
             self.nn_pops,
@@ -269,6 +275,7 @@ impl VecStats {
             self.prefix_extends,
             self.rows_buffered,
             self.rows_evicted,
+            self.anchor_groups,
             match &self.fallback_reason {
                 Some(r) => format!(" fallback={r}"),
                 None => String::new(),
@@ -305,7 +312,7 @@ pub fn resolve_spec<G: GraphAccess>(
     })
 }
 
-fn value_to_vector(v: &Value) -> Option<Vec<f32>> {
+pub(crate) fn value_to_vector(v: &Value) -> Option<Vec<f32>> {
     match v {
         Value::List(items) => items
             .iter()

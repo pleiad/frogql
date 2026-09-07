@@ -9,10 +9,19 @@
 //!
 //! ```text
 //! vec_build <db.gdb> --attr <name> --input <vectors.csv> [options]
+//! vec_build <db.gdb> --attr <name> --input-ttl <vectors.ttl> [options]
 //! vec_build <db.gdb> --attr <name> --random 128          [options]
 //!
 //!   --attr <name>            vector attribute name (required)
 //!   --input <path>           CSV: key,v0,v1,...  one row per node
+//!   --input-ttl <path>       N-Triples whose object is a bracketed float
+//!                            list literal:
+//!                              img:123 <.../hog> "[0.1,0.2,...]"^^t .
+//!                            Read line by line and appended straight into
+//!                            the flat vector buffer, so a dump far larger
+//!                            than RAM as text still loads — what has to
+//!                            fit is the f32 payload (4 x dim x rows), not
+//!                            the file.
 //!   --random <dim>           instead of --input, give every node a
 //!                            pseudo-random unit-cube vector of this
 //!                            dimension (synthetic benchmark data)
@@ -27,6 +36,8 @@
 //! ```
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Instant;
@@ -54,6 +65,7 @@ struct Args {
     db: PathBuf,
     attr: String,
     input: Option<PathBuf>,
+    input_ttl: Option<PathBuf>,
     random_dim: Option<usize>,
     key: KeyMode,
     metric: Metric,
@@ -63,7 +75,8 @@ struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: vec_build <db.gdb> --attr <name> (--input <csv> | --random <dim>) [options]\n\
+        "usage: vec_build <db.gdb> --attr <name> \
+          (--input <csv> | --input-ttl <ttl> | --random <dim>) [options]\n\
          \n\
          options:\n  \
            --key internal|name|<Label>.<prop>   key column meaning (default: internal)\n  \
@@ -84,6 +97,7 @@ fn parse_args() -> Args {
     let mut db = None;
     let mut attr = None;
     let mut input = None;
+    let mut input_ttl = None;
     let mut random_dim = None;
     let mut key = KeyMode::Internal;
     let mut metric = Metric::L2Sq;
@@ -106,6 +120,7 @@ fn parse_args() -> Args {
         match a.as_str() {
             "--attr" => attr = Some(value("--attr")),
             "--input" => input = Some(PathBuf::from(value("--input"))),
+            "--input-ttl" => input_ttl = Some(PathBuf::from(value("--input-ttl"))),
             "--random" => random_dim = Some(parse_usize(&value("--random"), "--random")),
             "--metric" => {
                 let v = value("--metric");
@@ -170,8 +185,12 @@ fn parse_args() -> Args {
             usage()
         }
     };
-    if input.is_some() == random_dim.is_some() {
-        eprintln!("error: give exactly one of --input or --random");
+    let sources = [input.is_some(), input_ttl.is_some(), random_dim.is_some()]
+        .iter()
+        .filter(|b| **b)
+        .count();
+    if sources != 1 {
+        eprintln!("error: give exactly one of --input, --input-ttl or --random");
         usage();
     }
 
@@ -179,6 +198,7 @@ fn parse_args() -> Args {
         db,
         attr,
         input,
+        input_ttl,
         random_dim,
         key,
         metric,
@@ -316,6 +336,186 @@ fn read_csv(path: &Path) -> Result<Vec<(String, Vec<f32>)>, String> {
     Ok(out)
 }
 
+/// Stream an N-Triples vector dump straight into a flat `f32` buffer.
+///
+/// A 47 GiB dump holds ~17 M rows of 288 floats. Materialising it as
+/// `Vec<(String, Vec<f32>)>` the way `read_csv` does would cost the file
+/// twice over plus an allocation header per row; here each line is parsed
+/// and appended, so the only thing that has to fit in memory is the
+/// payload the sidecar was always going to hold.
+///
+/// Returns `(ids, data, dim)` with `ids` strictly ascending and `data`
+/// laid out in the same order, which is the invariant `VectorSet` wants.
+fn read_ttl(
+    path: &Path,
+    store: &LazyGraphStore,
+    resolver: &mut Resolver,
+) -> Result<(Vec<u32>, Vec<f32>, usize), String> {
+    let file = File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut reader = BufReader::with_capacity(8 << 20, file);
+
+    let mut ids: Vec<u32> = Vec::new();
+    let mut data: Vec<f32> = Vec::new();
+    let mut dim: Option<usize> = None;
+    let mut line = String::new();
+    let mut lineno = 0usize;
+    let mut unresolved = 0usize;
+    let mut first_error: Option<String> = None;
+
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+        lineno += 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("@prefix") {
+            continue;
+        }
+
+        // subject: the first whitespace-delimited term, reduced to its
+        // local name so `img:1164163` and a full IRI both work.
+        let subject = match trimmed.split_ascii_whitespace().next() {
+            Some(t) => local_name(t).to_string(),
+            None => continue,
+        };
+
+        // object: the bracketed list inside the quoted literal.
+        let open = match trimmed.find('[') {
+            Some(i) => i,
+            None => continue,
+        };
+        let close = match trimmed[open..].find(']') {
+            Some(i) => open + i,
+            None => {
+                return Err(format!(
+                    "{}:{lineno}: literal opens `[` but never closes",
+                    path.display()
+                ))
+            }
+        };
+
+        // Resolve before parsing: a row for a node the graph does not
+        // have is skipped whole rather than parsed and thrown away.
+        let id = match resolver.resolve(store, &subject) {
+            Ok(id) => id,
+            Err(e) => {
+                unresolved += 1;
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+                continue;
+            }
+        };
+
+        let start = data.len();
+        for field in trimmed[open + 1..close].split(',') {
+            let f = field.trim();
+            if f.is_empty() {
+                continue;
+            }
+            match f.parse::<f32>() {
+                Ok(v) => data.push(v),
+                Err(e) => {
+                    return Err(format!(
+                        "{}:{lineno}: bad vector component `{f}` ({e})",
+                        path.display()
+                    ))
+                }
+            }
+        }
+        let got = data.len() - start;
+        match dim {
+            None => dim = Some(got),
+            Some(d) if d != got => {
+                return Err(format!(
+                    "{}:{lineno}: row has {got} components, earlier rows have {d}",
+                    path.display()
+                ))
+            }
+            Some(_) => {}
+        }
+        ids.push(id);
+
+        if ids.len() % 1_000_000 == 0 {
+            eprintln!("  read {} vectors", ids.len());
+        }
+    }
+
+    if unresolved > 0 {
+        eprintln!(
+            "warning: {unresolved} row(s) did not resolve to a node; first: {}",
+            first_error.unwrap_or_default()
+        );
+    }
+    let dim = dim.ok_or_else(|| format!("{}: no vectors found", path.display()))?;
+
+    // The sidecar wants ascending ids. Sort a permutation and apply it in
+    // place by walking cycles: a second copy of `data` would double the
+    // largest allocation in the program.
+    let n = ids.len();
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    order.sort_unstable_by_key(|&i| ids[i as usize]);
+    if let Some(w) = order
+        .windows(2)
+        .find(|w| ids[w[0] as usize] == ids[w[1] as usize])
+    {
+        return Err(format!(
+            "node {} appears twice in the input; each node may carry at most \
+             one vector per attribute",
+            ids[w[0] as usize]
+        ));
+    }
+    permute_rows(&mut ids, &mut data, &order, dim);
+    Ok((ids, data, dim))
+}
+
+/// Reorder `ids` and the `dim`-wide rows of `data` so that position `k`
+/// ends up holding what `order[k]` pointed at. Cycle-following, so the
+/// only scratch space is one row plus a visited bitmap.
+fn permute_rows(ids: &mut [u32], data: &mut [f32], order: &[u32], dim: usize) {
+    let n = ids.len();
+    let mut done = vec![false; n];
+    let mut row = vec![0f32; dim];
+    for start in 0..n {
+        if done[start] {
+            continue;
+        }
+        if order[start] as usize == start {
+            done[start] = true;
+            continue;
+        }
+        row.copy_from_slice(&data[start * dim..(start + 1) * dim]);
+        let held_id = ids[start];
+        let mut cur = start;
+        loop {
+            done[cur] = true;
+            let src = order[cur] as usize;
+            if src == start {
+                data[cur * dim..(cur + 1) * dim].copy_from_slice(&row);
+                ids[cur] = held_id;
+                break;
+            }
+            data.copy_within(src * dim..(src + 1) * dim, cur * dim);
+            ids[cur] = ids[src];
+            cur = src;
+        }
+    }
+}
+
+/// `img:1164163` -> `1164163`, `<https://host/hog>` -> `hog`.
+fn local_name(term: &str) -> &str {
+    let t = term.trim();
+    let t = t.strip_prefix('<').unwrap_or(t);
+    let t = t.strip_suffix('>').unwrap_or(t);
+    match t.rfind([':', '/', '#']) {
+        Some(i) => &t[i + 1..],
+        None => t,
+    }
+}
+
 /// Same xorshift64* as the HNSW layer draw. Deterministic synthetic data
 /// keeps a benchmark run reproducible.
 fn random_rows(store: &LazyGraphStore, dim: usize, seed: u64) -> Vec<(u32, Vec<f32>)> {
@@ -360,71 +560,102 @@ fn main() {
         open_start.elapsed()
     );
 
-    // Collect (internal id, vector) pairs.
-    let mut rows: Vec<(u32, Vec<f32>)> = match args.random_dim {
-        Some(dim) => random_rows(&store, dim, args.params.seed),
-        None => {
-            let path = args.input.as_ref().expect("checked in parse_args");
-            let raw = match read_csv(path) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    process::exit(1);
-                }
-            };
-            let mut resolver = Resolver::new(args.key);
-            let mut out = Vec::with_capacity(raw.len());
-            let mut unresolved = 0usize;
-            let mut first_error = None;
-            for (key, vec) in raw {
-                match resolver.resolve(&store, &key) {
-                    Ok(id) => out.push((id, vec)),
+    // Collect (id, vector) pairs, as three columns the sidecar can take
+    // directly. The TTL path fills them itself, streaming; the CSV and
+    // synthetic paths build row tuples first and are flattened here.
+    let (ids, data, dim): (Vec<u32>, Vec<f32>, usize) = if let Some(path) = args.input_ttl.clone() {
+        let mut resolver = Resolver::new(args.key);
+        let t = Instant::now();
+        match read_ttl(&path, &store, &mut resolver) {
+            Ok((ids, data, dim)) => {
+                eprintln!(
+                    "read {} vectors of dim {dim} from {} in {:?}",
+                    ids.len(),
+                    path.display(),
+                    t.elapsed()
+                );
+                (ids, data, dim)
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                process::exit(1);
+            }
+        }
+    } else {
+        let mut rows: Vec<(u32, Vec<f32>)> = match args.random_dim {
+            Some(dim) => random_rows(&store, dim, args.params.seed),
+            None => {
+                let path = args.input.as_ref().expect("checked in parse_args");
+                let raw = match read_csv(path) {
+                    Ok(r) => r,
                     Err(e) => {
-                        unresolved += 1;
-                        if first_error.is_none() {
-                            first_error = Some(e);
+                        eprintln!("error: {e}");
+                        process::exit(1);
+                    }
+                };
+                let mut resolver = Resolver::new(args.key);
+                let mut out = Vec::with_capacity(raw.len());
+                let mut unresolved = 0usize;
+                let mut first_error = None;
+                for (key, vec) in raw {
+                    match resolver.resolve(&store, &key) {
+                        Ok(id) => out.push((id, vec)),
+                        Err(e) => {
+                            unresolved += 1;
+                            if first_error.is_none() {
+                                first_error = Some(e);
+                            }
                         }
                     }
                 }
+                if unresolved > 0 {
+                    // Loud, not fatal: a partial attribute is legitimate (not
+                    // every node need carry a vector), but silently dropping
+                    // rows would quietly shrink the search space.
+                    eprintln!(
+                        "warning: {unresolved} input row(s) did not resolve to a node; first: {}",
+                        first_error.unwrap_or_default()
+                    );
+                }
+                out
             }
-            if unresolved > 0 {
-                // Loud, not fatal: a partial attribute is legitimate (not
-                // every node need carry a vector), but silently dropping
-                // rows would quietly shrink the search space.
-                eprintln!(
-                    "warning: {unresolved} input row(s) did not resolve to a node; first: {}",
-                    first_error.unwrap_or_default()
-                );
-            }
-            out
+        };
+
+        if rows.is_empty() {
+            eprintln!("error: no vectors to write");
+            process::exit(1);
         }
+
+        // The sidecar requires strictly ascending ids.
+        rows.sort_by_key(|(id, _)| *id);
+        if let Some(w) = rows.windows(2).find(|w| w[0].0 == w[1].0) {
+            eprintln!(
+                "error: node {} appears twice in the input; each node may carry at most \
+                 one vector per attribute",
+                w[0].0
+            );
+            process::exit(1);
+        }
+
+        let dim = rows[0].1.len();
+        if let Some((id, v)) = rows.iter().find(|(_, v)| v.len() != dim) {
+            eprintln!(
+                "error: node {id} has a {}-component vector, others have {dim}",
+                v.len()
+            );
+            process::exit(1);
+        }
+
+        let ids: Vec<u32> = rows.iter().map(|(id, _)| *id).collect();
+        let data: Vec<f32> = rows.into_iter().flat_map(|(_, v)| v).collect();
+        (ids, data, dim)
     };
 
-    if rows.is_empty() {
+    if ids.is_empty() {
         eprintln!("error: no vectors to write");
         process::exit(1);
     }
-
-    // The sidecar requires strictly ascending ids.
-    rows.sort_by_key(|(id, _)| *id);
-    if let Some(w) = rows.windows(2).find(|w| w[0].0 == w[1].0) {
-        eprintln!(
-            "error: node {} appears twice in the input; each node may carry at most \
-             one vector per attribute",
-            w[0].0
-        );
-        process::exit(1);
-    }
-
-    let dim = rows[0].1.len();
-    if let Some((id, v)) = rows.iter().find(|(_, v)| v.len() != dim) {
-        eprintln!(
-            "error: node {id} has a {}-component vector, others have {dim}",
-            v.len()
-        );
-        process::exit(1);
-    }
-    let max_id = rows[rows.len() - 1].0;
+    let max_id = ids[ids.len() - 1];
     if max_id >= store.node_count() {
         eprintln!(
             "error: node id {max_id} is beyond the graph's {} nodes",
@@ -433,8 +664,6 @@ fn main() {
         process::exit(1);
     }
 
-    let ids: Vec<u32> = rows.iter().map(|(id, _)| *id).collect();
-    let data: Vec<f32> = rows.into_iter().flat_map(|(_, v)| v).collect();
     let fp = fingerprint(store.node_count() as usize, store.edge_count() as usize);
     let set = VectorSet::new(args.attr.clone(), dim, args.metric, fp, ids, data);
 

@@ -497,6 +497,13 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             None => return self.run_match_chain(query, limit),
         };
         let cfg = self.vec_cfg();
+        // A query vector that names a pattern variable is one search per
+        // anchor, not one search: it cannot be resolved before the
+        // pattern runs, so it takes its own arm.
+        let anchors = crate::runtime::vsearch::correlated::anchor_vars(clause);
+        if !anchors.is_empty() {
+            return crate::runtime::vsearch::correlated::run(self, query, clause, &anchors, &cfg);
+        }
         match crate::runtime::vsearch::resolve_spec(self, clause) {
             Ok(spec) => crate::runtime::vsearch::run_nearest(self, query, &spec, &cfg),
             Err(e) => {

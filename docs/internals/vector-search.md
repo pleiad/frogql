@@ -132,6 +132,79 @@ They differ whenever one binding yields several rows, which for a join is
 the common case. Both exist because which one a study wants depends on
 the question.
 
+## Correlated `NEAREST`: one ranking per anchor
+
+Everything above answers "which nodes satisfy this pattern and are among
+the `k` nearest to **a** query vector" — one vector, fixed before the
+search starts. That is why `resolve_spec` can evaluate `<expr>` against an
+empty assignment.
+
+A different question shows up in the IMGpedia workload, written in the
+MillenniumDB benchmark dialect as `?v00 k50 ?v11`:
+
+```
+MATCH (v10:img)-[:P69]->(v00:img), (v10)-[:P6]->(:img {id: 100980834}),
+      (v01:img)-[:P926]->(v21:img), (v01)-[:P69]->(v11:img)
+NEAREST 50 v11.hog TO VECTOR(v00, 'hog') AS dist
+RETURN DISTINCT v00.id, v11.id, dist ORDER BY v00.id, dist
+```
+
+"for **each** `v00` the pattern binds, which `v11` are among its 50
+nearest". The query vector is a function of the row, so this is a
+similarity **join**: as many rankings as there are distinct anchors.
+
+The surface needs nothing new — `VECTOR(v00, 'hog')` was already legal
+syntax and already typechecked, since `check_nearest` checks `<expr>`
+against the environment the pattern binds. What was missing was the
+evaluation. Until `runtime/vsearch/correlated.rs`, such a clause parsed,
+typechecked, then returned **zero rows in silence**: the query vector
+resolved against an empty assignment, `v00` was an unbound reference, and
+an unresolvable query vector is (correctly, for the uncorrelated case) an
+empty answer.
+
+### The plan
+
+`Runtime::run_match_chain_or_nearest` asks `correlated::anchor_vars`
+whether `<expr>` names a pattern variable, minus the search variable
+itself. A non-empty answer takes the correlated arm; an empty one takes
+the four strategies exactly as before.
+
+The arm runs the pattern **once**, partitions its rows by the anchor
+binding, and ranks each partition against its own query vector.
+Partitioning after a single run is the whole point: the anchors are not
+known until the pattern has run, so re-running it pinned per anchor —
+the shape `exists_body_pinned` uses — would pay for the pattern again for
+every anchor.
+
+Ranking inside a partition delegates to `post_filter::rank_buckets`, so
+the correlated and uncorrelated arms cannot drift apart on what "the `k`
+nearest of this candidate set" means. `FROGQL_VEC_SOURCE` selects the
+per-partition stream with the same three values and the same cost story,
+scaled down to a partition:
+
+| source | per partition | when it wins |
+|---|---|---|
+| `localsort` | ranks that partition's candidates, exact | a selective pattern; never touches a node outside the match |
+| `hnsw` | walks the corpus proximity graph, testing membership | the partition is a large fraction of the corpus |
+| `globalsort` | sorts the **whole attribute**, exact | oracle only — it repeats that sort per partition |
+
+`stats.arm` reports `correlated+<source>` and `stats.anchor_groups`
+counts the partitions, so a benchmark row never claims an arm that did
+not run. Pinned by `tests/correlated_nearest_test.rs`, which also asserts
+the single pattern run and that a constant query vector still takes the
+ordinary arm.
+
+### Why the in-LTJ arms have no correlated form yet
+
+`interleave` and `memo` hook **one** ranking into a VEO level. A
+correlated clause has one ranking per anchor, and the anchor is bound by
+the same join the hook lives in, so there is no fixed stream for the
+level to consult. Making them correlated is a design question — at which
+level does the anchor bind, and does the ranking then move inside the
+backtracking — not a parameter change. A correlated clause therefore
+takes the partition-and-rank arm whatever `FROGQL_VEC_STRATEGY` asks for,
+and records the requested strategy in `fallback_reason`.
+
 ## Storage: sidecars
 
 One file per vector attribute, `<db>.vec.<attr>`, outside the `.gdb`.
@@ -469,3 +542,5 @@ its sweeps do not depend on process-global state.
   equal-sized insert followed by a save. The in-session DML guard covers
   that while the session lasts.
 - **`k = 0`** is legal and produces nothing; the typechecker warns.
+- **A correlated clause has no in-LTJ arm.** It always partitions and
+  ranks; see *Correlated `NEAREST`* above for why.

@@ -62,19 +62,32 @@ pub fn run<G: GraphAccess>(
     if buckets.is_empty() {
         return finish(sink, spec, stats);
     }
+    rank_buckets(set, spec, source, &mut buckets, &mut sink, stats);
+    finish(sink, spec, stats)
+}
 
+/// Rank one candidate set against `spec.q` and pour the survivors into
+/// `sink`. Split out of `run` because the correlated arm does exactly
+/// this, once per anchor group, with a different query vector each time —
+/// so the two arms cannot drift apart on how a candidate set is ranked.
+pub(crate) fn rank_buckets(
+    set: &VectorSet,
+    spec: &NearestSpec,
+    source: VecSource,
+    buckets: &mut HashMap<Id, Vec<ResultRow>>,
+    sink: &mut TopK,
+    stats: &mut VecStats,
+) {
     match source {
         // Rank only what the pattern produced.
-        VecSource::LocalSort => walk_candidates(set, spec, &mut buckets, &mut sink, stats),
+        VecSource::LocalSort => walk_candidates(set, spec, buckets, sink, stats),
         // Walk a corpus-wide ranking, testing membership. The two differ
         // only in how that ranking is produced — lazily by the graph, or
         // by sorting everything up front.
         VecSource::Hnsw | VecSource::GlobalSort => {
-            walk_global(set, spec, source, &mut buckets, &mut sink, stats)
+            walk_global(set, spec, source, buckets, sink, stats)
         }
     }
-
-    finish(sink, spec, stats)
 }
 
 /// Local sub-mode: distance to every candidate the pattern produced,

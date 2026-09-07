@@ -117,6 +117,11 @@ Cargo workspace with four members and `resolver = "2"`:
   - `ldbc_bench` — LDBC interactive-complete benchmark driver (queries in `bench/ldbc-queries/*.toml`). **Requires `bench` feature.**
   - `internal_bench` — gqlite-only diagnostic bench (typechecker on/off, lazy/disk backend, RSS, scaling)
   - `convert_edgelist` — edge-list format converter
+  - `import_ttl` — streaming N-Triples/Turtle importer for literal-free
+    triple dumps (IMGpedia shape: `img:S img:Pnn img:O .`). Writes the
+    modern format (CSR + name table + node locs + edge topo) record by
+    record as it reads, so it never builds a `MemoryGraphStore`; peak RSS
+    is ~20 B/edge + 16 B/node. See `wikidata/README.md`
   - `vec_build` — offline builder for a vector-attribute sidecar (`<db>.vec.<attr>`) + its HNSW
   - `vec_bench` — post-filter vs pre-filter vs in-LTJ vector-search harness
 - `python/` — the `frogql-py` crate: a `cdylib` exposing a PyO3 extension module named `frogql`. Depends on `gqlrust = { path = "..", default-features = false }` so the wheel ships only the library half (no rustyline/ureq/etc.). Built and installed with maturin (`maturin develop` for local dev, `maturin build --release` for wheels). Maturin installs into whichever venv is active.
@@ -578,6 +583,23 @@ Non-ISO extension for "which nodes satisfy this pattern **and** are among
 the k nearest to a query vector". Built to compare three evaluation
 strategies, not as a product feature. Full write-up in
 `docs/internals/vector-search.md`.
+
+**Correlated form** (`runtime/vsearch/correlated.rs`): when `<expr>` names
+a pattern variable — `NEAREST 50 v11.hog TO VECTOR(v00, 'hog')` — the
+query vector is a function of the row, so the clause is a similarity
+*join*: one ranking per distinct anchor binding. The surface needed
+nothing new (that spelling always parsed and typechecked); what was
+missing was the evaluation, and until this arm existed such a clause
+returned **zero rows in silence**, because `resolve_spec` evaluates the
+query vector against an empty assignment. The arm runs the pattern once,
+partitions rows by the anchor, and ranks each partition through
+`post_filter::rank_buckets` so the two arms share one definition of "the
+k nearest of this candidate set". `FROGQL_VEC_SOURCE` still picks the
+per-partition stream; `FROGQL_VEC_STRATEGY` does not apply (the in-LTJ
+arms hook a single ranking into a VEO level and a correlated clause has
+one per anchor). `stats.arm` reports `correlated+<source>` and
+`stats.anchor_groups` the partition count. Tests:
+`tests/correlated_nearest_test.rs`.
 
 Surface: `NEAREST <k> [ROWS] <var>.<attr> TO <expr> [AS <distvar>]`, a
 clause between the MATCH chain and RETURN (so the distance variable is in
