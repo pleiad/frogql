@@ -115,6 +115,7 @@ pub fn run<G: GraphAccess>(
             ctx: &mut ctx,
             dists: &mut dists,
         },
+        rt.budget(),
     );
 
     let ir = match ir {

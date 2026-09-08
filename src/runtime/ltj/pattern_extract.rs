@@ -12,6 +12,7 @@ use super::algorithm::{FilterKind, LtjAlgorithm, PlacedFilter, ResultTuple, VecC
 use super::iterator::{LtjIterator, SpoPos, Term, TriplePattern};
 use super::triple_index::TripleIndex;
 use super::veo::{Veo, VeoOverride, VeoSimple};
+use crate::runtime::budget::Budget;
 
 // ---- Decomposition result ----
 
@@ -76,11 +77,12 @@ pub fn try_ltj<G: GraphAccess>(
     pattern: &PathPattern,
     index: &TripleIndex,
     limit: usize,
+    budget: &Budget,
 ) -> Option<IntermediateResult> {
     if has_any_direction(pattern) {
         return None;
     }
-    try_ltj_inner(graph, pattern, index, None, limit, &[], None)
+    try_ltj_inner(graph, pattern, index, None, limit, &[], None, budget)
 }
 
 /// LTJ for patterns that contain any-direction edges (`-[e]-`), **pure or
@@ -101,11 +103,21 @@ pub fn try_ltj_mixed<G: GraphAccess>(
     index: &TripleIndex,
     anydir_index: &TripleIndex,
     limit: usize,
+    budget: &Budget,
 ) -> Option<IntermediateResult> {
     if anydir_ltj_disabled() {
         return None;
     }
-    try_ltj_inner(graph, pattern, index, Some(anydir_index), limit, &[], None)
+    try_ltj_inner(
+        graph,
+        pattern,
+        index,
+        Some(anydir_index),
+        limit,
+        &[],
+        None,
+        budget,
+    )
 }
 
 /// True when `FROGQL_DISABLE_ANYDIR_LTJ=1` forces the hash-join fallback
@@ -154,6 +166,7 @@ pub fn try_ltj_with_pin<G: GraphAccess>(
     limit: usize,
     pin_var: &str,
     pin_id: u32,
+    budget: &Budget,
 ) -> Option<IntermediateResult> {
     // The pinned paths (correlated EXISTS / OPTIONAL / value subquery) do
     // not carry the mirrored index; an any-direction body bails to its
@@ -169,6 +182,7 @@ pub fn try_ltj_with_pin<G: GraphAccess>(
         limit,
         &[(pin_var, pin_id)],
         None,
+        budget,
     )
 }
 
@@ -185,11 +199,12 @@ pub fn try_ltj_with_pins<G: GraphAccess>(
     index: &TripleIndex,
     limit: usize,
     pins: &[(&str, u32)],
+    budget: &Budget,
 ) -> Option<IntermediateResult> {
     if has_any_direction(pattern) {
         return None;
     }
-    try_ltj_inner(graph, pattern, index, None, limit, pins, None)
+    try_ltj_inner(graph, pattern, index, None, limit, pins, None, budget)
 }
 
 /// A vector-search level requested of the LTJ, plus the slot its
@@ -223,11 +238,13 @@ pub fn try_ltj_nearest<G: GraphAccess>(
     pattern: &PathPattern,
     index: &TripleIndex,
     plan: NnPlan<'_, '_>,
+    budget: &Budget,
 ) -> Option<IntermediateResult> {
     // No limit: an arrival-order cut has nothing to do with distance.
-    try_ltj_inner(graph, pattern, index, None, 0, &[], Some(plan))
+    try_ltj_inner(graph, pattern, index, None, 0, &[], Some(plan), budget)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_ltj_inner<G: GraphAccess>(
     graph: &G,
     pattern: &PathPattern,
@@ -236,6 +253,7 @@ fn try_ltj_inner<G: GraphAccess>(
     limit: usize,
     external_pins: &[(&str, u32)],
     nn: Option<NnPlan<'_, '_>>,
+    budget: &Budget,
 ) -> Option<IntermediateResult> {
     let mut decomp = decompose(pattern, index)?;
 
@@ -470,14 +488,14 @@ fn try_ltj_inner<G: GraphAccess>(
             let (level, var_id) = nn_level?;
             algorithm = algorithm.with_nn_level(level, var_id);
             plan.ctx.anchor_var = anchor_var_id;
-            let tuples = algorithm.run_nearest(graph, plan.ctx);
+            let tuples = algorithm.run_nearest(graph, plan.ctx, budget);
             // One distance per tuple; `convert_results` emits one row per
             // tuple in order, so the two line up positionally.
             plan.dists.clear();
             plan.dists.extend(tuples.iter().map(|t| t.dist));
             tuples
         }
-        None => algorithm.run(graph, limit),
+        None => algorithm.run(graph, limit, budget),
     };
 
     Some(convert_results(graph, &tuples, &decomp))

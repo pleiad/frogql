@@ -11,6 +11,8 @@
 //!   --limit <n>       row cap per query, 0 for none (default: 0)
 //!   --queries <list>  1-based indices to run, e.g. 1,4,17 (default: all)
 //!   --csv <path>      write the CSV here as well as to stdout
+//!   --timeout <secs>  abandon a query that runs longer, mark the row
+//!                     `timeout`, and carry on with the next one
 //! ```
 //!
 //! # Why this exists
@@ -46,6 +48,14 @@
 //! `correlated+<source>`, the partition-and-rank plan, with the reason in
 //! the `fallback` column.
 //!
+//! A **`timeout`** in the `fallback` column means the row is a partial
+//! result and not a measurement: the budget ran out, the search returned
+//! what it had, and the `rows` and counter columns describe an unfinished
+//! walk. Read it as "this combination did not finish inside the budget",
+//! never as a latency. Without `--timeout` there is no budget and a bad
+//! combination runs until it finishes — which on a large corpus can be
+//! days, which is why the flag exists.
+//!
 //! `nn_pops` per accepted row is the headline number: with a selective
 //! pattern the corpus-walking sources reach a candidate that also
 //! satisfies the pattern only after a large fraction of the corpus, while
@@ -54,7 +64,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::vsearch::{Strategy, VecCfg, VecSource};
@@ -101,6 +111,9 @@ struct Args {
     limit: usize,
     only: Option<Vec<usize>>,
     csv: Option<PathBuf>,
+    /// Wall-clock budget per query run. `None` leaves the sweep
+    /// unbounded, which is what a bad arm needs days of.
+    timeout: Option<Duration>,
 }
 
 fn usage() -> ! {
@@ -113,7 +126,9 @@ fn usage() -> ! {
            --iters <n>       runs per (arm, query); median reported (default: 3)\n  \
            --limit <n>       row cap per query, 0 for none (default: 0)\n  \
            --queries <list>  1-based query indices to run (default: all)\n  \
-           --csv <path>      also write the CSV to this file"
+           --csv <path>      also write the CSV to this file\n  \
+           --timeout <secs>  abandon a query that runs longer; the row is\n  \
+           \x20                marked `timeout` and the sweep continues"
     );
     process::exit(2)
 }
@@ -146,6 +161,7 @@ fn parse_args() -> Args {
     let mut limit = 0usize;
     let mut only: Option<Vec<usize>> = None;
     let mut csv = None;
+    let mut timeout = None;
 
     let mut i = 0;
     while i < argv.len() {
@@ -183,6 +199,16 @@ fn parse_args() -> Args {
                 )
             }
             "--csv" => csv = Some(PathBuf::from(value("--csv"))),
+            "--timeout" => {
+                let v = value("--timeout");
+                timeout = match v.parse::<f64>() {
+                    Ok(secs) if secs > 0.0 => Some(Duration::from_secs_f64(secs)),
+                    _ => {
+                        eprintln!("error: --timeout wants a positive number of seconds");
+                        usage()
+                    }
+                };
+            }
             "-h" | "--help" => usage(),
             other if other.starts_with("--") => {
                 eprintln!("error: unknown flag `{other}`");
@@ -205,6 +231,7 @@ fn parse_args() -> Args {
         limit,
         only,
         csv,
+        timeout,
     }
 }
 
@@ -258,6 +285,7 @@ fn main() {
     );
 
     let rt = Runtime::new(&store);
+    rt.set_query_budget(args.timeout);
     let t = Instant::now();
     let index = rt.warm_triple_index();
     eprintln!(
@@ -327,11 +355,18 @@ fn main() {
             for (qi, query) in &queries {
                 let mut times = Vec::with_capacity(args.iters);
                 let mut rows = 0usize;
+                let mut timed_out = false;
                 for _ in 0..args.iters {
                     let t = Instant::now();
                     let result = rt.run_query(query, args.limit);
                     times.push(t.elapsed().as_secs_f64() * 1000.0);
                     rows = result.row_count();
+                    // One expired iteration condemns the row: the rest
+                    // measure an unfinished walk just as much.
+                    timed_out |= rt.query_timed_out();
+                    if timed_out {
+                        break;
+                    }
                 }
                 let s = rt.last_vec_stats();
                 let lo = times.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -351,7 +386,14 @@ fn main() {
                     s.candidates_hashed,
                     s.anchor_groups,
                     // Commas would break the column; the reason is prose.
-                    s.fallback_reason.as_deref().unwrap_or("").replace(',', ";")
+                    // `timeout` wins over any fallback text: it says the
+                    // numbers on this row describe an unfinished walk, and
+                    // that is the first thing a reader has to know.
+                    if timed_out {
+                        "timeout".to_string()
+                    } else {
+                        s.fallback_reason.as_deref().unwrap_or("").replace(',', ";")
+                    }
                 );
                 println!("{line}");
                 if let Some(f) = csv_out.as_mut() {
@@ -364,5 +406,11 @@ fn main() {
 
     if let Some(p) = &args.csv {
         eprintln!("wrote {}", p.display());
+    }
+    if args.timeout.is_none() {
+        eprintln!(
+            "note: no --timeout was set, so every row ran to completion; \
+             a combination that cannot finish would have hung the sweep"
+        );
     }
 }

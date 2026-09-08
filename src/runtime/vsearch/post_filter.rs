@@ -20,6 +20,7 @@ use std::collections::HashMap;
 
 use crate::model::graph_access::GraphAccess;
 use crate::model::value::Id;
+use crate::runtime::budget::Budget;
 use crate::runtime::engine::Runtime;
 use crate::runtime::result::{IntermediateResult, ResultRow};
 use crate::syntax::query::{KMode, Query};
@@ -62,7 +63,15 @@ pub fn run<G: GraphAccess>(
     if buckets.is_empty() {
         return finish(sink, spec, stats);
     }
-    rank_buckets(set, spec, source, &mut buckets, &mut sink, stats);
+    rank_buckets(
+        set,
+        spec,
+        source,
+        &mut buckets,
+        &mut sink,
+        stats,
+        rt.budget(),
+    );
     finish(sink, spec, stats)
 }
 
@@ -77,15 +86,16 @@ pub(crate) fn rank_buckets(
     buckets: &mut HashMap<Id, Vec<ResultRow>>,
     sink: &mut TopK,
     stats: &mut VecStats,
+    budget: &Budget,
 ) {
     match source {
         // Rank only what the pattern produced.
-        VecSource::LocalSort => walk_candidates(set, spec, buckets, sink, stats),
+        VecSource::LocalSort => walk_candidates(set, spec, buckets, sink, stats, budget),
         // Walk a corpus-wide ranking, testing membership. The two differ
         // only in how that ranking is produced — lazily by the graph, or
         // by sorting everything up front.
         VecSource::Hnsw | VecSource::GlobalSort => {
-            walk_global(set, spec, source, buckets, sink, stats)
+            walk_global(set, spec, source, buckets, sink, stats, budget)
         }
     }
 }
@@ -98,11 +108,15 @@ fn walk_candidates(
     buckets: &mut HashMap<Id, Vec<ResultRow>>,
     sink: &mut TopK,
     stats: &mut VecStats,
+    budget: &Budget,
 ) {
     let ids: Vec<Id> = buckets.keys().copied().collect();
     let mut cursor = set.cursor_over(&spec.q, &ids);
     stats.nn_expanded += cursor.expanded();
     while let Some((id, dist)) = cursor.next() {
+        if budget.expired() {
+            break;
+        }
         stats.nn_pops += 1;
         if !offer(spec, buckets, sink, id, dist) {
             break;
@@ -120,10 +134,14 @@ fn walk_global(
     buckets: &mut HashMap<Id, Vec<ResultRow>>,
     sink: &mut TopK,
     stats: &mut VecStats,
+    budget: &Budget,
 ) {
     let mut cursor = set.cursor(&spec.q, source == VecSource::Hnsw);
     let mut remaining = buckets.len();
     while let Some((id, dist)) = cursor.next() {
+        if budget.expired() {
+            break;
+        }
         stats.nn_pops += 1;
         if !buckets.contains_key(&id) {
             continue;

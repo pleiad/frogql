@@ -62,6 +62,9 @@ pub fn run<G: GraphAccess>(
     };
 
     while let Some((id, dist)) = cursor.next() {
+        if rt.budget().expired() {
+            break;
+        }
         stats.nn_pops += 1;
 
         // The stream is non-decreasing, so once the sink is full and the

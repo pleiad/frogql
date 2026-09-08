@@ -5,6 +5,7 @@ use crate::syntax::expr::BinOp;
 
 use super::iterator::{LtjIterator, SpoPos};
 use super::veo::Veo;
+use crate::runtime::budget::Budget;
 use crate::runtime::vsearch::topk::DistThreshold;
 use crate::vector::cursor::NnStream;
 
@@ -425,10 +426,15 @@ impl<'a> LtjAlgorithm<'a> {
     /// this used to need — `LtjRunner`, whose only job was to hold this
     /// reference, and which carried a second copy of `search` that drifted
     /// out of sync (see the pinned-slot comment below).
-    pub fn run<G: GraphAccess>(&mut self, graph: &G, limit: usize) -> Vec<ResultTuple> {
+    pub fn run<G: GraphAccess>(
+        &mut self,
+        graph: &G,
+        limit: usize,
+        budget: &Budget,
+    ) -> Vec<ResultTuple> {
         let mut results = Vec::new();
         let mut tuple = self.fresh_tuple();
-        self.search(graph, 0, &mut tuple, &mut results, limit, None);
+        self.search(graph, 0, &mut tuple, &mut results, limit, None, budget);
         results
     }
 
@@ -442,6 +448,7 @@ impl<'a> LtjAlgorithm<'a> {
         &mut self,
         graph: &G,
         ctx: &mut VecCtx<'_>,
+        budget: &Budget,
     ) -> Vec<ResultTuple> {
         match ctx.mode {
             NnMode::Interleave => {
@@ -449,10 +456,10 @@ impl<'a> LtjAlgorithm<'a> {
                 let mut tuple = self.fresh_tuple();
                 // No limit: an arrival-order cut has nothing to do with
                 // distance. `ctx.cut` is what bounds the work instead.
-                self.search(graph, 0, &mut tuple, &mut results, 0, Some(ctx));
+                self.search(graph, 0, &mut tuple, &mut results, 0, Some(ctx), budget);
                 results
             }
-            NnMode::Memo => self.run_nearest_memo(graph, ctx),
+            NnMode::Memo => self.run_nearest_memo(graph, ctx, budget),
         }
     }
 
@@ -508,6 +515,7 @@ impl<'a> LtjAlgorithm<'a> {
         &mut self,
         graph: &G,
         ctx: &mut VecCtx<'_>,
+        budget: &Budget,
     ) -> Vec<ResultTuple> {
         let Some((level, var_id)) = self.nn_level else {
             return Vec::new();
@@ -519,7 +527,7 @@ impl<'a> LtjAlgorithm<'a> {
         // `ctx.table` (or, correlated, `ctx.anchor_tables`), so it
         // produces no tuples of its own.
         let mut discarded = Vec::new();
-        self.search(graph, 0, &mut tuple, &mut discarded, 0, Some(ctx));
+        self.search(graph, 0, &mut tuple, &mut discarded, 0, Some(ctx), budget);
         debug_assert!(
             discarded.is_empty(),
             "phase 1 stops above the search level and must not emit tuples"
@@ -527,12 +535,15 @@ impl<'a> LtjAlgorithm<'a> {
 
         let mut results = Vec::new();
         if ctx.anchor_var.is_none() {
-            self.walk_ranking(graph, level, var_id, &mut tuple, &mut results, ctx);
+            self.walk_ranking(graph, level, var_id, &mut tuple, &mut results, ctx, budget);
             return results;
         }
 
         // Correlated: one walk per anchor, in first-seen order.
         for slot in 0..ctx.anchor_tables.len() {
+            if budget.expired() {
+                break;
+            }
             let anchor = ctx.anchor_tables[slot].0;
             ctx.table = std::mem::take(&mut ctx.anchor_tables[slot].1);
             // Retargeting is what resets the vector, the threshold and —
@@ -548,7 +559,7 @@ impl<'a> LtjAlgorithm<'a> {
                 ctx.table.clear();
                 continue;
             }
-            self.walk_ranking(graph, level, var_id, &mut tuple, &mut results, ctx);
+            self.walk_ranking(graph, level, var_id, &mut tuple, &mut results, ctx, budget);
         }
         results
     }
@@ -586,6 +597,7 @@ impl<'a> LtjAlgorithm<'a> {
         tuple: &mut Vec<(u8, u32)>,
         results: &mut Vec<ResultTuple>,
         ctx: &mut VecCtx<'_>,
+        budget: &Budget,
     ) {
         if ctx.table.is_empty() {
             return;
@@ -603,6 +615,9 @@ impl<'a> LtjAlgorithm<'a> {
 
         let mut rank = 0usize;
         loop {
+            if budget.expired() {
+                break;
+            }
             let next = match &ranked {
                 Some(v) => v.get(rank).copied(),
                 None => ctx.stream.at(rank),
@@ -630,7 +645,9 @@ impl<'a> LtjAlgorithm<'a> {
             ctx.cur_dist = dist;
             for i in 0..prefixes.count {
                 let context = prefixes.get(i, level);
-                self.resume(graph, level, var_id, id, context, tuple, results, ctx);
+                self.resume(
+                    graph, level, var_id, id, context, tuple, results, ctx, budget,
+                );
             }
 
             if ctx.cuts && ctx.tau_eps == 0.0 && ctx.cut.is_full() {
@@ -667,6 +684,7 @@ impl<'a> LtjAlgorithm<'a> {
         tuple: &mut Vec<(u8, u32)>,
         results: &mut Vec<ResultTuple>,
         ctx: &mut VecCtx<'_>,
+        budget: &Budget,
     ) {
         let mut descended: Vec<(usize, SpoPos)> = Vec::new();
         for (l, &val) in context.iter().enumerate() {
@@ -689,7 +707,7 @@ impl<'a> LtjAlgorithm<'a> {
 
         ctx.resumes += 1;
         // No limit: an arrival-order cut has nothing to do with distance.
-        self.search(graph, level + 1, tuple, results, 0, Some(ctx));
+        self.search(graph, level + 1, tuple, results, 0, Some(ctx), budget);
 
         for &(it, pos) in descended.iter().rev() {
             self.iterators[it].up(pos);
@@ -778,6 +796,7 @@ impl<'a> LtjAlgorithm<'a> {
 
     /// Recursive search: bind the variable at level `j`, evaluate the
     /// filters placed there, descend, backtrack.
+    #[allow(clippy::too_many_arguments)]
     fn search<G: GraphAccess>(
         &mut self,
         graph: &G,
@@ -786,8 +805,15 @@ impl<'a> LtjAlgorithm<'a> {
         results: &mut Vec<ResultTuple>,
         limit: usize,
         mut ctx: Option<&mut VecCtx<'_>>,
+        budget: &Budget,
     ) -> bool {
         if limit > 0 && results.len() >= limit {
+            return false;
+        }
+        // The one place the join is bounded. `false` is the same signal
+        // the limit uses, so the recursion unwinds through the existing
+        // path and the iterators are ascended on the way out.
+        if budget.expired() {
             return false;
         }
 
@@ -956,6 +982,9 @@ impl<'a> LtjAlgorithm<'a> {
 
                 let mut rank = 0usize;
                 loop {
+                    if budget.expired() {
+                        return false;
+                    }
                     let tau = vc.cut.get();
                     let next = match &ranked {
                         Some(v) => v.get(rank).copied(),
@@ -985,7 +1014,7 @@ impl<'a> LtjAlgorithm<'a> {
                     for k in 0..iter_indices.len() {
                         self.iterators[iter_indices[k]].down(positions[k], id);
                     }
-                    let ok = self.search(graph, j + 1, tuple, results, limit, Some(vc));
+                    let ok = self.search(graph, j + 1, tuple, results, limit, Some(vc), budget);
                     for k in 0..iter_indices.len() {
                         self.iterators[iter_indices[k]].up(positions[k]);
                     }
@@ -1011,7 +1040,15 @@ impl<'a> LtjAlgorithm<'a> {
                 }
 
                 self.iterators[idx].down(pos, val);
-                let ok = self.search(graph, j + 1, tuple, results, limit, ctx.as_deref_mut());
+                let ok = self.search(
+                    graph,
+                    j + 1,
+                    tuple,
+                    results,
+                    limit,
+                    ctx.as_deref_mut(),
+                    budget,
+                );
                 self.iterators[idx].up(pos);
 
                 if !ok {
@@ -1033,7 +1070,15 @@ impl<'a> LtjAlgorithm<'a> {
                     self.iterators[iter_indices[k]].down(positions[k], val);
                 }
 
-                let ok = self.search(graph, j + 1, tuple, results, limit, ctx.as_deref_mut());
+                let ok = self.search(
+                    graph,
+                    j + 1,
+                    tuple,
+                    results,
+                    limit,
+                    ctx.as_deref_mut(),
+                    budget,
+                );
 
                 // Ascend in all iterators
                 for k in 0..iter_indices.len() {

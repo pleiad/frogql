@@ -248,6 +248,9 @@ fn eval<G: GraphAccess>(
 
     let mut out: Vec<ResultRow> = Vec::new();
     for key in order {
+        if rt.budget().expired() {
+            break;
+        }
         let rows = match parts.remove(&key) {
             Some(r) => r,
             None => continue,
@@ -292,7 +295,15 @@ fn eval<G: GraphAccess>(
         stats.candidates_hashed += buckets.len() as u64;
 
         let mut sink = TopK::new(spec.k, spec.mode);
-        post_filter::rank_buckets(set, &spec, source, &mut buckets, &mut sink, stats);
+        post_filter::rank_buckets(
+            set,
+            &spec,
+            source,
+            &mut buckets,
+            &mut sink,
+            stats,
+            rt.budget(),
+        );
         stats.rows_buffered += sink.buffered;
         stats.rows_evicted += sink.evicted;
         for (dist, mut row) in sink.drain_sorted() {

@@ -376,6 +376,17 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// Counters from the last `NEAREST` evaluation. The benchmark reads
     /// which arm actually ran, which is not always the one requested.
     last_vec_stats: RefCell<crate::runtime::vsearch::VecStats>,
+    /// Wall-clock budget the LTJ search and the vector walks consult, so
+    /// a query that will not finish stops instead of being waited on.
+    /// Unarmed by default and never armed by the REPL: an expired budget
+    /// yields a **partial** result, and a partial result handed back
+    /// unlabelled is indistinguishable from an answer. See
+    /// `runtime::budget`.
+    budget: crate::runtime::budget::Budget,
+    /// The limit `budget` is re-armed with at the top of every top-level
+    /// execution, so one setting covers each query separately rather than
+    /// the whole session.
+    budget_limit: Cell<Option<std::time::Duration>>,
 }
 
 /// Cached evaluation result for an existential predicate.
@@ -440,6 +451,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             correlation_scope: RefCell::new(Vec::new()),
             vec_cfg: RefCell::new(crate::runtime::vsearch::VecCfg::from_env()),
             last_vec_stats: RefCell::new(crate::runtime::vsearch::VecStats::default()),
+            budget: crate::runtime::budget::Budget::unlimited(),
+            budget_limit: Cell::new(None),
         }
     }
 
@@ -460,6 +473,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             correlation_scope: RefCell::new(Vec::new()),
             vec_cfg: RefCell::new(crate::runtime::vsearch::VecCfg::from_env()),
             last_vec_stats: RefCell::new(crate::runtime::vsearch::VecStats::default()),
+            budget: crate::runtime::budget::Budget::unlimited(),
+            budget_limit: Cell::new(None),
         }
     }
 
@@ -480,6 +495,38 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// Counters from the most recent `NEAREST` evaluation.
     pub fn last_vec_stats(&self) -> crate::runtime::vsearch::VecStats {
         self.last_vec_stats.borrow().clone()
+    }
+
+    /// Bound each query to `limit` of wall clock, or remove the bound
+    /// with `None`.
+    ///
+    /// A query that runs out returns **whatever the search had reached**,
+    /// which is a partial result and not an answer: any caller that sets
+    /// a budget must consult `query_timed_out` and label its output. The
+    /// budget is cooperative and covers the LTJ search and the vector
+    /// walks only — `runtime::budget` lists exactly where, and what it
+    /// does not cover.
+    pub fn set_query_budget(&self, limit: Option<std::time::Duration>) {
+        self.budget_limit.set(limit);
+        self.budget.arm(limit);
+    }
+
+    /// Register a flag that stops the search when it turns true — a
+    /// signal handler, or another thread. The result is partial in
+    /// exactly the way a timed-out one is, and `query_timed_out` reports
+    /// both. Clearing the flag between queries is the caller's job.
+    pub fn set_cancel_flag(&self, flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+        self.budget.set_cancel_flag(flag);
+    }
+
+    /// Did the last top-level execution stop early — out of budget or
+    /// cancelled? False whenever neither was set.
+    pub fn query_timed_out(&self) -> bool {
+        self.budget.tripped()
+    }
+
+    pub(crate) fn budget(&self) -> &crate::runtime::budget::Budget {
+        &self.budget
     }
 
     pub(crate) fn set_last_vec_stats(&self, s: crate::runtime::vsearch::VecStats) {
@@ -628,6 +675,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
 
     pub fn run(&self, pattern: &PathPattern) -> IntermediateResult {
         self.exists_cache.borrow_mut().clear();
+        // Each top-level execution gets the whole budget, not a
+        // share of a session-wide one.
+        self.budget.restart(self.budget_limit.get());
         self.value_subquery_cache.borrow_mut().clear();
         // A raw pattern carries no selected-prefix context, so unbounded repetition
         // (if any) has no license here.
@@ -638,6 +688,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// Run with a result limit (0 = unlimited). Stops early once limit is reached.
     pub fn run_with_limit(&self, pattern: &PathPattern, limit: usize) -> IntermediateResult {
         self.exists_cache.borrow_mut().clear();
+        // Each top-level execution gets the whole budget, not a
+        // share of a session-wide one.
+        self.budget.restart(self.budget_limit.get());
         self.value_subquery_cache.borrow_mut().clear();
         self.unbounded_policy.set(UnboundedPolicy::Forbidden);
         self.run_path_pattern(pattern, limit)
@@ -657,6 +710,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // entry from a prior body would silently satisfy a new EXISTS
         // probe. Scope memoization to one top-level execution.
         self.exists_cache.borrow_mut().clear();
+        // Each top-level execution gets the whole budget, not a
+        // share of a session-wide one.
+        self.budget.restart(self.budget_limit.get());
         self.value_subquery_cache.borrow_mut().clear();
         // ISO §4.11.5 group degree of reference, collected once per execution
         // so aggregate classification below is a set lookup, not a re-walk.
@@ -1067,7 +1123,15 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     .collect();
                 Some(IntermediateResult::new(filtered))
             }
-            _ => pattern_extract::try_ltj_with_pin(self.graph, pattern, index, 0, var, id),
+            _ => pattern_extract::try_ltj_with_pin(
+                self.graph,
+                pattern,
+                index,
+                0,
+                var,
+                id,
+                &self.budget,
+            ),
         }
     }
 
@@ -1103,7 +1167,14 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     .collect();
                 Some(IntermediateResult::new(filtered))
             }
-            _ => pattern_extract::try_ltj_with_pins(self.graph, pattern, index, limit, pins),
+            _ => pattern_extract::try_ltj_with_pins(
+                self.graph,
+                pattern,
+                index,
+                limit,
+                pins,
+                &self.budget,
+            ),
         }
     }
 
@@ -1384,8 +1455,14 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 continue;
             }
 
-            let inner =
-                pattern_extract::try_ltj_with_pins(self.graph, pattern, &index, 0, &pin_pairs)?;
+            let inner = pattern_extract::try_ltj_with_pins(
+                self.graph,
+                pattern,
+                &index,
+                0,
+                &pin_pairs,
+                &self.budget,
+            )?;
             decomposable_checked = true;
 
             if inner.rows.is_empty() {
@@ -2028,7 +2105,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // it at open) and reused across every subsequent query.
         let join_pattern = PathPattern::Join(Box::new(q1.clone()), Box::new(q2.clone()));
         let index = self.triple_index();
-        if let Some(result) = pattern_extract::try_ltj(self.graph, &join_pattern, &index, limit) {
+        if let Some(result) =
+            pattern_extract::try_ltj(self.graph, &join_pattern, &index, limit, &self.budget)
+        {
             return result;
         }
         // Any-direction join (pure or mixed with directed): route each
@@ -2045,6 +2124,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 &index,
                 &self.anydir_index(),
                 limit,
+                &self.budget,
             ) {
                 return result;
             }
@@ -2116,7 +2196,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // Try LTJ for chains of directed edges. Cached TripleIndex via Arc.
         let concat_pattern = PathPattern::Concat(Box::new(p1.clone()), Box::new(p2.clone()));
         let index = self.triple_index();
-        if let Some(result) = pattern_extract::try_ltj(self.graph, &concat_pattern, &index, limit) {
+        if let Some(result) =
+            pattern_extract::try_ltj(self.graph, &concat_pattern, &index, limit, &self.budget)
+        {
             return result;
         }
         // Any-direction chain (pure or mixed with directed): route each
@@ -2133,6 +2215,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 &index,
                 &self.anydir_index(),
                 limit,
+                &self.budget,
             ) {
                 return result;
             }

@@ -1,4 +1,5 @@
 pub mod assignment;
+pub mod budget;
 pub mod catalog;
 pub mod dm;
 pub mod engine;

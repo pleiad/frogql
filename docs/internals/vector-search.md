@@ -693,6 +693,35 @@ reason.
 `vec_bench` sets these programmatically via `Runtime::set_vec_cfg`, so
 its sweeps do not depend on process-global state.
 
+The environment is read once per process, which is right for a benchmark
+and wrong for a session: on a database that costs minutes to open,
+comparing arms cannot mean reopening it per arm. The REPL therefore has
+`.vec` — bare, it prints the current knobs plus the last `NEAREST`
+query's counters (so "which arm actually ran" is one keystroke);
+`.vec <knob> <value>` sets one of `strategy` / `source` / `level` /
+`tau-eps` / `memo-cuts` / `debug`.
+
+## Stopping a query that will not finish
+
+`Runtime::set_query_budget` arms a cooperative wall-clock budget and
+`Runtime::set_cancel_flag` a flag anyone can raise; either one stopping
+the search sets `Runtime::query_timed_out`. Full contract, including what
+it does **not** cover, in `src/runtime/budget.rs`.
+
+What matters when reading results: **an abandoned search returns a
+partial result, not a shorter one.** It stopped mid-walk, so its rows are
+whatever the threshold had admitted by then and its counters describe an
+unfinished walk. Nothing arms a budget by default. `vec_sweep --timeout
+<secs>` writes `timeout` in the `fallback` column and moves on, and the
+REPL's `.timeout <secs>` discards the rows entirely and says why —
+printing them would be indistinguishable from printing an answer. The
+REPL also routes Ctrl-C to the cancel flag, so an interrupted query
+leaves the session alive rather than taking a two-and-a-half-minute open
+with it.
+
+This exists because `interleave+hnsw` at level 4 on the IMGpedia dump
+never finished, and there was no way to tell that apart from slow.
+
 ## Known limits
 
 - **Approximate arms disagree by design.** Only the exact cursor is

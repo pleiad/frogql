@@ -154,7 +154,7 @@ Top-level dirs: `src/` (library: parser, elaborate, typing, optimizer, runtime, 
 Always-on: `serde` + `serde_json` (model serialization), `thiserror` (error types). These are the only deps the Python wheel pulls.
 
 Optional, behind features (default on for local `cargo build`):
-- `repl = ["dep:rustyline"]` — only `src/bin/frogql.rs` uses it.
+- `repl = ["dep:rustyline", "dep:signal-hook"]` — only `src/bin/frogql.rs` uses them. `signal-hook` is there so Ctrl-C stops the running query instead of the process; std has no signal API.
 - `bench = ["dep:sysinfo", "dep:toml", "dep:ureq", "dep:zstd", "dep:tar"]` — `bench_setup` (download/extract) and `ldbc_bench` (RSS reporting + TOML query specs) only.
 
 `default = ["repl", "bench"]` so plain `cargo build`, CI, and local dev see the same dependency surface as before. The `python/Cargo.toml` opts out via `default-features = false`; combined with workspace `resolver = "2"`, the wheel build never touches `ring/ureq/zstd/tar/rustyline/sysinfo/toml`. **Do not** add a new always-on dep for a bench- or REPL-only crate; gate it behind the appropriate feature and add `required-features = [...]` to the bin entry.
@@ -264,7 +264,21 @@ DDL surface today: `CREATE / USE / DROP GRAPH TYPE`, plus inspection / validatio
 
 `USE` does not validate. The walk is opt-in because it is O(N + E); the typechecker still constrains queries against the active schema either way.
 
-REPL meta-commands follow the SQLite dot-prefix convention (see `src/bin/frogql.rs`): `.schema` aliases `SHOW GRAPH TYPE DEFAULT`, `.schema simple` switches to the grouped by-label renderer in `print_schema_simple` (which lists every node type unconditionally — the earlier "standalone-only" filter hid all nodes on connected graphs and was removed in commit `e23d04d`), `.graph-types` aliases `SHOW GRAPH TYPES`, `.save` materialises the merged base+overlay view to the open `.gdb` atomically (see *Data Modification*), `.dump-json <path>` writes a pg_dump-style JSON snapshot, `.dump-gql <path>` writes a GQL script that recreates the graph, `.help` lists meta-commands and DDL surface, and `.quit` / `.exit` (plus bare `quit` / `exit`) leave the REPL.
+REPL meta-commands follow the SQLite dot-prefix convention (see `src/bin/frogql.rs`): `.schema` aliases `SHOW GRAPH TYPE DEFAULT`, `.schema simple` switches to the grouped by-label renderer in `print_schema_simple` (which lists every node type unconditionally — the earlier "standalone-only" filter hid all nodes on connected graphs and was removed in commit `e23d04d`), `.graph-types` aliases `SHOW GRAPH TYPES`, `.save` materialises the merged base+overlay view to the open `.gdb` atomically (see *Data Modification*), `.dump-json <path>` writes a pg_dump-style JSON snapshot, `.dump-gql <path>` writes a GQL script that recreates the graph, `.vec` reads or writes one vector-search knob (`strategy` / `source` / `level` / `tau-eps` / `memo-cuts` / `debug`) and bare `.vec` also prints the last `NEAREST` query's counters, `.timeout <secs>` bounds each query (`.timeout off` removes it), `.help` lists meta-commands and DDL surface, and `.quit` / `.exit` (plus bare `quit` / `exit`) leave the REPL.
+
+`.vec` exists because the knobs are read from the environment at startup, which is right for a benchmark process and wrong for a session: a database that costs minutes to open cannot be reopened once per arm.
+
+### Query budget and cancellation
+
+`Runtime::set_query_budget(Option<Duration>)` arms a **cooperative** wall-clock budget (`src/runtime/budget.rs`), re-armed at every top-level execution; `Runtime::set_cancel_flag(Arc<AtomicBool>)` registers a flag any embedder can raise. Either one stopping the search sets `Runtime::query_timed_out()`.
+
+Three things about it are load-bearing:
+
+- **The result is partial, not shorter.** Nothing armed by default, and the REPL *discards* the rows and prints why. A partial result handed back unlabelled is indistinguishable from an answer; `vec_sweep` writes `timeout` in the `fallback` column for the same reason `stats.arm` reports the executed arm.
+- **Coverage is a list, not a guarantee.** Honoured in `LtjAlgorithm::search` (per candidate at every level, so the join and the descents `memo` and `interleave` make are all bounded), `walk_ranking`, the interleave walk, and the post-/pre-filter and correlated walks. The hash-join fallback, repetition enumerators and shortest-path searches do **not** consult it. Claiming otherwise would be worse than no budget.
+- **Granularity is coarse on purpose.** `Instant::now()` costs tens of nanoseconds against loops that run billions of times, so the clock is read once every 4096 asks and a budget can overrun by that much work.
+
+The REPL registers SIGINT to the cancel flag (`signal-hook`, gated behind the `repl` feature — std has no signal API), so Ctrl-C stops the query and leaves the session alive. Before that, the default disposition took the process down, which on a database that costs two and a half minutes to open is the whole session.
 
 ### Data Modification (ISO §13, MVP-0 + MVP-1)
 

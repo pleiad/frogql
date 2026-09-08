@@ -194,6 +194,26 @@ fn main() {
     eprintln!();
 
     let rt = Runtime::new(&store);
+
+    // Ctrl-C stops the running query, not the session.
+    //
+    // rustyline handles ^C while it is reading the prompt (it returns
+    // `Interrupted`), but during a query nothing is reading the terminal
+    // and the default disposition takes the process down — which on a
+    // database that costs two and a half minutes to open is the whole
+    // session. Registering the flag replaces that disposition, so the
+    // signal now sets a bool the search consults on its amortised
+    // schedule. An interrupted query yields a *partial* result, so the
+    // loop below discards it and says so rather than printing rows that
+    // look like an answer.
+    let interrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    match signal_hook::flag::register(signal_hook::consts::SIGINT, interrupt.clone()) {
+        Ok(_) => rt.set_cancel_flag(Some(interrupt.clone())),
+        // Nothing here is worth failing to open a database over; the
+        // session simply keeps the default disposition.
+        Err(e) => eprintln!("warning: Ctrl-C will not stop a running query ({e})"),
+    }
+
     // Build the LTJ TripleIndex up-front so the first user query doesn't
     // pay the ~700ms (SF0.1) / multi-second (SF1) cold-build cost. The
     // load-time line below covers it.
@@ -243,6 +263,35 @@ fn main() {
                 "" => handle_show(&store, "DEFAULT"),
                 "simple" => print_schema_simple(&store),
                 _ => eprintln!("Unknown .schema arg. Use '.schema' or '.schema simple'."),
+            }
+            continue;
+        }
+
+        // `.vec` — the vector-search knobs, switchable without reopening
+        // the database. They are read from the environment at startup
+        // like every other diagnostic toggle, but a two-and-a-half-minute
+        // open makes "one process per arm" the wrong way to compare arms.
+        if let Some(rest) = line.strip_prefix(".vec") {
+            handle_vec(&rt, rest.trim());
+            continue;
+        }
+
+        // `.timeout` — a wall-clock budget per query. Off by default:
+        // an expired query returns a partial result, and that is only
+        // safe when somebody asked for it.
+        if let Some(rest) = line.strip_prefix(".timeout") {
+            match parse_timeout(rest.trim()) {
+                Ok(v) => {
+                    // The Runtime owns it from here; it re-arms the clock
+                    // at every execution so one setting bounds each query
+                    // rather than the session.
+                    rt.set_query_budget(v);
+                    match v {
+                        Some(d) => println!("query timeout: {:.3}s", d.as_secs_f64()),
+                        None => println!("query timeout: off"),
+                    }
+                }
+                Err(e) => eprintln!("{e}"),
             }
             continue;
         }
@@ -440,9 +489,30 @@ fn main() {
             }
         };
 
+        // A ^C typed at the prompt also raises the flag; clear it so it
+        // does not abandon the query the user typed next.
+        interrupt.store(false, std::sync::atomic::Ordering::Relaxed);
         let start = Instant::now();
         let result = rt.run_query(&query, 100);
         let elapsed = start.elapsed();
+
+        // An abandoned search returns what it had reached, which is a
+        // partial result and not a shorter answer. Printing those rows
+        // would be indistinguishable from printing an answer, so they are
+        // dropped and the reason is stated.
+        if rt.query_timed_out() {
+            let why = if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+                "interrupted"
+            } else {
+                "out of time"
+            };
+            eprintln!(
+                "query abandoned after {:.3}s ({why}) — no rows shown: an abandoned \
+                 search returns a partial result, not a shorter one",
+                elapsed.as_secs_f64()
+            );
+            continue;
+        }
 
         match result {
             QueryResult::Projected(rows) => {
@@ -1329,6 +1399,9 @@ fn print_help() {
     println!("  .save               persist overlay to the open .gdb (atomic tmp+rename)");
     println!("  .dump-json <path>   write a JSON snapshot (round-trips with import_json)");
     println!("  .dump-gql <path>    write a GQL script that recreates the graph");
+    println!("  .vec                show the vector-search knobs and last-query counters");
+    println!("  .vec <k> <v>        set one: strategy|source|level|tau-eps|memo-cuts|debug");
+    println!("  .timeout <secs>     abandon a query that runs longer ('.timeout off' to stop)");
     println!("  .help               this message");
     println!("  .quit / .exit       exit the REPL");
     println!();
@@ -1759,4 +1832,151 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// `.timeout <secs>` / `.timeout off` / bare `.timeout` (which reports by
+/// setting nothing, handled by the caller printing the result).
+fn parse_timeout(arg: &str) -> Result<Option<std::time::Duration>, String> {
+    match arg {
+        "" | "off" | "none" | "0" => Ok(None),
+        other => match other.parse::<f64>() {
+            Ok(secs) if secs > 0.0 && secs.is_finite() => {
+                Ok(Some(std::time::Duration::from_secs_f64(secs)))
+            }
+            _ => Err(format!(
+                "'{other}' is not a positive number of seconds. Use '.timeout 60' or '.timeout off'."
+            )),
+        },
+    }
+}
+
+/// `.vec` — read or write one vector-search knob.
+///
+/// The knobs come from the environment at startup, which is the right
+/// default for a benchmark process and the wrong one for a session: on a
+/// database that costs minutes to open, comparing arms cannot mean
+/// reopening it per arm. Bare `.vec` prints the current setting together
+/// with the counters of the last `NEAREST` query, so "which arm actually
+/// ran" is one keystroke rather than an environment variable and a
+/// restart.
+fn handle_vec<G: frogql::model::graph_access::GraphAccess>(rt: &Runtime<'_, G>, arg: &str) {
+    use frogql::runtime::vsearch::{Strategy, VecSource};
+
+    let mut cfg = rt.vec_cfg();
+    let parts: Vec<&str> = arg.split_whitespace().collect();
+    match parts.as_slice() {
+        [] => {
+            println!(
+                "strategy={} source={} level={} tau-eps={} memo-cuts={} debug={}",
+                cfg.strategy.name(),
+                cfg.source.name(),
+                cfg.level,
+                cfg.tau_eps,
+                cfg.memo_cuts,
+                cfg.debug
+            );
+            let s = rt.last_vec_stats();
+            if s.arm.is_empty() {
+                println!("(no NEAREST query has run in this session yet)");
+            } else {
+                s.print();
+            }
+            return;
+        }
+        [key, value] => {
+            let ok = match *key {
+                "strategy" => match Strategy::parse(value) {
+                    Some(v) => {
+                        cfg.strategy = v;
+                        true
+                    }
+                    None => {
+                        eprintln!("unknown strategy '{value}'. Use post|pre|interleave|memo.");
+                        false
+                    }
+                },
+                "source" => match VecSource::parse(value) {
+                    Some(v) => {
+                        cfg.source = v;
+                        true
+                    }
+                    None => {
+                        eprintln!("unknown source '{value}'. Use hnsw|localsort|globalsort.");
+                        false
+                    }
+                },
+                "level" => match value.parse() {
+                    Ok(v) => {
+                        cfg.level = v;
+                        true
+                    }
+                    Err(_) => {
+                        eprintln!("level wants a non-negative integer, got '{value}'.");
+                        false
+                    }
+                },
+                "tau-eps" | "tau_eps" => match value.parse() {
+                    Ok(v) => {
+                        cfg.tau_eps = v;
+                        true
+                    }
+                    Err(_) => {
+                        eprintln!("tau-eps wants a number, got '{value}'.");
+                        false
+                    }
+                },
+                "memo-cuts" | "memo_cuts" => match parse_bool(value) {
+                    Some(v) => {
+                        cfg.memo_cuts = v;
+                        true
+                    }
+                    None => {
+                        eprintln!("memo-cuts wants on|off, got '{value}'.");
+                        false
+                    }
+                },
+                "debug" => match parse_bool(value) {
+                    Some(v) => {
+                        cfg.debug = v;
+                        true
+                    }
+                    None => {
+                        eprintln!("debug wants on|off, got '{value}'.");
+                        false
+                    }
+                },
+                other => {
+                    eprintln!(
+                        "unknown knob '{other}'. Use strategy|source|level|tau-eps|memo-cuts|debug."
+                    );
+                    false
+                }
+            };
+            if !ok {
+                return;
+            }
+        }
+        _ => {
+            eprintln!("usage: .vec  |  .vec <knob> <value>");
+            return;
+        }
+    }
+    println!(
+        "strategy={} source={} level={} tau-eps={} memo-cuts={} debug={}",
+        cfg.strategy.name(),
+        cfg.source.name(),
+        cfg.level,
+        cfg.tau_eps,
+        cfg.memo_cuts,
+        cfg.debug
+    );
+    rt.set_vec_cfg(cfg);
+}
+
+fn parse_bool(s: &str) -> Option<bool> {
+    match s.to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" | "1" => Some(true),
+        "off" | "false" | "no" | "0" => Some(false),
+        _ => None,
+    }
 }
