@@ -213,10 +213,32 @@ impl VectorSet {
         }
         if use_index {
             if let Some(h) = &self.hnsw {
-                return Box::new(crate::vector::hnsw::HnswCursor::new(self, h, q));
+                return Box::new(crate::vector::hnsw::HnswCursor::new(self, h, q.to_vec()));
             }
         }
         self.brute_force_cursor(q)
+    }
+
+    /// Like `cursor`, but taking the query vector by value.
+    ///
+    /// A correlated `NEAREST` rebuilds its stream once per anchor from a
+    /// vector that lives inside the search context, and borrowing it
+    /// there would be self-referential: the cursor would have to outlive
+    /// the field it borrows from, in the same struct. Both cursor
+    /// implementations are fine with an owned vector — the brute-force
+    /// one computes every distance up front and never reads it again, and
+    /// `HnswCursor` holds its own copy — so this costs one vector per
+    /// rebuild, against a walk of the whole corpus.
+    pub fn cursor_owned<'a>(&'a self, q: Vec<f32>, use_index: bool) -> Box<dyn NnCursor + 'a> {
+        if self.validate_query(&q).is_err() {
+            return Box::new(EmptyCursor);
+        }
+        if use_index {
+            if let Some(h) = &self.hnsw {
+                return Box::new(crate::vector::hnsw::HnswCursor::new(self, h, q));
+            }
+        }
+        self.brute_force_cursor(&q)
     }
 
     /// A cursor restricted to `candidates`.
@@ -263,7 +285,9 @@ impl VectorSet {
         }
     }
 
-    fn brute_force_cursor<'a>(&'a self, q: &'a [f32]) -> Box<dyn NnCursor + 'a> {
+    /// `q` is not tied to `'a`: every distance is computed here, so the
+    /// returned cursor never reads the query vector again.
+    fn brute_force_cursor<'a>(&'a self, q: &[f32]) -> Box<dyn NnCursor + 'a> {
         let q_norm = self.query_norm(q);
         let pairs: Vec<(Id, f32)> = self
             .ids

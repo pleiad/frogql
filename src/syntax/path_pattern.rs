@@ -171,6 +171,38 @@ impl PathPattern {
         }
     }
 
+    /// Whether this pattern carries a residual `WHERE` predicate.
+    ///
+    /// `decompose_pattern` drops the predicate of a `Filter` and
+    /// decomposes only its inner pattern, which is sound for every caller
+    /// that reaches LTJ *through* `run_path_pattern`: the `Filter` arm
+    /// there re-applies the predicate to whatever the inner produced. It
+    /// is not sound for a caller that invokes the decomposition directly.
+    ///
+    /// The in-LTJ vector arms are such a caller, and for them the answer
+    /// cannot be repaired afterwards either: the search prunes with a
+    /// running top-`k` threshold, so a row that the predicate would
+    /// reject has already tightened the cut and excluded neighbours that
+    /// belonged in the answer. Filtering the output would give the right
+    /// rows out of a wrong candidate set. They bail on this instead.
+    pub fn has_residual_filter(&self) -> bool {
+        match self {
+            PathPattern::Filter(_, _) => true,
+            PathPattern::Node(_)
+            | PathPattern::EdgeRight(_)
+            | PathPattern::EdgeLeft(_)
+            | PathPattern::EdgeUndirected(_)
+            | PathPattern::EdgeAnyDirection(_) => false,
+            PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+                a.has_residual_filter() || b.has_residual_filter()
+            }
+            PathPattern::Questioned(p)
+            | PathPattern::Repeat { pattern: p, .. }
+            | PathPattern::Named { pattern: p, .. }
+            | PathPattern::Selected { pattern: p, .. } => p.has_residual_filter(),
+        }
+    }
+
     /// Whether this pattern contains an undirected edge (`~[...]~`).
     ///
     /// Pinning both endpoints of an undirected edge in the LTJ decomposition

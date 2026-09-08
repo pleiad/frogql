@@ -59,14 +59,32 @@ pub fn run<G: GraphAccess>(
     mode: NnMode,
 ) -> Option<IntermediateResult> {
     let pattern = query.collapsed_pattern();
+
+    // A residual `WHERE` is dropped by the decomposition — sound for
+    // callers that reach LTJ through `run_path_pattern`, which re-applies
+    // it, and unsound here, where the decomposition is invoked directly.
+    // Post-filtering the output would not repair it: the search prunes
+    // with a running top-`k` threshold, so a row the predicate rejects has
+    // already tightened the cut and excluded neighbours that belonged in
+    // the answer. Degrade to post-filtering, which evaluates the whole
+    // query.
+    if pattern.has_residual_filter() {
+        stats.fallback_reason = Some(
+            "the query has a WHERE the in-LTJ arms cannot evaluate inside the search".to_string(),
+        );
+        return None;
+    }
+
     let index = rt.warm_triple_index();
 
     let source = effective_source(cfg.source, set);
     let local = source == VecSource::LocalSort;
     // A local source ranks the context table's keys directly, so it
     // never reads a corpus-wide stream and gets an empty one rather than
-    // paying to build a ranking it will not use.
-    let cursor: Box<dyn crate::vector::cursor::NnCursor> = if local {
+    // paying to build a ranking it will not use. A correlated clause has
+    // no query vector yet either — its first stream is built when the
+    // search reaches its first anchor.
+    let cursor: Box<dyn crate::vector::cursor::NnCursor> = if local || spec.anchor.is_some() {
         Box::new(crate::vector::cursor::EmptyCursor)
     } else {
         set.cursor(&spec.q, source == VecSource::Hnsw)
@@ -80,6 +98,9 @@ pub fn run<G: GraphAccess>(
         &spec.q,
         mode,
     );
+    // Only the correlated path rebuilds its stream, and it has to
+    // reproduce the source the caller asked for.
+    ctx.use_hnsw = source == VecSource::Hnsw;
     let mut dists: Vec<Option<f32>> = Vec::new();
 
     let ir = pattern_extract::try_ltj_nearest(
@@ -88,6 +109,7 @@ pub fn run<G: GraphAccess>(
         &index,
         NnPlan {
             var: &spec.var,
+            anchor: spec.anchor.as_deref(),
             level: cfg.level,
             ctx: &mut ctx,
             dists: &mut dists,
@@ -97,10 +119,17 @@ pub fn run<G: GraphAccess>(
     let ir = match ir {
         Some(ir) => ir,
         None => {
-            stats.fallback_reason = Some(format!(
-                "the pattern does not decompose with `{}` at a variable-elimination level",
-                spec.var
-            ));
+            stats.fallback_reason = Some(match &spec.anchor {
+                Some(a) => format!(
+                    "the pattern does not decompose with `{}` at a variable-elimination \
+                     level below `{a}`",
+                    spec.var
+                ),
+                None => format!(
+                    "the pattern does not decompose with `{}` at a variable-elimination level",
+                    spec.var
+                ),
+            });
             return None;
         }
     };
@@ -127,6 +156,16 @@ pub fn run<G: GraphAccess>(
     // which can be more than `k` — the threshold prunes, it does not
     // select — so the sink picks the winners under the same rule it
     // applies for every other strategy.
+    //
+    // A correlated clause counts `k` **per anchor**, so it gets one sink
+    // per anchor rather than one for the query. Partitioning here rather
+    // than inside the search keeps the two cases sharing every line
+    // below: the search already reset its threshold per anchor, and this
+    // applies the same selection rule the other strategies use.
+    if let Some(anchor) = &spec.anchor {
+        return Some(select_per_anchor(ir, &dists, spec, anchor, stats));
+    }
+
     let mut sink = TopK::new(spec.k, spec.mode);
     match spec.mode {
         KMode::Rows => {
@@ -161,4 +200,80 @@ pub fn run<G: GraphAccess>(
     }
 
     Some(finish(sink, spec, stats))
+}
+
+/// Select the `k` nearest per anchor, then concatenate in first-seen
+/// anchor order.
+///
+/// The rows arrive in join order, carrying every candidate the per-anchor
+/// threshold let through — which is at least `k` per anchor and usually
+/// more, since the threshold prunes rather than selects. Grouping by the
+/// anchor binding and running the ordinary sink inside each group is what
+/// makes the correlated in-LTJ arm answer the same thing the correlated
+/// post-filter arm does.
+fn select_per_anchor(
+    ir: IntermediateResult,
+    dists: &[Option<f32>],
+    spec: &NearestSpec,
+    anchor: &str,
+    stats: &mut VecStats,
+) -> IntermediateResult {
+    use std::collections::HashMap;
+
+    let mut order: Vec<u32> = Vec::new();
+    let mut groups: HashMap<u32, Vec<(f32, crate::runtime::result::ResultRow)>> = HashMap::new();
+    for (row, dist) in ir.rows.into_iter().zip(dists.iter()) {
+        let (Some(a), Some(d)) = (row_node(&row, anchor), *dist) else {
+            continue;
+        };
+        groups.entry(a).or_insert_with(|| {
+            order.push(a);
+            Vec::new()
+        });
+        groups.get_mut(&a).expect("just inserted").push((d, row));
+    }
+    stats.anchor_groups = order.len() as u64;
+
+    let mut out: Vec<crate::runtime::result::ResultRow> = Vec::new();
+    for a in order {
+        let Some(rows) = groups.remove(&a) else {
+            continue;
+        };
+        let mut sink = TopK::new(spec.k, spec.mode);
+        match spec.mode {
+            KMode::Rows => {
+                for (d, row) in rows {
+                    sink.offer_row(d, row);
+                }
+            }
+            KMode::DistinctVar => {
+                // `k` counts bindings, so a binding is offered once with
+                // all of its rows.
+                let mut seen: Vec<u32> = Vec::new();
+                let mut by_id: HashMap<u32, (f32, Vec<_>)> = HashMap::new();
+                for (d, row) in rows {
+                    let Some(id) = row_node(&row, &spec.var) else {
+                        continue;
+                    };
+                    by_id.entry(id).or_insert_with(|| {
+                        seen.push(id);
+                        (d, Vec::new())
+                    });
+                    by_id.get_mut(&id).expect("just inserted").1.push(row);
+                }
+                for id in seen {
+                    if let Some((d, rows)) = by_id.remove(&id) {
+                        sink.offer_var(id, d, rows);
+                    }
+                }
+            }
+        }
+        stats.rows_buffered += sink.buffered;
+        stats.rows_evicted += sink.evicted;
+        for (dist, mut row) in sink.drain_sorted() {
+            super::bind_distance(&mut row, spec, dist);
+            out.push(row);
+        }
+    }
+    IntermediateResult::new(out)
 }

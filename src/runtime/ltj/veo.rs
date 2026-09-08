@@ -74,6 +74,44 @@ impl VeoOverride {
         Some(VeoOverride { order })
     }
 
+    /// Move `var` to `level`, and guarantee `prereq` binds strictly
+    /// before it.
+    ///
+    /// This is what makes a **correlated** `NEAREST` evaluable inside the
+    /// join. The query vector is the anchor's, so the anchor has to be
+    /// bound by the time the search variable's level is reached —
+    /// otherwise there is no vector to rank against. Rather than reject
+    /// an order that happens to put the anchor later, move it to just
+    /// before the search variable: the two are joined anyway, so the
+    /// pattern still decomposes, and the constraint is on their relative
+    /// position rather than on either one's absolute level.
+    ///
+    /// `None` when either variable is absent from the base order (the
+    /// secondary-index fold can turn one into a constant), which the
+    /// caller degrades on rather than answering a different question.
+    pub fn pin_at_after(base: &dyn Veo, var: u8, level: usize, prereq: u8) -> Option<VeoOverride> {
+        let mut order: Vec<u8> = (0..base.size()).map(|j| base.var_at(j)).collect();
+        if !order.contains(&prereq) {
+            return None;
+        }
+        let cur = order.iter().position(|&v| v == var)?;
+        let v = order.remove(cur);
+        let at = level.min(order.len());
+        // With `var` out of the way, is the anchor already above the slot
+        // it is going into?
+        let anchor_pos = order.iter().position(|&p| p == prereq)?;
+        if anchor_pos < at {
+            order.insert(at, v);
+        } else {
+            // Pull the anchor up to the slot and put the search variable
+            // immediately after it.
+            let a = order.remove(anchor_pos);
+            order.insert(at, a);
+            order.insert(at + 1, v);
+        }
+        Some(VeoOverride { order })
+    }
+
     /// Where `var` actually landed. The requested level is clamped, so
     /// callers must read the real position back rather than assume it.
     pub fn level_of(&self, var: u8) -> Option<usize> {

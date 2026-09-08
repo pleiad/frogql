@@ -53,6 +53,10 @@ pub struct NearestSpec {
     pub var: String,
     pub attr: String,
     pub q: Vec<f32>,
+    /// **Correlated clause**: the pattern variable whose stored vector is
+    /// the query vector, in which case `q` is empty and the vector is
+    /// read per anchor during the search. `None` for the ordinary clause.
+    pub anchor: Option<String>,
     pub dist_var: Option<String>,
 }
 
@@ -308,6 +312,7 @@ pub fn resolve_spec<G: GraphAccess>(
         var: clause.var.clone(),
         attr: clause.attr.clone(),
         q,
+        anchor: None,
         dist_var: clause.dist_var.clone(),
     })
 }

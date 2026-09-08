@@ -551,3 +551,66 @@ fn the_ranking_is_walked_once_not_once_per_visit() {
         stats.candidates_hashed
     );
 }
+
+/// A residual `WHERE` must not be silently dropped by the in-LTJ arms.
+///
+/// `decompose_pattern` discards the predicate of a `PathPattern::Filter`
+/// and decomposes only its inner pattern. That is sound for every caller
+/// that reaches LTJ through `run_path_pattern`, whose `Filter` arm
+/// re-applies the predicate to whatever the inner produced — and unsound
+/// for `in_ltj`, which invokes the decomposition directly. Measured
+/// before the guard, on a graph where `hub` is the only node with
+/// `idx = -1`:
+///
+/// ```text
+/// post       : v11 = 0, 1          (correct)
+/// interleave : v11 = 0, 100        (100 is reachable only from a node the WHERE excludes)
+/// ```
+///
+/// Post-filtering the output would not have repaired it: the search
+/// prunes with a running top-`k` threshold, so a row the predicate
+/// rejects has already tightened the cut and excluded neighbours that
+/// belonged in the answer — the right rows out of a wrong candidate set.
+/// The arms decline the query instead, and the assertion is on the
+/// answer, which must be the post-filter one however it was reached.
+#[test]
+fn a_residual_where_is_not_dropped() {
+    let db = build_db("residual_where", 20260908);
+    let q = "MATCH (u:User)-[:likes]->(x:Item) WHERE u.idx = 3 \
+             NEAREST 5 x.emb TO [0.1, -0.2, 0.3, -0.4] AS d \
+             RETURN u.idx, x.idx, d";
+
+    let want = run(
+        &db,
+        q,
+        VecCfg {
+            strategy: Strategy::PostFilter,
+            source: VecSource::GlobalSort,
+            ..VecCfg::default()
+        },
+    );
+    assert!(!want.is_empty(), "the fixture must produce rows");
+    // Every row must satisfy the predicate the arms are tempted to drop.
+    for row in &want {
+        assert_eq!(row[0], Value::Int(3), "post-filter must honour the WHERE");
+    }
+
+    for (strategy, source) in ALL_ARMS {
+        if !source.is_exact() {
+            continue;
+        }
+        let got = run(
+            &db,
+            q,
+            VecCfg {
+                strategy,
+                source,
+                ..VecCfg::default()
+            },
+        );
+        assert_eq!(
+            got, want,
+            "{strategy:?}+{source:?} must honour the WHERE, however it evaluates it"
+        );
+    }
+}

@@ -77,6 +77,79 @@ pub fn anchor_vars(clause: &NearestClause) -> Vec<String> {
     acc.into_iter().collect()
 }
 
+/// Evaluate a correlated clause under the configured strategy.
+///
+/// `interleave` has a correlated form: the anchor is forced above the
+/// search variable in the variable elimination order, so by the time a
+/// visit reaches that level the anchor is bound and its vector is the
+/// ranking's query vector. Everything that was per-query then becomes
+/// per-anchor — the vector, the top-`k` threshold, and the corpus stream
+/// for a non-local source.
+///
+/// `pre` and `memo` do not. Pre-filter's defining property is that it
+/// never runs the pattern first, and the anchors are not known until it
+/// has; memo's is that the ranking is walked **once, globally**, and
+/// there is no global ranking when the query vector varies per anchor.
+/// Both fall back to partitioning, with the reason recorded.
+pub fn run_correlated<G: GraphAccess>(
+    rt: &Runtime<'_, G>,
+    query: &Query,
+    clause: &NearestClause,
+    anchors: &[String],
+    cfg: &VecCfg,
+) -> IntermediateResult {
+    // One anchor variable is what the in-LTJ form can pin; an expression
+    // over several has no single node whose vector to read.
+    if cfg.strategy == super::Strategy::Interleave && anchors.len() == 1 {
+        let mut stats = VecStats::default();
+        if let Some(ir) = try_interleave(rt, query, clause, &anchors[0], cfg, &mut stats) {
+            stats.accepted = ir.rows.len() as u64;
+            if cfg.debug {
+                stats.print();
+            }
+            rt.set_last_vec_stats(stats);
+            return ir;
+        }
+    }
+    run(rt, query, clause, anchors, cfg)
+}
+
+/// The in-LTJ arm, when the shape allows it. `None` when the pattern does
+/// not decompose with the search variable below the anchor, or when the
+/// anchor is not a plain pattern variable — the caller then partitions.
+fn try_interleave<G: GraphAccess>(
+    rt: &Runtime<'_, G>,
+    query: &Query,
+    clause: &NearestClause,
+    anchor: &str,
+    cfg: &VecCfg,
+    stats: &mut VecStats,
+) -> Option<IntermediateResult> {
+    let set = rt.graph.vectors(&clause.attr)?;
+    if clause.k == 0 {
+        return None;
+    }
+    let spec = NearestSpec {
+        k: clause.k as usize,
+        mode: clause.mode,
+        var: clause.var.clone(),
+        attr: clause.attr.clone(),
+        // Empty: the vector is read per anchor inside the search.
+        q: Vec::new(),
+        anchor: Some(anchor.to_string()),
+        dist_var: clause.dist_var.clone(),
+    };
+    super::in_ltj::run(
+        rt,
+        query,
+        &spec,
+        cfg,
+        set,
+        stats,
+        crate::runtime::ltj::algorithm::NnMode::Interleave,
+    )
+}
+
 pub fn run<G: GraphAccess>(
     rt: &Runtime<'_, G>,
     query: &Query,
@@ -179,6 +252,7 @@ fn eval<G: GraphAccess>(
             var: clause.var.clone(),
             attr: clause.attr.clone(),
             q,
+            anchor: None,
             dist_var: clause.dist_var.clone(),
         };
 

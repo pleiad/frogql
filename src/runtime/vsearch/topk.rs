@@ -260,6 +260,20 @@ impl DistThreshold {
         }
     }
 
+    /// Forget everything held, so the threshold is `+∞` again.
+    ///
+    /// A correlated `NEAREST` counts `k` **per anchor**, and the in-LTJ
+    /// search reaches one anchor's visits contiguously (the join descends
+    /// depth-first, so every visit under an anchor happens before the
+    /// search backtracks past it). Carrying the previous anchor's cut
+    /// into the next would prune the next anchor's neighbours against
+    /// distances measured from a different vector.
+    pub fn reset(&mut self) {
+        self.heap.clear();
+        self.seen.clear();
+        self.seq = 0;
+    }
+
     /// Same contract as `TopK::threshold`: `+∞` until `k` are held, then
     /// the worst held, never rising afterwards.
     pub fn get(&self) -> f32 {

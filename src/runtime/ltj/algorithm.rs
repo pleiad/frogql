@@ -112,9 +112,32 @@ pub struct VecCtx<'v> {
     /// exact sources: `false` re-scans a global ranking on every visit,
     /// `true` never looks at a node outside the level.
     pub local: bool,
-    /// The attribute and query vector, needed to rank locally.
+    /// The attribute the search reads.
     pub set: &'v crate::vector::store::VectorSet,
+    /// The query vector when the clause is uncorrelated.
     pub q: &'v [f32],
+    /// **Correlated `NEAREST`.** The LTJ var id of the anchor — the
+    /// variable whose stored vector *is* the query vector. `None` for the
+    /// ordinary clause, whose vector is fixed before the search runs.
+    ///
+    /// The anchor is guaranteed to bind above the search variable (see
+    /// `VeoOverride::pin_at_after`), so by the time a visit reaches the
+    /// search level the anchor is in the tuple and its vector is
+    /// readable. Everything the ranking depends on then changes per
+    /// anchor rather than per query: the vector, the corpus stream that
+    /// walks from it, and the top-`k` threshold, which counts `k` per
+    /// anchor and not `k` overall.
+    pub anchor_var: Option<u8>,
+    /// The anchor binding the state below currently describes;
+    /// `u32::MAX` before the first one.
+    pub cur_anchor: u32,
+    /// The current anchor's vector. Owned, because it is replaced as the
+    /// search backtracks into a new anchor.
+    pub q_owned: Vec<f32>,
+    /// Whether a rebuilt stream should use the metric index. Only the
+    /// correlated path rebuilds, and it has to reproduce the source the
+    /// caller chose.
+    pub use_hnsw: bool,
     /// The running top-k threshold, updated as matches are accepted.
     pub cut: DistThreshold,
     /// Slack on the threshold: an approximate cursor's order is only
@@ -202,6 +225,10 @@ impl<'v> VecCtx<'v> {
             local,
             set,
             q,
+            anchor_var: None,
+            cur_anchor: u32::MAX,
+            q_owned: Vec::new(),
+            use_hnsw: false,
             cut,
             tau_eps,
             cur_id: 0,
@@ -213,6 +240,49 @@ impl<'v> VecCtx<'v> {
             nn_pops: 0,
             resumes: 0,
         }
+    }
+
+    /// Rank against the anchor's vector when correlated, the clause's
+    /// fixed one otherwise.
+    pub fn query_vector(&self) -> &[f32] {
+        if self.anchor_var.is_some() {
+            &self.q_owned
+        } else {
+            self.q
+        }
+    }
+
+    /// Point the context at `anchor`, if it is not already there.
+    ///
+    /// Returns false when the anchor carries no vector: nothing is among
+    /// the `k` nearest to a node that has none, so the visit produces
+    /// nothing rather than ranking against a stale vector.
+    ///
+    /// Three things are per-anchor and all three are reset here. The
+    /// vector is obvious. The threshold is `k` *per anchor*, so carrying
+    /// one anchor's cut into the next would prune the next anchor's
+    /// neighbours against distances that have nothing to do with it. And
+    /// the corpus stream walks *from* the query vector, so a new vector
+    /// means a new walk — which is precisely why the corpus-walking
+    /// sources cost so much more here than the local one, and why that
+    /// cost is the thing worth measuring.
+    fn retarget(&mut self, anchor: u32) -> bool {
+        if self.cur_anchor == anchor {
+            return true;
+        }
+        let Some(row) = self.set.row(anchor) else {
+            self.cur_anchor = anchor;
+            self.q_owned.clear();
+            return false;
+        };
+        self.cur_anchor = anchor;
+        self.q_owned.clear();
+        self.q_owned.extend_from_slice(row);
+        self.cut.reset();
+        if !self.local {
+            self.stream = NnStream::new(self.set.cursor_owned(self.q_owned.clone(), self.use_hnsw));
+        }
+        true
     }
 }
 
@@ -632,6 +702,31 @@ impl<'a> LtjAlgorithm<'a> {
         if self.nn_level == Some((j, var_id)) {
             if let Some(vc) = ctx {
                 vc.visits += 1;
+
+                // Correlated clause: the query vector is the anchor's,
+                // and the anchor is bound above this level by
+                // construction (`VeoOverride::pin_at_after`). Point the
+                // context at it before anything reads a vector — the
+                // ranking, the threshold and, for a corpus source, the
+                // stream itself all belong to this anchor and not to the
+                // query.
+                if let Some(anchor_var) = vc.anchor_var {
+                    let bound = (0..j).find_map(|l| {
+                        let (v, id) = tuple[l];
+                        (v == anchor_var).then_some(id)
+                    });
+                    match bound {
+                        // No vector for this anchor: nothing is among the
+                        // k nearest to a node that has none.
+                        Some(a) if !vc.retarget(a) => return true,
+                        Some(_) => {}
+                        // Unreachable while the VEO guarantees the anchor
+                        // binds first; treated as "no ranking possible"
+                        // rather than ranked against a stale vector.
+                        None => return true,
+                    }
+                }
+
                 let candidates = self.collect_candidates(var_id);
                 if candidates.is_empty() {
                     return true;
@@ -684,7 +779,7 @@ impl<'a> LtjAlgorithm<'a> {
                 // is why the ranking gets re-walked and why `Memo`
                 // exists.
                 let ranked: Option<Vec<(u32, f32)>> = if vc.local {
-                    Some(vc.set.rank_candidates(vc.q, &candidates))
+                    Some(vc.set.rank_candidates(vc.query_vector(), &candidates))
                 } else {
                     None
                 };

@@ -633,8 +633,29 @@ k nearest of this candidate set". `FROGQL_VEC_SOURCE` still picks the
 per-partition stream; `FROGQL_VEC_STRATEGY` does not apply (the in-LTJ
 arms hook a single ranking into a VEO level and a correlated clause has
 one per anchor). `stats.arm` reports `correlated+<source>` and
-`stats.anchor_groups` the partition count. Tests:
-`tests/correlated_nearest_test.rs`.
+`stats.anchor_groups` the partition count.
+
+**`interleave` has a correlated form** (`correlated::run_correlated` →
+`in_ltj`): force the anchor above the search variable in the VEO
+(`VeoOverride::pin_at_after`) and the anchor is bound by the time a visit
+reaches the search level. Vector, top-`k` threshold and corpus stream all
+become per-anchor and reset together in `VecCtx::retarget`; the threshold
+reset is sound because the join descends depth-first, so one anchor's
+visits are contiguous. Selection is per anchor too
+(`in_ltj::select_per_anchor`). `pre` and `memo` do not: pre-filter would
+need the minimal sub-pattern binding the anchor (query planning this
+engine does not do), and memo's whole point is one *global* ranking walk,
+which does not exist when the vector varies. Both partition and record
+why. Tests: `tests/correlated_nearest_test.rs`.
+
+**The in-LTJ arms decline a residual `WHERE`.** `decompose_pattern` drops
+a `PathPattern::Filter`'s predicate — sound through `run_path_pattern`,
+which re-applies it, unsound for `in_ltj`, which decomposes directly and
+returned rows the `WHERE` excluded. Post-filtering the output would not
+repair it: the search prunes with a running top-`k` threshold, so a
+rejected row has already tightened the cut and excluded neighbours that
+belonged in the answer. `PathPattern::has_residual_filter()` gates it;
+widening the value-predicate pushdown is what would re-admit those shapes.
 
 Surface: `NEAREST <k> [ROWS] <var>.<attr> TO <expr> [AS <distvar>]`, a
 clause between the MATCH chain and RETURN (so the distance variable is in

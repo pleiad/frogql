@@ -502,7 +502,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // pattern runs, so it takes its own arm.
         let anchors = crate::runtime::vsearch::correlated::anchor_vars(clause);
         if !anchors.is_empty() {
-            return crate::runtime::vsearch::correlated::run(self, query, clause, &anchors, &cfg);
+            return crate::runtime::vsearch::correlated::run_correlated(
+                self, query, clause, &anchors, &cfg,
+            );
         }
         match crate::runtime::vsearch::resolve_spec(self, clause) {
             Ok(spec) => crate::runtime::vsearch::run_nearest(self, query, &spec, &cfg),

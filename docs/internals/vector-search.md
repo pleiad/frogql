@@ -194,16 +194,62 @@ not run. Pinned by `tests/correlated_nearest_test.rs`, which also asserts
 the single pattern run and that a constant query vector still takes the
 ordinary arm.
 
-### Why the in-LTJ arms have no correlated form yet
+### `interleave` has a correlated form; `pre` and `memo` do not
 
-`interleave` and `memo` hook **one** ranking into a VEO level. A
-correlated clause has one ranking per anchor, and the anchor is bound by
-the same join the hook lives in, so there is no fixed stream for the
-level to consult. Making them correlated is a design question — at which
-level does the anchor bind, and does the ranking then move inside the
-backtracking — not a parameter change. A correlated clause therefore
-takes the partition-and-rank arm whatever `FROGQL_VEC_STRATEGY` asks for,
-and records the requested strategy in `fallback_reason`.
+The in-LTJ hook was built around **one** ranking, fixed before the search
+runs. A correlated clause has one per anchor. What makes `interleave`
+work anyway is an ordering constraint rather than a new algorithm: force
+the anchor **above** the search variable in the variable elimination order
+(`VeoOverride::pin_at_after`), and by the time a visit reaches the search
+level the anchor is bound and its vector is readable.
+
+Three things that were per-query then become per-anchor, and all three
+reset together in `VecCtx::retarget`:
+
+| | why |
+|---|---|
+| the query vector | it *is* the anchor's vector |
+| the top-`k` threshold | `k` counts per anchor; the previous anchor's cut was measured from a different vector |
+| the corpus stream | a stream walks *from* a query vector, so a new vector is a new walk — which is exactly why the corpus sources cost so much more here than the local one |
+
+The threshold reset is sound because the join descends depth-first: every
+visit under one anchor happens before the search backtracks past it, so
+one anchor's visits are contiguous. Selection is per anchor too
+(`in_ltj::select_per_anchor`), applying the same sink the other arms use
+inside each group.
+
+`pre` and `memo` have no such form. Pre-filter's defining property is
+that it never runs the pattern first, and the anchors are not known until
+it has; the honest correlated version needs the *minimal sub-pattern that
+binds the anchor*, which is query planning this engine does not do. Memo
+walks the ranking **once, globally**, and there is no global ranking when
+the vector varies per anchor. Both partition, with the reason in
+`fallback_reason`, and `tests/correlated_nearest_test.rs` pins that they
+say so rather than report an arm that did not run.
+
+### The in-LTJ arms decline a residual `WHERE`
+
+`decompose_pattern` drops the predicate of a `PathPattern::Filter` and
+decomposes only the inner pattern. Sound for every caller that reaches
+LTJ through `run_path_pattern`, whose `Filter` arm re-applies it; unsound
+for `in_ltj`, which invokes the decomposition directly and, until this
+guard, returned rows the `WHERE` excluded:
+
+```text
+MATCH (hub:Img)-[:P69]->(v11:Img) WHERE hub.idx = -1 NEAREST 2 v11.emb TO ...
+post       : v11 = 0, 1      correct
+interleave : v11 = 0, 100    100 is reachable only from a node the WHERE excludes
+```
+
+Filtering the output afterwards would not repair it. The search prunes
+with a running top-`k` threshold, so a row the predicate rejects has
+already tightened the cut and excluded neighbours that belonged in the
+answer: the right rows out of a wrong candidate set. `in_ltj` therefore
+declines a pattern with `has_residual_filter()` and degrades to
+post-filtering, which evaluates the whole query. Widening the optimizer's
+value-predicate pushdown is what would re-admit these shapes; until then
+the guard is what keeps the arm honest. Pinned by
+`vector_strategy_equiv_test::a_residual_where_is_not_dropped`.
 
 ## Storage: sidecars
 

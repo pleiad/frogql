@@ -202,6 +202,11 @@ pub fn try_ltj_with_pins<G: GraphAccess>(
 pub struct NnPlan<'v, 'c> {
     /// Name of the variable to drive from the neighbour stream.
     pub var: &'c str,
+    /// **Correlated clause**: the pattern variable whose stored vector is
+    /// the query vector. It is forced above `var` in the variable
+    /// elimination order, because the ranking cannot be produced until
+    /// the anchor is bound.
+    pub anchor: Option<&'c str>,
     /// Requested VEO level; clamped to a legal one.
     pub level: usize,
     pub ctx: &'c mut VecCtx<'v>,
@@ -386,6 +391,10 @@ fn try_ltj_inner<G: GraphAccess>(
     // id, and the deeper slots still hold values from the previous
     // sibling branch.
     let mut nn_level: Option<(usize, u8)> = None;
+    // Resolved inside the match below and handed to the context once the
+    // algorithm is built: `VecCtx` needs the id, and only the
+    // decomposition knows how names map to ids.
+    let mut anchor_var_id: Option<u8> = None;
     let veo: Box<dyn Veo> = match &nn {
         Some(plan) => {
             // The variable can be gone: the secondary-index fold turns an
@@ -401,7 +410,23 @@ fn try_ltj_inner<G: GraphAccess>(
                 return None;
             }
             let capped = plan.level.min(VeoOverride::max_level(&var_info));
-            let over = VeoOverride::pin_at(&base_veo, var_id, capped)?;
+            let over = match plan.anchor {
+                // Correlated: the anchor must bind first, or there is no
+                // vector to rank against when this level is reached.
+                Some(anchor_name) => {
+                    let anchor_id = decomp
+                        .var_id_to_name
+                        .iter()
+                        .position(|n| n == anchor_name)
+                        .map(|i| i as u8)?;
+                    if anchor_id == var_id || pinned_set.contains(&anchor_id) {
+                        return None;
+                    }
+                    anchor_var_id = Some(anchor_id);
+                    VeoOverride::pin_at_after(&base_veo, var_id, capped, anchor_id)?
+                }
+                None => VeoOverride::pin_at(&base_veo, var_id, capped)?,
+            };
             // Read the real position back: the request is clamped.
             nn_level = Some((over.level_of(var_id)?, var_id));
             Box::new(over)
@@ -444,6 +469,7 @@ fn try_ltj_inner<G: GraphAccess>(
         Some(plan) => {
             let (level, var_id) = nn_level?;
             algorithm = algorithm.with_nn_level(level, var_id);
+            plan.ctx.anchor_var = anchor_var_id;
             let tuples = algorithm.run_nearest(graph, plan.ctx);
             // One distance per tuple; `convert_results` emits one row per
             // tuple in order, so the two line up positionally.

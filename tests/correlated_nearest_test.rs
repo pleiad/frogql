@@ -20,7 +20,7 @@ use frogql::model::graph::MemoryGraphStore;
 use frogql::model::graph_access::GraphAccess;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
-use frogql::runtime::vsearch::{VecCfg, VecSource};
+use frogql::runtime::vsearch::{Strategy, VecCfg, VecSource};
 use frogql::store::lazy::LazyGraphStore;
 use frogql::vector::hnsw::{Hnsw, HnswParams};
 use frogql::vector::metric::Metric;
@@ -47,7 +47,11 @@ const ANCHORS: [f32; 3] = [0.0, 10.0, -5.0];
 /// they can never be an answer — but a ranking source that walks the
 /// whole attribute still walks past them.
 fn fixture_json_with_orphans(orphans: usize) -> String {
-    let mut nodes = vec![r#"{"id":"hub","labels":["Img"],"props":{"idx":-1}}"#.to_string()];
+    // Distinct labels rather than a `WHERE`: a residual predicate is
+    // dropped by the LTJ decomposition, so the in-LTJ arms decline a
+    // query that carries one and this fixture would silently measure the
+    // fallback instead of the arm under test.
+    let mut nodes = vec![r#"{"id":"hub","labels":["Img","Hub"],"props":{"idx":-1}}"#.to_string()];
     for i in 0..CANDIDATES {
         nodes.push(format!(
             r#"{{"id":"c{i}","labels":["Img"],"props":{{"idx":{i}}}}}"#
@@ -59,7 +63,7 @@ fn fixture_json_with_orphans(orphans: usize) -> String {
             100 + i
         ));
         nodes.push(format!(
-            r#"{{"id":"holder{i}","labels":["Img"],"props":{{"idx":{}}}}}"#,
+            r#"{{"id":"holder{i}","labels":["Img","Holder"],"props":{{"idx":{}}}}}"#,
             200 + i
         ));
     }
@@ -155,9 +159,14 @@ fn build_db_with_orphans(name: &str, orphans: usize) -> PathBuf {
 /// deduplicated and sorted, so the assertion is on the answer rather than
 /// on how many pattern rows carried it.
 fn run(db: &Path, q: &str, source: VecSource) -> Vec<(i64, i64, f32)> {
+    run_with(db, q, Strategy::PostFilter, source)
+}
+
+fn run_with(db: &Path, q: &str, strategy: Strategy, source: VecSource) -> Vec<(i64, i64, f32)> {
     let store = LazyGraphStore::open(db).unwrap();
     let rt = Runtime::new(&store);
     rt.set_vec_cfg(VecCfg {
+        strategy,
         source,
         ..VecCfg::default()
     });
@@ -186,8 +195,7 @@ fn run(db: &Path, q: &str, source: VecSource) -> Vec<(i64, i64, f32)> {
     out
 }
 
-const QUERY: &str = "MATCH (h:Img)-[:P69]->(v00:Img), (hub:Img)-[:P69]->(v11:Img) \
-     WHERE h.idx >= 200 AND hub.idx = -1 \
+const QUERY: &str = "MATCH (h:Holder)-[:P69]->(v00:Img), (hub:Hub)-[:P69]->(v11:Img) \
      NEAREST 2 v11.emb TO VECTOR(v00, 'emb') AS d \
      RETURN v00.idx, v11.idx, d";
 
@@ -371,4 +379,121 @@ fn orphan_vectors_change_the_cost_but_not_the_answer() {
         "globalsort walks the whole attribute, so {ORPHANS} orphans must \
          cost it materially more than {small_global} pops; got {full_global}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The in-LTJ form of a correlated clause
+// ---------------------------------------------------------------------------
+
+/// `interleave` over a correlated clause must answer exactly what the
+/// partitioning arm answers.
+///
+/// This is the arm the study needs and the one that did not exist: a
+/// correlated clause has one ranking per anchor, and the in-LTJ hook was
+/// built around a single ranking fixed before the search. It works now
+/// because the anchor is forced *above* the search variable in the
+/// variable elimination order (`VeoOverride::pin_at_after`), so by the
+/// time a visit reaches the search level the anchor is bound and its
+/// vector is readable — and the three things that were per-query become
+/// per-anchor: the vector, the top-`k` threshold, and the corpus stream.
+///
+/// Equality with the partitioning arm is the whole claim. Anything else
+/// would mean the two answer different questions and their latencies
+/// cannot be compared, which is the only reason to have both.
+#[test]
+fn correlated_interleave_agrees_with_partitioning() {
+    let db = build_db("corr_interleave");
+    for source in [VecSource::LocalSort, VecSource::GlobalSort, VecSource::Hnsw] {
+        let partitioned = run_with(&db, QUERY, Strategy::PostFilter, source);
+        let in_ltj = run_with(&db, QUERY, Strategy::Interleave, source);
+        assert_eq!(
+            in_ltj, partitioned,
+            "correlated interleave must agree with partitioning ({source:?})"
+        );
+        assert!(!partitioned.is_empty(), "the fixture must produce rows");
+    }
+}
+
+/// And it must actually be the in-LTJ arm, not a quiet fallback to
+/// partitioning. `ltj_visits` is the tell: the partitioning arm never
+/// enters the join's search level, so it reports zero.
+#[test]
+fn correlated_interleave_really_runs_in_the_join() {
+    let db = build_db("corr_interleave_arm");
+    let store = LazyGraphStore::open(&db).unwrap();
+    let rt = Runtime::new(&store);
+    let q = frogql::compile_query(QUERY).unwrap();
+
+    rt.set_vec_cfg(VecCfg {
+        strategy: Strategy::Interleave,
+        source: VecSource::LocalSort,
+        ..VecCfg::default()
+    });
+    let _ = rt.run_query(&q, 0);
+    let s = rt.last_vec_stats();
+    assert_eq!(s.arm, "interleave+localsort", "got {}", s.arm);
+    assert!(
+        s.ltj_visits > 0,
+        "the search must reach the level in the join"
+    );
+    assert_eq!(
+        s.anchor_groups,
+        ANCHORS.len() as u64,
+        "one ranking per distinct anchor"
+    );
+
+    rt.set_vec_cfg(VecCfg {
+        strategy: Strategy::PostFilter,
+        source: VecSource::LocalSort,
+        ..VecCfg::default()
+    });
+    let _ = rt.run_query(&q, 0);
+    let s = rt.last_vec_stats();
+    assert_eq!(s.arm, "correlated+localsort", "got {}", s.arm);
+    assert_eq!(s.ltj_visits, 0, "partitioning never enters the join level");
+}
+
+/// `pre` and `memo` have no correlated form, so they must partition —
+/// and say so, rather than report an arm that did not run.
+#[test]
+fn pre_and_memo_fall_back_with_a_reason() {
+    let db = build_db("corr_fallback");
+    let store = LazyGraphStore::open(&db).unwrap();
+    let rt = Runtime::new(&store);
+    let q = frogql::compile_query(QUERY).unwrap();
+
+    for strategy in [Strategy::PreFilter, Strategy::Memo] {
+        rt.set_vec_cfg(VecCfg {
+            strategy,
+            source: VecSource::LocalSort,
+            ..VecCfg::default()
+        });
+        let _ = rt.run_query(&q, 0);
+        let s = rt.last_vec_stats();
+        assert!(
+            s.arm.starts_with("correlated"),
+            "{strategy:?} must partition, got {}",
+            s.arm
+        );
+        assert!(
+            s.fallback_reason.is_some(),
+            "{strategy:?} must record why it did not run"
+        );
+    }
+}
+
+/// `k` counts per anchor, not per query: widening it must widen every
+/// anchor's answer, in both arms alike.
+#[test]
+fn correlated_interleave_counts_k_per_anchor() {
+    let db = build_db("corr_k");
+    let wide = QUERY.replace("NEAREST 2 ", "NEAREST 99 ");
+    for strategy in [Strategy::PostFilter, Strategy::Interleave] {
+        let got = run_with(&db, &wide, strategy, VecSource::LocalSort);
+        assert_eq!(
+            got.len(),
+            ANCHORS.len() * CANDIDATES,
+            "{strategy:?}: every anchor should keep every candidate"
+        );
+    }
 }

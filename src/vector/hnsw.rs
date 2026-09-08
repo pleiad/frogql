@@ -506,7 +506,11 @@ fn row_dist(set: &super::store::VectorSet, a: usize, b: usize) -> f32 {
 pub struct HnswCursor<'a> {
     set: &'a super::store::VectorSet,
     hnsw: &'a Hnsw,
-    q: &'a [f32],
+    /// Owned rather than borrowed: a correlated `NEAREST` rebuilds the
+    /// cursor once per anchor from a vector that lives inside the search
+    /// context, and a borrow there would be self-referential. The copy is
+    /// one vector per cursor, which is nothing beside the walk.
+    q: Vec<f32>,
     q_norm: f32,
     /// Discovered rows not yet emitted, nearest at the top.
     frontier: std::collections::BinaryHeap<std::cmp::Reverse<Cand>>,
@@ -530,18 +534,18 @@ pub struct HnswCursor<'a> {
 pub const DEFAULT_EF_SEARCH: usize = 64;
 
 impl<'a> HnswCursor<'a> {
-    pub fn new(set: &'a super::store::VectorSet, hnsw: &'a Hnsw, q: &'a [f32]) -> HnswCursor<'a> {
+    pub fn new(set: &'a super::store::VectorSet, hnsw: &'a Hnsw, q: Vec<f32>) -> HnswCursor<'a> {
         HnswCursor::with_ef(set, hnsw, q, DEFAULT_EF_SEARCH)
     }
 
     pub fn with_ef(
         set: &'a super::store::VectorSet,
         hnsw: &'a Hnsw,
-        q: &'a [f32],
+        q: Vec<f32>,
         ef: usize,
     ) -> HnswCursor<'a> {
         let count = set.len();
-        let q_norm = set.query_norm(q);
+        let q_norm = set.query_norm(&q);
         let mut cursor = HnswCursor {
             set,
             hnsw,
@@ -590,7 +594,7 @@ impl<'a> HnswCursor<'a> {
     }
 
     fn dist(&self, row: usize) -> f32 {
-        self.set.dist_at(self.q, self.q_norm, row)
+        self.set.dist_at(&self.q, self.q_norm, row)
     }
 
     fn discover(&mut self, row: usize, d: f32) {
@@ -896,8 +900,8 @@ mod tests {
         let hnsw = set.hnsw().expect("built");
         let q: Vec<f32> = (0..8).map(|i| i as f32 * 0.05).collect();
 
-        let mut narrow = HnswCursor::with_ef(&set, hnsw, &q, 1);
-        let mut wide = HnswCursor::with_ef(&set, hnsw, &q, DEFAULT_EF_SEARCH);
+        let mut narrow = HnswCursor::with_ef(&set, hnsw, q.clone(), 1);
+        let mut wide = HnswCursor::with_ef(&set, hnsw, q.clone(), DEFAULT_EF_SEARCH);
         let (n0, w0) = (narrow.next().unwrap(), wide.next().unwrap());
 
         let exact = drain(set.cursor(&q, false));
