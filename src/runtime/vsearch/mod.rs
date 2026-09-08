@@ -175,6 +175,13 @@ pub struct VecCfg {
     /// so cutting at exactly the threshold can drop a neighbour the
     /// stream was about to reveal. Zero is the exact rule.
     pub tau_eps: f32,
+    /// `memo` only: keep the two walk cuts that bound phase 2 by the
+    /// candidate set rather than by the corpus — stop once `k` are held,
+    /// and stop once every candidate has been seen in the stream. The
+    /// kill switch every other optimization here has, so a differential
+    /// test can pin "cut ≡ uncut" on the answer while the pop counts
+    /// diverge.
+    pub memo_cuts: bool,
     /// Print the arm taken and its counters to stderr.
     pub debug: bool,
 }
@@ -186,6 +193,7 @@ impl Default for VecCfg {
             source: VecSource::Hnsw,
             level: 0,
             tau_eps: 0.0,
+            memo_cuts: true,
             debug: false,
         }
     }
@@ -194,7 +202,8 @@ impl Default for VecCfg {
 impl VecCfg {
     /// `FROGQL_VEC_STRATEGY=post|pre|interleave|memo`,
     /// `FROGQL_VEC_SOURCE=hnsw|localsort|globalsort`,
-    /// `FROGQL_VEC_LEVEL=<n>`, `FROGQL_VEC_TAU_EPS=<f>`, `FROGQL_DEBUG_VEC`.
+    /// `FROGQL_VEC_LEVEL=<n>`, `FROGQL_VEC_TAU_EPS=<f>`,
+    /// `FROGQL_DISABLE_MEMO_CUTS`, `FROGQL_DEBUG_VEC`.
     pub fn from_env() -> VecCfg {
         let mut cfg = VecCfg::default();
         if let Ok(s) = std::env::var("FROGQL_VEC_STRATEGY") {
@@ -217,6 +226,7 @@ impl VecCfg {
                 cfg.tau_eps = v;
             }
         }
+        cfg.memo_cuts = std::env::var("FROGQL_DISABLE_MEMO_CUTS").is_err();
         cfg.debug = std::env::var("FROGQL_DEBUG_VEC").is_ok();
         cfg
     }

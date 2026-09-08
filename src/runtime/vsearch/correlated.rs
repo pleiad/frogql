@@ -42,13 +42,12 @@
 //!
 //! # What is not here
 //!
-//! The in-LTJ arms (`interleave`, `memo`) hook a *single* ranking into a
-//! VEO level. A correlated clause has one ranking per anchor, and the
-//! anchor is itself bound by the join, so the hook has no fixed stream to
-//! consult; making those arms correlated is a separate design, not a
-//! parameter change. A correlated clause therefore always takes the
-//! partition-and-rank arm, whatever `FROGQL_VEC_STRATEGY` asks for, and
-//! `stats.arm` reports `correlated+<source>` so a benchmark row never
+//! `pre` has no correlated form. Pre-filtering's defining property is
+//! that it never runs the pattern first, and the anchors are not known
+//! until it has; reaching them would need the minimal sub-pattern that
+//! binds the anchor, which is query planning this engine does not do. A
+//! correlated `pre` therefore falls back here, with the reason recorded,
+//! and `stats.arm` reports `correlated+<source>` so a benchmark row never
 //! claims an arm that did not run.
 
 use std::collections::{BTreeSet, HashMap};
@@ -79,18 +78,22 @@ pub fn anchor_vars(clause: &NearestClause) -> Vec<String> {
 
 /// Evaluate a correlated clause under the configured strategy.
 ///
-/// `interleave` has a correlated form: the anchor is forced above the
-/// search variable in the variable elimination order, so by the time a
-/// visit reaches that level the anchor is bound and its vector is the
-/// ranking's query vector. Everything that was per-query then becomes
-/// per-anchor — the vector, the top-`k` threshold, and the corpus stream
-/// for a non-local source.
+/// Both in-LTJ arms have a correlated form, and they share the mechanism
+/// that makes one possible: the anchor is forced above the search
+/// variable in the variable elimination order, so by the time a visit
+/// reaches that level the anchor is bound and its vector is the ranking's
+/// query vector. Everything that was per-query then becomes per-anchor —
+/// the vector, the top-`k` threshold, and the corpus stream for a
+/// non-local source.
 ///
-/// `pre` and `memo` do not. Pre-filter's defining property is that it
-/// never runs the pattern first, and the anchors are not known until it
-/// has; memo's is that the ranking is walked **once, globally**, and
-/// there is no global ranking when the query vector varies per anchor.
-/// Both fall back to partitioning, with the reason recorded.
+/// They differ where they always did. `interleave` consults the ranking
+/// inside each visit, so it holds one anchor at a time. `memo` collects
+/// every visit's candidates first, filed by anchor, then walks each
+/// anchor's ranking once — trading the memory of holding every anchor's
+/// candidates for one walk per anchor instead of one per visit.
+///
+/// `pre` has no correlated form and falls back to partitioning, with the
+/// reason recorded.
 pub fn run_correlated<G: GraphAccess>(
     rt: &Runtime<'_, G>,
     query: &Query,
@@ -98,11 +101,15 @@ pub fn run_correlated<G: GraphAccess>(
     anchors: &[String],
     cfg: &VecCfg,
 ) -> IntermediateResult {
+    let mut stats = VecStats::default();
     // One anchor variable is what the in-LTJ form can pin; an expression
     // over several has no single node whose vector to read.
-    if cfg.strategy == super::Strategy::Interleave && anchors.len() == 1 {
-        let mut stats = VecStats::default();
-        if let Some(ir) = try_interleave(rt, query, clause, &anchors[0], cfg, &mut stats) {
+    if cfg.strategy.is_in_ltj() && anchors.len() == 1 {
+        let mode = match cfg.strategy {
+            super::Strategy::Memo => crate::runtime::ltj::algorithm::NnMode::Memo,
+            _ => crate::runtime::ltj::algorithm::NnMode::Interleave,
+        };
+        if let Some(ir) = try_in_ltj(rt, query, clause, &anchors[0], cfg, &mut stats, mode) {
             stats.accepted = ir.rows.len() as u64;
             if cfg.debug {
                 stats.print();
@@ -111,19 +118,30 @@ pub fn run_correlated<G: GraphAccess>(
             return ir;
         }
     }
-    run(rt, query, clause, anchors, cfg)
+    // Carry whatever the in-LTJ arm recorded on its way out, so the
+    // fallback says which shape it declined rather than repeating the
+    // generic "no correlated form".
+    run(
+        rt,
+        query,
+        clause,
+        anchors,
+        cfg,
+        stats.fallback_reason.take(),
+    )
 }
 
 /// The in-LTJ arm, when the shape allows it. `None` when the pattern does
 /// not decompose with the search variable below the anchor, or when the
 /// anchor is not a plain pattern variable — the caller then partitions.
-fn try_interleave<G: GraphAccess>(
+fn try_in_ltj<G: GraphAccess>(
     rt: &Runtime<'_, G>,
     query: &Query,
     clause: &NearestClause,
     anchor: &str,
     cfg: &VecCfg,
     stats: &mut VecStats,
+    mode: crate::runtime::ltj::algorithm::NnMode,
 ) -> Option<IntermediateResult> {
     let set = rt.graph.vectors(&clause.attr)?;
     if clause.k == 0 {
@@ -139,15 +157,7 @@ fn try_interleave<G: GraphAccess>(
         anchor: Some(anchor.to_string()),
         dist_var: clause.dist_var.clone(),
     };
-    super::in_ltj::run(
-        rt,
-        query,
-        &spec,
-        cfg,
-        set,
-        stats,
-        crate::runtime::ltj::algorithm::NnMode::Interleave,
-    )
+    super::in_ltj::run(rt, query, &spec, cfg, set, stats, mode)
 }
 
 pub fn run<G: GraphAccess>(
@@ -156,9 +166,10 @@ pub fn run<G: GraphAccess>(
     clause: &NearestClause,
     anchors: &[String],
     cfg: &VecCfg,
+    carried_reason: Option<String>,
 ) -> IntermediateResult {
     let mut stats = VecStats::default();
-    let out = eval(rt, query, clause, anchors, cfg, &mut stats);
+    let out = eval(rt, query, clause, anchors, cfg, &mut stats, carried_reason);
     stats.accepted = out.rows.len() as u64;
     if cfg.debug {
         stats.print();
@@ -174,6 +185,7 @@ fn eval<G: GraphAccess>(
     anchors: &[String],
     cfg: &VecCfg,
     stats: &mut VecStats,
+    carried_reason: Option<String>,
 ) -> IntermediateResult {
     // A missing sidecar is not an error: nothing satisfies "among the k
     // nearest" then, and returning the unfiltered pattern would be
@@ -188,12 +200,24 @@ fn eval<G: GraphAccess>(
     };
     let source = effective_source(cfg.source, set);
     stats.arm = correlated_arm(source);
-    if cfg.strategy.is_in_ltj() || cfg.strategy == super::Strategy::PreFilter {
-        stats.fallback_reason = Some(format!(
-            "{} has no correlated form; the query vector varies per row",
-            cfg.strategy.name()
-        ));
-    }
+    stats.fallback_reason = match carried_reason {
+        // The in-LTJ arm was tried and declined; its reason is the
+        // specific one.
+        Some(r) => Some(r),
+        None if cfg.strategy == super::Strategy::PreFilter => Some(
+            "pre has no correlated form: the anchors are not known until the pattern has run"
+                .to_string(),
+        ),
+        // Reached with an in-LTJ strategy only when the query vector
+        // depends on more than one pattern variable, so there is no
+        // single node whose vector the search could read.
+        None if cfg.strategy.is_in_ltj() => Some(format!(
+            "{} needs exactly one anchor variable; this query vector depends on {}",
+            cfg.strategy.name(),
+            anchors.len()
+        )),
+        None => None,
+    };
     if clause.k == 0 {
         return IntermediateResult::new(Vec::new());
     }

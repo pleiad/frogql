@@ -320,6 +320,20 @@ impl DistThreshold {
         self.heap.push(entry);
     }
 
+    /// Are all `k` slots taken?
+    ///
+    /// Same meaning as `TopK::is_full`, and the sharper half of the cut
+    /// `get()` gives: a walk in non-decreasing distance that has already
+    /// accepted `k` results has accepted `k` that are all at least as
+    /// near as whatever comes next, and `TopK` refuses a tie once full —
+    /// so nothing later can enter and the walk can stop *at* the
+    /// threshold rather than one entry past it. Only sound against an
+    /// exactly sorted stream; a caller that allows slack (`tau_eps`) has
+    /// declared its stream is not, and must keep walking.
+    pub fn is_full(&self) -> bool {
+        self.k > 0 && self.heap.len() >= self.k
+    }
+
     /// Has this binding already been counted? `DistinctVar` only.
     pub fn holds(&self, id: Id) -> bool {
         self.seen.contains_key(&id)

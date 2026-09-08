@@ -99,6 +99,7 @@ Runtime/store toggles for A/B testing and tracing (all read at query/open time; 
 | `FROGQL_VEC_SOURCE=hnsw\|localsort\|globalsort` | where the nearest-first ranking comes from. `hnsw` and `globalsort` share the same walk and differ only in build cost + exactness; `localsort` ranks just the current visit's candidates and never re-scans. The two exact sources are what the strategies are pinned equivalent in |
 | `FROGQL_VEC_LEVEL=<n>` | VEO position of the vector-search variable (`interleave` / `memo` only, clamped to just before the first lonely var) |
 | `FROGQL_VEC_TAU_EPS=<f>` | relative slack on the top-k threshold cut; an approximate cursor's order is only approximately sorted |
+| `FROGQL_DISABLE_MEMO_CUTS` | drop `memo`'s two phase-2 walk cuts (`k` held, every candidate seen), leaving only the threshold cut — the kill switch the differential test A/Bs against |
 | `FROGQL_DISABLE_VECTORS` | ignore every vector sidecar; queries see no vector attribute |
 | `FROGQL_DEBUG_VEC` | print the executed vector-search arm and its counters |
 
@@ -635,18 +636,36 @@ arms hook a single ranking into a VEO level and a correlated clause has
 one per anchor). `stats.arm` reports `correlated+<source>` and
 `stats.anchor_groups` the partition count.
 
-**`interleave` has a correlated form** (`correlated::run_correlated` →
-`in_ltj`): force the anchor above the search variable in the VEO
+**Both in-LTJ arms have a correlated form** (`correlated::run_correlated`
+→ `in_ltj`): force the anchor above the search variable in the VEO
 (`VeoOverride::pin_at_after`) and the anchor is bound by the time a visit
 reaches the search level. Vector, top-`k` threshold and corpus stream all
 become per-anchor and reset together in `VecCtx::retarget`; the threshold
 reset is sound because the join descends depth-first, so one anchor's
 visits are contiguous. Selection is per anchor too
-(`in_ltj::select_per_anchor`). `pre` and `memo` do not: pre-filter would
-need the minimal sub-pattern binding the anchor (query planning this
-engine does not do), and memo's whole point is one *global* ranking walk,
-which does not exist when the vector varies. Both partition and record
-why. Tests: `tests/correlated_nearest_test.rs`.
+(`in_ltj::select_per_anchor`). `interleave` holds one anchor at a time;
+`memo` files phase 1's candidates per anchor (`VecCtx::anchor_tables`,
+first-seen order) and runs its single walk once per anchor in phase 2 —
+"once, globally" becomes "once per anchor", at the cost of holding every
+anchor's candidates at once. Retargeting happens in phase 2, since phase
+1 consults no ranking. `pre` does not: it would need the minimal
+sub-pattern binding the anchor, which is query planning this engine does
+not do; it partitions and records why. Tests:
+`tests/correlated_nearest_test.rs`.
+
+**`memo`'s phase-2 walk carries three cuts** (`walk_ranking`): past the
+threshold (the original, with `tau_eps` slack); **`k` held** — the same
+fact one entry earlier, sound only against an exactly sorted stream so a
+caller asking for slack keeps walking; and **every candidate seen** — the
+table is empty, so no remaining stream entry can be in it whatever the
+threshold says. The third is load-bearing: it caps the walk at the rank
+of the *last* candidate instead of at the end of the corpus, the same
+discipline `post_filter::walk_global` applies with its `remaining`
+counter. What it is worth depends on where that last candidate sits in
+the ranking — a few percent with the pattern's images interleaved through
+the corpus, an order of magnitude with them clustered ahead of it.
+`FROGQL_DISABLE_MEMO_CUTS=1` is the kill switch the differential test
+A/Bs both against, on the answer as well as the pop counts.
 
 **The in-LTJ arms decline a residual `WHERE`.** `decompose_pattern` drops
 a `PathPattern::Filter`'s predicate — sound through `run_path_pattern`,

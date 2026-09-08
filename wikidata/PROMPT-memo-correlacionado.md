@@ -1,5 +1,13 @@
 # Prompt: `memo` correlacionado por ancla
 
+> **Hecho.** El arm está implementado y verificado; el detalle vive en
+> `docs/internals/vector-search.md` (*Correlated `NEAREST`*) y en
+> `CLAUDE.md`. Los dos cortes nuevos llevan interruptor de apagado
+> (`FROGQL_DISABLE_MEMO_CUTS=1`) y su test diferencial. Falta la medición
+> sobre la base real: `wikidata/imgpedia.gdb` no está en esta máquina, así
+> que el barrido por nivel se midió sobre un fixture sintético. Sigue
+> pendiente el timeout de query de la última sección.
+
 Copia todo lo de abajo en una sesión nueva.
 
 ---

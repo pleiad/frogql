@@ -194,10 +194,10 @@ not run. Pinned by `tests/correlated_nearest_test.rs`, which also asserts
 the single pattern run and that a constant query vector still takes the
 ordinary arm.
 
-### `interleave` has a correlated form; `pre` and `memo` do not
+### Both in-LTJ arms have a correlated form; `pre` does not
 
 The in-LTJ hook was built around **one** ranking, fixed before the search
-runs. A correlated clause has one per anchor. What makes `interleave`
+runs. A correlated clause has one per anchor. What makes the in-LTJ arms
 work anyway is an ordering constraint rather than a new algorithm: force
 the anchor **above** the search variable in the variable elimination order
 (`VeoOverride::pin_at_after`), and by the time a visit reaches the search
@@ -218,14 +218,90 @@ one anchor's visits are contiguous. Selection is per anchor too
 (`in_ltj::select_per_anchor`), applying the same sink the other arms use
 inside each group.
 
-`pre` and `memo` have no such form. Pre-filter's defining property is
-that it never runs the pattern first, and the anchors are not known until
-it has; the honest correlated version needs the *minimal sub-pattern that
-binds the anchor*, which is query planning this engine does not do. Memo
-walks the ranking **once, globally**, and there is no global ranking when
-the vector varies per anchor. Both partition, with the reason in
-`fallback_reason`, and `tests/correlated_nearest_test.rs` pins that they
-say so rather than report an arm that did not run.
+`memo` keeps its two phases and scopes them by anchor. Phase 1 walks the
+whole join and files each visit's candidates under the anchor that
+reached them (`VecCtx::anchor_tables`, in first-seen order); phase 2 then
+runs its single walk once per anchor, against that anchor's vector,
+threshold and stream. "Once, globally" becomes "once per anchor", which
+is still the thing the arm buys: at a deep level one anchor has many
+visits, and `interleave` re-walks its ranking in every one of them.
+
+The trade is memory. `interleave` holds one anchor at a time; `memo` holds
+every anchor's candidates at once, because phase 2 cannot begin until
+phase 1 has walked the whole join. Retargeting happens in phase 2 rather
+than phase 1, since phase 1 consults no ranking and would only have built
+a stream to leave it unread.
+
+Phase 2's walk carries **three** cuts, and the last two bound it by the
+candidate set instead of by the corpus:
+
+| cut | when | worth |
+|---|---|---|
+| past the threshold | `k` held and the stream has moved beyond the worst of them, with `tau_eps` slack | the original cut |
+| `k` held | the same fact one entry earlier: every accepted result is at least as near as this entry, and `TopK` refuses a tie once full. Only sound against an exactly sorted stream, so a caller asking for slack keeps walking | one pop per walk |
+| every candidate seen | the table is empty, so no remaining stream entry can be in it, whatever the threshold says | caps the walk at the rank of the *last* candidate |
+
+The third is the load-bearing one, and it is the discipline
+`post_filter::walk_global` already applies with its `remaining` counter.
+What it is worth depends entirely on where the last candidate sits in the
+ranking: with the pattern's images interleaved through the corpus it trims
+a few percent, and with them clustered ahead of it — the shape a real
+corpus has, where the matched images are a sliver of the attribute — it
+ends the walk at the eleventh entry instead of the two hundred and
+eleventh. `FROGQL_DISABLE_MEMO_CUTS=1` is the kill switch the
+differential test A/Bs both against, on the answer as well as the pops.
+
+#### What the correlated arms measure
+
+A synthetic sweep, since the IMGpedia dump is not on every machine: 4 450
+nodes, 4 600 edges, a corpus of 4 420 vectors of which 4 000 are orphans
+placed past every candidate, `k = 50`, over
+
+```
+MATCH (a:Anchor)-[:R]->(m:Mid), (m)-[:R]->(v:Img)
+NEAREST 50 v.emb TO VECTOR(a, 'emb') AS d
+```
+
+Twenty anchors, thirty mids each, so at any level below the anchor an
+anchor has thirty visits. Every arm returns the same 10 000 rows.
+
+| arm | level | ms | `nn_pops` | visits | candidates | resumes |
+|---|---|---|---|---|---|---|
+| `correlated+localsort` | — | 133.7 | 1 000 | 0 | 8 000 | 0 |
+| `interleave+localsort` | 0 | 36.6 | 1 038 | 20 | 8 600 | 0 |
+| `memo+localsort` | 0 | 39.3 | 1 000 | 20 | 8 600 | 1 000 |
+| `interleave+localsort` | 1 | 60.0 | 30 740 | 600 | 80 000 | 0 |
+| `memo+localsort` | 1 | 48.3 | **1 000** | 600 | 80 000 | 10 000 |
+| `interleave+globalsort` | 1 | 68.8 | 96 430 | 600 | 80 000 | 0 |
+| `memo+globalsort` | 1 | 55.3 | **1 061** | 600 | 80 000 | 10 000 |
+| `interleave+hnsw` | 1 | 71.4 | 96 430 | 600 | 80 000 | 0 |
+| `memo+hnsw` | 1 | 55.1 | **1 061** | 600 | 80 000 | 10 000 |
+
+Levels 2 and 3 are identical to level 1 here: the clamp puts the search
+variable at the same place.
+
+Two things to read off it, and the second is the more important one.
+
+**The pop counts move by the factor the design predicts.** At level 1
+`memo` pops 1 061 neighbours against `interleave`'s 96 430 — 91× fewer —
+because thirty visits share one walk instead of re-walking it thirty
+times. At level 0 there is one visit per anchor, nothing to hoist, and the
+two are equal. That is the same shape the uncorrelated results show.
+
+**The wall clock does not.** 55 ms against 69 ms is 1.25×, not 91×. The
+join dominates, so the ranking was never the bottleneck the pop counts
+make it look like — again the uncorrelated finding, reproduced. What the
+correlated arms *do* beat by a wide margin is partitioning: 133 ms for
+`correlated+localsort`, roughly 3× either in-LTJ arm, since it runs the
+whole pattern and ranks 8 000 buckets afterwards.
+
+`pre` has no correlated form. Pre-filter's defining property is that it
+never runs the pattern first, and the anchors are not known until it has;
+the honest correlated version needs the *minimal sub-pattern that binds
+the anchor*, which is query planning this engine does not do. It
+partitions, with the reason in `fallback_reason`, and
+`tests/correlated_nearest_test.rs` pins that it says so rather than
+report an arm that did not run.
 
 ### The in-LTJ arms decline a residual `WHERE`
 
@@ -568,6 +644,7 @@ reason.
 | `FROGQL_VEC_SOURCE=hnsw\|localsort\|globalsort` | where the ranking comes from (default `hnsw`) |
 | `FROGQL_VEC_LEVEL=<n>` | VEO position of the search variable; `interleave` / `memo` only, clamped |
 | `FROGQL_VEC_TAU_EPS=<f>` | relative slack on the threshold cut (default 0) |
+| `FROGQL_DISABLE_MEMO_CUTS` | drop `memo`'s two phase-2 walk cuts (`k` held, every candidate seen), leaving only the threshold cut. The kill switch the differential test A/Bs against |
 | `FROGQL_DISABLE_VECTORS` | ignore every sidecar; queries see no vector attribute |
 | `FROGQL_DEBUG_VEC` | print the executed arm and its counters |
 
@@ -588,5 +665,5 @@ its sweeps do not depend on process-global state.
   equal-sized insert followed by a save. The in-session DML guard covers
   that while the session lasts.
 - **`k = 0`** is legal and produces nothing; the typechecker warns.
-- **A correlated clause has no in-LTJ arm.** It always partitions and
-  ranks; see *Correlated `NEAREST`* above for why.
+- **`pre` has no correlated form.** It partitions and ranks; `post`,
+  `interleave` and `memo` all have one. See *Correlated `NEAREST`* above.

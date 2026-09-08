@@ -144,6 +144,10 @@ pub struct VecCtx<'v> {
     /// approximately sorted, so an exact cut can drop a neighbour the
     /// stream was about to reveal.
     pub tau_eps: f32,
+    /// `Memo` only: keep the two walk cuts of `walk_ranking`. Set from
+    /// `VecCfg::memo_cuts`; false is the baseline a differential test
+    /// A/Bs the cuts against.
+    pub cuts: bool,
     /// The candidate currently being descended into.
     pub cur_id: u32,
     pub cur_dist: f32,
@@ -155,6 +159,18 @@ pub struct VecCtx<'v> {
     /// reachable by many paths, so a key holds several prefixes and
     /// phase 2 has to resume every one of them, not just the first.
     pub table: PrefixTable,
+    /// `Memo` + **correlated** only. One such table per anchor, in
+    /// first-seen order, because a correlated clause has one ranking per
+    /// anchor and phase 2 walks each separately.
+    ///
+    /// Interleaving cannot use this and does not need it: it consults the
+    /// ranking inside the visit, so it only ever holds the anchor it is
+    /// standing on. Memo has to hold every anchor's candidates at once,
+    /// because phase 2 does not begin until phase 1 has walked the whole
+    /// join — that is the memory this arm trades for the single walk.
+    pub anchor_tables: Vec<(u32, PrefixTable)>,
+    /// Anchor id → its index in `anchor_tables`.
+    pub anchor_index: std::collections::HashMap<u32, usize>,
     /// Instrumentation.
     pub visits: u64,
     pub candidates_hashed: u64,
@@ -231,10 +247,13 @@ impl<'v> VecCtx<'v> {
             use_hnsw: false,
             cut,
             tau_eps,
+            cuts: true,
             cur_id: 0,
             cur_dist: 0.0,
             mode,
             table: PrefixTable::new(),
+            anchor_tables: Vec::new(),
+            anchor_index: std::collections::HashMap::new(),
             visits: 0,
             candidates_hashed: 0,
             nn_pops: 0,
@@ -250,6 +269,22 @@ impl<'v> VecCtx<'v> {
         } else {
             self.q
         }
+    }
+
+    /// The table this anchor's candidates are filed under, created the
+    /// first time the anchor is seen.
+    ///
+    /// Creation order is the order phase 2 walks the anchors in, so the
+    /// output does not depend on hash iteration order — the same reason
+    /// the partitioning arm remembers a first-seen order of its own.
+    fn anchor_slot(&mut self, anchor: u32) -> usize {
+        if let Some(&slot) = self.anchor_index.get(&anchor) {
+            return slot;
+        }
+        let slot = self.anchor_tables.len();
+        self.anchor_tables.push((anchor, PrefixTable::new()));
+        self.anchor_index.insert(anchor, slot);
+        slot
     }
 
     /// Point the context at `anchor`, if it is not already there.
@@ -420,6 +455,15 @@ impl<'a> LtjAlgorithm<'a> {
     /// whole search stops — instead of every visit re-walking the
     /// ranking because the best candidate might still be under the last
     /// prefix.
+    ///
+    /// **Correlated**, "once, globally" becomes "once per anchor". The
+    /// query vector is the anchor's, so there is no global ranking to
+    /// walk; phase 1 files each visit's candidates under the anchor that
+    /// reached them, and phase 2 runs the same single walk per anchor,
+    /// against that anchor's vector, threshold and stream. What the arm
+    /// still buys over interleaving is the same thing it buys
+    /// uncorrelated: the ranking is walked once per anchor rather than
+    /// once per *visit*, and at a deep level an anchor has many visits.
     fn run_nearest_memo<G: GraphAccess>(
         &mut self,
         graph: &G,
@@ -432,7 +476,8 @@ impl<'a> LtjAlgorithm<'a> {
         let mut tuple = self.fresh_tuple();
 
         // Phase 1. `search` stops at the search level and fills
-        // `ctx.table`, so it produces no tuples of its own.
+        // `ctx.table` (or, correlated, `ctx.anchor_tables`), so it
+        // produces no tuples of its own.
         let mut discarded = Vec::new();
         self.search(graph, 0, &mut tuple, &mut discarded, 0, Some(ctx));
         debug_assert!(
@@ -440,14 +485,78 @@ impl<'a> LtjAlgorithm<'a> {
             "phase 1 stops above the search level and must not emit tuples"
         );
 
-        // Phase 2. `LocalSort` ranks the table's keys directly: they are
-        // the only nodes that can contribute, so nothing outside the
-        // domain is ever touched and no membership test is needed. The
-        // corpus-wide sources walk their stream and test membership.
         let mut results = Vec::new();
+        if ctx.anchor_var.is_none() {
+            self.walk_ranking(graph, level, var_id, &mut tuple, &mut results, ctx);
+            return results;
+        }
+
+        // Correlated: one walk per anchor, in first-seen order.
+        for slot in 0..ctx.anchor_tables.len() {
+            let anchor = ctx.anchor_tables[slot].0;
+            ctx.table = std::mem::take(&mut ctx.anchor_tables[slot].1);
+            // Retargeting is what resets the vector, the threshold and —
+            // for a corpus source — the stream. It is done here, once per
+            // anchor, rather than in phase 1, which consults no ranking
+            // and would only have rebuilt the stream to leave it unread.
+            //
+            // A false return is an anchor with no vector of its own:
+            // nothing is among the `k` nearest to a node that has none,
+            // so its candidates are dropped rather than ranked against
+            // the previous anchor's vector.
+            if !ctx.retarget(anchor) {
+                ctx.table.clear();
+                continue;
+            }
+            self.walk_ranking(graph, level, var_id, &mut tuple, &mut results, ctx);
+        }
+        results
+    }
+
+    /// Phase 2 over whatever `ctx.table` currently holds: one walk of the
+    /// ranking, resuming the prefixes of every candidate it accepts.
+    ///
+    /// Split out of `run_nearest_memo` because a correlated clause runs
+    /// it once per anchor and an uncorrelated one exactly once, and the
+    /// two must not drift apart on when the walk stops.
+    ///
+    /// Three cuts end it, and the last two are what bound the walk by the
+    /// *candidate set* rather than by the corpus:
+    ///
+    /// 1. **past the threshold** — `k` are held and the stream has moved
+    ///    beyond the worst of them (with `tau_eps` slack for an
+    ///    approximate cursor, whose order is only approximately sorted).
+    /// 2. **`k` held, at the threshold** — the same fact one entry
+    ///    earlier. Every accepted result is at least as near as this
+    ///    entry and `TopK` refuses a tie once full, so nothing later can
+    ///    enter. Only sound against an exactly sorted stream, so a caller
+    ///    that asked for slack keeps walking.
+    /// 3. **every candidate seen** — the table is empty, so no remaining
+    ///    entry of the stream can be in it, whatever the threshold says.
+    ///    This is the load-bearing one: it caps the walk at the depth of
+    ///    the *last* candidate instead of at the end of the corpus, which
+    ///    is the same discipline `post_filter::walk_global` applies with
+    ///    its `remaining` counter.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_ranking<G: GraphAccess>(
+        &mut self,
+        graph: &G,
+        level: usize,
+        var_id: u8,
+        tuple: &mut Vec<(u8, u32)>,
+        results: &mut Vec<ResultTuple>,
+        ctx: &mut VecCtx<'_>,
+    ) {
+        if ctx.table.is_empty() {
+            return;
+        }
+        // `LocalSort` ranks the table's keys directly: they are the only
+        // nodes that can contribute, so nothing outside the domain is
+        // ever touched and no membership test is needed. The corpus-wide
+        // sources walk their stream and test membership.
         let ranked: Option<Vec<(u32, f32)>> = if ctx.local {
             let keys: Vec<u32> = ctx.table.keys().copied().collect();
-            Some(ctx.set.rank_candidates(ctx.q, &keys))
+            Some(ctx.set.rank_candidates(ctx.query_vector(), &keys))
         } else {
             None
         };
@@ -481,19 +590,19 @@ impl<'a> LtjAlgorithm<'a> {
             ctx.cur_dist = dist;
             for i in 0..prefixes.count {
                 let context = prefixes.get(i, level);
-                self.resume(
-                    graph,
-                    level,
-                    var_id,
-                    id,
-                    context,
-                    &mut tuple,
-                    &mut results,
-                    ctx,
-                );
+                self.resume(graph, level, var_id, id, context, tuple, results, ctx);
+            }
+
+            if ctx.cuts && ctx.tau_eps == 0.0 && ctx.cut.is_full() {
+                break;
+            }
+            if ctx.cuts && ctx.table.is_empty() {
+                break;
             }
         }
-        results
+        // Whatever the cut left behind belongs to this walk alone; a
+        // correlated clause reuses the slot for the next anchor.
+        ctx.table.clear();
     }
 
     /// Complete one stored prefix: replay the descent phase 1 already
@@ -705,25 +814,34 @@ impl<'a> LtjAlgorithm<'a> {
 
                 // Correlated clause: the query vector is the anchor's,
                 // and the anchor is bound above this level by
-                // construction (`VeoOverride::pin_at_after`). Point the
-                // context at it before anything reads a vector — the
-                // ranking, the threshold and, for a corpus source, the
-                // stream itself all belong to this anchor and not to the
-                // query.
+                // construction (`VeoOverride::pin_at_after`).
+                //
+                // `Interleave` reads a vector right here, so it points
+                // the context at the anchor first — the ranking, the
+                // threshold and, for a corpus source, the stream itself
+                // all belong to this anchor and not to the query.
+                // `Memo` reads none: phase 1 only files candidates, so
+                // the anchor is a table key and nothing else, and
+                // whether it carries a vector at all is a question
+                // phase 2 asks once per anchor instead of once per visit.
+                let mut memo_slot: Option<usize> = None;
                 if let Some(anchor_var) = vc.anchor_var {
                     let bound = (0..j).find_map(|l| {
                         let (v, id) = tuple[l];
                         (v == anchor_var).then_some(id)
                     });
-                    match bound {
-                        // No vector for this anchor: nothing is among the
-                        // k nearest to a node that has none.
-                        Some(a) if !vc.retarget(a) => return true,
-                        Some(_) => {}
+                    let Some(a) = bound else {
                         // Unreachable while the VEO guarantees the anchor
                         // binds first; treated as "no ranking possible"
                         // rather than ranked against a stale vector.
-                        None => return true,
+                        return true;
+                    };
+                    if vc.mode == NnMode::Memo {
+                        memo_slot = Some(vc.anchor_slot(a));
+                    } else if !vc.retarget(a) {
+                        // No vector for this anchor: nothing is among the
+                        // k nearest to a node that has none.
+                        return true;
                     }
                 }
 
@@ -746,10 +864,17 @@ impl<'a> LtjAlgorithm<'a> {
                         if !self.check_filters(graph, j, tuple) {
                             continue;
                         }
+                        // Correlated: file under the anchor this visit
+                        // sits below, so phase 2 can walk one ranking per
+                        // anchor. Uncorrelated: the one table.
+                        let table = match memo_slot {
+                            Some(slot) => &mut vc.anchor_tables[slot].1,
+                            None => &mut vc.table,
+                        };
                         // The prefix is the value bound at each level
                         // above this one. The var ids are implied by the
                         // VEO, so only the values are stored.
-                        let entry = vc.table.entry(id).or_default();
+                        let entry = table.entry(id).or_default();
                         entry.count += 1;
                         entry.flat.extend((0..j).map(|l| tuple[l].1));
                     }

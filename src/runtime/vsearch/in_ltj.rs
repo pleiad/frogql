@@ -101,6 +101,7 @@ pub fn run<G: GraphAccess>(
     // Only the correlated path rebuilds its stream, and it has to
     // reproduce the source the caller asked for.
     ctx.use_hnsw = source == VecSource::Hnsw;
+    ctx.cuts = cfg.memo_cuts;
     let mut dists: Vec<Option<f32>> = Vec::new();
 
     let ir = pattern_extract::try_ltj_nearest(

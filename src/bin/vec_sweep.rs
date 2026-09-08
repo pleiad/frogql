@@ -38,12 +38,13 @@
 //!
 //! **`arm_actual` is the column to check first.** A strategy that meets a
 //! shape it cannot hook into falls back, and a row reporting the requested
-//! arm rather than the executed one is a lie. The commonest case here: a
-//! *correlated* `NEAREST` — one whose query vector names a pattern
-//! variable, like `VECTOR(v10, 'hog')` — has one ranking per anchor, so
-//! the in-LTJ arms have no single ranking to hook and every arm runs the
-//! partition-and-rank plan. Such a query will report `correlated+<source>`
-//! for all seven, and only the source axis is really varying.
+//! arm rather than the executed one is a lie. A *correlated* `NEAREST` —
+//! one whose query vector names a pattern variable, like
+//! `VECTOR(v10, 'hog')` — has one ranking per anchor rather than one for
+//! the query. `post`, `interleave` and `memo` all have a correlated form
+//! and report their own arm; `pre` does not and reports
+//! `correlated+<source>`, the partition-and-rank plan, with the reason in
+//! the `fallback` column.
 //!
 //! `nn_pops` per accepted row is the headline number: with a selective
 //! pattern the corpus-walking sources reach a candidate that also
@@ -315,6 +316,12 @@ fn main() {
                 strategy: *strategy,
                 source: *source,
                 level,
+                // The one knob the sweep does not own. `memo`'s walk cuts
+                // are an optimization with a kill switch, and A/Bing them
+                // over a real database is what the switch is for, so it
+                // is read from the environment rather than pinned to the
+                // default here.
+                memo_cuts: std::env::var("FROGQL_DISABLE_MEMO_CUTS").is_err(),
                 ..VecCfg::default()
             });
             for (qi, query) in &queries {
