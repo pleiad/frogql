@@ -640,10 +640,15 @@ one per anchor). `stats.arm` reports `correlated+<source>` and
 → `in_ltj`): force the anchor above the search variable in the VEO
 (`VeoOverride::pin_at_after`) and the anchor is bound by the time a visit
 reaches the search level. Vector, top-`k` threshold and corpus stream all
-become per-anchor and reset together in `VecCtx::retarget`; the threshold
-reset is sound because the join descends depth-first, so one anchor's
-visits are contiguous. Selection is per anchor too
-(`in_ltj::select_per_anchor`). `interleave` holds one anchor at a time;
+become per-anchor and reset together in `VecCtx::retarget`; selection is
+per anchor too (`in_ltj::select_per_anchor`). **An anchor's visits are
+not generally contiguous** — `pin_at_after` constrains the anchor only
+relative to the search variable, so at a level past 0 the join revisits
+an anchor once per binding of the variables above it and `retarget` fires
+per *visit*. A reset threshold only under-prunes, so the answer is
+unchanged; the cost is not, and `memo` sidesteps it by construction (one
+retarget per anchor, whatever order the join used). `interleave` holds
+one anchor at a time;
 `memo` files phase 1's candidates per anchor (`VecCtx::anchor_tables`,
 first-seen order) and runs its single walk once per anchor in phase 2 —
 "once, globally" becomes "once per anchor", at the cost of holding every

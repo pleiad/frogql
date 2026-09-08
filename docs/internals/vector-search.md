@@ -212,11 +212,21 @@ reset together in `VecCtx::retarget`:
 | the top-`k` threshold | `k` counts per anchor; the previous anchor's cut was measured from a different vector |
 | the corpus stream | a stream walks *from* a query vector, so a new vector is a new walk — which is exactly why the corpus sources cost so much more here than the local one |
 
-The threshold reset is sound because the join descends depth-first: every
-visit under one anchor happens before the search backtracks past it, so
-one anchor's visits are contiguous. Selection is per anchor too
-(`in_ltj::select_per_anchor`), applying the same sink the other arms use
-inside each group.
+Selection is per anchor too (`in_ltj::select_per_anchor`), applying the
+same sink the other arms use inside each group.
+
+**An anchor's visits are not generally contiguous**, and the cost of that
+falls entirely on `interleave`. `pin_at_after` puts the anchor above the
+search variable and says nothing about what sits above the *anchor*, so at
+any level past 0 the join revisits an anchor once per binding of those
+outer variables. `VecCtx::retarget` then fires once per visit rather than
+once per anchor: a fresh vector, a fresh threshold and — for a corpus
+source — a fresh stream, each time. Correctness survives (a reset
+threshold only under-prunes; the surviving rows are discarded at
+selection, which is why the equivalence tests pass at every level), but
+the cost does not. `memo` sidesteps it by construction: phase 1 files by
+anchor, so phase 2 retargets exactly once per anchor however the join
+interleaved them.
 
 `memo` keeps its two phases and scopes them by anchor. Phase 1 walks the
 whole join and files each visit's candidates under the anchor that
@@ -253,47 +263,79 @@ differential test A/Bs both against, on the answer as well as the pops.
 
 #### What the correlated arms measure
 
-A synthetic sweep, since the IMGpedia dump is not on every machine: 4 450
-nodes, 4 600 edges, a corpus of 4 420 vectors of which 4 000 are orphans
-placed past every candidate, `k = 50`, over
+A synthetic sweep, since the IMGpedia dump is not on every machine.
+60 450 nodes, 4 600 edges, a corpus of 60 420 sixteen-dimensional vectors
+of which 60 000 are orphans — images with a descriptor and no triple, the
+IMGpedia shape, spread pseudo-randomly so the corpus is genuinely hard
+rather than lying on a line. `k = 50`, over
 
 ```
 MATCH (a:Anchor)-[:R]->(m:Mid), (m)-[:R]->(v:Img)
 NEAREST 50 v.emb TO VECTOR(a, 'emb') AS d
 ```
 
-Twenty anchors, thirty mids each, so at any level below the anchor an
-anchor has thirty visits. Every arm returns the same 10 000 rows.
+Twenty anchors and thirty mids, so the join reaches the search level 600
+times — thirty visits per anchor, and (see above) not contiguously. All
+400 candidates are 0.7% of the corpus. Every arm returns the same 10 000
+rows.
 
-| arm | level | ms | `nn_pops` | visits | candidates | resumes |
-|---|---|---|---|---|---|---|
-| `correlated+localsort` | — | 133.7 | 1 000 | 0 | 8 000 | 0 |
-| `interleave+localsort` | 0 | 36.6 | 1 038 | 20 | 8 600 | 0 |
-| `memo+localsort` | 0 | 39.3 | 1 000 | 20 | 8 600 | 1 000 |
-| `interleave+localsort` | 1 | 60.0 | 30 740 | 600 | 80 000 | 0 |
-| `memo+localsort` | 1 | 48.3 | **1 000** | 600 | 80 000 | 10 000 |
-| `interleave+globalsort` | 1 | 68.8 | 96 430 | 600 | 80 000 | 0 |
-| `memo+globalsort` | 1 | 55.3 | **1 061** | 600 | 80 000 | 10 000 |
-| `interleave+hnsw` | 1 | 71.4 | 96 430 | 600 | 80 000 | 0 |
-| `memo+hnsw` | 1 | 55.1 | **1 061** | 600 | 80 000 | 10 000 |
+| arm | level | ms | `nn_pops` | `nn_expanded` |
+|---|---|---|---|---|
+| `correlated+localsort` | — | 106.0 | 1 000 | 8 000 |
+| `correlated+globalsort` | — | 128.0 | 142 688 | 1 208 400 |
+| `correlated+hnsw` | — | 185.5 | 142 688 | 143 948 |
+| `interleave+localsort` | 0 | 27.6 | 1 020 | 0 |
+| `memo+localsort` | 0 | 29.5 | 1 000 | 0 |
+| `interleave+globalsort` | 0 | 58.3 | 142 708 | 1 208 400 |
+| `memo+globalsort` | 0 | 60.2 | 142 688 | 1 208 400 |
+| `interleave+hnsw` | 0 | 110.2 | 142 708 | 143 968 |
+| `memo+hnsw` | 0 | 109.7 | 142 688 | 143 948 |
+| `interleave+localsort` | 1 | 40.3 | 30 600 | 0 |
+| `memo+localsort` | 1 | **36.5** | **1 000** | 0 |
+| `interleave+globalsort` | 1 | 965.2 | 13 534 770 | 36 252 000 |
+| `memo+globalsort` | 1 | **67.7** | **142 688** | **1 208 400** |
+| `interleave+hnsw` | 1 | 5 614.8 | 13 534 770 | 13 572 570 |
+| `memo+hnsw` | 1 | **116.5** | **142 688** | **143 948** |
 
-Levels 2 and 3 are identical to level 1 here: the clamp puts the search
-variable at the same place.
+**At a level past 0 the corpus sources are where `memo` earns its
+keep: 48× on hnsw, 14× on globalsort.** Two effects compound. The
+ranking is walked once per anchor instead of once per visit (95× fewer
+pops), and — the one that was not designed in — retargeting happens once
+per anchor instead of once per visit, so `interleave` rebuilt its stream
+600 times against `memo`'s 20 (30× fewer expansions). This is the case
+that motivated the arm: on the IMGpedia dump `interleave+hnsw` at level 4
+never finished.
 
-Two things to read off it, and the second is the more important one.
+**At level 0 there is one visit per anchor, nothing to hoist, and the two
+are equal.** Same shape as the uncorrelated results.
 
-**The pop counts move by the factor the design predicts.** At level 1
-`memo` pops 1 061 neighbours against `interleave`'s 96 430 — 91× fewer —
-because thirty visits share one walk instead of re-walking it thirty
-times. At level 0 there is one visit per anchor, nothing to hoist, and the
-two are equal. That is the same shape the uncorrelated results show.
+**With a local source the clock still barely moves** — 36.5 ms against
+40.3 ms, on 31× fewer pops. The join dominates when the ranking is
+already cheap, which is the uncorrelated finding reproduced. The pop
+count is a real quantity and a poor proxy for time; both are reported for
+that reason.
 
-**The wall clock does not.** 55 ms against 69 ms is 1.25×, not 91×. The
-join dominates, so the ranking was never the bottleneck the pop counts
-make it look like — again the uncorrelated finding, reproduced. What the
-correlated arms *do* beat by a wide margin is partitioning: 133 ms for
-`correlated+localsort`, roughly 3× either in-LTJ arm, since it runs the
-whole pattern and ranks 8 000 buckets afterwards.
+**Partitioning loses to both**, 106 ms against 30–40 ms, since it runs
+the whole pattern and ranks 8 000 buckets afterwards.
+
+#### Why `globalsort` is worth keeping when there is an index
+
+Read the two corpus sources against each other in the table above. At
+level 1, `memo+hnsw` expands 143 948 vectors where `memo+globalsort`
+expands 1 208 400 — the index touches **8.4× fewer** — and it is
+**1.7× slower**, 116.5 ms against 67.7 ms. Both walk the same 142 688
+stream positions; a best-first graph traversal simply costs far more per
+position than indexing into a sorted array. The index pays only when the
+walk stops early enough for 8× fewer expansions to beat a much cheaper
+per-pop cost, and a selective pattern is exactly the case where it does
+not stop early. `localsort` then beats both by another 1.9×, by never
+leaving the candidate set at all.
+
+So `globalsort` is not a naive baseline that the index supersedes. It is
+there for three reasons: it is **exact**, so it is the oracle the
+approximate arm's recall is scored against; it shares `hnsw`'s walk line
+for line, so the pair isolates what the *index* buys with nothing else
+varying; and on this shape it is simply the faster of the two.
 
 `pre` has no correlated form. Pre-filter's defining property is that it
 never runs the pattern first, and the anchors are not known until it has;

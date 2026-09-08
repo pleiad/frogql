@@ -143,9 +143,12 @@ pub fn run<G: GraphAccess>(
     stats.ltj_visits = ctx.visits;
     stats.candidates_hashed = ctx.candidates_hashed;
     stats.nn_pops = ctx.nn_pops;
-    stats.prefix_replays = ctx.stream.replays;
-    stats.prefix_extends = ctx.stream.extends;
-    stats.nn_expanded = ctx.stream.expanded();
+    // Totals, not the live stream's: a correlated clause discards its
+    // stream on every anchor, so reading the last one reports one
+    // anchor's walk as the query's.
+    stats.prefix_replays = ctx.total_replays();
+    stats.prefix_extends = ctx.total_extends();
+    stats.nn_expanded = ctx.total_expanded();
     stats.suffix_resumes = ctx.resumes;
     // One prefix pass, however many suffixes it resumes. The pair
     // (`candidates_hashed`, `suffix_resumes`) is what the memo buys:

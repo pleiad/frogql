@@ -262,12 +262,21 @@ impl DistThreshold {
 
     /// Forget everything held, so the threshold is `+∞` again.
     ///
-    /// A correlated `NEAREST` counts `k` **per anchor**, and the in-LTJ
-    /// search reaches one anchor's visits contiguously (the join descends
-    /// depth-first, so every visit under an anchor happens before the
-    /// search backtracks past it). Carrying the previous anchor's cut
-    /// into the next would prune the next anchor's neighbours against
-    /// distances measured from a different vector.
+    /// A correlated `NEAREST` counts `k` **per anchor**, so carrying one
+    /// anchor's cut into the next would prune the next anchor's
+    /// neighbours against distances measured from a different vector.
+    ///
+    /// The reset is sound whether or not an anchor's visits are
+    /// contiguous, and they often are not: `VeoOverride::pin_at_after`
+    /// only guarantees the anchor binds *above* the search variable, and
+    /// at a level past 0 there are variables above the anchor too, so the
+    /// join revisits an anchor once per binding of those. Returning to an
+    /// anchor with an empty threshold can only *under*-prune — more rows
+    /// survive the search and `TopK` discards them at selection — so the
+    /// answer is unchanged and only the pruning is weaker. `NnMode::Memo`
+    /// sidesteps it entirely by filing candidates per anchor and walking
+    /// each anchor's ranking once, which is a large part of why it wins
+    /// on a corpus source.
     pub fn reset(&mut self) {
         self.heap.clear();
         self.seen.clear();

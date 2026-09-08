@@ -175,6 +175,16 @@ pub struct VecCtx<'v> {
     pub visits: u64,
     pub candidates_hashed: u64,
     pub nn_pops: u64,
+    /// Cursor work done by streams this context has already discarded.
+    ///
+    /// A correlated clause replaces its stream on every anchor, and the
+    /// counters a cursor keeps go with it. Without carrying them forward,
+    /// `nn_expanded` (and the replay/extend pair) report the **last**
+    /// anchor's walk as though it were the query's — under-reporting by
+    /// the anchor count, on the one metric the whole experiment is about.
+    pub retired_expanded: u64,
+    pub retired_replays: u64,
+    pub retired_extends: u64,
     /// `Memo` only. Prefixes resumed in phase 2, against
     /// `candidates_hashed` as the number phase 1 collected. The gap is
     /// what consulting the neighbour order saved.
@@ -254,6 +264,9 @@ impl<'v> VecCtx<'v> {
             table: PrefixTable::new(),
             anchor_tables: Vec::new(),
             anchor_index: std::collections::HashMap::new(),
+            retired_expanded: 0,
+            retired_replays: 0,
+            retired_extends: 0,
             visits: 0,
             candidates_hashed: 0,
             nn_pops: 0,
@@ -301,6 +314,15 @@ impl<'v> VecCtx<'v> {
     /// means a new walk — which is precisely why the corpus-walking
     /// sources cost so much more here than the local one, and why that
     /// cost is the thing worth measuring.
+    ///
+    /// **An anchor's visits are not generally contiguous.** The VEO puts
+    /// the anchor above the search variable and says nothing about what
+    /// sits above the anchor, so at any level past 0 the join revisits an
+    /// anchor once per binding of those outer variables and this runs
+    /// once per *visit*, not once per anchor. Correctness is unaffected —
+    /// a reset threshold only under-prunes — but the cost is not: on a
+    /// 60 k corpus with thirty outer bindings per anchor, `Interleave`
+    /// rebuilt its stream six hundred times against `Memo`'s twenty.
     fn retarget(&mut self, anchor: u32) -> bool {
         if self.cur_anchor == anchor {
             return true;
@@ -315,9 +337,27 @@ impl<'v> VecCtx<'v> {
         self.q_owned.extend_from_slice(row);
         self.cut.reset();
         if !self.local {
+            // Bank the outgoing stream's counters before dropping it.
+            self.retired_expanded += self.stream.expanded();
+            self.retired_replays += self.stream.replays;
+            self.retired_extends += self.stream.extends;
             self.stream = NnStream::new(self.set.cursor_owned(self.q_owned.clone(), self.use_hnsw));
         }
         true
+    }
+
+    /// Cursor work across every stream this context has driven, the
+    /// retired ones included.
+    pub fn total_expanded(&self) -> u64 {
+        self.retired_expanded + self.stream.expanded()
+    }
+
+    pub fn total_replays(&self) -> u64 {
+        self.retired_replays + self.stream.replays
+    }
+
+    pub fn total_extends(&self) -> u64 {
+        self.retired_extends + self.stream.extends
     }
 }
 
