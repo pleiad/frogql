@@ -42,7 +42,11 @@ const ANCHORS: [f32; 3] = [0.0, 10.0, -5.0];
 /// Both arms of the join are anchored on a constant so the pattern is
 /// deterministic and small; what varies per row is the anchor image,
 /// which is exactly the correlation under test.
-fn fixture_json() -> String {
+/// The graph plus `orphans` isolated nodes: images that carry a
+/// vector but appear in no triple. They cannot satisfy any pattern, so
+/// they can never be an answer — but a ranking source that walks the
+/// whole attribute still walks past them.
+fn fixture_json_with_orphans(orphans: usize) -> String {
     let mut nodes = vec![r#"{"id":"hub","labels":["Img"],"props":{"idx":-1}}"#.to_string()];
     for i in 0..CANDIDATES {
         nodes.push(format!(
@@ -75,6 +79,13 @@ fn fixture_json() -> String {
         e += 1;
     }
 
+    for i in 0..orphans {
+        nodes.push(format!(
+            r#"{{"id":"orphan{i}","labels":["Img"],"props":{{"idx":{}}}}}"#,
+            1000 + i
+        ));
+    }
+
     format!(
         r#"{{"nodes":[{}],"edges":[{}]}}"#,
         nodes.join(","),
@@ -83,12 +94,21 @@ fn fixture_json() -> String {
 }
 
 fn build_db(name: &str) -> PathBuf {
+    build_db_with_orphans(name, 0)
+}
+
+/// Build a database whose vector attribute covers the graph's images
+/// *and* `orphans` images that carry a descriptor but appear in no
+/// triple. That is the shape the IMGpedia dumps have — only ~10% of the
+/// images with a HOG vector occur in the triple file — and importing the
+/// graph alone silently shrinks the search corpus to that 10%.
+fn build_db_with_orphans(name: &str, orphans: usize) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("frogql_corr_nearest_{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("t.gdb");
 
-    MemoryGraphStore::from_json_str(&fixture_json())
+    MemoryGraphStore::from_json_str(&fixture_json_with_orphans(orphans))
         .unwrap()
         .save(&db)
         .unwrap();
@@ -108,6 +128,14 @@ fn build_db(name: &str) -> PathBuf {
             .and_then(|s| s.parse::<usize>().ok())
         {
             rows.push((id, ANCHORS[i]));
+        } else if let Some(i) = name
+            .strip_prefix("orphan")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            // Seeded across the same interval the anchors and candidates
+            // occupy, so a corpus-wide ranking really does have to walk
+            // past them rather than dismiss them in one comparison.
+            rows.push((id, -6.0 + i as f32 * 0.1));
         }
     }
     rows.sort_by_key(|(id, _)| *id);
@@ -279,5 +307,68 @@ fn correlated_nearest_runs_the_pattern_once() {
         stats.arm.starts_with("correlated"),
         "expected the correlated arm, got {}",
         stats.arm
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Corpus size
+// ---------------------------------------------------------------------------
+
+/// Images that carry a vector but appear in no triple must not change the
+/// answer — and must change the cost.
+///
+/// On the IMGpedia dumps only ~10% of the images with a HOG descriptor
+/// occur in the triple file, so importing the graph alone yields a sidecar
+/// covering a tenth of the corpus. The answers are the same either way: an
+/// image with no triple satisfies no pattern, so it could never have been
+/// returned. What differs is how much a ranking source that walks the
+/// whole attribute has to walk past — which is exactly the quantity a
+/// similarity benchmark is measuring. `import_ttl --nodes-from` exists to
+/// put those images back.
+///
+/// The asymmetry between the sources is the point, and it is why "just
+/// use localsort" is not an answer: the two exact sources disagree about
+/// whether the corpus is even visible.
+#[test]
+fn orphan_vectors_change_the_cost_but_not_the_answer() {
+    const ORPHANS: usize = 200;
+    let small = build_db_with_orphans("corpus_small", 0);
+    let full = build_db_with_orphans("corpus_full", ORPHANS);
+
+    for source in [VecSource::LocalSort, VecSource::GlobalSort] {
+        assert_eq!(
+            run(&small, QUERY, source),
+            run(&full, QUERY, source),
+            "an image with no triple can never be an answer ({source:?})"
+        );
+    }
+
+    // `localsort` ranks only the pattern's candidates, so the corpus is
+    // invisible to it; `globalsort` sorts the whole attribute, so it is
+    // not. Counted through the engine's own stats rather than a clock.
+    let pops = |db: &Path, source: VecSource| -> u64 {
+        let store = LazyGraphStore::open(db).unwrap();
+        let rt = Runtime::new(&store);
+        rt.set_vec_cfg(VecCfg {
+            source,
+            ..VecCfg::default()
+        });
+        let q = frogql::compile_query(QUERY).unwrap();
+        let _ = rt.run_query(&q, 0);
+        rt.last_vec_stats().nn_pops
+    };
+
+    assert_eq!(
+        pops(&small, VecSource::LocalSort),
+        pops(&full, VecSource::LocalSort),
+        "localsort never looks outside the pattern's candidates"
+    );
+
+    let small_global = pops(&small, VecSource::GlobalSort);
+    let full_global = pops(&full, VecSource::GlobalSort);
+    assert!(
+        full_global > small_global * 4,
+        "globalsort walks the whole attribute, so {ORPHANS} orphans must \
+         cost it materially more than {small_global} pops; got {full_global}"
     );
 }

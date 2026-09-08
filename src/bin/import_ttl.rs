@@ -15,6 +15,12 @@
 //! ```text
 //! import_ttl <graph.ttl> <out.gdb> [options]
 //!
+//!   --nodes-from <path>   also create a node for every subject in this
+//!                         file, without reading its objects. For the
+//!                         vector dump: an image with a descriptor but no
+//!                         triple is still an image, and leaving it out
+//!                         shrinks the search corpus rather than the
+//!                         answer.
 //!   --node-label <name>   label given to every node (default: img)
 //!   --id-prop <name>      integer property holding the external id
 //!                         (default: id)
@@ -47,6 +53,31 @@
 //! Edges carry no element name. Every edge interns the same empty string,
 //! so the name table holds one entry for all of them rather than one per
 //! edge — nothing in the query path resolves an edge name anyway.
+//!
+//! # `--nodes-from`, and why it changes a measurement
+//!
+//! On the IMGpedia dumps, only ~10% of the images carrying a HOG
+//! descriptor appear in the triple graph. Import the graph alone and
+//! `vec_build` resolves one row in ten, because the other nine name
+//! images the graph has never heard of — correct, and the sidecar it
+//! writes is a corpus ten times smaller than the real one.
+//!
+//! That is invisible in the *answers*: an image with no triple satisfies
+//! no pattern, so it could never have been returned. It is very visible
+//! in the **cost**, for the two ranking sources that walk the whole
+//! attribute:
+//!
+//! | `FROGQL_VEC_SOURCE` | reads the corpus? |
+//! |---|---|
+//! | `localsort` | no — ranks only the pattern's candidates |
+//! | `globalsort` | yes — sorts the whole attribute |
+//! | `hnsw` | yes — walks the corpus proximity graph |
+//!
+//! So a benchmark of the corpus-walking arms over a tenth of the corpus
+//! measures a query nobody asked. `--nodes-from hog.ttl` creates the
+//! missing images as isolated nodes: they carry a vector, they are walked
+//! and rejected exactly as the reference system walks and rejects them,
+//! and no pattern can return one.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -65,6 +96,8 @@ const READ_BUF: usize = 8 << 20;
 
 struct Args {
     input: PathBuf,
+    /// Files whose subjects become nodes with no edges.
+    nodes_from: Vec<PathBuf>,
     output: PathBuf,
     node_label: String,
     id_prop: String,
@@ -77,6 +110,7 @@ fn usage() -> ! {
         "usage: import_ttl <graph.ttl> <out.gdb> [options]\n\
          \n\
          options:\n  \
+           --nodes-from <path>   also create a node per subject in this file (repeatable)\n  \
            --node-label <name>   label for every node (default: img)\n  \
            --id-prop <name>      integer property holding the external id (default: id)\n  \
            --max-edges <n>       stop after n triples\n  \
@@ -88,6 +122,7 @@ fn usage() -> ! {
 fn parse_args() -> Args {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut positional: Vec<String> = Vec::new();
+    let mut nodes_from: Vec<PathBuf> = Vec::new();
     let mut node_label = "img".to_string();
     let mut id_prop = "id".to_string();
     let mut max_edges = None;
@@ -107,6 +142,7 @@ fn parse_args() -> Args {
             }
         };
         match a.as_str() {
+            "--nodes-from" => nodes_from.push(PathBuf::from(value("--nodes-from"))),
             "--node-label" => node_label = value("--node-label"),
             "--id-prop" => id_prop = value("--id-prop"),
             "--max-edges" => max_edges = Some(parse_u64(&value("--max-edges"), "--max-edges")),
@@ -127,6 +163,7 @@ fn parse_args() -> Args {
     }
     Args {
         input: PathBuf::from(&positional[0]),
+        nodes_from,
         output: PathBuf::from(&positional[1]),
         node_label,
         id_prop,
@@ -437,6 +474,16 @@ fn main() {
         }
     });
 
+    for extra in &args.nodes_from {
+        eprintln!("scanning {} for extra nodes ...", extra.display());
+        let t = Instant::now();
+        let (seen, added) = scan_subjects(extra, &mut nodes, args.progress);
+        eprintln!(
+            "  {seen} subjects, {added} not already in the graph ({:.1}s)",
+            t.elapsed().as_secs_f64()
+        );
+    }
+
     if dropped > 0 {
         // Loud, and never fatal: a dump may legitimately carry lines this
         // importer does not model. But the count has to be visible, or a
@@ -641,6 +688,68 @@ fn main() {
         bytes as f64 / edge_count.max(1) as f64,
         t0.elapsed().as_secs_f64()
     );
+}
+
+/// Collect the subject of every line into `nodes`, ignoring the rest.
+///
+/// Byte-oriented on purpose. The vector dump's lines are ~2.7 KiB of
+/// float text and only the first token matters, so `read_line` would
+/// UTF-8-validate and allocate 47 GiB of `String` to read 200 MiB of
+/// subjects. `read_until(b' ')` takes the subject and a second
+/// `read_until(b'\n')` discards the tail without either.
+///
+/// Returns `(subjects seen, ids added)`.
+fn scan_subjects(path: &Path, nodes: &mut U32Set, progress: u64) -> (u64, u64) {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: cannot open {}: {e}", path.display());
+            process::exit(1);
+        }
+    };
+    let mut reader = BufReader::with_capacity(READ_BUF, file);
+    let mut token: Vec<u8> = Vec::with_capacity(64);
+    let mut seen: u64 = 0;
+    let mut added: u64 = 0;
+    let before = nodes.len;
+
+    loop {
+        token.clear();
+        match reader.read_until(b' ', &mut token) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("error: reading {}: {e}", path.display());
+                process::exit(1);
+            }
+        }
+        // Everything up to the newline belongs to this line's object.
+        // A subject-only file (no spaces) leaves nothing to drain.
+        if token.last() == Some(&b' ') {
+            let mut sink = Vec::new();
+            if reader.read_until(b'\n', &mut sink).is_err() {
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&token);
+        let text = text.trim();
+        if text.is_empty() || text.starts_with('#') || text.starts_with('@') {
+            continue;
+        }
+        seen += 1;
+        if seen % progress == 0 {
+            eprintln!("  nodes-from: {seen} subjects");
+        }
+        match local_name(text).parse::<u32>() {
+            Ok(id) if id != EMPTY => nodes.insert(id),
+            // A non-numeric or out-of-range subject is not an image id;
+            // the graph pass reports its own drops, and a node the vector
+            // file alone names is not worth a second tally.
+            _ => continue,
+        }
+    }
+    added += (nodes.len - before) as u64;
+    (seen, added)
 }
 
 /// Stream a file line by line. The callback returns `false` to stop.

@@ -125,7 +125,12 @@ Cargo workspace with four members and `resolver = "2"`:
     triple dumps (IMGpedia shape: `img:S img:Pnn img:O .`). Writes the
     modern format (CSR + name table + node locs + edge topo) record by
     record as it reads, so it never builds a `MemoryGraphStore`; peak RSS
-    is ~20 B/edge + 16 B/node. See `wikidata/README.md`
+    is ~20 B/edge + 16 B/node. `--nodes-from <file>` additionally creates a
+    node per subject of another dump — for the vector file, an image with a
+    descriptor but no triple, which otherwise shrinks the *search corpus*
+    without changing any answer (only `globalsort`/`hnsw` read the corpus;
+    `localsort` ranks the pattern's candidates and cannot tell). See
+    `wikidata/README.md`
   - `vec_build` — offline builder for a vector-attribute sidecar (`<db>.vec.<attr>`) + its HNSW
   - `vec_bench` — post-filter vs pre-filter vs in-LTJ vector-search harness
 - `python/` — the `frogql-py` crate: a `cdylib` exposing a PyO3 extension module named `frogql`. Depends on `gqlrust = { path = "..", default-features = false }` so the wheel ships only the library half (no rustyline/ureq/etc.). Built and installed with maturin (`maturin develop` for local dev, `maturin build --release` for wheels). Maturin installs into whichever venv is active.

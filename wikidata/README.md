@@ -46,7 +46,43 @@ cargo build --release --bin import_ttl --bin vec_build
 ```
 
 Options: `--node-label img`, `--id-prop id`, `--max-edges N` (sample a
-big dump), `--progress N`.
+big dump), `--progress N`, `--nodes-from <path>`.
+
+### `--nodes-from`, and the size of the search corpus
+
+Only ~10% of the images carrying a HOG descriptor appear in the triple
+graph: `vec_build` over the full dumps resolves 1 455 385 of 14 763 612
+rows and reports the rest as unresolved. That is correct — the other nine
+in ten name images the graph has never heard of — and it leaves a sidecar
+covering a tenth of the real corpus.
+
+It changes no **answer**: an image with no triple satisfies no pattern, so
+it could never have been returned. It changes the **cost**, and only for
+the two ranking sources that read the whole attribute:
+
+| `FROGQL_VEC_SOURCE` | reads the corpus? | measured on a 200-orphan fixture |
+|---|---|---|
+| `localsort` | no — ranks only the pattern's candidates | 6 → 6 neighbour pops |
+| `globalsort` | yes — sorts the whole attribute | 10 → 168 pops |
+| `hnsw` | yes — walks the corpus proximity graph | grows likewise |
+
+So a latency comparison of the corpus-walking arms against a system that
+indexes all 14.7 M images is not comparing the same query. Two ways out,
+and which is right depends on what the other system indexes:
+
+```bash
+# Keep the corpus the graph references. The default.
+import_ttl graph.ttl imgpedia.gdb
+
+# Put the unreferenced images back, as isolated nodes.
+import_ttl graph.ttl imgpedia.gdb --nodes-from hog.ttl
+```
+
+With `--nodes-from` the `.gdb` grows ~8% and the sidecar goes from ~1.8 GiB
+to ~18 GiB; the HNSW build grows with it (2.2 ms a row measured, so ~9 h at
+14.7 M — use `--no-index` and an exact source unless the index is the thing
+being measured). Pinned by
+`tests/correlated_nearest_test.rs::orphan_vectors_change_the_cost_but_not_the_answer`.
 
 The importer streams the file twice — pass 1 collects the distinct ids
 and predicates, pass 2 writes edge records straight onto pages as it
