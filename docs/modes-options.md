@@ -6,6 +6,11 @@ measurement below is LDBC SF0.1 (`bench/data/ldbc-sf0.1.gdb`, 327 588 nodes
 / 1 477 965 edges) on a warm OS cache, macOS, release build. Treat them as
 indicative: peak RSS varies ~10% run to run.
 
+A second set of numbers appears where SF0.1 is too small to show the
+effect: a 160 288 041-node / 617 065 092-edge IMGpedia RDF dump on a
+123 GiB machine. Everything on that scale is labelled **(RDF dump)** and is
+what motivated the options in §3.1 — at SF0.1 all of them are noise.
+
 ## 1. Two mechanisms
 
 froGQL has two ways to change how a session behaves:
@@ -26,7 +31,7 @@ misspelled switch looks exactly like a default run.
 ## 2. CLI flags
 
 ```
-frogql <database.gdb> [--no-typecheck] [--no-auto-indexes]
+frogql <database.gdb> [--no-typecheck] [--no-auto-indexes] [--auto-indexes <kinds>]
 frogql <database.gdb> --import-csv <dir>       [flags]
 frogql <database.gdb> --import-ldbc-csv <dir>  [flags]
 frogql <database.gdb> --import-json <file>     [flags]
@@ -36,6 +41,7 @@ frogql <database.gdb> --import-json <file>     [flags]
 |---|---|---|
 | `--no-typecheck` | Skips the typechecker for the session. Queries compile straight to the runtime. | You lose the `guaranteed empty` short-circuit and all static errors. A query that the checker would reject now runs and returns nothing, slowly. |
 | `--no-auto-indexes` | Skips the secondary-index auto-build at open. | Open drops the 0.54 s index phase and ~120 MiB of peak RSS, but `Eq` predicates stop constant-folding into point lookups. IC2 goes from ~9 ms back to seconds. |
+| `--auto-indexes <both\|hash\|btree\|none>` | Which kinds the auto-builder produces. `both` is the default; `none` is `--no-auto-indexes`. | Declining the btree costs ranges and `ORDER BY` acceleration and nothing else; declining the hash costs `=` lookups. See §3.1. |
 
 A non-existent path is created, sqlite3-style, and opens as an empty
 database ready for `INSERT` + `.save`.
@@ -47,7 +53,60 @@ database ready for `INSERT` + `.save`.
 | Variable | Effect |
 |---|---|
 | `FROGQL_DISABLE_AUTO_INDEXES=1` | Skip the secondary-index auto-build at open (same as `--no-auto-indexes`). |
+| `FROGQL_AUTO_INDEX_KINDS=both\|hash\|btree\|none` | Which kinds the auto-builder produces (default `both`; same as `--auto-indexes`). |
 | `FROGQL_DISABLE_INDEX_FOLD=1` | Keep the indexes, but skip the LTJ pre-pass that folds `x.attr = k` into a pinned constant and range predicates into a `NodeInSet`. Isolates "does the index exist" from "does the optimizer use it". |
+| `FROGQL_LTJ_SOURCE=build` | Ignore `<db>.ltj` and rebuild the LTJ index from the graph. The kill switch the persistence differential test A/Bs against. |
+
+**Which kind serves what.** The auto-builder indexes every `(label, prop)`
+whose values are unique within the label, and by default builds a hash
+*and* a btree over it. They answer different predicates:
+
+| kind | serves | consulted by |
+|---|---|---|
+| hash | `x.p = v` | `fold_indexed_constants`, `get_candidate_nodes` |
+| btree | `x.p < v`, `ORDER BY x.p` | `fold_range_filters`, `try_btree_ltj_real` |
+
+The btree is a full second copy of the postings, so a workload of pure
+equality predicates pays for it and never reads it. At SF0.1 the pair is a
+few MiB and the choice does not matter. **(RDF dump)** it is ~34 GiB of a
+123 GiB machine, and the difference between opening the database and being
+killed by the OOM reaper:
+
+| setting | index heap (RDF dump) |
+|---|---|
+| `both` (default) | ~34 GiB |
+| `hash` | ~13 GiB |
+| `none` | 0, and every `x.id = v` becomes a scan |
+
+`--no-auto-indexes` predates this and is all-or-nothing; `hash` is usually
+what an RDF-shaped workload wants.
+
+**Persisting the LTJ index.** `ltj_build <db.gdb> [--compact]` writes
+`<db>.ltj` once, and every later open reads it instead of rebuilding:
+
+```bash
+ltj_build db.gdb --compact     # once, after building or changing the graph
+frogql db.gdb                  # finds db.gdb.ltj and loads it
+```
+
+Measured on a 3.85 M-edge graph:
+
+| representation | build | load | |
+|---|---|---|---|
+| array | 1.69 s | 0.07 s | 24× |
+| compact | 1.99 s | 0.03 s | 66× |
+
+**(RDF dump)** the build is 252 s of every session. The loaded index is the
+same structure the builder produces, filled from a file rather than
+computed, so a query cannot tell them apart — pinned by
+`tests/ltj_persist_test.rs`.
+
+Rerun `ltj_build` after any change to the database. The sidecar carries a
+`(node count, edge count)` fingerprint and is ignored when the graph no
+longer matches; deleting it always forces a rebuild. A sidecar that cannot
+be used — absent, stale, wrong representation, truncated, foreign — is
+always a rebuild and never an error. `FROGQL_TRACE_OPEN=1` prints the
+reason, so a sidecar that is silently never used is diagnosable.
 
 ### 3.2 Join strategy
 
@@ -72,7 +131,7 @@ database ready for `INSERT` + `.save`.
 
 | Variable | Effect |
 |---|---|
-| `FROGQL_TRACE_OPEN=1` | Print per-phase open latency to stderr. |
+| `FROGQL_TRACE_OPEN=1` | Print per-phase open latency to stderr, and the reason an LTJ sidecar was not used. |
 | `FROGQL_DEBUG_INDEXES=1` | Print the auto-built index list at open and every LTJ variable pinned through an index. |
 
 ## 4. What each phase costs
@@ -90,16 +149,17 @@ Loaded 327588 nodes, 1477965 edges in 0.87s
 LTJ TripleIndex built in 0.69s
 ```
 
-The four structures worth knowing by size, since they dominate RSS. None of
-them is persisted: every one is rebuilt from scratch on each open (the
-mirror, only on demand):
+The four structures worth knowing by size, since they dominate RSS:
 
 | Structure | Build | Heap | Persisted? |
 |---|---|---|---|
-| LTJ TripleIndex, array | 0.68 s | 136.6 MiB | no, rebuilt every open |
-| LTJ TripleIndex, compact | 0.82 s | 47.6 MiB | no, rebuilt every open |
+| LTJ TripleIndex, array | 0.68 s | 136.6 MiB | optional — `ltj_build` writes `<db>.ltj` |
+| LTJ TripleIndex, compact | 0.82 s | 47.6 MiB | optional — `ltj_build --compact` |
 | Secondary indexes (auto) | 0.54 s | ~120 MiB | no, rebuilt every open |
 | Any-direction mirror | ~0.9 s | ~330 MiB | no, built on first `-[e]-` query |
+
+Only the LTJ index can be persisted, and only on request. The other two are
+rebuilt from scratch on every open (the mirror, only on demand).
 
 Reproduce the first two with `cargo run --release --bin ltj_index_stats -- <db.gdb>`.
 
@@ -130,6 +190,30 @@ for `--no-auto-indexes` when you care about the peak.
 
 Queries get slower either way. This is a mode for measuring the memory
 floor, not for latency numbers.
+
+### A graph too big for the defaults
+
+At SF0.1 every structure fits in a few hundred MiB and none of this
+matters. **(RDF dump)** the defaults ask for ~125 GiB on a 123 GiB machine
+and the process is killed before it answers anything. What that machine
+runs is:
+
+```bash
+ltj_build db.gdb --compact      # once
+FROGQL_LTJ_COMPACT=1 FROGQL_AUTO_INDEX_KINDS=hash frogql db.gdb
+```
+
+| | default | above |
+|---|---|---|
+| graph, resident after open | 20 GiB | 20 GiB |
+| secondary indexes | 34 GiB | 13 GiB |
+| LTJ index | 71 GiB | 25 GiB |
+| **peak** | **125 GiB** | **~58 GiB** |
+| open + index build | 521 s | seconds |
+
+Three separate decisions, and each is a real trade: the compact index is
+slower per query, `hash` gives up range and `ORDER BY` acceleration, and
+the sidecar has to be rebuilt whenever the graph changes.
 
 ### Lowest latency
 
@@ -167,6 +251,33 @@ schema, which can degrade compile-time numbers by ~3000× with no visible
 error.
 
 ## 6. Gotchas
+
+**The LTJ sidecar is opt-in and never written by itself.** Nothing creates
+`<db>.ltj` except `ltj_build`, and nothing deletes it when the graph
+changes. The fingerprint stops a stale one from being *used*, but it is
+`(node count, edge count)` — coarse enough that a delete plus an
+equal-sized insert followed by a save would slip past it. Rerun `ltj_build`
+after changing the database, or delete the sidecar.
+
+**A sidecar written for the other representation is refused, not
+converted.** `FROGQL_LTJ_COMPACT` selects which index a session wants, and
+loading the other one would silently change which algorithm runs. So
+`ltj_build db.gdb` followed by `FROGQL_LTJ_COMPACT=1 frogql db.gdb` rebuilds
+from scratch and the sidecar is dead weight. Build the one you intend to
+run, and check with `FROGQL_TRACE_OPEN=1`:
+
+```
+LTJ sidecar not used: sidecar holds the array index, this session wants compact
+```
+
+**A node-only pattern reaches the secondary index; it did not always.**
+`MATCH (a:Img) WHERE a.id = 7` has no edges, so it never decomposes into
+triples, so the LTJ constant-folding pre-pass — for a long time the only
+caller of the index in the engine — never ran. It scanned every node
+carrying the label with the hash index sitting unused: 0.606 s against
+0.000 s at a million nodes, 56 s **(RDF dump)**. `get_candidate_nodes` now
+consults the index first. If you are comparing against an older build,
+that is the difference.
 
 **Auto-indexes are never loaded, always built.** They are memory-only by
 design, so "skip loading" and "skip creating" are the same act. Only
@@ -218,12 +329,24 @@ semantic ones.
 
 | Var | Effect |
 |---|---|
-| `FROGQL_VEC_STRATEGY=post\|pre\|inltj` | which strategy runs (default `post`) |
+| `FROGQL_VEC_STRATEGY=post\|pre\|interleave\|memo` | which strategy runs (default `post`); `inltj` is an alias for `interleave` |
 | `FROGQL_VEC_SOURCE=hnsw\|localsort\|globalsort` | where the ranking comes from (default `hnsw`) |
 | `FROGQL_VEC_LEVEL=<n>` | VEO position of the search variable; in-LTJ only |
 | `FROGQL_VEC_TAU_EPS=<f>` | relative slack on the top-k threshold cut |
 | `FROGQL_DISABLE_VECTORS` | ignore every sidecar |
 | `FROGQL_DEBUG_VEC` | print the executed arm and its counters |
+
+**A correlated clause ignores `FROGQL_VEC_STRATEGY`.** When the query
+vector names a pattern variable — `NEAREST 50 v11.hog TO VECTOR(v00,
+'hog')` — there is one ranking per distinct binding of `v00`, not one for
+the query. That is a similarity *join*, and the interleaving arms hook a
+single ranking into a VEO level, so they have nothing to hook. Such a
+clause always takes the partition-and-rank arm: run the pattern once,
+partition its rows by the anchor, rank each partition against its own
+vector. `FROGQL_VEC_SOURCE` still selects the per-partition stream, and
+`stats.arm` reports `correlated+<source>` with `anchor_groups` counting the
+partitions, so a benchmark row never claims an arm that did not run. See
+`docs/internals/vector-search.md` §*Correlated `NEAREST`*.
 
 **`FROGQL_VEC_SOURCE=hnsw` changes the answer, deliberately.** HNSW is
 approximate; `localsort` and `globalsort` are exact. Recall is a

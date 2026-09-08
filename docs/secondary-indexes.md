@@ -1,7 +1,8 @@
 # Secondary indexes
 
-froGQL auto-builds hash indexes on `(label, prop)` pairs whose values are
-unique within the label, in a single O(N) pass at `LazyGraphStore::open`.
+froGQL auto-builds hash **and btree** indexes on `(label, prop)` pairs whose
+values are unique within the label, in a single O(N) pass at
+`LazyGraphStore::open`.
 On the LDBC SF0.1 dataset that captures `Person.id`, `Tag.name`,
 `Country.name`, `TagClass.name`, every other `*_id` column the loader
 produced — 26 indexes in total, no DDL required. The LTJ optimizer
@@ -25,6 +26,78 @@ triples and benefits from the start-node pin. Diagnostic env vars:
 `FROGQL_DEBUG_INDEXES=1` prints the auto-built indexes and pinned
 variables; `FROGQL_DISABLE_INDEX_FOLD=1` reverts to the pre-index plan
 for A/B benchmarking.
+
+## Choosing which kinds get built
+
+`FROGQL_AUTO_INDEX_KINDS=both|hash|btree|none` (CLI: `--auto-indexes <k>`)
+controls what the auto-builder produces. `both` is the default.
+
+| kind | serves | consulted by |
+|---|---|---|
+| hash | `x.p = v` | `fold_indexed_constants`, `get_candidate_nodes` |
+| btree | `x.p < v`, `ORDER BY x.p` | `fold_range_filters`, `try_btree_ltj_real` |
+
+The btree is a **full second copy of the postings**, so a workload of pure
+equality predicates pays for it and never reads it. At SF0.1 the pair costs
+a few MiB and the setting is noise. On a 160 M-node RDF dump it is ~34 GiB
+of a 123 GiB machine — the difference between opening the database and
+being killed by the OOM reaper:
+
+| setting | index heap |
+|---|---|
+| `both` | ~34 GiB |
+| `hash` | ~13 GiB |
+| `none` | 0, and every `x.id = v` becomes a scan |
+
+`--no-auto-indexes` predates this and is the all-or-nothing form; it is
+`--auto-indexes none`.
+
+Whatever is built, the answer is the same: an index is an accelerator, and
+declining one may only cost time. `tests/auto_index_memory_test.rs` pins
+every setting against a full scan.
+
+## Postings are inline when single
+
+A value's node ids are a `Posting`:
+
+```rust
+enum Posting { One(Id), Many(Box<Vec<Id>>) }
+```
+
+16 bytes, and heap-free in the `One` case. That case is not an
+optimization for the common path — on an auto index it is the *only* case,
+because the auto-builder only indexes a `(label, prop)` whose values are
+unique within the label.
+
+The `Vec<Id>` it replaced cost 24 bytes of header plus a heap block the
+allocator rounds up to 32, to carry a single 4-byte id, once per node, in
+both the hash and the btree. At 160 M nodes that is ~9.6 GiB of allocator
+padding around 1.2 GiB of ids, spread over 320 M tiny allocations. Measured
+by the index's own accounting: 76 → 40 bytes an entry.
+
+`Many` is boxed so the enum stays 16 bytes: an inline `Vec` would put its
+three-word header in every `One` as well, which is the cost the type exists
+to avoid. `as_slice` returns `slice::from_ref` for `One`, so every reader
+keeps the `&[Id]` it had and cannot tell the two representations apart.
+
+## A pattern with no edges reaches the index
+
+`MATCH (a:Img) WHERE a.id = 7` has no edges, so it never decomposes into
+triples, so the LTJ constant-folding pre-pass never runs — and for a long
+time that pre-pass was the *only* caller of `lookup_node_eq` in the engine.
+The query scanned every node carrying the label with a hash index sitting
+beside it unused: 0.606 s against 0.000 s at a million nodes, and 56 s on
+the 160 M-node dump.
+
+`Runtime::get_candidate_nodes` now asks `indexed_candidates` before the
+label sets. The claim is a **narrowing only** — `filter_node` still runs
+over whatever comes back — so a superset is safe and a subset would not be.
+Two things make it a superset:
+
+- `LabelType::required_labels()` is empty for a disjunction, so `(x:A|B)`
+  falls back to the label sets rather than narrowing wrongly to `A`;
+- an index on `(l, attr)` holds every `l`-node that carries `attr`, and one
+  that does not carry it reads as null, which no `=` satisfies.
 
 ## Declared indexes (`CREATE INDEX` DDL)
 
@@ -93,6 +166,18 @@ Auto-built indexes are memory-only — they live in `RefCell<SecondaryIndex>`
 on the `LazyGraphStore` and `build_auto_indexes_bulk` reproduces them
 on every open in a single O(N) pass over the node records. Storing them
 on disk would just duplicate work and grow the `.gdb`.
+
+That reasoning is sound at LDBC scale, where the pass is 0.54 s. On a
+160 M-node dump it is ~74 s of every open, and there is no way to avoid
+paying it other than declining the index (`--auto-indexes none`) and taking
+the scans. The LTJ index has an answer for this — `ltj_build` writes it to
+a sidecar, see `docs/modes-options.md` §3.1 — and the secondary index does
+not yet.
+
+Note that even a *declared* index is recomputed at open: what
+`header.secondary_index_root` persists is the declaration, not the
+contents, and the open path replays it through `build_declared`, which
+scans.
 
 Declared (DDL) indexes ARE persisted. `header.secondary_index_root` (a
 new slot at bytes 100-103 of the file header) points at a chain of

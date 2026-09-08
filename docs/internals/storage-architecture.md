@@ -571,7 +571,7 @@ the `GraphAccess` trait. The backend decides whether that's an array
 lookup, a hash map lookup, or a disk read.
 
 
-## 6. TripleIndex (in-memory, built at query time)
+## 6. TripleIndex (built at query time, optionally persisted)
 
 When the query engine encounters a multi-way join or a long chain of
 directed edges, it builds a temporary in-memory structure called the
