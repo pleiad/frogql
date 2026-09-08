@@ -1,0 +1,361 @@
+//! Run a file of queries under every vector-search arm, opening the
+//! database once.
+//!
+//! ```text
+//! vec_sweep <db.gdb> <queries.gql> [options]
+//!
+//!   --arms <list>     comma-separated `strategy+source` pairs, or `all`
+//!                     (default: the seven the study compares)
+//!   --levels <list>   VEO levels to try for the in-LTJ arms (default: 0)
+//!   --iters <n>       runs per (arm, query); the median is reported (default: 3)
+//!   --limit <n>       row cap per query, 0 for none (default: 0)
+//!   --queries <list>  1-based indices to run, e.g. 1,4,17 (default: all)
+//!   --csv <path>      write the CSV here as well as to stdout
+//! ```
+//!
+//! # Why this exists
+//!
+//! The arms are selected by environment variables, which are read once per
+//! process, so comparing seven of them from a shell means seven processes
+//! and seven opens. On the RDF dump an open is ~220 s and the LTJ build is
+//! another ~250 s, so the setup would dwarf the thing being measured and
+//! the numbers would be dominated by page-cache state rather than by the
+//! algorithm.
+//!
+//! Here the store, its indexes and the LTJ index are built once, before
+//! any measurement, and `Runtime::set_vec_cfg` switches arms between
+//! queries. Every timing is then the query and nothing else — the same
+//! discipline `vec_bench` follows on synthetic data, applied to a real
+//! database and real queries.
+//!
+//! # Reading the output
+//!
+//! One CSV row per (arm, level, query, iteration set):
+//!
+//! ```text
+//! query,strategy,source,level,arm_actual,median_ms,min_ms,max_ms,rows,nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,anchor_groups,fallback
+//! ```
+//!
+//! **`arm_actual` is the column to check first.** A strategy that meets a
+//! shape it cannot hook into falls back, and a row reporting the requested
+//! arm rather than the executed one is a lie. The commonest case here: a
+//! *correlated* `NEAREST` — one whose query vector names a pattern
+//! variable, like `VECTOR(v10, 'hog')` — has one ranking per anchor, so
+//! the in-LTJ arms have no single ranking to hook and every arm runs the
+//! partition-and-rank plan. Such a query will report `correlated+<source>`
+//! for all seven, and only the source axis is really varying.
+//!
+//! `nn_pops` per accepted row is the headline number: with a selective
+//! pattern the corpus-walking sources reach a candidate that also
+//! satisfies the pattern only after a large fraction of the corpus, while
+//! `localsort` never leaves the candidate set.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process;
+use std::time::Instant;
+
+use frogql::runtime::engine::Runtime;
+use frogql::runtime::vsearch::{Strategy, VecCfg, VecSource};
+use frogql::store::lazy::LazyGraphStore;
+
+/// The seven arms of the study, in the order the write-up lists them.
+const DEFAULT_ARMS: [(Strategy, VecSource); 7] = [
+    // 1 — post-filter, no metric index
+    (Strategy::PostFilter, VecSource::LocalSort),
+    // 2 — post-filter, with index
+    (Strategy::PostFilter, VecSource::Hnsw),
+    // 3 — in-LTJ, with index
+    (Strategy::Interleave, VecSource::Hnsw),
+    // 4 — in-LTJ, no index
+    (Strategy::Interleave, VecSource::LocalSort),
+    // 5 — global pre-sort (a special case of 3, by its source)
+    (Strategy::Interleave, VecSource::GlobalSort),
+    // 6 — pre-filter: substitute each neighbour and re-run
+    (Strategy::PreFilter, VecSource::Hnsw),
+    // 7 — memo: consult the ranking once, globally
+    (Strategy::Memo, VecSource::Hnsw),
+];
+
+const ALL_ARMS: [(Strategy, VecSource); 11] = [
+    (Strategy::PostFilter, VecSource::Hnsw),
+    (Strategy::PostFilter, VecSource::LocalSort),
+    (Strategy::PostFilter, VecSource::GlobalSort),
+    (Strategy::PreFilter, VecSource::Hnsw),
+    (Strategy::PreFilter, VecSource::GlobalSort),
+    (Strategy::Interleave, VecSource::Hnsw),
+    (Strategy::Interleave, VecSource::LocalSort),
+    (Strategy::Interleave, VecSource::GlobalSort),
+    (Strategy::Memo, VecSource::Hnsw),
+    (Strategy::Memo, VecSource::LocalSort),
+    (Strategy::Memo, VecSource::GlobalSort),
+];
+
+struct Args {
+    db: PathBuf,
+    queries: PathBuf,
+    arms: Vec<(Strategy, VecSource)>,
+    levels: Vec<usize>,
+    iters: usize,
+    limit: usize,
+    only: Option<Vec<usize>>,
+    csv: Option<PathBuf>,
+}
+
+fn usage() -> ! {
+    eprintln!(
+        "usage: vec_sweep <db.gdb> <queries.gql> [options]\n\
+         \n\
+         options:\n  \
+           --arms <list>     `strategy+source` pairs, or `all` (default: the study's seven)\n  \
+           --levels <list>   VEO levels for the in-LTJ arms (default: 0)\n  \
+           --iters <n>       runs per (arm, query); median reported (default: 3)\n  \
+           --limit <n>       row cap per query, 0 for none (default: 0)\n  \
+           --queries <list>  1-based query indices to run (default: all)\n  \
+           --csv <path>      also write the CSV to this file"
+    );
+    process::exit(2)
+}
+
+fn parse_arm(s: &str) -> (Strategy, VecSource) {
+    let (a, b) = match s.split_once('+') {
+        Some(p) => p,
+        None => {
+            eprintln!("error: `{s}` is not `strategy+source`, e.g. `post+hnsw`");
+            usage()
+        }
+    };
+    let strategy = Strategy::parse(a).unwrap_or_else(|| {
+        eprintln!("error: unknown strategy `{a}` (post|pre|interleave|memo)");
+        usage()
+    });
+    let source = VecSource::parse(b).unwrap_or_else(|| {
+        eprintln!("error: unknown source `{b}` (hnsw|localsort|globalsort)");
+        usage()
+    });
+    (strategy, source)
+}
+
+fn parse_args() -> Args {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let mut positional: Vec<String> = Vec::new();
+    let mut arms = DEFAULT_ARMS.to_vec();
+    let mut levels = vec![0usize];
+    let mut iters = 3usize;
+    let mut limit = 0usize;
+    let mut only: Option<Vec<usize>> = None;
+    let mut csv = None;
+
+    let mut i = 0;
+    while i < argv.len() {
+        let a = argv[i].clone();
+        let mut value = |name: &str| -> String {
+            i += 1;
+            argv.get(i).cloned().unwrap_or_else(|| {
+                eprintln!("error: {name} needs a value");
+                usage()
+            })
+        };
+        match a.as_str() {
+            "--arms" => {
+                let v = value("--arms");
+                arms = if v == "all" {
+                    ALL_ARMS.to_vec()
+                } else {
+                    v.split(',').map(parse_arm).collect()
+                };
+            }
+            "--levels" => {
+                levels = value("--levels")
+                    .split(',')
+                    .map(|s| s.trim().parse().unwrap_or(0))
+                    .collect()
+            }
+            "--iters" => iters = value("--iters").parse().unwrap_or(3).max(1),
+            "--limit" => limit = value("--limit").parse().unwrap_or(0),
+            "--queries" => {
+                only = Some(
+                    value("--queries")
+                        .split(',')
+                        .filter_map(|s| s.trim().parse().ok())
+                        .collect(),
+                )
+            }
+            "--csv" => csv = Some(PathBuf::from(value("--csv"))),
+            "-h" | "--help" => usage(),
+            other if other.starts_with("--") => {
+                eprintln!("error: unknown flag `{other}`");
+                usage()
+            }
+            other => positional.push(other.to_string()),
+        }
+        i += 1;
+    }
+    if positional.len() != 2 {
+        eprintln!("error: expected a database and a query file");
+        usage();
+    }
+    Args {
+        db: PathBuf::from(&positional[0]),
+        queries: PathBuf::from(&positional[1]),
+        arms,
+        levels,
+        iters,
+        limit,
+        only,
+        csv,
+    }
+}
+
+/// One statement per non-blank line, trailing `;` optional. That is the
+/// shape `sparql_to_gql.py --batch --one-line` produces and the shape the
+/// REPL accepts, so the same file works in both.
+fn read_queries(path: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("error: cannot read {}: {e}", path.display());
+        process::exit(1);
+    });
+    text.lines()
+        .map(|l| l.trim().trim_end_matches(';').trim())
+        .filter(|l| !l.is_empty() && !l.starts_with("--"))
+        .map(|l| l.to_string())
+        .collect()
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
+}
+
+fn main() {
+    let args = parse_args();
+
+    // Everything expensive happens here, once, before any timing: the
+    // store, the auto-built secondary indexes, and the LTJ index (read
+    // from `<db>.ltj` when `ltj_build` has written one).
+    let t = Instant::now();
+    let store = LazyGraphStore::open(&args.db).unwrap_or_else(|e| {
+        eprintln!("error: cannot open {}: {e}", args.db.display());
+        process::exit(1);
+    });
+    let (nodes, edges) = {
+        use frogql::model::graph_access::GraphAccess;
+        store
+            .index_sidecar_key()
+            .map(|(_, n, e)| (n, e))
+            .unwrap_or((0, 0))
+    };
+    eprintln!(
+        "opened {} ({nodes} nodes, {edges} edges) in {:.1}s",
+        args.db.display(),
+        t.elapsed().as_secs_f64()
+    );
+
+    let rt = Runtime::new(&store);
+    let t = Instant::now();
+    let index = rt.warm_triple_index();
+    eprintln!(
+        "LTJ index ready ({} triples) in {:.1}s",
+        index.len(),
+        t.elapsed().as_secs_f64()
+    );
+
+    let raw = read_queries(&args.queries);
+    // Compile once. A compile error is fatal rather than skipped: a sweep
+    // that quietly drops a query reports a mean over a set nobody chose.
+    let mut queries = Vec::with_capacity(raw.len());
+    for (i, q) in raw.iter().enumerate() {
+        match frogql::compile_query(q) {
+            Ok(c) => queries.push((i + 1, c)),
+            Err(e) => {
+                eprintln!("error: query {} does not compile: {e}", i + 1);
+                process::exit(1);
+            }
+        }
+    }
+    if let Some(only) = &args.only {
+        queries.retain(|(i, _)| only.contains(i));
+    }
+    eprintln!(
+        "{} queries x {} arms x {} level(s) x {} iters",
+        queries.len(),
+        args.arms.len(),
+        args.levels.len(),
+        args.iters
+    );
+
+    let header = "query,strategy,source,level,arm_actual,median_ms,min_ms,max_ms,\
+                  rows,nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,\
+                  anchor_groups,fallback";
+    println!("{header}");
+    let mut csv_out = args.csv.as_ref().map(|p| {
+        let mut f = std::fs::File::create(p).unwrap_or_else(|e| {
+            eprintln!("error: cannot create {}: {e}", p.display());
+            process::exit(1);
+        });
+        let _ = writeln!(f, "{header}");
+        f
+    });
+
+    for (strategy, source) in &args.arms {
+        // Only the in-LTJ arms read the level; running the others once
+        // per level would repeat identical work and pad the output.
+        let levels: &[usize] = if strategy.is_in_ltj() {
+            &args.levels
+        } else {
+            &args.levels[..1]
+        };
+        for &level in levels {
+            rt.set_vec_cfg(VecCfg {
+                strategy: *strategy,
+                source: *source,
+                level,
+                ..VecCfg::default()
+            });
+            for (qi, query) in &queries {
+                let mut times = Vec::with_capacity(args.iters);
+                let mut rows = 0usize;
+                for _ in 0..args.iters {
+                    let t = Instant::now();
+                    let result = rt.run_query(query, args.limit);
+                    times.push(t.elapsed().as_secs_f64() * 1000.0);
+                    rows = result.row_count();
+                }
+                let s = rt.last_vec_stats();
+                let lo = times.iter().cloned().fold(f64::INFINITY, f64::min);
+                let hi = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let line = format!(
+                    "{qi},{},{},{level},{},{:.3},{:.3},{:.3},{rows},{},{},{},{},{},{},{}",
+                    strategy.name(),
+                    source.name(),
+                    s.arm,
+                    median(times),
+                    lo,
+                    hi,
+                    s.nn_pops,
+                    s.nn_expanded,
+                    s.pattern_runs,
+                    s.ltj_visits,
+                    s.candidates_hashed,
+                    s.anchor_groups,
+                    // Commas would break the column; the reason is prose.
+                    s.fallback_reason.as_deref().unwrap_or("").replace(',', ";")
+                );
+                println!("{line}");
+                if let Some(f) = csv_out.as_mut() {
+                    let _ = writeln!(f, "{line}");
+                }
+            }
+            eprintln!("  done {}+{} level {level}", strategy.name(), source.name());
+        }
+    }
+
+    if let Some(p) = &args.csv {
+        eprintln!("wrote {}", p.display());
+    }
+}

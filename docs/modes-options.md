@@ -348,6 +348,23 @@ vector. `FROGQL_VEC_SOURCE` still selects the per-partition stream, and
 partitions, so a benchmark row never claims an arm that did not run. See
 `docs/internals/vector-search.md` §*Correlated `NEAREST`*.
 
+**Sweeping the arms: use `vec_sweep`, not a shell loop.** The variables
+are read once per process, so comparing seven arms from a shell costs
+seven opens — ~220 s each on the RDF dump, plus the index build, which
+dwarfs the thing being measured and leaves the numbers dominated by
+page-cache state. `vec_sweep` opens once and switches arms through
+`Runtime::set_vec_cfg` between queries:
+
+```bash
+ltj_build db.gdb --compact                    # once, so the open is seconds
+vec_sweep db.gdb queries.gql --iters 5 --csv results.csv
+```
+
+One CSV row per (arm, level, query), with the median, the neighbour
+counters, and — first column to read — `arm_actual`, the arm that
+*executed*. `--arms all` runs all eleven; `--arms post+hnsw,pre+hnsw` runs
+a subset; `--levels 0,1` sweeps the VEO position for the in-LTJ arms.
+
 **`FROGQL_VEC_SOURCE=hnsw` changes the answer, deliberately.** HNSW is
 approximate; `localsort` and `globalsort` are exact. Recall is a
 measurement, not a defect.
