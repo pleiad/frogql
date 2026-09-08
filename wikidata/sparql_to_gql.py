@@ -367,4 +367,19 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Die quietly when the reader goes away, the way a well-behaved
+    # filter does: `sparql_to_gql.py --batch | head` closes the pipe
+    # mid-write, and the default Python handler turns that into a
+    # BrokenPipeError traceback that looks like the translation failed.
+    try:
+        import signal
+
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except (ImportError, AttributeError, ValueError):
+        # No SIGPIPE on Windows; there the write simply raises and the
+        # except below catches it.
+        pass
+    try:
+        raise SystemExit(main())
+    except BrokenPipeError:
+        raise SystemExit(0) from None
