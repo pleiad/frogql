@@ -422,7 +422,10 @@ iterator.rs        One iterator per triple pattern. Navigates the right
                    Handles constant labels by pre-fixing them in the stack.
 
 veo.rs             Decides the order to bind variables. Non-lonely variables
-                   (shared between triples) go first. Currently static.
+                   (shared between triples) go first. Two protocols: a
+                   materialised order fixed before the search (VeoSimple,
+                   the default), and an adaptive one that picks the next
+                   variable per binding (AdaptiveVeo, FROGQL_VEO=adaptive).
 
 algorithm.rs       The recursive search: bind variable j, seek intersection,
                    descend, recurse for j+1, backtrack. Evaluates filters
@@ -439,9 +442,8 @@ engine.rs          Integration: run_join() and run_concat_pattern() call
 
 ## 10. Remaining improvements
 
-1. **Adaptive VEO**: choose the next variable dynamically based on current
-   cardinalities, not a fixed order. The CLTJ paper shows an order-of-
-   magnitude improvement from this alone.
+1. **Adaptive VEO**: **DONE, behind `FROGQL_VEO=adaptive`** (issue #101) —
+   see section 11 for what it costs and what it does not buy here.
 
 2. **Cache the TripleIndex**: currently rebuilt for each query. Should be
    built once per graph and reused.
@@ -486,3 +488,147 @@ ordering. Only genuinely undirected edges are stored in both senses
 (`triple_index.rs`, `push_both`). So the ring buys cheap reverse *access*,
 never any-direction *matching*; conflating the two is how `-[e]-` looks
 "already supported" when it is not.
+
+
+## 11. Adaptive VEO (`FROGQL_VEO=adaptive`)
+
+`VeoSimple` fixes the whole variable order before the search, from a
+syntactic weight: an equality filter counts as one binding, a range as a
+tenth of the index, a label as a quarter, nothing as the whole thing. It
+is a guess about the query, made once, and never a measurement of what the
+index holds.
+
+`AdaptiveVeo` (a port of `cltj/include/veo/veo_adaptive.hpp`) decides one
+variable at a time, from four hooks the search drives:
+
+- **`next(j)`** — take the lightest still-unbound variable. Lonely
+  variables are held back and returned last, exactly as `VeoSimple` sorts
+  them last.
+- **`down`** — a value was bound and the iterators descended: ask every
+  iterator holding an unbound *neighbour* for the subtree it now reports,
+  take the minimum, and lower the neighbour's weight if it improved.
+  Overwritten weights are recorded in a version.
+- **`up`** — pop the version and restore. This is what makes it correct
+  under backtracking.
+- **`done`** — the level is exhausted; return its variable to the pool.
+
+The cardinality is `LtjIterator::subtree_size`, the reference's
+`trait_size`: `usize::MAX` with nothing fixed, the real subtree at the
+current node otherwise. Constants count as fixed, so a labelled edge
+reports a genuine number before any variable binds. The array
+representation answers with the width of its current range (index entries,
+parallel edges included); the compact trie answers with the span between
+its leftmost and rightmost leaf (distinct `(s, p, o)`). Both are O(1) and
+both are estimates feeding a comparison.
+
+Two things are kept from `VeoSimple` rather than ported:
+
+- **Lonely-last.** A variable in a single triple is enumerated, not
+  intersected; elevating it trades a structural intersection for a scan.
+- **The syntactic weight as a ceiling** (`min` with the measured size).
+  The index knows nothing about a pushed-down `x.id = K`, which really does
+  leave one binding, and this engine works hard to push exactly those down.
+
+### Combining the measured size with the syntactic weight
+
+The measured size is a property of the **triple**, not of the variable.
+With only the label fixed, both endpoints of `(a)-[:L]->(b)` report the
+same subtree, so at the root it discriminates *across* triples and never
+*within* one. The weight is therefore `min(syntactic, measured)` compared
+**with the syntactic weight as the tiebreak**, and the tiebreak is
+load-bearing rather than cosmetic.
+
+Without it, LDBC IC5's outer join — the single triple
+`(otherPerson)<-[:hasMember]-(forum:Forum)` — measures 123 268 on both
+sides. `min` then overwrote two genuinely different syntactic weights
+(1 492 038 and 373 009; `forum` is the side carrying the `:Forum` filter)
+with the same number, turned a real ranking into a tie, and let the tie
+fall to variable id. The unfiltered 123 268-node side bound first and the
+whole query ran 1.36× slower. `tests/veo_adaptive_test.rs` and
+`adaptive_breaks_a_measured_tie_on_the_syntactic_weight` pin it.
+
+### A forced order skips the adaptive VEO entirely
+
+`veo::order_is_forced` is true when the pattern's shape leaves one
+possible order: at most one non-lonely variable (no pick to make) and at
+most one lonely one (nothing to sort it against). `AdaptiveVeo` then
+provably produces `VeoSimple`'s order, so `pattern_extract` builds the
+cheap one instead.
+
+This matters because the LTJ runs once per outer row inside a correlated
+subquery or an OPTIONAL pushdown, so VEO construction is a per-*row* cost.
+IC8 issues 148 323 runs of a `(connector, lonely)` pattern; both orders
+visit the same 600 candidates, and building the adaptive VEO for them was
+20% of the query for an order it could not change. IC5 issues 197 489 runs
+of a single-variable pattern, same story.
+
+### What it costs
+
+LDBC IC medians on `bench/data/ldbc-sf0.1.gdb`, lazy backend, 15 params ×
+5 iters, release build, two independent repetitions. Every IC returns the
+**same row counts** under both orders — the strongest equivalence check
+available outside the differential suite.
+
+| IC | simple | adaptive | ratio (rep 1 / rep 2) |
+|---|---|---|---|
+| IC1 | 28.7 ms | 28.6 ms | 1.00 / 0.99 |
+| IC2 | 11.7 ms | 11.6 ms | 0.99 / 1.00 |
+| IC3 | 10.1 ms | 10.1 ms | 1.00 / 0.99 |
+| **IC4** | **120.5 ms** | **0.7 ms** | **0.01 / 0.01** |
+| IC5 | 185.4 ms | 181.5 ms | 0.98 / 1.01 |
+| IC6 | 1.3 ms | 1.3 ms | 1.00 / 1.00 |
+| IC7 | 21.8 ms | 22.3 ms | 1.02 / 1.01 |
+| IC8 | 36.7 ms | 38.4 ms | 1.05 / 1.09 |
+| IC9 | 1649.5 ms | 1830.6 ms | 1.11 / 1.10 |
+| IC11 | 1.7 ms | 0.9 ms | 0.53 / 0.53 |
+| IC12 | 96.9 ms | 90.6 ms | 0.93 / 1.02 |
+| IC13 | 19.7 ms | 19.8 ms | 1.01 / 1.01 |
+| IC14 | 500.2 ms | 481.2 ms | 0.96 / 0.96 |
+
+**IC4 is ~170× faster**, and the visit counts say why: the same 386 LTJ
+runs descend into 43 264 candidates under `simple` and 1 783 under
+`adaptive`. IC4's cost is a correlated `NOT EXISTS` anti-join run once per
+distinct correlation tuple with the outer variables pinned; the pins make
+each triple's subtree genuinely different, which is exactly where the
+measurement carries information. Its dominant pattern weighs
+`friend(syn=373 009 meas=1)` against `post(syn=149 203 meas=286 744)`:
+the syntactic weight ranks them backwards, and the measurement flips it.
+IC11 is the same shape, smaller.
+
+**IC9 is the honest regression.** 30 LTJ runs, so construction cost is not
+in it, and the visits barely move (2 540 806 → 2 521 095). Its
+3-variable pattern weighs `_ltj_0(syn=1 492 038 meas=10)` against
+`otherPerson(syn=373 009 meas=28 146)`, so adaptive binds `_ltj_0` first.
+Ten candidates against 28 146 looks like the better opening and is not:
+the same number of descents come out costing more, because a descent is
+not a unit of work — which iterators leapfrog at which level changes with
+the order. Reporting visits alongside wall clock is what makes that
+visible, and `FROGQL_DEBUG_VEO=1` prints both.
+
+**IC8's residual 1.05–1.09× is the switch, not the order.** Both orders
+are identical there (600 visits each) and the adaptive VEO is not even
+built. The gap is the `std::env::var("FROGQL_VEO")` that
+`adaptive_requested` reads once per LTJ run — 148 323 lookups, each
+allocating a `String`. Running the *simple* order with `FROGQL_VEO=simple`
+set reproduces it exactly (38.6 ms against 36.4 ms with the variable
+unset), which is how it was identified. Every other kill switch on this
+path is read the same way; caching it would need a mechanism the
+in-process differential tests can still flip.
+
+The default path pays nothing for the hooks. `next` / `down` / `up` /
+`done` are trait calls with no-op bodies for a materialised order, and an
+A/B against the commit before this one measures IC2 1.004×, IC5 1.034×,
+IC9 1.000×.
+
+The honest summary: **adaptive wins where the pins have already made the
+triples' cardinalities differ, and is a coin flip everywhere else.** That
+is a per-query decision, which is why the flag exists and why neither
+order is the default for both.
+
+### Not wired to the vector-search arms
+
+The in-LTJ vector strategies stay on the materialised order. They *set*
+the level their search variable binds at (`VeoOverride`), which is the
+axis those benchmarks measure, and `Memo`'s phase 2 replays a stored
+prefix by reading `var_at` for levels the search has already left —
+something an order decided during the search cannot answer.

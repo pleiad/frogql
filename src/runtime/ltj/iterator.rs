@@ -113,6 +113,28 @@ impl<'a> LtjIterator<'a> {
         }
     }
 
+    /// How much of the index still sits under the current fixed prefix,
+    /// as a cardinality the adaptive VEO can compare across variables.
+    ///
+    /// This is the reference's `trait_size` (`cltj/include/cltj_utils.hpp`):
+    /// `usize::MAX` with nothing fixed yet — the root subtree tells the
+    /// order nothing it does not already know — and the real subtree size
+    /// at the current node otherwise. Constants count as fixed, so a
+    /// labelled edge reports a genuine cardinality before any variable
+    /// binds.
+    ///
+    /// The two representations count slightly different things: the array
+    /// reports index *entries* (parallel edges included, the width of its
+    /// range) and the compact trie reports distinct `(s, p, o)` leaves,
+    /// because that is what each answers in O(1). Both are estimates
+    /// feeding a comparison, and neither can change which rows come back.
+    pub fn subtree_size(&self, var_pos: SpoPos) -> usize {
+        match self {
+            LtjIterator::Array(it) => it.subtree_size(var_pos),
+            LtjIterator::Compact(it) => it.subtree_size(var_pos),
+        }
+    }
+
     /// Whether all 3 positions are fixed (constants + variables).
     pub fn in_last_level(&self) -> bool {
         match self {
@@ -264,6 +286,15 @@ impl<'a> ArrayLtjIterator<'a> {
     pub fn children_count(&self, var_pos: SpoPos) -> usize {
         let (slice, begin, end, depth) = self.compute_range(var_pos);
         TripleIndex::distinct_count(slice, begin, end, depth)
+    }
+
+    /// Index entries still under the fixed prefix; see the enum wrapper.
+    pub fn subtree_size(&self, var_pos: SpoPos) -> usize {
+        if self.constants.is_empty() && self.stack.is_empty() {
+            return usize::MAX;
+        }
+        let (_, begin, end, _) = self.compute_range(var_pos);
+        end - begin
     }
 
     /// Whether all 3 positions are fixed (constants + variables).
@@ -503,6 +534,32 @@ impl<'a> CompactLtjIterator<'a> {
             Some((_, beg, end)) => end - beg + 1,
             None => 0,
         }
+    }
+
+    /// Distinct `(s, p, o)` leaves still under the fixed prefix; see the
+    /// enum wrapper.
+    ///
+    /// With two positions fixed the child block *is* the leaf block, so
+    /// its width is the answer (the reference's `subtree_size_fixed2`).
+    /// With one fixed, the leaves are one level further down, and the
+    /// span between the leftmost and the rightmost is contiguous in the
+    /// LOUDS sequence — so two handle lookups give the count without
+    /// walking the block (`subtree_size_fixed1`).
+    pub fn subtree_size(&self, var_pos: SpoPos) -> usize {
+        if self.fixed.is_empty() {
+            return usize::MAX;
+        }
+        let Some((trie_i, beg, end)) = self.child_block(var_pos) else {
+            return 0;
+        };
+        if self.fixed.len() >= 2 {
+            return end - beg + 1;
+        }
+        let trie = self.index.trie(trie_i);
+        let leftmost = trie.node_handle(beg);
+        let last_child = trie.node_handle(end);
+        let rightmost = last_child + trie.children(last_child) - 1;
+        rightmost - leftmost + 1
     }
 
     /// Whether all 3 positions are fixed (constants + variables).

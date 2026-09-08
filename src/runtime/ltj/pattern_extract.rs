@@ -11,7 +11,7 @@ use crate::syntax::path_pattern::PathPattern;
 use super::algorithm::{FilterKind, LtjAlgorithm, PlacedFilter, ResultTuple, VecCtx};
 use super::iterator::{LtjIterator, SpoPos, Term, TriplePattern};
 use super::triple_index::TripleIndex;
-use super::veo::{Veo, VeoOverride, VeoSimple};
+use super::veo::{self, AdaptiveVeo, IterSizes, Veo, VeoOverride, VeoSimple};
 use crate::runtime::budget::Budget;
 
 // ---- Decomposition result ----
@@ -131,6 +131,12 @@ pub fn try_ltj_mixed<G: GraphAccess>(
 /// more memory than the optimization it disables.
 pub fn anydir_ltj_disabled() -> bool {
     std::env::var("FROGQL_DISABLE_ANYDIR_LTJ").is_ok()
+}
+
+/// `FROGQL_VEO=adaptive` asks for the order to be re-picked per binding
+/// (issue #101). Any other value, or none, keeps `VeoSimple`.
+fn adaptive_requested() -> bool {
+    std::env::var("FROGQL_VEO").is_ok_and(|v| v.eq_ignore_ascii_case("adaptive"))
 }
 
 /// True when the pattern contains at least one any-direction (`-[e]-`)
@@ -449,12 +455,65 @@ fn try_ltj_inner<G: GraphAccess>(
             nn_level = Some((over.level_of(var_id)?, var_id));
             Box::new(over)
         }
+        // `FROGQL_VEO=adaptive` re-picks the order per binding from the
+        // cardinalities the index reports (issue #101). Off by default:
+        // it is the arm under study, and a differential test pins it
+        // against `simple` on the answer while the costs diverge.
+        //
+        // The vector-search arms are excluded on purpose. They *set* the
+        // level their search variable binds at (`VeoOverride`), which is
+        // the axis those benchmarks measure, and `Memo`'s phase 2 replays
+        // a prefix by reading `var_at` for levels the search has left —
+        // something an order decided during the search cannot answer.
+        None if adaptive_requested() && !veo::order_is_forced(&var_info) => {
+            // Which variables share a triple: the adaptive VEO re-weighs
+            // exactly this neighbourhood after each binding, since nothing
+            // else narrows. Built here rather than above so the default
+            // path never allocates it — this runs once per LTJ run, and a
+            // correlated subquery issues one per outer row.
+            let mut related: Vec<Vec<u8>> = vec![Vec::new(); num_vars];
+            for triple in &decomp.triples {
+                let vars: Vec<u8> = triple
+                    .terms
+                    .iter()
+                    .filter_map(|t| match t {
+                        Term::Variable(v) => Some(*v),
+                        Term::Constant(_) => None,
+                    })
+                    .collect();
+                for &a in &vars {
+                    for &b in &vars {
+                        if a != b {
+                            related[a as usize].push(b);
+                        }
+                    }
+                }
+            }
+            let sizes = IterSizes::new(&iterators, &var_to_iterators, &var_to_positions);
+            Box::new(AdaptiveVeo::new(var_info.clone(), &related, &sizes))
+        }
         None => Box::new(base_veo),
     };
 
-    // Place filters
+    // Place filters. An adaptive order has no level to place them at yet,
+    // so it carries the dependency list instead and resolves the level per
+    // binding; `filters_at_level` stays empty in that case.
+    let adaptive = veo.is_adaptive();
     let mut filters_at_level: Vec<Vec<PlacedFilter>> = vec![vec![]; veo.size()];
+    let mut filters_dyn: Vec<(Vec<u8>, FilterKind)> = Vec::new();
     for filter in &decomp.filters {
+        if adaptive {
+            // Only the variables the search actually binds count as
+            // dependencies; a pinned one already has its value.
+            let deps: Vec<u8> = filter
+                .depends_on
+                .iter()
+                .copied()
+                .filter(|v| !pinned_set.contains(v))
+                .collect();
+            filters_dyn.push((deps, filter.kind.clone()));
+            continue;
+        }
         let max_level = filter
             .depends_on
             .iter()
@@ -481,7 +540,8 @@ fn try_ltj_inner<G: GraphAccess>(
         filters_at_level,
         num_vars,
         pinned,
-    );
+    )
+    .with_dynamic_filters(filters_dyn);
 
     let tuples = match nn {
         Some(plan) => {
@@ -497,6 +557,18 @@ fn try_ltj_inner<G: GraphAccess>(
         }
         None => algorithm.run(graph, limit, budget),
     };
+
+    if std::env::var("FROGQL_DEBUG_VEO").is_ok() {
+        // Both orders' work, not only their wall clock: an order that
+        // visits fewer candidates and still costs more is a result.
+        eprintln!(
+            "ltj: veo={} vars={} visits={} rows={}",
+            if adaptive { "adaptive" } else { "simple" },
+            num_vars,
+            algorithm.visits(),
+            tuples.len()
+        );
+    }
 
     Some(convert_results(graph, &tuples, &decomp))
 }

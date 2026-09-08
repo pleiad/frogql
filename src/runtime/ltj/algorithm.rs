@@ -4,7 +4,7 @@ use crate::runtime::cmp_values;
 use crate::syntax::expr::BinOp;
 
 use super::iterator::{LtjIterator, SpoPos};
-use super::veo::Veo;
+use super::veo::{IterSizes, Veo};
 use crate::runtime::budget::Budget;
 use crate::runtime::vsearch::topk::DistThreshold;
 use crate::vector::cursor::NnStream;
@@ -385,6 +385,17 @@ pub struct LtjAlgorithm<'a> {
     /// VEO level at which the vector-search variable binds, and the
     /// variable itself. `None` for every ordinary query.
     nn_level: Option<(usize, u8)>,
+    /// Filters keyed by the search variables they depend on, for an
+    /// adaptive VEO. `filters_at_level` resolves each filter to the level
+    /// its last dependency binds at, which an order decided during the
+    /// search cannot know in advance; here the level is found per binding
+    /// instead. An empty dependency list means every dependency was pinned
+    /// before the search, so the filter is due immediately.
+    filters_dyn: Vec<(Vec<u8>, FilterKind)>,
+    /// Candidate bindings the search descended into, across every level.
+    /// Reported under `FROGQL_DEBUG_VEO` so two orders can be compared on
+    /// work done and not only on wall clock.
+    visits: u64,
 }
 
 impl<'a> LtjAlgorithm<'a> {
@@ -407,7 +418,20 @@ impl<'a> LtjAlgorithm<'a> {
             num_vars,
             pinned,
             nn_level: None,
+            filters_dyn: Vec::new(),
+            visits: 0,
         }
+    }
+
+    /// Supply the per-variable filter table an adaptive VEO needs.
+    pub fn with_dynamic_filters(mut self, filters: Vec<(Vec<u8>, FilterKind)>) -> Self {
+        self.filters_dyn = filters;
+        self
+    }
+
+    /// Candidate bindings descended into, across every level.
+    pub fn visits(&self) -> u64 {
+        self.visits
     }
 
     /// Bind `var` to the neighbour stream at VEO level `level`.
@@ -804,7 +828,7 @@ impl<'a> LtjAlgorithm<'a> {
         tuple: &mut Vec<(u8, u32)>,
         results: &mut Vec<ResultTuple>,
         limit: usize,
-        mut ctx: Option<&mut VecCtx<'_>>,
+        ctx: Option<&mut VecCtx<'_>>,
         budget: &Budget,
     ) -> bool {
         if limit > 0 && results.len() >= limit {
@@ -868,7 +892,46 @@ impl<'a> LtjAlgorithm<'a> {
             return true;
         }
 
-        let var_id = self.veo.var_at(j);
+        let var_id = self.veo.next(j);
+        let ok = self.search_level(graph, j, var_id, tuple, results, limit, ctx, budget);
+        self.veo.done();
+        ok
+    }
+
+    /// Re-weigh the order against the index, now that the current level's
+    /// value is bound and every iterator holding it has descended.
+    ///
+    /// A no-op for a materialised order. It reads three fields and mutates
+    /// a fourth, which is why `IterSizes` exists at all: the sizes have to
+    /// be borrowed out of `self` separately from the VEO.
+    fn veo_down(&mut self) {
+        let sizes = IterSizes::new(
+            &self.iterators,
+            &self.var_to_iterators,
+            &self.var_to_positions,
+        );
+        self.veo.down(&sizes);
+    }
+
+    /// One level of the search: enumerate the candidates for `var_id`,
+    /// descend into each, backtrack.
+    ///
+    /// Split out of `search` so that `next` and `done` bracket *every*
+    /// exit from the level. An adaptive order takes the variable out of
+    /// its pool in `next` and puts it back in `done`; a path that returned
+    /// without the second would leave it bound for the rest of the search.
+    #[allow(clippy::too_many_arguments)]
+    fn search_level<G: GraphAccess>(
+        &mut self,
+        graph: &G,
+        j: usize,
+        var_id: u8,
+        tuple: &mut Vec<(u8, u32)>,
+        results: &mut Vec<ResultTuple>,
+        limit: usize,
+        mut ctx: Option<&mut VecCtx<'_>>,
+        budget: &Budget,
+    ) -> bool {
         let iter_indices: Vec<usize> = self.var_to_iterators[var_id as usize].clone();
         let positions: Vec<SpoPos> = self.var_to_positions[var_id as usize].clone();
 
@@ -1014,7 +1077,10 @@ impl<'a> LtjAlgorithm<'a> {
                     for k in 0..iter_indices.len() {
                         self.iterators[iter_indices[k]].down(positions[k], id);
                     }
+                    self.veo_down();
+                    self.visits += 1;
                     let ok = self.search(graph, j + 1, tuple, results, limit, Some(vc), budget);
+                    self.veo.up();
                     for k in 0..iter_indices.len() {
                         self.iterators[iter_indices[k]].up(positions[k]);
                     }
@@ -1040,6 +1106,8 @@ impl<'a> LtjAlgorithm<'a> {
                 }
 
                 self.iterators[idx].down(pos, val);
+                self.veo_down();
+                self.visits += 1;
                 let ok = self.search(
                     graph,
                     j + 1,
@@ -1049,6 +1117,7 @@ impl<'a> LtjAlgorithm<'a> {
                     ctx.as_deref_mut(),
                     budget,
                 );
+                self.veo.up();
                 self.iterators[idx].up(pos);
 
                 if !ok {
@@ -1069,6 +1138,8 @@ impl<'a> LtjAlgorithm<'a> {
                 for k in 0..iter_indices.len() {
                     self.iterators[iter_indices[k]].down(positions[k], val);
                 }
+                self.veo_down();
+                self.visits += 1;
 
                 let ok = self.search(
                     graph,
@@ -1081,6 +1152,7 @@ impl<'a> LtjAlgorithm<'a> {
                 );
 
                 // Ascend in all iterators
+                self.veo.up();
                 for k in 0..iter_indices.len() {
                     self.iterators[iter_indices[k]].up(positions[k]);
                 }
@@ -1096,57 +1168,103 @@ impl<'a> LtjAlgorithm<'a> {
         true
     }
 
-    /// Evaluate the filters placed at level `j` against the graph. Called
+    /// Evaluate the filters due at level `j` against the graph. Called
     /// after binding the level's variable and before descending, so a
     /// rejected candidate prunes its whole subtree.
     fn check_filters<G: GraphAccess>(&self, graph: &G, j: usize, tuple: &[(u8, u32)]) -> bool {
+        if self.veo.is_adaptive() {
+            return self.check_filters_dyn(graph, j, tuple);
+        }
         if j >= self.filters_at_level.len() {
             return true;
         }
         for filter in &self.filters_at_level[j] {
-            match &filter.kind {
-                FilterKind::NodeLabel { var_id, label } => {
-                    // Find the bound value for this variable
-                    if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
-                        let actual = graph.node_labels(node_id);
-                        let required = crate::typing::label_type::LabelType::Label(label.clone());
-                        if !crate::typing::label_type::LabelType::is_subtype(&actual, &required) {
-                            return false;
-                        }
+            if !self.eval_filter(graph, &filter.kind, tuple) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The same decision for an adaptive order, which cannot precompute a
+    /// level per filter because it has not decided the levels yet.
+    ///
+    /// A filter is due exactly once: at the level where its **last**
+    /// dependency binds. That is the level whose variable it names and at
+    /// which every other dependency is already bound — dependencies only
+    /// ever accumulate as the search descends, so no other level satisfies
+    /// both halves. A filter naming no search variable at all had every
+    /// dependency pinned before the search, and is due at level 0.
+    fn check_filters_dyn<G: GraphAccess>(&self, graph: &G, j: usize, tuple: &[(u8, u32)]) -> bool {
+        let var_id = tuple[j].0;
+        for (deps, kind) in &self.filters_dyn {
+            let due = if deps.is_empty() {
+                j == 0
+            } else {
+                deps.contains(&var_id) && deps.iter().all(|&d| self.is_bound_at(d, j, tuple))
+            };
+            if due && !self.eval_filter(graph, kind, tuple) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether `var` already has a value: bound at a level at or above
+    /// `j`, or pinned to a constant before the search started.
+    fn is_bound_at(&self, var: u8, j: usize, tuple: &[(u8, u32)]) -> bool {
+        tuple[..=j].iter().any(|&(v, _)| v == var) || self.pinned.iter().any(|&(v, _)| v == var)
+    }
+
+    /// Evaluate one filter against the current bindings.
+    fn eval_filter<G: GraphAccess>(
+        &self,
+        graph: &G,
+        kind: &FilterKind,
+        tuple: &[(u8, u32)],
+    ) -> bool {
+        match kind {
+            FilterKind::NodeLabel { var_id, label } => {
+                // Find the bound value for this variable
+                if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
+                    let actual = graph.node_labels(node_id);
+                    let required = crate::typing::label_type::LabelType::Label(label.clone());
+                    if !crate::typing::label_type::LabelType::is_subtype(&actual, &required) {
+                        return false;
                     }
                 }
-                FilterKind::NodeProperty { var_id, prop } => {
-                    if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
-                        let props = graph.node_props(node_id);
-                        if !props.contains_key(prop) {
-                            return false;
-                        }
+            }
+            FilterKind::NodeProperty { var_id, prop } => {
+                if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
+                    let props = graph.node_props(node_id);
+                    if !props.contains_key(prop) {
+                        return false;
                     }
                 }
-                FilterKind::NodeAttrCmp {
-                    var_id,
-                    attr,
-                    op,
-                    value,
-                } => {
-                    if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
-                        let props = graph.node_props(node_id);
-                        match props.get(attr) {
-                            Some(actual) => {
-                                if !cmp_values(actual, *op, value) {
-                                    return false;
-                                }
+            }
+            FilterKind::NodeAttrCmp {
+                var_id,
+                attr,
+                op,
+                value,
+            } => {
+                if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
+                    let props = graph.node_props(node_id);
+                    match props.get(attr) {
+                        Some(actual) => {
+                            if !cmp_values(actual, *op, value) {
+                                return false;
                             }
-                            // Missing property → predicate is null → reject
-                            None => return false,
                         }
+                        // Missing property → predicate is null → reject
+                        None => return false,
                     }
                 }
-                FilterKind::NodeInSet { var_id, set } => {
-                    if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
-                        if set.binary_search(&node_id).is_err() {
-                            return false;
-                        }
+            }
+            FilterKind::NodeInSet { var_id, set } => {
+                if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
+                    if set.binary_search(&node_id).is_err() {
+                        return false;
                     }
                 }
             }

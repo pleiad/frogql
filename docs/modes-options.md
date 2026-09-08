@@ -117,6 +117,7 @@ reason, so a sidecar that is silently never used is diagnosable.
 | `FROGQL_DISABLE_SEEDED_REPEAT=1` | Use the legacy global repetition path instead of the seeded adjacency traversal. |
 | `FROGQL_DISABLE_REPEAT_UNROLL=1` | Keep bounded `{n,m}` repetitions as `Repeat` instead of unrolling to a Union of LTJ-eligible arms. |
 | `FROGQL_DISABLE_SHORTEST_BFS=1` | Force the generic k-shortest-walk enumerator instead of the BFS fast path. Expect IC1/IC13 to go from ~25 ms to tens of seconds, and IC14 to OOM. |
+| `FROGQL_VEO=adaptive` | Re-pick the variable order per binding from the subtree sizes the index reports, instead of fixing it before the search. Same rows either way; the cost swings both directions — IC4 166× faster, IC5 1.36× slower. See below. |
 
 ### 3.3 Correlated subqueries and clauses
 
@@ -133,6 +134,37 @@ reason, so a sidecar that is silently never used is diagnosable.
 |---|---|
 | `FROGQL_TRACE_OPEN=1` | Print per-phase open latency to stderr, and the reason an LTJ sidecar was not used. |
 | `FROGQL_DEBUG_INDEXES=1` | Print the auto-built index list at open and every LTJ variable pinned through an index. |
+| `FROGQL_DEBUG_VEO=1` | Print, per LTJ run, which variable order executed and how many candidate bindings the search descended into. |
+
+#### Which VEO to run
+
+`FROGQL_VEO=adaptive` is not a faster mode; it is a different bet, and
+which one pays depends on the query. LDBC SF0.1 medians, lazy backend,
+two independent repetitions:
+
+| IC | simple | adaptive |
+|---|---|---|
+| IC4 | 120.5 ms | **0.7 ms** |
+| IC11 | 1.7 ms | 0.9 ms |
+| IC14 | 500.2 ms | 481.2 ms |
+| IC9 | 1649.5 ms | 1830.6 ms |
+| everything else | — | within ±5% |
+
+Adaptive wins where the query pins most of its variables before the LTJ
+runs — a correlated `EXISTS` / `VALUE` subquery, or an OPTIONAL pushdown —
+because the pins are what make one triple's cardinality differ from
+another's, and that is the only situation where a measured subtree tells
+the order something the syntactic weight cannot. IC4 is that shape: 43 264
+candidate visits drop to 1 783.
+
+It loses on IC9, where the order changes, the visit count barely moves
+(2 540 806 → 2 521 095) and the query still runs 1.10× slower — the same
+number of descents, costing more each. Which is why `FROGQL_DEBUG_VEO=1`
+prints visits alongside the executed order: an order that visits less and
+costs more is a normal outcome, not a bug.
+
+Row counts are identical under both on every IC, so it is safe to try per
+query.
 
 ## 4. What each phase costs
 
@@ -234,7 +266,11 @@ done
 
 The suites that already do this: `tests/compact_ltj_test.rs`,
 `tests/seeded_repetition_test.rs`, `tests/shortest_bfs_test.rs`,
-`tests/anydir_path_consistency_test.rs`.
+`tests/anydir_path_consistency_test.rs`, `tests/veo_adaptive_test.rs`.
+
+One caveat for `FROGQL_VEO`: a different variable order produces the same
+rows in a different *arrival* order, so diff the sorted output, or add an
+`ORDER BY`.
 
 ### Bench runs
 
