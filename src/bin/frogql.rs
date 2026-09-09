@@ -17,7 +17,9 @@
 //! memory without losing a lookup.
 
 use std::env;
+use std::io::{IsTerminal, Write as _};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use rustyline::DefaultEditor;
@@ -224,6 +226,17 @@ fn main() {
         t_idx.elapsed().as_secs_f64()
     );
     let mut rl = DefaultEditor::new().expect("failed to init readline");
+    // Session output settings, both `.`-commands like `.timeout`.
+    //
+    // No row cap by default. The REPL used to pass a hard-wired 100 into
+    // `run_query`, which was not a display cap but an execution one: a
+    // 172-row answer printed 100 rows and reported `100 rows`, which
+    // reads as "there are exactly 100", and an explicit `LIMIT 200` came
+    // back with 100 because the runtime takes the smaller of the two.
+    // Truncating an answer without saying so is the thing this REPL
+    // already refuses to do on the timeout path.
+    let mut row_limit: usize = 0;
+    let mut pager = PagerMode::default();
 
     loop {
         let line = match rl.readline("gql> ") {
@@ -292,6 +305,35 @@ fn main() {
                     }
                 }
                 Err(e) => eprintln!("{e}"),
+            }
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix(".pager") {
+            match parse_pager(rest.trim()) {
+                Ok(Some(m)) => pager = m,
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("{e}");
+                    continue;
+                }
+            }
+            println!("pager: {}", pager.name());
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix(".limit") {
+            match parse_row_limit(rest.trim()) {
+                Ok(Some(n)) => row_limit = n,
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("{e}");
+                    continue;
+                }
+            }
+            match row_limit {
+                0 => println!("row limit: off"),
+                n => println!("row limit: {n}"),
             }
             continue;
         }
@@ -492,8 +534,13 @@ fn main() {
         // A ^C typed at the prompt also raises the flag; clear it so it
         // does not abandon the query the user typed next.
         interrupt.store(false, std::sync::atomic::Ordering::Relaxed);
+        // An explicit `LIMIT` is the user saying how many rows they
+        // want, so the session cap does not get a vote — passing both
+        // would let the runtime take the smaller and silently answer a
+        // different question than the one typed.
+        let effective_limit = if query.limit.is_some() { 0 } else { row_limit };
         let start = Instant::now();
-        let result = rt.run_query(&query, 100);
+        let result = rt.run_query(&query, effective_limit);
         let elapsed = start.elapsed();
 
         // An abandoned search returns what it had reached, which is a
@@ -514,6 +561,16 @@ fn main() {
             continue;
         }
 
+        // A cap the engine actually hit: the answer may go on past here,
+        // and a bare row count would read as the whole of it.
+        let capped = |n: usize| -> String {
+            if effective_limit > 0 && n >= effective_limit {
+                " — stopped at the .limit; there may be more".to_string()
+            } else {
+                String::new()
+            }
+        };
+
         match result {
             QueryResult::Projected(rows) => {
                 if let Some(returns) = &query.returns {
@@ -525,62 +582,27 @@ fn main() {
                                 .unwrap_or_else(|| format!("{r}"))
                         })
                         .collect();
-
-                    // Format all cell values
                     let str_rows: Vec<Vec<String>> = rows
                         .iter()
                         .map(|row| row.iter().map(|v| format!("{v}")).collect())
                         .collect();
-
-                    // Compute column widths from headers and data
-                    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
-                    for row in &str_rows {
-                        for (i, cell) in row.iter().enumerate() {
-                            if i < widths.len() {
-                                widths[i] = widths[i].max(cell.len());
-                            }
-                        }
-                    }
-
-                    // Print header
-                    let header_line: String = headers
-                        .iter()
-                        .enumerate()
-                        .map(|(i, h)| format!("{:width$}", h, width = widths[i]))
-                        .collect::<Vec<_>>()
-                        .join(" | ");
-                    println!("{header_line}");
-
-                    // Print separator
-                    let sep: String = widths
-                        .iter()
-                        .map(|w| "-".repeat(*w))
-                        .collect::<Vec<_>>()
-                        .join("-+-");
-                    println!("{sep}");
-
-                    // Print rows
-                    for row in &str_rows {
-                        let line: String = row
-                            .iter()
-                            .enumerate()
-                            .map(|(i, cell)| {
-                                format!(
-                                    "{:width$}",
-                                    cell,
-                                    width = widths.get(i).copied().unwrap_or(0)
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" | ");
-                        println!("{line}");
-                    }
+                    emit(&render_table(&headers, &str_rows), pager);
                 }
-                eprintln!("{} rows ({:.3}s)", rows.len(), elapsed.as_secs_f64());
+                eprintln!(
+                    "{} rows ({:.3}s){}",
+                    rows.len(),
+                    elapsed.as_secs_f64(),
+                    capped(rows.len())
+                );
             }
             QueryResult::Raw(ir) => {
-                print_raw_table(&store, &ir, 20);
-                eprintln!("{} rows ({:.3}s)", ir.rows.len(), elapsed.as_secs_f64());
+                emit(&render_raw_table(&store, &ir), pager);
+                eprintln!(
+                    "{} rows ({:.3}s){}",
+                    ir.rows.len(),
+                    elapsed.as_secs_f64(),
+                    capped(ir.rows.len())
+                );
             }
         }
         println!();
@@ -670,9 +692,177 @@ fn import(db_path: &Path, mode: &str, source: &str) {
 
 /// Print raw results as a table with columns [path, var1, var2, ...].
 /// Resolves internal IDs to user-facing names.
-fn print_raw_table(store: &LazyGraphStore, ir: &IntermediateResult, max_rows: usize) {
-    if ir.rows.is_empty() {
+/// How a result reaches the terminal. The three values and their names
+/// are psql's `\pset pager`, because the behaviour is the same and a
+/// second vocabulary for it would help nobody.
+///
+/// A result too tall for the screen is unreadable when it just scrolls
+/// past, and a result that fits should not make anyone press `q`. `On`
+/// is both: it hands the output to the pager, and the pager's own `-F`
+/// quits immediately when it already fits.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum PagerMode {
+    /// Page when stdout is a terminal. The default. A redirect or a pipe
+    /// writes straight through, so `frogql db.gdb < s.gql > out.txt` is
+    /// unaffected.
+    #[default]
+    On,
+    /// Never page; write straight to stdout.
+    Off,
+    /// Page even when stdout is not a terminal.
+    Always,
+}
+
+impl PagerMode {
+    fn name(self) -> &'static str {
+        match self {
+            PagerMode::On => "on",
+            PagerMode::Off => "off",
+            PagerMode::Always => "always",
+        }
+    }
+}
+
+/// The pager to run: `FROGQL_PAGER`, else `PAGER`, else the platform
+/// default. An empty setting disables paging, the same escape hatch psql
+/// gives.
+fn pager_command() -> Option<(String, Vec<String>)> {
+    let configured = env::var("FROGQL_PAGER").or_else(|_| env::var("PAGER")).ok();
+    let spec = match configured {
+        Some(s) if s.trim().is_empty() => return None,
+        Some(s) => s,
+        None if cfg!(windows) => "more".to_string(),
+        None => "less".to_string(),
+    };
+    let mut parts = spec.split_whitespace().map(str::to_string);
+    let cmd = parts.next()?;
+    Some((cmd, parts.collect()))
+}
+
+/// Pipe `text` through the pager. Returns false when there is no pager to
+/// run or it could not be spawned, so the caller can fall back to
+/// printing rather than swallow the result.
+fn page(text: &str) -> bool {
+    let Some((cmd, args)) = pager_command() else {
+        return false;
+    };
+    let mut c = Command::new(&cmd);
+    c.args(&args).stdin(Stdio::piped());
+    // Bare `less` would hold a three-line answer on screen until someone
+    // presses `q`, and would print the colour escapes as text. `-F` quits
+    // when the output already fits, `-R` passes the colours through, `-S`
+    // stops a wide table from wrapping into unreadable ribbons (the arrow
+    // keys scroll sideways instead), and `-X` leaves the result in the
+    // scrollback on exit instead of wiping it.
+    //
+    // Passed as arguments rather than through the `LESS` environment
+    // variable, which is what this first tried. `less` reads `LESS` as if
+    // it preceded the command line, so setting it only when it is unset —
+    // psql's approach — silently does nothing for anyone who already has
+    // one. A `LESS=-R` in the shell profile was enough to make a
+    // three-row answer stop at `(END)`. As arguments the two combine, and
+    // the user's own `LESS` still applies.
+    //
+    // Only for a bare `less`: arguments in `PAGER` mean the user has
+    // configured it, and second-guessing that is not ours to do.
+    let stem = Path::new(&cmd).file_stem().and_then(|s| s.to_str());
+    if stem == Some("less") && args.is_empty() {
+        c.args(["-F", "-R", "-S", "-X"]);
+    }
+    let Ok(mut child) = c.spawn() else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        // A write error is the user quitting the pager early. That is a
+        // normal way to leave `less`, not a failure to report.
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let _ = child.wait();
+    true
+}
+
+/// Send rendered output to the pager or to stdout, per `mode`.
+fn emit(text: &str, mode: PagerMode) {
+    if text.is_empty() {
         return;
+    }
+    let wanted = match mode {
+        PagerMode::Off => false,
+        PagerMode::Always => true,
+        PagerMode::On => std::io::stdout().is_terminal(),
+    };
+    if wanted && page(text) {
+        return;
+    }
+    print!("{text}");
+}
+
+/// `.pager on|off|always`; bare `.pager` reports the current mode.
+/// `auto` is accepted as a synonym for `on`, since that is what the mode
+/// does and the word is the one people reach for.
+fn parse_pager(arg: &str) -> Result<Option<PagerMode>, String> {
+    match arg {
+        "" => Ok(None),
+        "on" | "auto" => Ok(Some(PagerMode::On)),
+        "off" => Ok(Some(PagerMode::Off)),
+        "always" => Ok(Some(PagerMode::Always)),
+        other => Err(format!("usage: .pager on|off|always (got `{other}`)")),
+    }
+}
+
+/// `.limit <n>` / `.limit off`; bare `.limit` reports the current cap.
+/// `0` and `off` are the same request, and both mean "no cap" — the
+/// runtime's own convention.
+fn parse_row_limit(arg: &str) -> Result<Option<usize>, String> {
+    match arg {
+        "" => Ok(None),
+        "off" | "none" | "0" => Ok(Some(0)),
+        other => other
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|_| format!("usage: .limit <n> | off (got `{other}`)")),
+    }
+}
+
+/// Lay out a table with one padded column per header.
+fn render_table(headers: &[String], rows: &[Vec<String>]) -> String {
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(cell.len());
+            }
+        }
+    }
+    let pad = |cells: &[String]| -> String {
+        cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{:width$}", c, width = widths.get(i).copied().unwrap_or(0)))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let mut out = String::new();
+    out.push_str(&pad(headers));
+    out.push('\n');
+    out.push_str(
+        &widths
+            .iter()
+            .map(|w| "-".repeat(*w))
+            .collect::<Vec<_>>()
+            .join("-+-"),
+    );
+    out.push('\n');
+    for row in rows {
+        out.push_str(&pad(row));
+        out.push('\n');
+    }
+    out
+}
+
+fn render_raw_table(store: &LazyGraphStore, ir: &IntermediateResult) -> String {
+    if ir.rows.is_empty() {
+        return String::new();
     }
 
     // Collect variable names (sorted, consistent across rows)
@@ -694,7 +884,6 @@ fn print_raw_table(store: &LazyGraphStore, ir: &IntermediateResult, max_rows: us
     let display_rows: Vec<Vec<String>> = ir
         .rows
         .iter()
-        .take(max_rows)
         .map(|row| {
             let mut cells = Vec::new();
 
@@ -722,48 +911,7 @@ fn print_raw_table(store: &LazyGraphStore, ir: &IntermediateResult, max_rows: us
         })
         .collect();
 
-    // Compute column widths
-    let num_cols = headers.len();
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
-    for row in &display_rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < num_cols {
-                widths[i] = widths[i].max(cell.len());
-            }
-        }
-    }
-
-    // Print header
-    let header_line: Vec<String> = headers
-        .iter()
-        .enumerate()
-        .map(|(i, h)| format!("{:width$}", h, width = widths[i]))
-        .collect();
-    println!("{}", header_line.join(" | "));
-
-    // Print separator
-    let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
-    println!("{}", sep.join("-+-"));
-
-    // Print rows
-    for row in &display_rows {
-        let line: Vec<String> = row
-            .iter()
-            .enumerate()
-            .map(|(i, cell)| {
-                format!(
-                    "{:width$}",
-                    cell,
-                    width = widths.get(i).copied().unwrap_or(0)
-                )
-            })
-            .collect();
-        println!("{}", line.join(" | "));
-    }
-
-    if ir.rows.len() > max_rows {
-        println!("... ({} more rows)", ir.rows.len() - max_rows);
-    }
+    render_table(&headers, &display_rows)
 }
 
 /// Format a PathValue with labels and properties (for variable columns).
@@ -1401,7 +1549,11 @@ fn print_help() {
     println!("  .dump-gql <path>    write a GQL script that recreates the graph");
     println!("  .vec                show the vector-search knobs and last-query counters");
     println!("  .vec <k> <v>        set one: strategy|source|level|tau-eps|memo-cuts|debug");
-    println!("  .timeout <secs>     abandon a query that runs longer ('.timeout off' to stop)");
+    println!(
+        "  .timeout <secs>     abandon a query that runs longer ('.timeout off' to stop)
+  .pager <mode>       on|off|always — page results through $PAGER (default: on)
+  .limit <n>          cap rows the engine produces ('.limit off' for all)"
+    );
     println!("  .help               this message");
     println!("  .quit / .exit       exit the REPL");
     println!();

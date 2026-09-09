@@ -385,8 +385,8 @@ partitions, so a benchmark row never claims an arm that did not run. See
 `docs/internals/vector-search.md` §*Correlated `NEAREST`*.
 
 **Sweeping the arms: use `vec_sweep`, not a shell loop.** The variables
-are read once per process, so comparing seven arms from a shell costs
-seven opens — ~220 s each on the RDF dump, plus the index build, which
+are read once per process, so comparing eight arms from a shell costs
+eight opens — ~220 s each on the RDF dump, plus the index build, which
 dwarfs the thing being measured and leaves the numbers dominated by
 page-cache state. `vec_sweep` opens once and switches arms through
 `Runtime::set_vec_cfg` between queries:
@@ -395,6 +395,13 @@ page-cache state. `vec_sweep` opens once and switches arms through
 ltj_build db.gdb --compact                    # once, so the open is seconds
 vec_sweep db.gdb queries.gql --iters 5 --csv results.csv
 ```
+
+Two defaults worth knowing. Each query run gets a **five-minute budget**
+(`--timeout off` removes it); a row it cut says `timeout` in the
+`fallback` column and is a partial walk, never a latency. And `--levels`
+defaults to `0`, which is the one level where `memo` provably cannot win —
+one visit means nothing to re-walk — so pass `--levels 0,1,2` before
+concluding anything about it.
 
 One CSV row per (arm, level, query), with the median, the neighbour
 counters, and — first column to read — `arm_actual`, the arm that

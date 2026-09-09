@@ -5,7 +5,7 @@
 //! vec_sweep <db.gdb> <queries.gql> [options]
 //!
 //!   --arms <list>     comma-separated `strategy+source` pairs, or `all`
-//!                     (default: the seven the study compares)
+//!                     (default: the eight the study compares)
 //!   --levels <list>   VEO levels to try for the in-LTJ arms (default: 0)
 //!   --iters <n>       runs per (arm, query); the median is reported (default: 3)
 //!   --limit <n>       row cap per query, 0 for none (default: 0)
@@ -13,6 +13,7 @@
 //!   --csv <path>      write the CSV here as well as to stdout
 //!   --timeout <secs>  abandon a query that runs longer, mark the row
 //!                     `timeout`, and carry on with the next one
+//!                     (default: 300s; `--timeout off` removes it)
 //! ```
 //!
 //! # Why this exists
@@ -52,9 +53,20 @@
 //! result and not a measurement: the budget ran out, the search returned
 //! what it had, and the `rows` and counter columns describe an unfinished
 //! walk. Read it as "this combination did not finish inside the budget",
-//! never as a latency. Without `--timeout` there is no budget and a bad
-//! combination runs until it finishes — which on a large corpus can be
-//! days, which is why the flag exists.
+//! never as a latency.
+//!
+//! There is a five-minute budget by default, because a bad combination
+//! runs until it finishes and on a large corpus that can be days. Pass
+//! `--timeout off` to remove it — which is the right call when the
+//! question *is* how long a bad arm takes.
+//!
+//! Two things the budget does not promise. It is **cooperative and
+//! partial in coverage**: honoured in the LTJ search, the ranking walks
+//! and the post-/pre-filter and correlated paths, but the hash-join
+//! fallback, the repetition enumerators and the shortest-path searches do
+//! not consult it, so an arm that falls to one of those is not bounded by
+//! it. And it is **coarse**: the clock is read once every 4096 asks, so a
+//! run can overrun by that much work.
 //!
 //! `nn_pops` per accepted row is the headline number: with a selective
 //! pattern the corpus-walking sources reach a candidate that also
@@ -70,8 +82,8 @@ use frogql::runtime::engine::Runtime;
 use frogql::runtime::vsearch::{Strategy, VecCfg, VecSource};
 use frogql::store::lazy::LazyGraphStore;
 
-/// The seven arms of the study, in the order the write-up lists them.
-const DEFAULT_ARMS: [(Strategy, VecSource); 7] = [
+/// The arms of the study, in the order the write-up lists them.
+const DEFAULT_ARMS: [(Strategy, VecSource); 8] = [
     // 1 — post-filter, no metric index
     (Strategy::PostFilter, VecSource::LocalSort),
     // 2 — post-filter, with index
@@ -86,6 +98,17 @@ const DEFAULT_ARMS: [(Strategy, VecSource); 7] = [
     (Strategy::PreFilter, VecSource::Hnsw),
     // 7 — memo: consult the ranking once, globally
     (Strategy::Memo, VecSource::Hnsw),
+    // 7b — memo against the source that has been winning. The set above
+    // pairs `memo` with HNSW alone, which reads the comparison backwards:
+    // `localsort` beats both corpus-walking sources in every in-LTJ row
+    // measured so far, and `memo+localsort` holds the lowest `nn_pops` of
+    // any arm (11 against `interleave+localsort`'s 1 050 at level 1). A
+    // default set that omits it under-samples the source under suspicion.
+    //
+    // Note it only says something off level 0: one visit means nothing to
+    // re-walk, so `memo` cannot win there and does not. Pass
+    // `--levels 0,1` to give this row a level where it can.
+    (Strategy::Memo, VecSource::LocalSort),
 ];
 
 const ALL_ARMS: [(Strategy, VecSource); 11] = [
@@ -101,6 +124,16 @@ const ALL_ARMS: [(Strategy, VecSource); 11] = [
     (Strategy::Memo, VecSource::LocalSort),
     (Strategy::Memo, VecSource::GlobalSort),
 ];
+
+/// Wall-clock budget per query run when `--timeout` is not given.
+///
+/// A default rather than `None` because the failure it prevents is not a
+/// slow sweep but an unbounded one: an arm that walks a corpus-wide
+/// ranking for every visit of a deep level can run for days on a large
+/// database, and the row it would eventually produce is one nobody is
+/// waiting for. Five minutes is far above any arm that is working and far
+/// below the ones that are not.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
 struct Args {
     db: PathBuf,
@@ -121,14 +154,15 @@ fn usage() -> ! {
         "usage: vec_sweep <db.gdb> <queries.gql> [options]\n\
          \n\
          options:\n  \
-           --arms <list>     `strategy+source` pairs, or `all` (default: the study's seven)\n  \
+           --arms <list>     `strategy+source` pairs, or `all` (default: the study's eight)\n  \
            --levels <list>   VEO levels for the in-LTJ arms (default: 0)\n  \
            --iters <n>       runs per (arm, query); median reported (default: 3)\n  \
            --limit <n>       row cap per query, 0 for none (default: 0)\n  \
            --queries <list>  1-based query indices to run (default: all)\n  \
            --csv <path>      also write the CSV to this file\n  \
            --timeout <secs>  abandon a query that runs longer; the row is\n  \
-           \x20                marked `timeout` and the sweep continues"
+           \x20                marked `timeout` and the sweep continues\n  \
+           \x20                (default: 300; `off` removes the budget)"
     );
     process::exit(2)
 }
@@ -161,7 +195,7 @@ fn parse_args() -> Args {
     let mut limit = 0usize;
     let mut only: Option<Vec<usize>> = None;
     let mut csv = None;
-    let mut timeout = None;
+    let mut timeout = Some(DEFAULT_TIMEOUT);
 
     let mut i = 0;
     while i < argv.len() {
@@ -201,12 +235,20 @@ fn parse_args() -> Args {
             "--csv" => csv = Some(PathBuf::from(value("--csv"))),
             "--timeout" => {
                 let v = value("--timeout");
-                timeout = match v.parse::<f64>() {
-                    Ok(secs) if secs > 0.0 => Some(Duration::from_secs_f64(secs)),
-                    _ => {
-                        eprintln!("error: --timeout wants a positive number of seconds");
-                        usage()
-                    }
+                timeout = match v.trim() {
+                    // Opting out has to be spellable: a sweep meant to
+                    // find out how long a bad arm actually takes needs no
+                    // budget, and the default would silently truncate it.
+                    "0" | "off" | "none" => None,
+                    other => match other.parse::<f64>() {
+                        Ok(secs) if secs > 0.0 => Some(Duration::from_secs_f64(secs)),
+                        _ => {
+                            eprintln!(
+                                "error: --timeout wants a positive number of seconds, or `off`"
+                            );
+                            usage()
+                        }
+                    },
                 };
             }
             "-h" | "--help" => usage(),
@@ -311,11 +353,18 @@ fn main() {
         queries.retain(|(i, _)| only.contains(i));
     }
     eprintln!(
-        "{} queries x {} arms x {} level(s) x {} iters",
+        "{} queries x {} arms x {} level(s) x {} iters, budget {}",
         queries.len(),
         args.arms.len(),
         args.levels.len(),
-        args.iters
+        args.iters,
+        // The budget is on by default, so it has to be visible: a reader
+        // who does not know a row was cut short reads a partial walk as a
+        // latency. The `timeout` column says it per row; this says it once.
+        match args.timeout {
+            Some(d) => format!("{:.0}s", d.as_secs_f64()),
+            None => "off".to_string(),
+        }
     );
 
     let header = "query,strategy,source,level,arm_actual,median_ms,min_ms,max_ms,\
@@ -409,7 +458,7 @@ fn main() {
     }
     if args.timeout.is_none() {
         eprintln!(
-            "note: no --timeout was set, so every row ran to completion; \
+            "note: the budget was turned off, so every row ran to completion; \
              a combination that cannot finish would have hung the sweep"
         );
     }

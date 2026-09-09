@@ -711,9 +711,12 @@ it does **not** cover, in `src/runtime/budget.rs`.
 What matters when reading results: **an abandoned search returns a
 partial result, not a shorter one.** It stopped mid-walk, so its rows are
 whatever the threshold had admitted by then and its counters describe an
-unfinished walk. Nothing arms a budget by default. `vec_sweep --timeout
-<secs>` writes `timeout` in the `fallback` column and moves on, and the
-REPL's `.timeout <secs>` discards the rows entirely and says why —
+unfinished walk. The library arms no budget by default; `vec_sweep` does,
+five minutes per query run, because an arm that cannot finish is the case
+it exists to survive — `--timeout off` removes it when the question *is*
+how long a bad arm takes. It writes `timeout` in the `fallback` column and
+moves on, and the REPL's `.timeout <secs>` discards the rows entirely and
+says why —
 printing them would be indistinguishable from printing an answer. The
 REPL also routes Ctrl-C to the cancel flag, so an interrupted query
 leaves the session alive rather than taking a two-and-a-half-minute open
