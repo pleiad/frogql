@@ -341,7 +341,7 @@ fn main() {
                         rt.set_vec_cfg(VecCfg {
                             strategy,
                             source,
-                            level,
+                            level: Some(level),
                             ..VecCfg::default()
                         });
 

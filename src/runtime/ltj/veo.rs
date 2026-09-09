@@ -75,6 +75,21 @@ pub trait Veo {
     /// The current level is exhausted: its variable goes back in the pool.
     fn done(&mut self) {}
 
+    /// Replay a binding taken on an earlier branch: mark `var` bound at
+    /// the current level, without choosing it.
+    ///
+    /// `memo`'s phase 2 resumes a stored prefix long after the search
+    /// that produced it unwound, and it puts the *iterators* back by
+    /// descending them. A materialised order needs nothing more, since
+    /// `next` reads a fixed table. An adaptive one carries state — which
+    /// variables are still in the pool — and would otherwise pick, below
+    /// the resumed prefix, a variable the prefix already bound: the
+    /// iterator then fixes a third position in a triple that has two, and
+    /// the array iterator's depth assertion fires.
+    ///
+    /// Undone by `done`, one per `force`, exactly as `next` is.
+    fn force(&mut self, _var: u8) {}
+
     /// Whether the order is decided during the search. Filter placement
     /// is precomputed per level for a materialised order and has to be
     /// resolved per binding for an adaptive one.
@@ -250,6 +265,17 @@ struct VarInfo {
     /// Non-lonely variables sharing a triple with this one — the only ones
     /// binding it can narrow.
     related: Vec<u8>,
+    /// A variable that must be bound before this one can be picked.
+    ///
+    /// This is the similarity arc of a correlated `NEAREST`: the query
+    /// vector is the anchor's, so the ranking does not exist until the
+    /// anchor is bound. Unlike a graph edge the arc is **not symmetric** —
+    /// "b is among a's k nearest" does not imply the reverse, and there is
+    /// no index for the reverse direction — so it constrains the order
+    /// rather than merely informing it. Without it a free order can put
+    /// the search variable first, and the search then finds no anchor to
+    /// rank against and quietly yields nothing.
+    prereq: Option<u8>,
     is_bound: bool,
 }
 
@@ -305,7 +331,13 @@ impl AdaptiveVeo {
     /// iterators, which at this point have descended their constants only:
     /// a labelled edge already reports a real subtree, an unlabelled one
     /// reports `usize::MAX` and leans on the syntactic weight.
-    pub fn new(var_info: Vec<(u8, usize, bool)>, related: &[Vec<u8>], sizes: &IterSizes) -> Self {
+    /// `prereq` is `(dependent, must_bind_first)` — see `VarInfo::prereq`.
+    pub fn new(
+        var_info: Vec<(u8, usize, bool)>,
+        related: &[Vec<u8>],
+        prereq: Option<(u8, u8)>,
+        sizes: &IterSizes,
+    ) -> Self {
         let num_vars = related.len();
         let mut pos_of = vec![None; num_vars];
         let mut info: Vec<VarInfo> = Vec::new();
@@ -322,6 +354,7 @@ impl AdaptiveVeo {
                     weight,
                     syntactic,
                     related: Vec::new(),
+                    prereq: prereq.filter(|&(dep, _)| dep == name).map(|(_, on)| on),
                     is_bound: false,
                 });
             }
@@ -377,19 +410,29 @@ impl Veo for AdaptiveVeo {
         let name = if self.index < self.info.len() {
             // Linear scan for the lightest unbound variable. The pool is
             // the query's variables, so this is a handful of comparisons.
-            let mut best = 0usize;
-            let mut best_w = {
-                let v = &self.info[self.not_bound[0]];
-                (v.weight, v.syntactic)
+            // A variable whose prerequisite is still unbound is not
+            // eligible yet, however light it looks. There is at most one
+            // such edge and its head is never itself blocked, so something
+            // is always eligible; the `unwrap_or` is a belt-and-braces
+            // fallback rather than a reachable path.
+            let eligible = |v: &VarInfo, info: &[VarInfo]| -> bool {
+                match v.prereq {
+                    Some(on) => info.iter().all(|o| o.name != on || o.is_bound),
+                    None => true,
+                }
             };
-            for (i, &pos) in self.not_bound.iter().enumerate().skip(1) {
+            let mut best: Option<(usize, (usize, usize))> = None;
+            for (i, &pos) in self.not_bound.iter().enumerate() {
                 let v = &self.info[pos];
+                if !eligible(v, &self.info) {
+                    continue;
+                }
                 let w = (v.weight, v.syntactic);
-                if w < best_w {
-                    best_w = w;
-                    best = i;
+                if best.map_or(true, |(_, bw)| w < bw) {
+                    best = Some((i, w));
                 }
             }
+            let best = best.map(|(i, _)| i).unwrap_or(0);
             let pos = self.not_bound.remove(best);
             self.info[pos].is_bound = true;
             self.bound.push(pos);
@@ -434,6 +477,21 @@ impl Veo for AdaptiveVeo {
         }
         for (pos, w) in self.versions.pop().expect("one version per down") {
             self.info[pos].weight = w;
+        }
+    }
+
+    fn force(&mut self, var: u8) {
+        self.index += 1;
+        self.path.push(var);
+        // A lonely variable is not in `info` and `next` does not push it
+        // to `bound` either, so the two stay in step and `done`'s guard
+        // undoes whichever it was.
+        if let Some(pos) = self.pos_of[var as usize] {
+            if let Some(i) = self.not_bound.iter().position(|&p| p == pos) {
+                self.not_bound.remove(i);
+                self.info[pos].is_bound = true;
+                self.bound.push(pos);
+            }
         }
     }
 
@@ -589,7 +647,7 @@ mod tests {
             (1, index.len(), false),
             (2, index.len(), true),
         ];
-        let mut veo = AdaptiveVeo::new(info, &related, &sizes);
+        let mut veo = AdaptiveVeo::new(info, &related, None, &sizes);
         assert_eq!(veo.size(), 3);
         assert_eq!(veo.next(0), 1, "the only non-lonely variable binds first");
         assert_eq!(
@@ -632,7 +690,7 @@ mod tests {
         // win by accident.
         let related = vec![vec![1], vec![0]];
         let info = vec![(0u8, 900, true), (1, 100, true)];
-        let mut veo = AdaptiveVeo::new(info, &related, &sizes);
+        let mut veo = AdaptiveVeo::new(info, &related, None, &sizes);
         assert_eq!(veo.next(0), 1, "the syntactically cheaper side binds first");
         assert_eq!(veo.next(1), 0);
     }
@@ -662,13 +720,73 @@ mod tests {
         // times, where the adaptive VEO's construction was pure cost.
         let info = vec![(1u8, 500, false), (2, 100, true)];
         assert!(order_is_forced(&info));
-        let mut adaptive = AdaptiveVeo::new(info.clone(), &vec![vec![]; 3], &sizes);
+        let mut adaptive = AdaptiveVeo::new(info.clone(), &vec![vec![]; 3], None, &sizes);
         let simple = VeoSimple::new(info);
         assert_eq!(
             vec![adaptive.next(0), adaptive.next(1)],
             order_of(&simple),
             "a forced order is VeoSimple's order"
         );
+    }
+
+    /// The similarity arc constrains the order, it does not merely weigh
+    /// it: the anchor's vector *is* the query vector, so a search variable
+    /// picked before its anchor has nothing to rank against, and the
+    /// search answers such a visit with no rows at all — silently. The
+    /// arc is also the one relation here that is not symmetric, so the
+    /// constraint cannot be replaced by making the pair heavy.
+    #[test]
+    fn adaptive_never_picks_a_variable_before_its_prerequisite() {
+        let g = skewed_graph();
+        let index = TripleIndex::from_graph(&g);
+        let iterators = skewed_iterators(&index);
+        let var_to_iterators = vec![vec![0], vec![0, 1], vec![1]];
+        let var_to_positions = vec![vec![SpoPos::S], vec![SpoPos::O, SpoPos::S], vec![SpoPos::O]];
+        let sizes = IterSizes::new(&iterators, &var_to_iterators, &var_to_positions);
+        let related = vec![vec![1, 2], vec![0, 2], vec![0, 1]];
+
+        // Variable 0 is by far the lightest, so without the constraint it
+        // binds first. Declare it the search variable of a clause anchored
+        // on 2, the heaviest, and it must wait.
+        let info = vec![(0u8, 1, false), (1, 500, false), (2, 900, false)];
+        let mut free = AdaptiveVeo::new(info.clone(), &related, None, &sizes);
+        assert_eq!(free.next(0), 0, "unconstrained, the lightest goes first");
+
+        let mut arced = AdaptiveVeo::new(info, &related, Some((0, 2)), &sizes);
+        let order = vec![arced.next(0), arced.next(1), arced.next(2)];
+        let at = |v: u8| order.iter().position(|&x| x == v).expect("in the order");
+        assert!(
+            at(2) < at(0),
+            "the anchor must bind before the search variable, got {order:?}"
+        );
+    }
+
+    /// `force` is how `memo`'s phase 2 replays a prefix: the variables it
+    /// names must leave the pool, or the resumed search picks one of them
+    /// again and descends a triple twice.
+    #[test]
+    fn forcing_a_binding_takes_it_out_of_the_pool_and_done_puts_it_back() {
+        let g = skewed_graph();
+        let index = TripleIndex::from_graph(&g);
+        let iterators = skewed_iterators(&index);
+        let var_to_iterators = vec![vec![0], vec![0, 1], vec![1]];
+        let var_to_positions = vec![vec![SpoPos::S], vec![SpoPos::O, SpoPos::S], vec![SpoPos::O]];
+        let sizes = IterSizes::new(&iterators, &var_to_iterators, &var_to_positions);
+        let related = vec![vec![1], vec![0, 2], vec![1]];
+        let info = vec![(0u8, 10, false), (1, 20, false), (2, 30, false)];
+        let mut veo = AdaptiveVeo::new(info, &related, None, &sizes);
+
+        veo.force(1);
+        veo.force(0);
+        let rest = vec![veo.next(2)];
+        assert_eq!(rest, vec![2], "only the unforced variable is left");
+
+        veo.done();
+        veo.done();
+        veo.done();
+        let mut back: Vec<u8> = (0..3).map(|j| veo.next(j)).collect();
+        back.sort_unstable();
+        assert_eq!(back, vec![0, 1, 2], "done() restores every forced binding");
     }
 
     #[test]
@@ -690,7 +808,7 @@ mod tests {
         ];
         let mut veo = {
             let sizes = IterSizes::new(&iterators, &var_to_iterators, &var_to_positions);
-            AdaptiveVeo::new(info, &related, &sizes)
+            AdaptiveVeo::new(info, &related, None, &sizes)
         };
 
         let first = veo.next(0);

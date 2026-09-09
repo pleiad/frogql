@@ -6,7 +6,8 @@
 //!
 //!   --arms <list>     comma-separated `strategy+source` pairs, or `all`
 //!                     (default: the eight the study compares)
-//!   --levels <list>   VEO levels to try for the in-LTJ arms (default: 0)
+//!   --levels <list>   VEO levels for the in-LTJ arms, or `auto` for the
+//!                     optimizer's own placement (default: 0)
 //!   --iters <n>       runs per (arm, query); the median is reported (default: 3)
 //!   --limit <n>       row cap per query, 0 for none (default: 0)
 //!   --queries <list>  1-based indices to run, e.g. 1,4,17 (default: all)
@@ -139,7 +140,7 @@ struct Args {
     db: PathBuf,
     queries: PathBuf,
     arms: Vec<(Strategy, VecSource)>,
-    levels: Vec<usize>,
+    levels: Vec<Option<usize>>,
     iters: usize,
     limit: usize,
     only: Option<Vec<usize>>,
@@ -155,7 +156,7 @@ fn usage() -> ! {
          \n\
          options:\n  \
            --arms <list>     `strategy+source` pairs, or `all` (default: the study's eight)\n  \
-           --levels <list>   VEO levels for the in-LTJ arms (default: 0)\n  \
+           --levels <list>   VEO levels for in-LTJ arms, or `auto` (default: 0)\n  \
            --iters <n>       runs per (arm, query); median reported (default: 3)\n  \
            --limit <n>       row cap per query, 0 for none (default: 0)\n  \
            --queries <list>  1-based query indices to run (default: all)\n  \
@@ -190,7 +191,7 @@ fn parse_args() -> Args {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut positional: Vec<String> = Vec::new();
     let mut arms = DEFAULT_ARMS.to_vec();
-    let mut levels = vec![0usize];
+    let mut levels: Vec<Option<usize>> = vec![Some(0)];
     let mut iters = 3usize;
     let mut limit = 0usize;
     let mut only: Option<Vec<usize>> = None;
@@ -217,9 +218,21 @@ fn parse_args() -> Args {
                 };
             }
             "--levels" => {
+                // `auto` is the un-pinned placement: the optimizer puts
+                // the search variable where its ordering heuristic wants
+                // it, which is the only setting an adaptive VEO can serve
+                // and the only one that is not partly measuring how much
+                // that heuristic was worth.
                 levels = value("--levels")
                     .split(',')
-                    .map(|s| s.trim().parse().unwrap_or(0))
+                    .map(|s| {
+                        let t = s.trim();
+                        if t.eq_ignore_ascii_case("auto") || t.eq_ignore_ascii_case("free") {
+                            None
+                        } else {
+                            Some(t.parse().unwrap_or(0))
+                        }
+                    })
                     .collect()
             }
             "--iters" => iters = value("--iters").parse().unwrap_or(3).max(1),
@@ -383,12 +396,18 @@ fn main() {
     for (strategy, source) in &args.arms {
         // Only the in-LTJ arms read the level; running the others once
         // per level would repeat identical work and pad the output.
-        let levels: &[usize] = if strategy.is_in_ltj() {
+        let levels: &[Option<usize>] = if strategy.is_in_ltj() {
             &args.levels
         } else {
             &args.levels[..1]
         };
         for &level in levels {
+            // `auto` in the level column, so a row cannot be read as
+            // level 0 when nothing was pinned at all.
+            let level_label = match level {
+                Some(n) => n.to_string(),
+                None => "auto".to_string(),
+            };
             rt.set_vec_cfg(VecCfg {
                 strategy: *strategy,
                 source: *source,
@@ -421,7 +440,7 @@ fn main() {
                 let lo = times.iter().cloned().fold(f64::INFINITY, f64::min);
                 let hi = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                 let line = format!(
-                    "{qi},{},{},{level},{},{:.3},{:.3},{:.3},{rows},{},{},{},{},{},{},{}",
+                    "{qi},{},{},{level_label},{},{:.3},{:.3},{:.3},{rows},{},{},{},{},{},{},{}",
                     strategy.name(),
                     source.name(),
                     s.arm,
@@ -449,7 +468,11 @@ fn main() {
                     let _ = writeln!(f, "{line}");
                 }
             }
-            eprintln!("  done {}+{} level {level}", strategy.name(), source.name());
+            eprintln!(
+                "  done {}+{} level {level_label}",
+                strategy.name(),
+                source.name()
+            );
         }
     }
 

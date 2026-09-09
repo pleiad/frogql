@@ -134,7 +134,7 @@ fn run(db: &Path, strategy: Strategy, budget: Option<Duration>) -> (usize, bool)
     rt.set_vec_cfg(VecCfg {
         strategy,
         source: VecSource::GlobalSort,
-        level: 1,
+        level: Some(1),
         ..VecCfg::default()
     });
     let q = frogql::compile_query(Q).unwrap();
@@ -193,7 +193,7 @@ fn the_verdict_resets_between_queries() {
     rt.set_vec_cfg(VecCfg {
         strategy: Strategy::Interleave,
         source: VecSource::GlobalSort,
-        level: 1,
+        level: Some(1),
         ..VecCfg::default()
     });
     let q = frogql::compile_query(Q).unwrap();

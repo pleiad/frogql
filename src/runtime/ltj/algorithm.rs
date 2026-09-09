@@ -216,23 +216,46 @@ pub type PrefixTable = std::collections::HashMap<u32, Prefixes>;
 
 /// The prefixes reaching one binding, stored flat.
 ///
-/// Every prefix is the same length — one value per VEO level above the
-/// search level — so they pack end to end into a single buffer and the
-/// `i`-th is a slice at `i * stride`. The obvious `Vec<Vec<u32>>` costs
-/// one allocation per prefix, and at a deep level there are as many
-/// prefixes as the join has partial rows: 39 880 allocations on a
-/// 3 000-item fixture, against 3 000 growable buffers here.
+/// A prefix is the path that reached the candidate: what every level
+/// *above* the search level was bound to. Phase 2 replays it to put the
+/// iterators back where phase 1 left them before finishing the join
+/// below.
+///
+/// Each entry is a `(variable, value)` pair and each prefix carries its
+/// own length, which is what lets the variable order be decided *during*
+/// the search. Under an adaptive order two branches can bind different
+/// variables at the same level — that is the whole point of one — so a
+/// stored value's variable can no longer be recovered by asking the VEO
+/// what sits at that position. Storing the pair also makes the prefix's
+/// length its level, so no level has to be fixed before the search runs.
+///
+/// Still flat, for the reason it always was: the obvious
+/// `Vec<Vec<(u8, u32)>>` costs one allocation per prefix, and at a deep
+/// level there are as many prefixes as the join has partial rows —
+/// 39 880 allocations on a 3 000-item fixture, against two growable
+/// buffers here.
 #[derive(Debug, Default, Clone)]
 pub struct Prefixes {
     pub count: usize,
-    pub flat: Vec<u32>,
+    flat: Vec<(u8, u32)>,
+    /// End offset into `flat` of each prefix; `ends[i]` closes prefix `i`.
+    ends: Vec<u32>,
 }
 
 impl Prefixes {
+    /// Append one prefix: the bindings of levels `0..j`, in order.
+    pub fn push(&mut self, bindings: impl Iterator<Item = (u8, u32)>) {
+        self.flat.extend(bindings);
+        self.ends.push(self.flat.len() as u32);
+        self.count += 1;
+    }
+
     /// The `i`-th prefix. Empty for a search variable at level 0, where
     /// there is nothing above it and `count` alone carries the arity.
-    pub fn get(&self, i: usize, stride: usize) -> &[u32] {
-        &self.flat[i * stride..(i + 1) * stride]
+    pub fn get(&self, i: usize) -> &[(u8, u32)] {
+        let end = self.ends[i] as usize;
+        let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+        &self.flat[start..end]
     }
 }
 
@@ -382,9 +405,15 @@ pub struct LtjAlgorithm<'a> {
     /// search starts. These slots are pre-populated in the result tuple and
     /// never written to by the search loop.
     pinned: Vec<(u8, u32)>,
-    /// VEO level at which the vector-search variable binds, and the
-    /// variable itself. `None` for every ordinary query.
-    nn_level: Option<(usize, u8)>,
+    /// The vector-search variable. `None` for every ordinary query.
+    ///
+    /// A variable and not a level: the search level is wherever the order
+    /// happens to bind it, which an order decided during the search only
+    /// knows when it gets there. `FROGQL_VEC_LEVEL` still pins it, but it
+    /// does so by moving the variable in the order (`VeoOverride`), which
+    /// is a fact about the order rather than something the search has to
+    /// be told twice.
+    nn_var: Option<u8>,
     /// Filters keyed by the search variables they depend on, for an
     /// adaptive VEO. `filters_at_level` resolves each filter to the level
     /// its last dependency binds at, which an order decided during the
@@ -417,7 +446,7 @@ impl<'a> LtjAlgorithm<'a> {
             filters_at_level,
             num_vars,
             pinned,
-            nn_level: None,
+            nn_var: None,
             filters_dyn: Vec::new(),
             visits: 0,
         }
@@ -434,9 +463,10 @@ impl<'a> LtjAlgorithm<'a> {
         self.visits
     }
 
-    /// Bind `var` to the neighbour stream at VEO level `level`.
-    pub fn with_nn_level(mut self, level: usize, var: u8) -> Self {
-        self.nn_level = Some((level, var));
+    /// Bind `var` to the neighbour stream at whatever level the order
+    /// puts it.
+    pub fn with_nn_var(mut self, var: u8) -> Self {
+        self.nn_var = Some(var);
         self
     }
 
@@ -541,7 +571,7 @@ impl<'a> LtjAlgorithm<'a> {
         ctx: &mut VecCtx<'_>,
         budget: &Budget,
     ) -> Vec<ResultTuple> {
-        let Some((level, var_id)) = self.nn_level else {
+        let Some(var_id) = self.nn_var else {
             return Vec::new();
         };
 
@@ -559,7 +589,7 @@ impl<'a> LtjAlgorithm<'a> {
 
         let mut results = Vec::new();
         if ctx.anchor_var.is_none() {
-            self.walk_ranking(graph, level, var_id, &mut tuple, &mut results, ctx, budget);
+            self.walk_ranking(graph, var_id, &mut tuple, &mut results, ctx, budget);
             return results;
         }
 
@@ -583,7 +613,7 @@ impl<'a> LtjAlgorithm<'a> {
                 ctx.table.clear();
                 continue;
             }
-            self.walk_ranking(graph, level, var_id, &mut tuple, &mut results, ctx, budget);
+            self.walk_ranking(graph, var_id, &mut tuple, &mut results, ctx, budget);
         }
         results
     }
@@ -616,7 +646,6 @@ impl<'a> LtjAlgorithm<'a> {
     fn walk_ranking<G: GraphAccess>(
         &mut self,
         graph: &G,
-        level: usize,
         var_id: u8,
         tuple: &mut Vec<(u8, u32)>,
         results: &mut Vec<ResultTuple>,
@@ -668,10 +697,10 @@ impl<'a> LtjAlgorithm<'a> {
             ctx.cur_id = id;
             ctx.cur_dist = dist;
             for i in 0..prefixes.count {
-                let context = prefixes.get(i, level);
-                self.resume(
-                    graph, level, var_id, id, context, tuple, results, ctx, budget,
-                );
+                // The prefix carries its own length, so it says which
+                // level it reached the search variable at.
+                let context = prefixes.get(i);
+                self.resume(graph, var_id, id, context, tuple, results, ctx, budget);
             }
 
             if ctx.cuts && ctx.tau_eps == 0.0 && ctx.cut.is_full() {
@@ -701,19 +730,26 @@ impl<'a> LtjAlgorithm<'a> {
     fn resume<G: GraphAccess>(
         &mut self,
         graph: &G,
-        level: usize,
         var_id: u8,
         id: u32,
-        context: &[u32],
+        context: &[(u8, u32)],
         tuple: &mut Vec<(u8, u32)>,
         results: &mut Vec<ResultTuple>,
         ctx: &mut VecCtx<'_>,
         budget: &Budget,
     ) {
+        // The prefix's length is the level the search variable sat at on
+        // the branch that stored it, and each entry names its own
+        // variable — neither is read back off the VEO, which under an
+        // adaptive order has long since moved on.
+        let level = context.len();
         let mut descended: Vec<(usize, SpoPos)> = Vec::new();
-        for (l, &val) in context.iter().enumerate() {
-            let v = self.veo.var_at(l);
+        for (l, &(v, val)) in context.iter().enumerate() {
             tuple[l] = (v, val);
+            // The order has to be replayed alongside the iterators. An
+            // adaptive one would otherwise re-pick a variable this prefix
+            // already bound; see `Veo::force`.
+            self.veo.force(v);
             for k in 0..self.var_to_iterators[v as usize].len() {
                 let it = self.var_to_iterators[v as usize][k];
                 let pos = self.var_to_positions[v as usize][k];
@@ -722,6 +758,7 @@ impl<'a> LtjAlgorithm<'a> {
             }
         }
         tuple[level] = (var_id, id);
+        self.veo.force(var_id);
         for k in 0..self.var_to_iterators[var_id as usize].len() {
             let it = self.var_to_iterators[var_id as usize][k];
             let pos = self.var_to_positions[var_id as usize][k];
@@ -735,6 +772,10 @@ impl<'a> LtjAlgorithm<'a> {
 
         for &(it, pos) in descended.iter().rev() {
             self.iterators[it].up(pos);
+        }
+        // One `done` per `force`: the prefix plus the search variable.
+        for _ in 0..=level {
+            self.veo.done();
         }
     }
 
@@ -937,7 +978,7 @@ impl<'a> LtjAlgorithm<'a> {
 
         // The vector-search level. What happens here is the entire
         // difference between the two in-LTJ algorithms.
-        if self.nn_level == Some((j, var_id)) {
+        if self.nn_var == Some(var_id) {
             if let Some(vc) = ctx {
                 vc.visits += 1;
 
@@ -1000,12 +1041,12 @@ impl<'a> LtjAlgorithm<'a> {
                             Some(slot) => &mut vc.anchor_tables[slot].1,
                             None => &mut vc.table,
                         };
-                        // The prefix is the value bound at each level
-                        // above this one. The var ids are implied by the
-                        // VEO, so only the values are stored.
-                        let entry = table.entry(id).or_default();
-                        entry.count += 1;
-                        entry.flat.extend((0..j).map(|l| tuple[l].1));
+                        // The prefix is what every level above this one
+                        // is bound to, variable and value both: an
+                        // adaptive order can bind a different variable
+                        // here on the next branch, so the position no
+                        // longer names the variable.
+                        table.entry(id).or_default().push((0..j).map(|l| tuple[l]));
                     }
                     return true;
                 }

@@ -188,8 +188,21 @@ fn build_db(name: &str, seed: u64) -> PathBuf {
     db
 }
 
-/// Run `q` and return the projected rows.
+/// `FROGQL_VEO` is process-global, so every query in this file passes
+/// through here.
+static VEO_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run `q` and return the projected rows, with the variable order
+/// explicitly static. `FROGQL_VEO` is process-global, so a test that sets
+/// it would otherwise leak into every other test running beside it, and a
+/// row here would silently be measuring the order it did not ask for.
 fn run(db: &Path, q: &str, cfg: VecCfg) -> Vec<Vec<Value>> {
+    let _g = VEO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var("FROGQL_VEO");
+    run_inner(db, q, cfg)
+}
+
+fn run_inner(db: &Path, q: &str, cfg: VecCfg) -> Vec<Vec<Value>> {
     let store = LazyGraphStore::open(db).unwrap();
     let rt = Runtime::new(&store);
     rt.set_vec_cfg(cfg);
@@ -210,7 +223,7 @@ fn cfg(strategy: Strategy, source: VecSource, level: usize) -> VecCfg {
     VecCfg {
         strategy,
         source,
-        level,
+        level: Some(level),
         ..VecCfg::default()
     }
 }
@@ -612,5 +625,118 @@ fn a_residual_where_is_not_dropped() {
             got, want,
             "{strategy:?}+{source:?} must honour the WHERE, however it evaluates it"
         );
+    }
+}
+
+// ---- Free level, and the adaptive VEO (issue #101 follow-up) ----
+//
+// `level: None` leaves the search variable where the ordinary order puts
+// it, instead of pinning it. That is what makes `FROGQL_VEO=adaptive`
+// usable on a `NEAREST` query at all — a pin needs a materialised order
+// to move the variable within, and an adaptive one has none before the
+// search runs.
+//
+// Both are answer-preserving: leapfrog is order-agnostic, and the search
+// finds its variable by name rather than by level. What could break is
+// subtler than a wrong row — a **correlated** clause whose anchor is not
+// bound by the time the search level is reached produces *no* rows for
+// that visit, silently. So the correlated cases below are the ones that
+// matter.
+
+fn free(strategy: Strategy, source: VecSource) -> VecCfg {
+    VecCfg {
+        strategy,
+        source,
+        level: None,
+        ..VecCfg::default()
+    }
+}
+
+fn sorted(mut rows: Vec<Vec<Value>>) -> Vec<String> {
+    let mut keys: Vec<String> = rows.drain(..).map(|r| format!("{r:?}")).collect();
+    keys.sort();
+    keys
+}
+
+/// Run with `FROGQL_VEO=adaptive` set for the duration.
+fn run_adaptive(db: &Path, q: &str, cfg: VecCfg) -> Vec<Vec<Value>> {
+    let _g = VEO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("FROGQL_VEO", "adaptive");
+    let rows = run_inner(db, q, cfg);
+    std::env::remove_var("FROGQL_VEO");
+    rows
+}
+
+/// The uncorrelated queries the pinned suite already uses, run with no
+/// pin at all: the answer must not depend on whether a level was chosen.
+#[test]
+fn a_free_level_answers_what_a_pinned_one_does() {
+    let db = build_db("veq_free", 0xF7EE);
+    let qv = &query_vectors(0xF7EE, 2)[0];
+    for q in queries(qv, 5, false) {
+        let pinned = sorted(run(&db, &q, exact(Strategy::Interleave, 0)));
+        for strategy in [Strategy::Interleave, Strategy::Memo] {
+            for source in [VecSource::GlobalSort, VecSource::LocalSort] {
+                let got = sorted(run(&db, &q, free(strategy, source)));
+                assert_eq!(
+                    got, pinned,
+                    "free level differs for {q} ({strategy:?}/{source:?})"
+                );
+            }
+        }
+    }
+}
+
+/// The same, with the order decided during the search.
+#[test]
+fn the_adaptive_veo_answers_what_the_static_one_does_on_nearest() {
+    let db = build_db("veq_adaptive", 0xADA9);
+    let qv = &query_vectors(0xADA9, 2)[0];
+    for q in queries(qv, 5, false) {
+        let baseline = sorted(run(&db, &q, exact(Strategy::Interleave, 0)));
+        for strategy in [Strategy::Interleave, Strategy::Memo] {
+            for source in [VecSource::GlobalSort, VecSource::LocalSort] {
+                let got = sorted(run_adaptive(&db, &q, free(strategy, source)));
+                assert_eq!(
+                    got, baseline,
+                    "adaptive VEO differs for {q} ({strategy:?}/{source:?})"
+                );
+            }
+        }
+    }
+}
+
+/// **The case the similarity arc exists for.** The query vector is the
+/// anchor's, so the anchor has to bind before the search variable or
+/// there is nothing to rank against — and the search answers a visit with
+/// no anchor by returning no rows, which is invisible in the output.
+/// With a pinned level `pin_at_after` enforced the order; without one the
+/// arc has to, both under the static order and under the adaptive one.
+#[test]
+fn a_correlated_clause_keeps_its_answer_with_no_pinned_level() {
+    let db = build_db("veq_corr_free", 0xC077);
+    let qs = [
+        "MATCH (u:User)-[:likes]->(i:Item), (u)-[:likes]->(j:Item) \
+         NEAREST 5 i.emb TO VECTOR(j, 'emb') RETURN i.idx, j.idx, u.idx",
+        "MATCH (u:User)-[:likes]->(i:Item), (u)-[:likes]->(j:Item), (i)-[:tagged]->(g:Tag) \
+         NEAREST 3 i.emb TO VECTOR(j, 'emb') RETURN i.idx, j.idx, g.idx",
+    ];
+    for q in qs {
+        let pinned = sorted(run(&db, q, exact(Strategy::Interleave, 0)));
+        assert!(!pinned.is_empty(), "fixture must produce rows for {q}");
+        for strategy in [Strategy::Interleave, Strategy::Memo] {
+            for source in [VecSource::GlobalSort, VecSource::LocalSort] {
+                let got = sorted(run(&db, q, free(strategy, source)));
+                assert_eq!(
+                    got, pinned,
+                    "free correlated differs for {q} ({strategy:?}/{source:?})"
+                );
+                let got = sorted(run_adaptive(&db, q, free(strategy, source)));
+                assert_eq!(
+                    got, pinned,
+                    "adaptive correlated differs for {q} ({strategy:?}/{source:?})"
+                );
+            }
+        }
     }
 }

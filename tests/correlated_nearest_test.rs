@@ -725,7 +725,7 @@ fn correlated_memo_agrees_at_every_level() {
                 rt.set_vec_cfg(VecCfg {
                     strategy,
                     source,
-                    level,
+                    level: Some(level),
                     ..VecCfg::default()
                 });
                 let q = frogql::compile_query(QUERY).unwrap();

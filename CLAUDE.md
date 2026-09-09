@@ -642,6 +642,8 @@ the k nearest to a query vector". Built to compare three evaluation
 strategies, not as a product feature. Full write-up in
 `docs/internals/vector-search.md`.
 
+**The similarity arc.** A correlated `NEAREST k b.attr TO VECTOR(a, 'attr')` relates `a` to `b` the way an edge does — with `a` bound, `b` ranges over at most `k` values — so the variable order treats the pair as joined: neither is lonely, and binding one re-weighs the other. What it is **not** is symmetric: "`b` is among `a`'s `k` nearest" does not imply the reverse, and no index answers the reverse, so the arc can only be traversed from the anchor. That makes it a *constraint* on the order (`VarInfo::prereq`) and not merely a weight, and it is load-bearing rather than an optimisation: the search answers a visit whose anchor is unbound with **no rows**, so a free order that picked the search variable first would return fewer rows in silence. With a pinned level `VeoOverride::pin_at_after` enforced the same thing.
+
 **Correlated form** (`runtime/vsearch/correlated.rs`): when `<expr>` names
 a pattern variable — `NEAREST 50 v11.hog TO VECTOR(v00, 'hog')` — the
 query vector is a function of the row, so the clause is a similarity

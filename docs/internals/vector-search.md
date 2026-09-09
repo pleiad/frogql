@@ -684,7 +684,7 @@ reason.
 |---|---|
 | `FROGQL_VEC_STRATEGY=post\|pre\|interleave\|memo` | which strategy to run (default `post`). `inltj` is an accepted alias for `interleave` |
 | `FROGQL_VEC_SOURCE=hnsw\|localsort\|globalsort` | where the ranking comes from (default `hnsw`) |
-| `FROGQL_VEC_LEVEL=<n>` | VEO position of the search variable; `interleave` / `memo` only, clamped |
+| `FROGQL_VEC_LEVEL=<n>\|auto` | VEO position of the search variable; `interleave` / `memo` only, clamped. `auto` (the default) does not pin at all — the only setting `FROGQL_VEO=adaptive` can serve |
 | `FROGQL_VEC_TAU_EPS=<f>` | relative slack on the threshold cut (default 0) |
 | `FROGQL_DISABLE_MEMO_CUTS` | drop `memo`'s two phase-2 walk cuts (`k` held, every candidate seen), leaving only the threshold cut. The kill switch the differential test A/Bs against |
 | `FROGQL_DISABLE_VECTORS` | ignore every sidecar; queries see no vector attribute |

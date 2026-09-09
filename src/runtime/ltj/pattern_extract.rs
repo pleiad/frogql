@@ -228,8 +228,11 @@ pub struct NnPlan<'v, 'c> {
     /// elimination order, because the ranking cannot be produced until
     /// the anchor is bound.
     pub anchor: Option<&'c str>,
-    /// Requested VEO level; clamped to a legal one.
-    pub level: usize,
+    /// Requested VEO level, clamped to a legal one. `None` leaves the
+    /// placement to the ordinary variable order — which is what makes the
+    /// adaptive VEO usable here, since a pin needs a materialised order
+    /// to move the variable within.
+    pub level: Option<usize>,
     pub ctx: &'c mut VecCtx<'v>,
     /// Filled with one entry per returned row, in row order.
     pub dists: &'c mut Vec<Option<f32>>,
@@ -389,7 +392,7 @@ fn try_ltj_inner<G: GraphAccess>(
     // with the same selectivity class. Pinned vars are excluded — their
     // NodeId is already known via the index lookup.
     let weights = estimate_var_weights(num_vars, &decomp.filters, index.len());
-    let var_info: Vec<(u8, usize, bool)> = (0..num_vars)
+    let mut var_info: Vec<(u8, usize, bool)> = (0..num_vars)
         .filter(|v| !pinned_set.contains(&(*v as u8)))
         .map(|v| {
             let v_id = v as u8;
@@ -404,8 +407,6 @@ fn try_ltj_inner<G: GraphAccess>(
         })
         .collect();
 
-    let base_veo = VeoSimple::new(var_info.clone());
-
     // A vector-search level moves its variable in the order. This has to
     // happen BEFORE filters are placed: placement resolves each filter to
     // the level at which its last dependency binds, and reordering
@@ -414,85 +415,146 @@ fn try_ltj_inner<G: GraphAccess>(
     // `check_filters` finds a binding by scanning the tuple for the var
     // id, and the deeper slots still hold values from the previous
     // sibling branch.
-    let mut nn_level: Option<(usize, u8)> = None;
+    let mut nn_var: Option<u8> = None;
     // Resolved inside the match below and handed to the context once the
     // algorithm is built: `VecCtx` needs the id, and only the
     // decomposition knows how names map to ids.
     let mut anchor_var_id: Option<u8> = None;
-    let veo: Box<dyn Veo> = match &nn {
-        Some(plan) => {
-            // The variable can be gone: the secondary-index fold turns an
-            // `attr = literal` variable into a constant and drops it from
-            // the order, leaving no level to occupy. The caller degrades
-            // to post-filtering rather than answer a different question.
-            let var_id = decomp
-                .var_id_to_name
-                .iter()
-                .position(|n| n == plan.var)
-                .map(|i| i as u8)?;
-            if pinned_set.contains(&var_id) {
-                return None;
-            }
-            let capped = plan.level.min(VeoOverride::max_level(&var_info));
-            let over = match plan.anchor {
-                // Correlated: the anchor must bind first, or there is no
-                // vector to rank against when this level is reached.
-                Some(anchor_name) => {
-                    let anchor_id = decomp
-                        .var_id_to_name
-                        .iter()
-                        .position(|n| n == anchor_name)
-                        .map(|i| i as u8)?;
-                    if anchor_id == var_id || pinned_set.contains(&anchor_id) {
-                        return None;
-                    }
-                    anchor_var_id = Some(anchor_id);
-                    VeoOverride::pin_at_after(&base_veo, var_id, capped, anchor_id)?
+    // Resolve the `NEAREST` variables before choosing an order: whether
+    // the level is pinned or free, the order has to know about them.
+    //
+    // A missing one is not an error here — the secondary-index fold turns
+    // an `attr = literal` variable into a constant and drops it from the
+    // order, leaving nothing to place — but the caller has to degrade to
+    // post-filtering rather than answer a different question.
+    let mut nn_ids: Option<(u8, Option<u8>)> = None;
+    if let Some(plan) = &nn {
+        let var_id = decomp
+            .var_id_to_name
+            .iter()
+            .position(|n| n == plan.var)
+            .map(|i| i as u8)?;
+        if pinned_set.contains(&var_id) {
+            return None;
+        }
+        let anchor_id = match plan.anchor {
+            Some(anchor_name) => {
+                let a = decomp
+                    .var_id_to_name
+                    .iter()
+                    .position(|n| n == anchor_name)
+                    .map(|i| i as u8)?;
+                if a == var_id || pinned_set.contains(&a) {
+                    return None;
                 }
+                Some(a)
+            }
+            None => None,
+        };
+        anchor_var_id = anchor_id;
+        nn_var = Some(var_id);
+        nn_ids = Some((var_id, anchor_id));
+    }
+
+    // **The similarity arc.** A correlated `NEAREST k b.attr TO
+    // VECTOR(a, 'attr')` relates `a` to `b` exactly the way an edge does:
+    // with `a` bound, `b` ranges over at most `k` values. So the order
+    // treats the pair as joined — neither is lonely, and binding one
+    // narrows the other.
+    //
+    // What it is *not* is symmetric. "`b` is among `a`'s `k` nearest"
+    // does not imply the reverse, and no index answers the reverse, so
+    // the arc can only be traversed from the anchor. That makes it a
+    // constraint on the order and not merely a weight: `prereq` below.
+    let arc: Option<(u8, u8)> = match nn_ids {
+        Some((var_id, Some(anchor_id))) => Some((var_id, anchor_id)),
+        _ => None,
+    };
+    if let Some((var_id, anchor_id)) = arc {
+        for (v, _, lonely) in var_info.iter_mut() {
+            if *v == var_id || *v == anchor_id {
+                *lonely = false;
+            }
+        }
+    }
+
+    let base_veo = VeoSimple::new(var_info.clone());
+
+    let veo: Box<dyn Veo> = match (&nn, nn_ids) {
+        // A **pinned** level: the benchmark instrument. It moves the
+        // search variable to a chosen position, deliberately overriding
+        // the ordering heuristic, which is why part of what that axis
+        // measures is how much the heuristic was worth. It needs a
+        // materialised order to move the variable within, so it is the
+        // one case an adaptive order cannot serve.
+        (Some(plan), Some((var_id, anchor_id))) if plan.level.is_some() => {
+            let capped = plan
+                .level
+                .unwrap_or(0)
+                .min(VeoOverride::max_level(&var_info));
+            let over = match anchor_id {
+                Some(a) => VeoOverride::pin_at_after(&base_veo, var_id, capped, a)?,
                 None => VeoOverride::pin_at(&base_veo, var_id, capped)?,
             };
-            // Read the real position back: the request is clamped.
-            nn_level = Some((over.level_of(var_id)?, var_id));
+            // The pin only has to be legal; where it landed is not
+            // something the search needs told, since it finds the search
+            // variable by name.
+            over.level_of(var_id)?;
             Box::new(over)
         }
-        // `FROGQL_VEO=adaptive` re-picks the order per binding from the
-        // cardinalities the index reports (issue #101). Off by default:
-        // it is the arm under study, and a differential test pins it
-        // against `simple` on the answer while the costs diverge.
-        //
-        // The vector-search arms are excluded on purpose. They *set* the
-        // level their search variable binds at (`VeoOverride`), which is
-        // the axis those benchmarks measure, and `Memo`'s phase 2 replays
-        // a prefix by reading `var_at` for levels the search has left —
-        // something an order decided during the search cannot answer.
-        None if adaptive_requested() && !veo::order_is_forced(&var_info) => {
-            // Which variables share a triple: the adaptive VEO re-weighs
-            // exactly this neighbourhood after each binding, since nothing
-            // else narrows. Built here rather than above so the default
-            // path never allocates it — this runs once per LTJ run, and a
-            // correlated subquery issues one per outer row.
-            let mut related: Vec<Vec<u8>> = vec![Vec::new(); num_vars];
-            for triple in &decomp.triples {
-                let vars: Vec<u8> = triple
-                    .terms
-                    .iter()
-                    .filter_map(|t| match t {
-                        Term::Variable(v) => Some(*v),
-                        Term::Constant(_) => None,
-                    })
-                    .collect();
-                for &a in &vars {
-                    for &b in &vars {
-                        if a != b {
-                            related[a as usize].push(b);
+        _ => {
+            // `FROGQL_VEO=adaptive` re-picks the order per binding from
+            // the cardinalities the index reports (issue #101). Off by
+            // default: it is the arm under study, and a differential test
+            // pins it against `simple` on the answer while the costs
+            // diverge.
+            if adaptive_requested() && !veo::order_is_forced(&var_info) {
+                // Which variables share a triple: the adaptive VEO
+                // re-weighs exactly this neighbourhood after each binding,
+                // since nothing else narrows. Built here rather than
+                // above so the default path never allocates it — this runs
+                // once per LTJ run, and a correlated subquery issues one
+                // per outer row.
+                let mut related: Vec<Vec<u8>> = vec![Vec::new(); num_vars];
+                for triple in &decomp.triples {
+                    let vars: Vec<u8> = triple
+                        .terms
+                        .iter()
+                        .filter_map(|t| match t {
+                            Term::Variable(v) => Some(*v),
+                            Term::Constant(_) => None,
+                        })
+                        .collect();
+                    for &a in &vars {
+                        for &b in &vars {
+                            if a != b {
+                                related[a as usize].push(b);
+                            }
                         }
                     }
                 }
+                if let Some((var_id, anchor_id)) = arc {
+                    related[var_id as usize].push(anchor_id);
+                    related[anchor_id as usize].push(var_id);
+                }
+                let sizes = IterSizes::new(&iterators, &var_to_iterators, &var_to_positions);
+                Box::new(AdaptiveVeo::new(var_info.clone(), &related, arc, &sizes))
+            } else if let Some((var_id, anchor_id)) = arc {
+                // A free level under a materialised order still has to
+                // honour the arc's direction. `VeoSimple` knows nothing
+                // about it, so the variable stays where the heuristic put
+                // it and only the anchor is pulled above it.
+                let at = (0..base_veo.size())
+                    .find(|&j| base_veo.var_at(j) == var_id)
+                    .unwrap_or(0);
+                match VeoOverride::pin_at_after(&base_veo, var_id, at, anchor_id) {
+                    Some(o) => Box::new(o),
+                    None => Box::new(base_veo),
+                }
+            } else {
+                Box::new(base_veo)
             }
-            let sizes = IterSizes::new(&iterators, &var_to_iterators, &var_to_positions);
-            Box::new(AdaptiveVeo::new(var_info.clone(), &related, &sizes))
         }
-        None => Box::new(base_veo),
     };
 
     // Place filters. An adaptive order has no level to place them at yet,
@@ -545,8 +607,7 @@ fn try_ltj_inner<G: GraphAccess>(
 
     let tuples = match nn {
         Some(plan) => {
-            let (level, var_id) = nn_level?;
-            algorithm = algorithm.with_nn_level(level, var_id);
+            algorithm = algorithm.with_nn_var(nn_var?);
             plan.ctx.anchor_var = anchor_var_id;
             let tuples = algorithm.run_nearest(graph, plan.ctx, budget);
             // One distance per tuple; `convert_results` emits one row per

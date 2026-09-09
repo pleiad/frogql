@@ -2022,7 +2022,7 @@ fn handle_vec<G: frogql::model::graph_access::GraphAccess>(rt: &Runtime<'_, G>, 
                 "strategy={} source={} level={} tau-eps={} memo-cuts={} debug={}",
                 cfg.strategy.name(),
                 cfg.source.name(),
-                cfg.level,
+                level_label(cfg.level),
                 cfg.tau_eps,
                 cfg.memo_cuts,
                 cfg.debug
@@ -2057,16 +2057,25 @@ fn handle_vec<G: frogql::model::graph_access::GraphAccess>(rt: &Runtime<'_, G>, 
                         false
                     }
                 },
-                "level" => match value.parse() {
-                    Ok(v) => {
-                        cfg.level = v;
+                "level" => {
+                    if value.eq_ignore_ascii_case("auto") || value.eq_ignore_ascii_case("free") {
+                        cfg.level = None;
                         true
+                    } else {
+                        match value.parse() {
+                            Ok(v) => {
+                                cfg.level = Some(v);
+                                true
+                            }
+                            Err(_) => {
+                                eprintln!(
+                                    "level wants a non-negative integer or 'auto', got '{value}'."
+                                );
+                                false
+                            }
+                        }
                     }
-                    Err(_) => {
-                        eprintln!("level wants a non-negative integer, got '{value}'.");
-                        false
-                    }
-                },
+                }
                 "tau-eps" | "tau_eps" => match value.parse() {
                     Ok(v) => {
                         cfg.tau_eps = v;
@@ -2117,12 +2126,21 @@ fn handle_vec<G: frogql::model::graph_access::GraphAccess>(rt: &Runtime<'_, G>, 
         "strategy={} source={} level={} tau-eps={} memo-cuts={} debug={}",
         cfg.strategy.name(),
         cfg.source.name(),
-        cfg.level,
+        level_label(cfg.level),
         cfg.tau_eps,
         cfg.memo_cuts,
         cfg.debug
     );
     rt.set_vec_cfg(cfg);
+}
+
+/// `auto` for an un-pinned search level, so a printed `0` never stands
+/// for "nothing was pinned".
+fn level_label(level: Option<usize>) -> String {
+    match level {
+        Some(n) => n.to_string(),
+        None => "auto".to_string(),
+    }
 }
 
 fn parse_bool(s: &str) -> Option<bool> {

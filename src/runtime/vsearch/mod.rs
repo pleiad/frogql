@@ -169,7 +169,16 @@ pub struct VecCfg {
     /// Requested position of the search variable in the variable
     /// elimination order. `interleave` / `memo` only; clamped to a legal
     /// level.
-    pub level: usize,
+    ///
+    /// `None` leaves the position to the optimizer, which is what a plan
+    /// would do and what lets the adaptive VEO run on a `NEAREST` query
+    /// at all — a pinned level needs a materialised order to move the
+    /// variable within, and an adaptive one has none before the search.
+    /// A pin is a benchmark instrument: it is the axis `vec_bench` and
+    /// `vec_sweep` sweep, and it deliberately overrides the ordering
+    /// heuristic, so part of what that axis measures is how much the
+    /// heuristic was worth.
+    pub level: Option<usize>,
     /// Slack on the threshold cut, as a relative fraction. An
     /// approximate cursor's distances are not strictly non-decreasing,
     /// so cutting at exactly the threshold can drop a neighbour the
@@ -191,7 +200,7 @@ impl Default for VecCfg {
         VecCfg {
             strategy: Strategy::PostFilter,
             source: VecSource::Hnsw,
-            level: 0,
+            level: None,
             tau_eps: 0.0,
             memo_cuts: true,
             debug: false,
@@ -216,9 +225,14 @@ impl VecCfg {
                 cfg.source = v;
             }
         }
+        // `FROGQL_VEC_LEVEL=auto` (or `free`) is the explicit spelling of
+        // the default: no pin, the optimizer places the variable.
         if let Ok(s) = std::env::var("FROGQL_VEC_LEVEL") {
-            if let Ok(v) = s.parse() {
-                cfg.level = v;
+            let t = s.trim();
+            if t.eq_ignore_ascii_case("auto") || t.eq_ignore_ascii_case("free") {
+                cfg.level = None;
+            } else if let Ok(v) = t.parse() {
+                cfg.level = Some(v);
             }
         }
         if let Ok(s) = std::env::var("FROGQL_VEC_TAU_EPS") {
