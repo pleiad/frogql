@@ -12,6 +12,8 @@
 //!   --limit <n>       row cap per query, 0 for none (default: 0)
 //!   --queries <list>  1-based indices to run, e.g. 1,4,17 (default: all)
 //!   --csv <path>      write the CSV here as well as to stdout
+//!   --no-recall       skip the exact reference run per query; the
+//!                     `recall` column is then empty everywhere
 //!   --timeout <secs>  abandon a query that runs longer, mark the row
 //!                     `timeout`, and carry on with the next one
 //!                     (default: 300s; `--timeout off` removes it)
@@ -37,8 +39,34 @@
 //! One CSV row per (arm, level, query, iteration set):
 //!
 //! ```text
-//! query,strategy,source,level,arm_actual,median_ms,min_ms,max_ms,rows,nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,anchor_groups,fallback
+//! query,strategy,source,level,arm_actual,median_ms,min_ms,max_ms,rows,recall,truth_keys,nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,anchor_groups,fallback
 //! ```
+//!
+//! **`recall` is what makes an `hnsw` row comparable to a `localsort`
+//! one.** The exact sources return the true nearest matches; `hnsw`
+//! navigates a proximity graph and can miss some. Comparing the two on
+//! latency alone credits `hnsw` for work it skipped — a faster arm that
+//! answered less is not a faster arm. `rows` does not catch it either: an
+//! approximate walk can return the same *number* of rows and a different
+//! *set*, swapping a true neighbour for the next one out.
+//!
+//! Ground truth is one exact run per query, `post+localsort`, taken
+//! before the sweep. One suffices because every strategy under an exact
+//! source returns identical answers — `tests/vector_strategy_equiv_test.rs`
+//! is what pins that — so the reference does not have to match the arm.
+//! Recall is `|arm ∩ truth| / |truth|` over whole projected rows taken as
+//! a **set**, which is what `truth_keys` counts — and why it can sit well
+//! below `rows`. A `NEAREST 5` in distinct-binding mode returns five
+//! images and one row per way the pattern reaches each, so twenty-one
+//! rows can carry five answers. Duplicates from the join say nothing
+//! about whether the nearest were found. Recall is 1.0 for every exact
+//! arm by construction: a value below 1.0 there is a bug, and below 1.0
+//! on `hnsw` is the result being measured.
+//!
+//! A query whose reference did not finish inside the budget has no truth
+//! to compare against, and its `recall` is left **empty** rather than
+//! guessed. `--no-recall` skips the reference pass entirely, which is the
+//! right call only when latency is all that is wanted.
 //!
 //! **`arm_actual` is the column to check first.** A strategy that meets a
 //! shape it cannot hook into falls back, and a row reporting the requested
@@ -145,6 +173,8 @@ struct Args {
     limit: usize,
     only: Option<Vec<usize>>,
     csv: Option<PathBuf>,
+    /// Skip the exact reference run that `recall` is measured against.
+    no_recall: bool,
     /// Wall-clock budget per query run. `None` leaves the sweep
     /// unbounded, which is what a bad arm needs days of.
     timeout: Option<Duration>,
@@ -161,6 +191,7 @@ fn usage() -> ! {
            --limit <n>       row cap per query, 0 for none (default: 0)\n  \
            --queries <list>  1-based query indices to run (default: all)\n  \
            --csv <path>      also write the CSV to this file\n  \
+           --no-recall       skip the exact reference run; recall stays empty\n  \
            --timeout <secs>  abandon a query that runs longer; the row is\n  \
            \x20                marked `timeout` and the sweep continues\n  \
            \x20                (default: 300; `off` removes the budget)"
@@ -196,6 +227,7 @@ fn parse_args() -> Args {
     let mut limit = 0usize;
     let mut only: Option<Vec<usize>> = None;
     let mut csv = None;
+    let mut no_recall = false;
     let mut timeout = Some(DEFAULT_TIMEOUT);
 
     let mut i = 0;
@@ -246,6 +278,7 @@ fn parse_args() -> Args {
                 )
             }
             "--csv" => csv = Some(PathBuf::from(value("--csv"))),
+            "--no-recall" => no_recall = true,
             "--timeout" => {
                 let v = value("--timeout");
                 timeout = match v.trim() {
@@ -286,6 +319,7 @@ fn parse_args() -> Args {
         limit,
         only,
         csv,
+        no_recall,
         timeout,
     }
 }
@@ -303,6 +337,25 @@ fn read_queries(path: &Path) -> Vec<String> {
         .filter(|l| !l.is_empty() && !l.starts_with("--"))
         .map(|l| l.to_string())
         .collect()
+}
+
+/// Every projected row of a result, formatted — the unit recall is
+/// measured in.
+///
+/// The whole row and not its first column: two arms can agree on which
+/// images they found and disagree on what they joined them to, and a
+/// recall that could not see the difference would report agreement that
+/// is not there.
+fn key_set(r: &frogql::runtime::result::QueryResult) -> std::collections::HashSet<String> {
+    use frogql::runtime::result::QueryResult;
+    match r {
+        QueryResult::Projected(rows) => rows.iter().map(|row| format!("{row:?}")).collect(),
+        QueryResult::Raw(ir) => ir
+            .rows
+            .iter()
+            .map(|row| format!("{:?}", row.paths))
+            .collect(),
+    }
 }
 
 fn median(mut v: Vec<f64>) -> f64 {
@@ -380,9 +433,58 @@ fn main() {
         }
     );
 
+    // Ground truth, once per query, before anything is measured. One
+    // exact run suffices for every arm: under an exact source all the
+    // strategies return identical answers, which is what
+    // `tests/vector_strategy_equiv_test.rs` exists to pin.
+    //
+    // `post+localsort` is the reference because it is the arm with the
+    // fewest ways to decline: it runs the pattern through the ordinary
+    // path and ranks what came out, so it needs no decomposition into
+    // triples and no legal level to occupy.
+    let truth: Vec<Option<std::collections::HashSet<String>>> = if args.no_recall {
+        vec![None; queries.len()]
+    } else {
+        let t = Instant::now();
+        rt.set_vec_cfg(VecCfg {
+            strategy: Strategy::PostFilter,
+            source: VecSource::LocalSort,
+            level: None,
+            ..VecCfg::default()
+        });
+        let truth: Vec<Option<std::collections::HashSet<String>>> = queries
+            .iter()
+            .map(|(_, q)| {
+                let r = rt.run_query(q, args.limit);
+                // A reference that ran out of budget describes an
+                // unfinished walk, so it is not truth. Left absent rather
+                // than used, which would score every arm against a
+                // partial answer and read as poor recall everywhere.
+                if rt.query_timed_out() {
+                    None
+                } else {
+                    Some(key_set(&r))
+                }
+            })
+            .collect();
+        let missing = truth.iter().filter(|t| t.is_none()).count();
+        eprintln!(
+            "ground truth: {} of {} queries in {:.1}s{}",
+            queries.len() - missing,
+            queries.len(),
+            t.elapsed().as_secs_f64(),
+            if missing > 0 {
+                format!(" ({missing} did not finish; their recall stays empty)")
+            } else {
+                String::new()
+            }
+        );
+        truth
+    };
+
     let header = "query,strategy,source,level,arm_actual,median_ms,min_ms,max_ms,\
-                  rows,nn_pops,nn_expanded,pattern_runs,ltj_visits,candidates,\
-                  anchor_groups,fallback";
+                  rows,recall,truth_keys,nn_pops,nn_expanded,pattern_runs,ltj_visits,\
+                  candidates,anchor_groups,fallback";
     println!("{header}");
     let mut csv_out = args.csv.as_ref().map(|p| {
         let mut f = std::fs::File::create(p).unwrap_or_else(|e| {
@@ -420,15 +522,17 @@ fn main() {
                 memo_cuts: std::env::var("FROGQL_DISABLE_MEMO_CUTS").is_err(),
                 ..VecCfg::default()
             });
-            for (qi, query) in &queries {
+            for (qslot, (qi, query)) in queries.iter().enumerate() {
                 let mut times = Vec::with_capacity(args.iters);
                 let mut rows = 0usize;
                 let mut timed_out = false;
+                let mut last = None;
                 for _ in 0..args.iters {
                     let t = Instant::now();
                     let result = rt.run_query(query, args.limit);
                     times.push(t.elapsed().as_secs_f64() * 1000.0);
                     rows = result.row_count();
+                    last = Some(result);
                     // One expired iteration condemns the row: the rest
                     // measure an unfinished walk just as much.
                     timed_out |= rt.query_timed_out();
@@ -436,11 +540,31 @@ fn main() {
                         break;
                     }
                 }
+                // Formatting the rows is not part of the measurement, so
+                // it happens here rather than inside the timed loop.
+                let (recall, truth_keys) = match (&truth[qslot], &last) {
+                    // A partial walk is not a recall of anything: the row
+                    // already says `timeout`, and scoring it would read as
+                    // a bad index rather than an unfinished run.
+                    (Some(t), Some(r)) if !timed_out => {
+                        let got = key_set(r);
+                        let hit = t.iter().filter(|k| got.contains(*k)).count();
+                        let recall = if t.is_empty() {
+                            1.0
+                        } else {
+                            hit as f64 / t.len() as f64
+                        };
+                        (format!("{recall:.4}"), t.len().to_string())
+                    }
+                    (Some(t), _) => (String::new(), t.len().to_string()),
+                    _ => (String::new(), String::new()),
+                };
                 let s = rt.last_vec_stats();
                 let lo = times.iter().cloned().fold(f64::INFINITY, f64::min);
                 let hi = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                 let line = format!(
-                    "{qi},{},{},{level_label},{},{:.3},{:.3},{:.3},{rows},{},{},{},{},{},{},{}",
+                    "{qi},{},{},{level_label},{},{:.3},{:.3},{:.3},{rows},\
+                     {recall},{truth_keys},{},{},{},{},{},{},{}",
                     strategy.name(),
                     source.name(),
                     s.arm,

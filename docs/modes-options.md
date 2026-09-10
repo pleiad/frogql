@@ -396,12 +396,17 @@ ltj_build db.gdb --compact                    # once, so the open is seconds
 vec_sweep db.gdb queries.gql --iters 5 --csv results.csv
 ```
 
-Two defaults worth knowing. Each query run gets a **five-minute budget**
+Three defaults worth knowing. Each query run gets a **five-minute budget**
 (`--timeout off` removes it); a row it cut says `timeout` in the
-`fallback` column and is a partial walk, never a latency. And `--levels`
+`fallback` column and is a partial walk, never a latency. `--levels`
 defaults to `0`, which is the one level where `memo` provably cannot win —
-one visit means nothing to re-walk — so pass `--levels 0,1,2` before
-concluding anything about it.
+one visit means nothing to re-walk — so pass `--levels 0,1,2`, or `auto`
+for no pin at all, before concluding anything about it. And a **`recall`**
+column is measured against one exact reference run per query, because
+`hnsw` is approximate and the exact sources are not: comparing them on
+latency alone credits `hnsw` for answers it skipped, and `rows` does not
+catch it, since an approximate walk can return the same number of rows and
+a different set. `--no-recall` skips that reference pass.
 
 One CSV row per (arm, level, query), with the median, the neighbour
 counters, and — first column to read — `arm_actual`, the arm that
