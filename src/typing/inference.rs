@@ -1,11 +1,19 @@
 //! Schema inference from a live graph. Mirrors the grouping logic of the
 //! `print_schema_simple` REPL helper: nodes group by sorted label list,
 //! edges group by `(edge_labels, src_labels, tgt_labels, directed)`. For
-//! each group, property types are intersected across instances; props that
-//! appear on every instance with the same type become required, the rest
-//! are dropped from the group's record. If any instance carries props
-//! beyond the common set the record is left open (so the lost props remain
-//! addressable as `Star`).
+//! each group, the record is the **union** of every key its instances
+//! carry: the type at a key is the union of the types seen there, plus
+//! `NULL` when some instance lacked it. The walk sees every element, so
+//! the record is closed.
+//!
+//! It used to take the intersection instead — a key missing from one
+//! instance, or typed differently on another, was dropped and the record
+//! left open so it stayed addressable as `Star`. That threw away what the
+//! walk knew: a label whose instances mostly carry `nombre` reported
+//! `{oaci: str, *}`, where the `*` names no property in particular and
+//! the schema says nothing about the one property a reader came for. A
+//! missing key is not an unknown key. It reads as null, and null is a
+//! type this lattice can state.
 //!
 //! Used to populate the reserved `DEFAULT` graph type at import time and
 //! whenever the user runs `USE GRAPH TYPE DEFAULT`.
@@ -81,46 +89,68 @@ fn value_to_simple_type(v: &Value) -> SimpleType {
     }
 }
 
-/// Per-group accumulator: the running intersection of common property
-/// types and a flag tracking whether any instance had props beyond it.
+/// Per-group accumulator: every property key the group's instances carry,
+/// the union of the types seen at each, and how many instances carried it.
+///
+/// It used to accumulate the *intersection* instead, dropping any key that
+/// was missing from one instance or typed differently on another, and
+/// marking the record open so the dropped keys stayed addressable as
+/// `Star`. That threw away what it knew. A label whose instances mostly
+/// carry `nombre` reported `{oaci: str, *}` — the `*` naming no property
+/// in particular and the schema saying nothing about the one property a
+/// reader was looking for. A missing key is not an unknown key: it reads
+/// as null, which is a type the lattice can state.
 struct Group {
-    common: Option<BTreeMap<String, SimpleType>>,
-    has_optional: bool,
+    /// Union of the types seen at each key, over the instances that had
+    /// it. A key typed `int` on one instance and `str` on another lands
+    /// as `int | str` rather than disappearing.
+    types: BTreeMap<String, SimpleType>,
+    /// How many instances carried each key. Short of `count`, the key is
+    /// optional and the inferred type gains `| NULL`.
+    present: BTreeMap<String, usize>,
     count: usize,
 }
 
 impl Group {
     fn new() -> Self {
         Group {
-            common: None,
-            has_optional: false,
+            types: BTreeMap::new(),
+            present: BTreeMap::new(),
             count: 0,
         }
     }
 
     fn update(&mut self, instance_props: BTreeMap<String, SimpleType>) {
         self.count += 1;
-        match &mut self.common {
-            None => {
-                self.common = Some(instance_props);
-            }
-            Some(common) => {
-                let prev_common_len = common.len();
-                let prev_instance_len = instance_props.len();
-                let keys: Vec<String> = common.keys().cloned().collect();
-                for k in keys {
-                    match instance_props.get(&k) {
-                        Some(t) if t == &common[&k] => {}
-                        _ => {
-                            common.remove(&k);
-                        }
-                    }
+        for (k, t) in instance_props {
+            *self.present.entry(k.clone()).or_insert(0) += 1;
+            match self.types.get(&k) {
+                None => {
+                    self.types.insert(k, t);
                 }
-                if common.len() < prev_common_len || prev_instance_len > common.len() {
-                    self.has_optional = true;
+                Some(prev) => {
+                    let merged = SimpleType::union(prev, &t);
+                    self.types.insert(k, merged);
                 }
             }
         }
+    }
+
+    /// The group's record: every key it ever saw, with `| NULL` on the
+    /// ones some instance lacked.
+    fn property_types(&self) -> BTreeMap<String, SimpleType> {
+        self.types
+            .iter()
+            .map(|(k, t)| {
+                let optional = self.present.get(k).copied().unwrap_or(0) < self.count;
+                let t = if optional {
+                    SimpleType::union(t, &SimpleType::Null)
+                } else {
+                    t.clone()
+                };
+                (k.clone(), t)
+            })
+            .collect()
     }
 }
 
@@ -189,22 +219,26 @@ fn labels_to_label_type(labels: &[String]) -> LabelType {
     }
 }
 
-fn props_to_property_type(
-    props: &BTreeMap<String, SimpleType>,
-    has_optional: bool,
-) -> PropertyType {
-    if has_optional {
-        PropertyType::Open(props.clone())
-    } else {
-        PropertyType::Closed(props.clone())
-    }
+/// Inference walks every element, so the key set it produces is the whole
+/// key set and the record is **closed**.
+///
+/// It used to leave the record open whenever some instance carried a key
+/// the others lacked. That was the only way to keep those keys reachable
+/// back when they were dropped; now they are listed, with `| NULL`, and
+/// an open record would be claiming ignorance the walk does not have.
+///
+/// What closing changes: reading a key the schema does not list types as
+/// `NULL` rather than `Star`, which is what the data says — a closed
+/// record means the element definitely has no such property, and ISO
+/// reads that projection as null (see `PropertyType::get`).
+fn props_to_property_type(props: &BTreeMap<String, SimpleType>) -> PropertyType {
+    PropertyType::Closed(props.clone())
 }
 
 fn node_descriptor(labels: &[String], gp: &Group) -> DescriptorType {
-    let common = gp.common.clone().unwrap_or_default();
     DescriptorType::new(
         labels_to_label_type(labels),
-        props_to_property_type(&common, gp.has_optional),
+        props_to_property_type(&gp.property_types()),
     )
 }
 
@@ -219,7 +253,7 @@ fn edge_variable_type(
 ) -> VariableType {
     let desc = DescriptorType::new(
         labels_to_label_type(&key.edge_labels),
-        props_to_property_type(&gp.common.clone().unwrap_or_default(), gp.has_optional),
+        props_to_property_type(&gp.property_types()),
     );
 
     // Endpoints: if the inferred node group exists, reuse its descriptor.
@@ -309,8 +343,11 @@ mod tests {
         }
     }
 
+    /// A key some instances lack is `T | NULL`, not a dropped key behind
+    /// a `*`. That is what the data says: a missing property reads as
+    /// null, and null is a type the lattice can state.
     #[test]
-    fn infer_optional_props_open_record() {
+    fn infer_optional_prop_is_nullable_not_dropped() {
         let json = r#"{
             "nodes": [
                 {"id": "a", "labels": ["Person"], "props": {"name": "Ada", "age": 30}},
@@ -322,12 +359,38 @@ mod tests {
         let s = infer_simple_schema(&g);
         match &s.nodes[0] {
             VariableType::Node(d) => match &d.props {
-                PropertyType::Open(m) => {
+                PropertyType::Closed(m) => {
                     assert_eq!(m.get("name"), Some(&SimpleType::S));
-                    assert!(!m.contains_key("age"));
+                    assert_eq!(
+                        m.get("age"),
+                        Some(&SimpleType::union(&SimpleType::Z, &SimpleType::Null)),
+                        "a key half the instances carry is int | NULL"
+                    );
                 }
-                _ => panic!("expected open record (some instance had extra props)"),
+                other => panic!("expected a closed record, got {other:?}"),
             },
+            _ => panic!("expected Node variant"),
+        }
+    }
+
+    /// A key every instance carries, with disagreeing types, is the union
+    /// of them — and stays non-null, because nothing was missing.
+    #[test]
+    fn infer_conflicting_types_unions_without_null() {
+        let json = r#"{
+            "nodes": [
+                {"id": "a", "labels": ["P"], "props": {"v": 1}},
+                {"id": "b", "labels": ["P"], "props": {"v": "two"}}
+            ],
+            "edges": []
+        }"#;
+        let g = graph_from_json(json);
+        let s = infer_simple_schema(&g);
+        match &s.nodes[0] {
+            VariableType::Node(d) => {
+                let t = d.props.get("v");
+                assert_eq!(t, SimpleType::union(&SimpleType::Z, &SimpleType::S));
+            }
             _ => panic!("expected Node variant"),
         }
     }
