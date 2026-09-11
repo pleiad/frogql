@@ -891,3 +891,88 @@ fn warning_compatible_variable_no_collapse_warning() {
         "no collapse warning expected, got {ws:?}"
     );
 }
+
+// =========================================================
+// Naming node types in the schema renderer.
+// =========================================================
+
+fn schema_of(create_body: &str) -> Schema {
+    let body = match parse_statement(&format!("CREATE GRAPH TYPE g AS {create_body}")).unwrap() {
+        Statement::CreateGraphType { body, .. } => body,
+        _ => panic!("expected CREATE GRAPH TYPE"),
+    };
+    build_schema_from_body(&body)
+}
+
+/// A node type printed once per edge that touches it is the thing that
+/// makes a real schema unreadable: the part that differs between two
+/// lines is the short part, buried between two long ones. Node types get
+/// a name and the edge lines point at it.
+#[test]
+fn format_schema_names_node_types_and_references_them() {
+    let schema = schema_of(
+        "{ (:Fpl {fplId INT}), (:Aerodromo {oaci STRING}), \
+           (:Fpl {fplId INT})-[:SALE_DE]->(:Aerodromo {oaci STRING}), \
+           (:Fpl {fplId INT})-[:LLEGA_A]->(:Aerodromo {oaci STRING}) }",
+    );
+    let out = frogql::typing::format::format_schema(&schema);
+
+    assert!(
+        out.contains("fpl = (:Fpl {fplId INT})"),
+        "node types carry their name:\n{out}"
+    );
+    assert!(
+        out.contains("aerodromo = (:Aerodromo {oaci STRING})"),
+        "node types carry their name:\n{out}"
+    );
+    assert!(
+        out.contains("(fpl)-[:SALE_DE]->(aerodromo)"),
+        "edge lines reference the name:\n{out}"
+    );
+    assert!(
+        !out.contains("-[:SALE_DE]->(:Aerodromo"),
+        "and do not also spell the endpoint out:\n{out}"
+    );
+}
+
+/// A compound label becomes one name, lowercased, joined.
+#[test]
+fn format_schema_names_a_compound_label() {
+    let schema = schema_of(
+        "{ (:Copiloto&Persona {rol STRING}), (:Fpl {fplId INT}), \
+           (:Fpl {fplId INT})-[:DECLARA]->(:Copiloto&Persona {rol STRING}) }",
+    );
+    let out = frogql::typing::format::format_schema(&schema);
+    assert!(
+        out.contains("copiloto_persona = "),
+        "compound labels join with an underscore:\n{out}"
+    );
+    assert!(
+        out.contains("]->(copiloto_persona)"),
+        "and the edge line uses it:\n{out}"
+    );
+}
+
+/// A name with nothing to reference it is noise, so a schema with no
+/// edges keeps the plain listing.
+#[test]
+fn format_schema_leaves_an_edgeless_schema_unnamed() {
+    let schema = schema_of("{ (:Person {name STRING}) }");
+    let out = frogql::typing::format::format_schema(&schema);
+    assert!(out.contains("    (:Person {name STRING})"), "{out}");
+    assert!(!out.contains(" = "), "no names without edges:\n{out}");
+}
+
+/// An endpoint that is not one of the declared node types prints in
+/// full. Inventing a name for something the reader cannot look up in the
+/// list above would be worse than the repetition — and it is what keeps
+/// such a schema re-parseable as a CREATE body.
+#[test]
+fn format_schema_spells_out_an_undeclared_endpoint() {
+    let schema = schema_of("{ (:Person {name STRING}), (:A)-[:E]->(:B) }");
+    let out = frogql::typing::format::format_schema(&schema);
+    assert!(
+        out.contains("(:A)-[:E]->(:B)"),
+        "an undeclared endpoint stays spelled out:\n{out}"
+    );
+}

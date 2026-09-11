@@ -35,6 +35,7 @@ use frogql::runtime::result::{IntermediateResult, QueryResult};
 use frogql::store::lazy::LazyGraphStore;
 use frogql::syntax::statement::{Statement, TypeElement};
 use frogql::typing::descriptor_type::DescriptorType;
+use frogql::typing::format::NodeTypeNames;
 use frogql::typing::inference::infer_simple_schema;
 use frogql::typing::label_type::LabelType;
 use frogql::typing::property_type::PropertyType;
@@ -1692,10 +1693,25 @@ fn handle_show_current(store: &LazyGraphStore) {
 // arrows yellow, open-record marker magenta).
 
 fn print_schema_colored(schema: &Schema) {
+    // Same naming rule as `typing::format::format_schema`, so the two
+    // renderers cannot disagree about what a node type is called: names
+    // once there are edges to reference them from, none otherwise.
+    let names = if schema.edges.is_empty() {
+        None
+    } else {
+        Some(NodeTypeNames::of(schema))
+    };
     if !schema.nodes.is_empty() {
         println!("{C_BOLD}Node types:{C_RESET}");
         for vt in schema.nodes.iter() {
-            println!("    {}", color_variable(vt));
+            let label = match (&names, vt) {
+                (Some(names), VariableType::Node(d)) => names
+                    .get(d)
+                    .map(|n| format!("{C_BOLD}{n}{C_RESET} = "))
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            println!("    {label}{}", color_variable(vt));
         }
     }
     if !schema.edges.is_empty() {
@@ -1704,7 +1720,7 @@ fn print_schema_colored(schema: &Schema) {
         }
         println!("{C_BOLD}Edge types:{C_RESET}");
         for vt in schema.edges.iter() {
-            println!("    {}", color_variable(vt));
+            println!("    {}", color_variable_with(vt, names.as_ref()));
         }
     }
     if schema.nodes.is_empty() && schema.edges.is_empty() {
@@ -1713,19 +1729,23 @@ fn print_schema_colored(schema: &Schema) {
 }
 
 fn color_variable(vt: &VariableType) -> String {
+    color_variable_with(vt, None)
+}
+
+fn color_variable_with(vt: &VariableType, names: Option<&NodeTypeNames>) -> String {
     match vt {
         VariableType::Node(d) => color_node_descriptor(d),
         VariableType::EdgeDirectional { desc, left, right } => format!(
             "{}{}{}",
-            color_endpoint(left),
+            color_endpoint_with(left, names),
             color_edge_arrow(desc, true),
-            color_endpoint(right),
+            color_endpoint_with(right, names),
         ),
         VariableType::EdgeNonDirectional { desc, left, right } => format!(
             "{}{}{}",
-            color_endpoint(left),
+            color_endpoint_with(left, names),
             color_edge_arrow(desc, false),
-            color_endpoint(right),
+            color_endpoint_with(right, names),
         ),
         VariableType::Union(a, b) => {
             format!("({}) | ({})", color_variable(a), color_variable(b))
@@ -1738,9 +1758,12 @@ fn color_variable(vt: &VariableType) -> String {
     }
 }
 
-fn color_endpoint(vt: &VariableType) -> String {
+fn color_endpoint_with(vt: &VariableType, names: Option<&NodeTypeNames>) -> String {
     match vt {
-        VariableType::Node(d) => color_node_descriptor(d),
+        VariableType::Node(d) => match names.and_then(|n| n.get(d)) {
+            Some(name) => format!("({C_BOLD}{name}{C_RESET})"),
+            None => color_node_descriptor(d),
+        },
         _ => format!("({})", color_variable(vt)),
     }
 }

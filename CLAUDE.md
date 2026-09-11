@@ -277,6 +277,38 @@ DDL surface today: `CREATE / USE / DROP GRAPH TYPE`, plus inspection / validatio
 - `SHOW CURRENT GRAPH TYPE` — name + content of the active entry
 - `VALIDATE GRAPH TYPE <name>` — walks the data via `typing::validate::validate_against_data` and caches the verdict in `catalog.validations`
 
+**Inference states an optional property, it does not hide one.**
+`infer_simple_schema` takes the **union** of every key a label's instances
+carry: the type at a key is the union of the types seen there, plus `NULL`
+when some instance lacked it, and the record is **closed** because the
+walk saw every element. It used to take the intersection — a key missing
+from one instance, or typed differently on another, was dropped and the
+record left open so it stayed reachable as `Star` — which reported
+`(:Aerodromo {oaci STRING, *})` where the data supports
+`(:Aerodromo {oaci STRING, nombre STRING | NULL})`. The `*` named no
+property in particular and said nothing about the one a reader came for.
+A missing key is not an unknown key: it reads as null, and `SimpleType::
+Null` is a type the lattice can state. Closing the record also sharpens
+reading an unlisted key from `Star` to `NULL`, which is what a closed
+record means (see the `PropertyType::get` note under *Alignment with the
+Lean mechanisation*). A `.gdb` written earlier keeps its **persisted**
+DEFAULT until something marks it dirty; `USE GRAPH TYPE DEFAULT`
+re-infers on demand.
+
+**The schema renderers name node types.** A node type with a dozen
+properties was printed once per edge that touches it, so the part that
+differs between two edge lines — the label — sat buried between two long
+ones. `typing::format::NodeTypeNames` derives a name from the labels
+(`Copiloto&Persona` → `copiloto_persona`), `format_schema` prints
+`fpl = (:Fpl {...})` and the edge lines read `(fpl)-[:SALE_DE]->(aerodromo)`.
+The REPL's colored renderer (`print_schema_colored`) uses the same
+`NodeTypeNames`, so the two cannot disagree about what a type is called.
+Names appear only when the schema has edges to reference them from, and
+only for endpoints that **render identically** to a declared node type —
+an endpoint carrying a weaker type prints in full rather than borrowing a
+name that would misdescribe it. The named form does not re-parse as a
+CREATE body; an unnamed one still does (`tests/graph_type_test.rs`).
+
 `USE` does not validate. The walk is opt-in because it is O(N + E); the typechecker still constrains queries against the active schema either way.
 
 REPL meta-commands follow the SQLite dot-prefix convention (see `src/bin/frogql.rs`): `.schema` aliases `SHOW GRAPH TYPE DEFAULT`, `.schema simple` switches to the grouped by-label renderer in `print_schema_simple` (which lists every node type unconditionally — the earlier "standalone-only" filter hid all nodes on connected graphs and was removed in commit `e23d04d`), `.graph-types` aliases `SHOW GRAPH TYPES`, `.save` materialises the merged base+overlay view to the open `.gdb` atomically (see *Data Modification*), `.dump-json <path>` writes a pg_dump-style JSON snapshot, `.dump-gql <path>` writes a GQL script that recreates the graph, `.vec` reads or writes one vector-search knob (`strategy` / `source` / `level` / `tau-eps` / `memo-cuts` / `debug`) and bare `.vec` also prints the last `NEAREST` query's counters, `.timeout <secs>` bounds each query (`.timeout off` removes it), `.pager on|off|always` routes results through `$PAGER` (default `on` — psql's naming and psql's meaning: page when stdout is a terminal) and `.limit <n>|off` caps how many rows the engine produces (default off), `.help` lists meta-commands and DDL surface, and `.quit` / `.exit` (plus bare `quit` / `exit`) leave the REPL.

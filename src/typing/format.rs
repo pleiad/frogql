@@ -16,14 +16,116 @@ use super::property_type::PropertyType;
 use super::simple_type::SimpleType;
 use super::variable_type::{Schema, VariableType};
 
+/// Short names for a schema's node types, so an edge line can point at
+/// one instead of repeating its whole record.
+///
+/// A node type with a dozen properties is printed once per edge that
+/// touches it, and a schema with seven edges off one hub prints that hub
+/// seven times. The information is all there and none of it is legible:
+/// the part that differs between two lines — the edge label — is the
+/// short part, buried between two long ones.
+///
+/// The name comes from the labels (`Copiloto&Persona` → `copiloto_persona`),
+/// so it is stable across runs and says what it names. A type whose label
+/// is not a plain conjunction — a union, or the wildcard — has no such
+/// name and takes a positional one.
+///
+/// Keyed on the *rendering* rather than on the descriptor: an edge
+/// endpoint is a separate value from the node type it matches, and what
+/// makes them the same type for a reader is that they print the same.
+pub struct NodeTypeNames {
+    by_rendering: BTreeMap<String, String>,
+}
+
+impl NodeTypeNames {
+    /// Names for every node type in `schema`.
+    pub fn of(schema: &Schema) -> Self {
+        let mut by_rendering: BTreeMap<String, String> = BTreeMap::new();
+        let mut taken: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, vt) in schema.nodes.iter().enumerate() {
+            let VariableType::Node(d) = vt else { continue };
+            let rendering = format_node_descriptor(d);
+            if by_rendering.contains_key(&rendering) {
+                continue;
+            }
+            let base = name_from_labels(&d.label).unwrap_or_else(|| format!("t{}", i + 1));
+            // Two distinct types can still want the same name — a
+            // user-written schema may declare one label twice with
+            // different records. Numbering keeps the reference unambiguous.
+            let n = taken.entry(base.clone()).or_insert(0);
+            *n += 1;
+            let name = if *n == 1 { base } else { format!("{base}_{n}") };
+            by_rendering.insert(rendering, name);
+        }
+        NodeTypeNames { by_rendering }
+    }
+
+    /// The name for an endpoint, or `None` when it is not one of the
+    /// schema's declared node types — an endpoint can carry a label
+    /// combination that never appears standalone, and inventing a name
+    /// for something the reader cannot look up would be worse than
+    /// printing it in full.
+    pub fn get(&self, d: &DescriptorType) -> Option<&str> {
+        self.by_rendering
+            .get(&format_node_descriptor(d))
+            .map(|s| s.as_str())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.by_rendering.is_empty()
+    }
+}
+
+/// `Copiloto&Persona` → `copiloto_persona`. `None` for a label that is
+/// not a plain conjunction of names.
+pub fn name_from_labels(label: &LabelType) -> Option<String> {
+    let parts = label.required_labels();
+    if parts.is_empty() {
+        return None;
+    }
+    let mut name = String::new();
+    for p in parts {
+        if !name.is_empty() {
+            name.push('_');
+        }
+        for c in p.chars() {
+            if c.is_alphanumeric() {
+                name.extend(c.to_lowercase());
+            } else {
+                name.push('_');
+            }
+        }
+    }
+    Some(name)
+}
+
 /// Render `schema` as a CREATE GRAPH TYPE body. Returns a multi-line
 /// string with one element per line, indented for readability.
+///
+/// Node types are given names once the schema has edges to reference
+/// them from; with no edges a name has no reader and is only noise. The
+/// named form does **not** re-parse as a CREATE body — `(fpl)` is a name
+/// where the grammar wants a label — which is the price of the edge list
+/// being readable at all. An unnamed schema (no edges, or endpoints that
+/// are not declared node types) still round-trips.
 pub fn format_schema(schema: &Schema) -> String {
     let mut out = String::new();
+    let names = if schema.edges.is_empty() {
+        None
+    } else {
+        let n = NodeTypeNames::of(schema);
+        (!n.is_empty()).then_some(n)
+    };
     if !schema.nodes.is_empty() {
         out.push_str("Node types:\n");
         for vt in schema.nodes.iter() {
             out.push_str("    ");
+            if let (Some(names), VariableType::Node(d)) = (&names, vt) {
+                if let Some(name) = names.get(d) {
+                    out.push_str(name);
+                    out.push_str(" = ");
+                }
+            }
             out.push_str(&format_variable(vt));
             out.push('\n');
         }
@@ -35,7 +137,7 @@ pub fn format_schema(schema: &Schema) -> String {
         out.push_str("Edge types:\n");
         for vt in schema.edges.iter() {
             out.push_str("    ");
-            out.push_str(&format_variable(vt));
+            out.push_str(&format_variable_with(vt, names.as_ref()));
             out.push('\n');
         }
     }
@@ -47,19 +149,25 @@ pub fn format_schema(schema: &Schema) -> String {
 
 /// Single-line CREATE-style rendering of one `VariableType`.
 pub fn format_variable(vt: &VariableType) -> String {
+    format_variable_with(vt, None)
+}
+
+/// As `format_variable`, but abbreviating any endpoint `names` has a
+/// name for.
+pub fn format_variable_with(vt: &VariableType, names: Option<&NodeTypeNames>) -> String {
     match vt {
         VariableType::Node(d) => format_node_descriptor(d),
         VariableType::EdgeDirectional { desc, left, right } => format!(
             "{}-[{}]->{}",
-            format_endpoint(left),
+            format_endpoint_with(left, names),
             format_edge_descriptor(desc),
-            format_endpoint(right),
+            format_endpoint_with(right, names),
         ),
         VariableType::EdgeNonDirectional { desc, left, right } => format!(
             "{}~[{}]~{}",
-            format_endpoint(left),
+            format_endpoint_with(left, names),
             format_edge_descriptor(desc),
-            format_endpoint(right),
+            format_endpoint_with(right, names),
         ),
         // Unions / Group / Zero appear in inference output too, even
         // though CREATE syntax doesn't accept them at the top level.
@@ -73,9 +181,12 @@ pub fn format_variable(vt: &VariableType) -> String {
     }
 }
 
-fn format_endpoint(vt: &VariableType) -> String {
+fn format_endpoint_with(vt: &VariableType, names: Option<&NodeTypeNames>) -> String {
     match vt {
-        VariableType::Node(d) => format_node_descriptor(d),
+        VariableType::Node(d) => match names.and_then(|n| n.get(d)) {
+            Some(name) => format!("({name})"),
+            None => format_node_descriptor(d),
+        },
         // Only Node is valid here per the schema-body grammar; render
         // a fallback rather than panicking.
         _ => format!("({})", format_variable(vt)),
