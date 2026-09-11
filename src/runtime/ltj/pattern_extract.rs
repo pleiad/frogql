@@ -8,7 +8,7 @@ use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::BinOp;
 use crate::syntax::path_pattern::PathPattern;
 
-use super::algorithm::{FilterKind, LtjAlgorithm, PlacedFilter, ResultTuple, VecCtx};
+use super::algorithm::{EdgeDirReq, FilterKind, LtjAlgorithm, PlacedFilter, ResultTuple, VecCtx};
 use super::iterator::{LtjIterator, SpoPos, Term, TriplePattern};
 use super::triple_index::TripleIndex;
 use super::veo::{self, AdaptiveVeo, IterSizes, Veo, VeoOverride, VeoSimple};
@@ -603,7 +603,22 @@ fn try_ltj_inner<G: GraphAccess>(
         num_vars,
         pinned,
     )
-    .with_dynamic_filters(filters_dyn);
+    .with_dynamic_filters(filters_dyn)
+    // The index cannot tell a directed edge from an undirected one — it
+    // stores both as forward triples — so the pattern's own requirement
+    // has to travel with each triple. Without it `-[:L]->` matched
+    // undirected edges and `~[:L]~` matched directed ones.
+    .with_edge_directions(
+        decomp
+            .triple_info
+            .iter()
+            .map(|(_, _, _, kind)| match kind {
+                EdgeKind::Right | EdgeKind::Left => EdgeDirReq::Directed,
+                EdgeKind::Undirected => EdgeDirReq::Undirected,
+                EdgeKind::AnyDir => EdgeDirReq::Any,
+            })
+            .collect(),
+    );
 
     let tuples = match nn {
         Some(plan) => {

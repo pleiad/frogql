@@ -71,6 +71,41 @@ pub enum FilterKind {
     },
 }
 
+/// What a pattern edge requires of the stored edge it matches.
+///
+/// LTJ decomposes every pattern edge into a forward triple and queries one
+/// index that holds directed edges in their physical sense and undirected
+/// edges in **both** senses (`triple_index.rs`, `push_both`). The triple
+/// keeps no record of which kind it came from, so without this the join
+/// matched any pattern edge against any stored edge — in both directions
+/// of the mistake: `-[:L]->` found undirected edges and `~[:L]~` found
+/// directed ones.
+///
+/// The reference semantics is the scan's (`run_edge_pattern`): `-[]->` and
+/// `<-[]-` take their candidates from `edges_directed` alone, `~[]~` from
+/// `edges_undirected` alone, and `-[]-` is the union of all three — a
+/// union that would be redundant if a directed pattern edge already
+/// matched an undirected stored one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EdgeDirReq {
+    /// `-[]->` / `<-[]-`.
+    Directed,
+    /// `~[]~`.
+    Undirected,
+    /// `-[]-`, which is meant to see everything.
+    Any,
+}
+
+impl EdgeDirReq {
+    fn admits<G: GraphAccess>(self, graph: &G, eid: u32) -> bool {
+        match self {
+            EdgeDirReq::Any => true,
+            EdgeDirReq::Directed => graph.is_directed(eid),
+            EdgeDirReq::Undirected => !graph.is_directed(eid),
+        }
+    }
+}
+
 /// A result tuple: variable bindings as (var_id, value), plus the source
 /// edge id per triple. `triple_eids[i]` is the edge id of the index entry
 /// that produced the binding for triple `i`. Replaces the older
@@ -425,6 +460,10 @@ pub struct LtjAlgorithm<'a> {
     /// Reported under `FROGQL_DEBUG_VEO` so two orders can be compared on
     /// work done and not only on wall clock.
     visits: u64,
+    /// What each triple's pattern edge requires of the stored edge, in
+    /// `iterators` order. Empty means "no requirement", which is what a
+    /// caller that builds triples by hand gets.
+    triple_dir: Vec<EdgeDirReq>,
 }
 
 impl<'a> LtjAlgorithm<'a> {
@@ -449,7 +488,15 @@ impl<'a> LtjAlgorithm<'a> {
             nn_var: None,
             filters_dyn: Vec::new(),
             visits: 0,
+            triple_dir: Vec::new(),
         }
+    }
+
+    /// Declare what each triple's pattern edge requires of the stored edge
+    /// it matches. Parallel to the iterators; see `EdgeDirReq`.
+    pub fn with_edge_directions(mut self, dirs: Vec<EdgeDirReq>) -> Self {
+        self.triple_dir = dirs;
+        self
     }
 
     /// Supply the per-variable filter table an adaptive VEO needs.
@@ -904,9 +951,20 @@ impl<'a> LtjAlgorithm<'a> {
             // validate the combination. Emitting a row there invented an
             // edge: `(a)-[:follows]->(b) WHERE a.id = 0 AND b.id = 3`
             // returned a match whether or not that edge existed.
+            //
+            // The same place also enforces edge **direction**. The index
+            // cannot: it holds one triple space for both kinds, so a
+            // forward lookup finds an undirected edge as readily as a
+            // directed one. Filtering here rather than in the index costs
+            // a descent into values that will be rejected, and buys the
+            // scan's semantics without a second index or a direction bit
+            // per triple.
             let mut eid_lists: Vec<Vec<u32>> = Vec::with_capacity(self.iterators.len());
-            for it in self.iterators.iter() {
-                let eids = it.current_eids_all();
+            for (i, it) in self.iterators.iter().enumerate() {
+                let mut eids = it.current_eids_all();
+                if let Some(&req) = self.triple_dir.get(i) {
+                    eids.retain(|&e| req.admits(graph, e));
+                }
                 if eids.is_empty() {
                     return true;
                 }
