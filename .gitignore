@@ -6,6 +6,12 @@
 # database they were built from (see the fingerprint in
 # src/vector/sidecar.rs). Always regenerate rather than commit.
 *.vec.*
+# LTJ index sidecars (<db>.ltj). Written automatically the first time a
+# database is opened without one, and refused whenever the graph it was
+# built from no longer matches — so a committed one would be dead weight
+# at best. Delete to force a rebuild.
+*.ltj
+*.ltj.tmp
 __pycache__/
 /bench/data/
 # Bench artifacts (timestamped per run; regenerate via the bench

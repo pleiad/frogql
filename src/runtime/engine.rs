@@ -627,10 +627,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     fn load_or_build_triple_index(&self) -> TripleIndex {
         use crate::runtime::ltj::persist;
         let forced_build = std::env::var("FROGQL_LTJ_SOURCE").as_deref() == Ok("build");
+        let key = self.graph.index_sidecar_key();
+        let want_compact = TripleIndex::compact_selected();
         if !forced_build {
-            if let Some((db, nodes, edges)) = self.graph.index_sidecar_key() {
-                let want_compact = TripleIndex::compact_selected();
-                match persist::read_for(db, nodes, edges, want_compact) {
+            if let Some(key) = &key {
+                match persist::read_for(key, want_compact) {
                     Ok(idx) => return idx,
                     Err(persist::Reject::Missing) => {}
                     Err(why) => {
@@ -641,7 +642,56 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 }
             }
         }
-        TripleIndex::from_graph(self.graph)
+        let index = TripleIndex::from_graph(self.graph);
+        if let Some(key) = &key {
+            self.persist_index(&index, key);
+        }
+        index
+    }
+
+    /// Write the index just built, so the next session reads it.
+    ///
+    /// This is a deliberate exception to the rule that a rebuilt
+    /// structure is not persisted by default, and it is worth stating why
+    /// rather than leaving the reader to notice the contradiction. The
+    /// rule exists so nobody pays disk they did not ask for. What changed
+    /// is both sides of that trade: the default representation is now the
+    /// compact one, roughly a third the size, and the cost it avoids is
+    /// 252 seconds — measured — at every open of a 617 M-edge graph, for
+    /// a pure function of a file that did not change. A third of a minute
+    /// per session against a one-time write is not the trade the rule was
+    /// written against.
+    ///
+    /// The recovery story is unchanged: deleting `<db>.ltj` forces a
+    /// rebuild, and every rejection is a rebuild rather than an error.
+    /// `FROGQL_LTJ_PERSIST=0` switches the write off for a session that
+    /// wants the index and not the file.
+    ///
+    /// Failures are silent by design. The index is in hand and the query
+    /// is about to run; a read-only directory is a reason not to have a
+    /// sidecar, not a reason to fail a query. `FROGQL_TRACE_OPEN` prints
+    /// what happened, so a sidecar that never appears is diagnosable.
+    fn persist_index(&self, index: &TripleIndex, key: &crate::model::graph_access::SidecarKey<'_>) {
+        use crate::runtime::ltj::persist;
+        if std::env::var("FROGQL_LTJ_PERSIST").as_deref() == Ok("0") {
+            return;
+        }
+        let trace = std::env::var("FROGQL_TRACE_OPEN").is_ok();
+        match persist::write_for(index, key) {
+            Ok(()) => {
+                if trace {
+                    eprintln!(
+                        "  LTJ sidecar written: {}",
+                        persist::path_for(key.path).display()
+                    );
+                }
+            }
+            Err(e) => {
+                if trace {
+                    eprintln!("  LTJ sidecar not written: {e}");
+                }
+            }
+        }
     }
 
     /// Lazily build (or return) the cached LTJ TripleIndex. Idempotent —

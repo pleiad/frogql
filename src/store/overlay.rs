@@ -124,6 +124,28 @@ impl MutationOverlay {
         self.base_edge_count + self.new_edges.len() as u32
     }
 
+    /// Whether this overlay can have changed the set of `(src, label,
+    /// tgt)` triples the LTJ index holds.
+    ///
+    /// Three kinds of mutation can: a new edge adds triples, a delete
+    /// removes them (deleting a node detaches its edges), and re-labelling
+    /// an edge moves them. A new *node* adds no triple by itself, but it
+    /// moves the counts a sidecar is judged against, so it counts here
+    /// too. Property mutations and node labels do not appear in a triple
+    /// at all.
+    ///
+    /// Used to refuse a sidecar mid-session: the on-disk file still
+    /// describes the pre-mutation graph, and its fingerprint still
+    /// matches, because the counts a sidecar is checked against are the
+    /// base ones.
+    pub fn affects_triples(&self) -> bool {
+        !self.new_nodes.is_empty()
+            || !self.new_edges.is_empty()
+            || !self.deleted_nodes.is_empty()
+            || !self.deleted_edges.is_empty()
+            || !self.mod_edge_labels.is_empty()
+    }
+
     pub fn is_node_deleted(&self, id: Id) -> bool {
         self.deleted_nodes.contains(&id)
     }

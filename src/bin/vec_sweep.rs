@@ -383,7 +383,7 @@ fn main() {
         use frogql::model::graph_access::GraphAccess;
         store
             .index_sidecar_key()
-            .map(|(_, n, e)| (n, e))
+            .map(|k| (k.node_count, k.edge_count))
             .unwrap_or((0, 0))
     };
     eprintln!(

@@ -224,6 +224,12 @@ pub fn save_graph(graph: &MemoryGraphStore, db_path: &Path) -> io::Result<()> {
     pager.header.names_root = names_root;
     pager.header.node_locs_root = node_locs_root;
     pager.header.edge_topo_root = edge_topo_root;
+    // A new image of the graph gets a new identity, unconditionally.
+    // This is what tells a sidecar written against the previous image
+    // that its ids no longer name the elements it thinks they do — the
+    // counts cannot, because `graph` arrives here with its ids already
+    // compacted, and a delete plus an insert leaves them equal.
+    pager.header.graph_id = crate::pager::header::new_graph_id();
     pager.write_header()?;
 
     Ok(())

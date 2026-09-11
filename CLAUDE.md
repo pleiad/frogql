@@ -81,7 +81,8 @@ Runtime/store toggles for A/B testing and tracing (all read at query/open time; 
 | Var | Effect |
 |---|---|
 | `FROGQL_LTJ_SOURCE=build` | ignore `<db>.ltj` and rebuild the LTJ index from the graph (the kill switch the persistence differential test A/Bs against) |
-| `FROGQL_LTJ_COMPACT` | build the LTJ `TripleIndex` as compact CLTJ (six LOUDS succinct tries, issue #66) instead of the default six sorted arrays — ~2.9× smaller, 1.4–2.1× slower on IC latency (IC11 faster); differential suite `tests/compact_ltj_test.rs`, size/build stats via the `ltj_index_stats` bin |
+| `FROGQL_LTJ_PERSIST=0` | build the LTJ index but do not write `<db>.ltj`. The index is written automatically the first time a database is opened without a usable sidecar; this declines the file, not the index |
+| `FROGQL_LTJ_REPR=compact\|array` | which physical representation the LTJ `TripleIndex` is built in (**default `compact`**): six LOUDS succinct tries (issue #66) or six sorted arrays — compact is ~2.9× smaller and 1.4–2.1× slower on IC latency (IC11 faster); differential suite `tests/compact_ltj_test.rs`, size/build stats via the `ltj_index_stats` bin. `FROGQL_LTJ_COMPACT` is honoured as a legacy alias (`0` means arrays) |
 | `FROGQL_DISABLE_ANYDIR_LTJ` | force the hash-join fallback for any-direction (`-[e]-`) patterns instead of the mirrored-index LTJ (`try_ltj_mixed`); checked at the *call site* (`pattern_extract::anydir_ltj_disabled`) so the mirror is never built when disabled |
 | `FROGQL_DISABLE_SEEDED_REPEAT` | force the legacy global repetition path instead of the seeded adjacency traversal |
 | `FROGQL_DISABLE_REPEAT_UNROLL` | keep bounded `{n,m}` repetitions as `Repeat` instead of unrolling to a Union |
@@ -451,32 +452,66 @@ termination guard, not a premise of the rule.
 
 Primary strategy for joins and concatenations of directed/undirected edges. Worst-case-optimal multi-way join: each directed edge is a triple `(src, label, tgt)` indexed in six sorted orderings (`TripleIndex`: SPO, SOP, POS, PSO, OSP, OPS); LTJ binds variables one at a time by leapfrog-intersecting candidate lists across triples, no intermediate materialisation. CompactLTJ paper (Arroyuelo et al., VLDBJ 2025). Module structure: `runtime/ltj/{triple_index, compact, iterator, veo, algorithm, pattern_extract}.rs`. Full algorithm walkthrough, examples, and benchmark numbers in `docs/internals/JOIN_STRATEGY_NOTES.md`.
 
-**Persisted to a sidecar** (`runtime/ltj/persist.rs`): `ltj_build <db.gdb>
-[--compact]` writes `<db>.ltj`, and `Runtime::load_or_build_triple_index`
-reads it back instead of rebuilding. Building is `O(E log E)` and lands
-entirely at open — 670 ms at SF0.1, and **252 s measured on a 617 M-edge
-RDF dump**, every session, for a pure function of a graph that did not
-change. Measured on a 3.85 M-edge graph: 1.69 s -> 0.07 s (array, 24×) and
-1.99 s -> 0.03 s (compact, 66×), with the 100 IMGpedia benchmark queries
-byte-identical either way. A sidecar, not a header root, so the `.gdb`
-format is untouched, the file can be deleted to force a rebuild, and the
-`.gdb` does not grow for users who never wanted it. The layout is
+**Persisted to a sidecar, automatically** (`runtime/ltj/persist.rs`):
+`Runtime::load_or_build_triple_index` reads `<db>.ltj` when one describes
+the graph in front of it, and **writes one when it has to build instead**.
+`ltj_build <db.gdb> [--array | --compact] [--force]` does the same thing
+ahead of time, for a database somebody would rather warm than wait on.
+Building is `O(E log E)` and lands entirely at open — 670 ms at SF0.1, and
+**252 s measured on a 617 M-edge RDF dump**, every session, for a pure
+function of a graph that did not change. Measured on a 3.85 M-edge graph:
+1.69 s -> 0.07 s (array, 24×) and 1.99 s -> 0.03 s (compact, 66×), with
+the 100 IMGpedia benchmark queries byte-identical either way. A sidecar,
+not a header root, so the `.gdb` format is untouched, the file can be
+deleted to force a rebuild, and the `.gdb` does not grow. The layout is
 little-endian with every array 8-byte aligned — not needed by this reader,
 which fills the same `Vec`s the builder produces, but it is what would let
 a later mmap hand out `&[u64]` views with no copy.
 
+Only the **plain six-ordering index** is written. The mirrored
+any-direction index (`from_graph_anydir`, every edge in both senses,
+roughly twice the triples) stays lazy: a workload without `-[e]-` never
+builds it, and writing it would double the sidecar for a query shape that
+may never be asked. `FROGQL_LTJ_PERSIST=0` declines the write for a
+session that wants the index and not the file; a write that fails (a
+read-only directory, a full disk) is not an error — the index is in hand
+and the query runs — and the reason prints under `FROGQL_TRACE_OPEN`.
+
+**`.save` deletes the sidecar.** `materialize_to_graph` compacts ids, so
+the saved file is a new image and every id in the old index may name a
+different element. The identity stamp in the new header already makes
+that file unusable; the delete is so the disk comes back. It is not
+rebuilt there — that would put the whole build inside `.save` for a
+session that may never query again — so the next open pays it, which is
+where the cost already lived.
+
 **Every rejection is a rebuild, never an error**: absent, wrong magic,
 unknown version, other word size, other endianness, other representation,
-truncated, or a `(node_count, edge_count)` fingerprint that no longer
-matches. A stale index would answer with edges that are gone and miss
-edges that are new, and nothing downstream re-checks it. The reason prints
-under `FROGQL_TRACE_OPEN`, so a sidecar that is silently never used is
-diagnosable. `FROGQL_LTJ_SOURCE=build` forces the rebuild; tests in
+truncated, or a fingerprint that no longer matches. A stale index would
+answer with edges that are gone and miss edges that are new, and nothing
+downstream re-checks it. The reason prints under `FROGQL_TRACE_OPEN`, so
+a sidecar that is silently never used is diagnosable.
+`FROGQL_LTJ_SOURCE=build` forces the rebuild; tests in
 `tests/ltj_persist_test.rs`.
 
+**The fingerprint is `(graph_id, node_count, edge_count)`**, and the
+first part is the one that earns its place. `FileHeader::graph_id` (bytes
+108-115, `0` on a legacy file) is stamped fresh on every save. Counts
+alone miss the case that matters: delete one edge, insert another, save —
+both counts come back exactly as they were while every id past the
+deletion has moved, so the sidecar is accepted and answers about other
+elements, silently. Two further guards close the same class in-session:
+`LazyGraphStore::index_sidecar_key` returns `None` while the overlay
+holds a mutation that can change a triple (`MutationOverlay::
+affects_triples`), because the counts it would report are the *base*
+ones and the pre-mutation sidecar would match them; and `.save` deletes
+the file outright. Not a content hash: hashing the graph to decide
+whether the index is stale costs a pass over the graph, which is the
+order of rebuilding the index it was meant to save.
+
 **Two physical representations** (issue #66), selected at index-build time; both drive the same `LtjAlgorithm` through the `LtjIterator` enum:
-- **Array** (default): six fully-materialized sorted `Vec<(u32,u32,u32,u32)>`. The iterator recomputes its range from scratch per call (simple, cache-friendly).
-- **Compact CLTJ** (`FROGQL_LTJ_COMPACT=1`): a port of the reference `cltj_index_spo_basic` — six LOUDS succinct tries (`compact.rs`: topology bitvector with sampled select-0 + bit-packed symbol sequence), navigated by a stateful handle-stack iterator (`CompactLtjIterator`, ported from `ltj_iterator_basic.hpp`). Property-graph divergence from the RDF reference: parallel edges collapse into one trie leaf, so the index keeps an SPO-ordered eid side table (`leaf_offsets`/`leaf_eids`) that the base case consults for ISO bag multiplicity. At SF0.1 (1.49 M triples): 47.6 MiB vs 136.6 MiB (**2.87× smaller**), build 1.13 s vs 0.92 s, IC medians 1.4–2.1× slower (succinct-navigation trade-off; IC11 runs 1.5× *faster* compact). Equivalence pinned by `tests/compact_ltj_test.rs`; per-repr size/build stats via the `ltj_index_stats` bin. The metatrie tier (root-sharing across ordering pairs) and the paper's RDF/BGP benchmark remain open in #66.
+- **Array** (`FROGQL_LTJ_REPR=array`): six fully-materialized sorted `Vec<(u32,u32,u32,u32)>`. The iterator recomputes its range from scratch per call (simple, cache-friendly).
+- **Compact CLTJ** (the default): a port of the reference `cltj_index_spo_basic` — six LOUDS succinct tries (`compact.rs`: topology bitvector with sampled select-0 + bit-packed symbol sequence), navigated by a stateful handle-stack iterator (`CompactLtjIterator`, ported from `ltj_iterator_basic.hpp`). Property-graph divergence from the RDF reference: parallel edges collapse into one trie leaf, so the index keeps an SPO-ordered eid side table (`leaf_offsets`/`leaf_eids`) that the base case consults for ISO bag multiplicity. At SF0.1 (1.49 M triples): 47.6 MiB vs 136.6 MiB (**2.87× smaller**), build 1.13 s vs 0.92 s, IC medians 1.4–2.1× slower (succinct-navigation trade-off; IC11 runs 1.5× *faster* compact). **Compact is the default**: the ratio does not stay abstract at scale — a 617 M-edge RDF dump is ~20 GB compact against ~59 GB in arrays, and the arrays stop fitting long before the tries do, at which point the faster representation is infinitely slower than the smaller one. Arrays remain the opt-in for a workload with the memory to spend. Equivalence pinned by `tests/compact_ltj_test.rs`; per-repr size/build stats via the `ltj_index_stats` bin. The metatrie tier (root-sharing across ordering pairs) and the paper's RDF/BGP benchmark remain open in #66.
 
 **Activation** (`run_join`, `run_concat_pattern`): kicks in automatically when the pattern decomposes into triples — chains / comma-joins of directed (`-[]->`), reverse (`<-[]-`), and undirected (`~[e]~`) edges, with or without labels. **Any-direction** (`-[e]-`) chains / comma-joins also run through LTJ — pure *and* mixed with directed / `~` edges. `try_ltj_mixed` decomposes with a per-triple `EdgeKind::AnyDir` tag and routes each iterator to the index its edge kind selects: any-direction triples query a separate mirrored index (`TripleIndex::from_graph_anydir`, every edge stored in both senses), the rest the plain index. The leapfrog intersection joins candidates across the two indexes transparently (node ids are global; both indexes assign label ids in the same edge order). `has_any_direction` gates the choice between `try_ltj` (plain only, mirror stays lazy) and `try_ltj_mixed`; `FROGQL_DISABLE_ANYDIR_LTJ=1` forces the fallback. Falls back to pairwise hash-join only for Unions and Repeats not handled by the unroll optimiser.
 
@@ -879,7 +914,9 @@ Run + chart: `bench_setup` (downloads LDBC SF0.1) → `install_python_deps.sh` �
 
 - Do **not** add an always-on dep for a bench- or REPL-only crate. Gate it behind the `bench` / `repl` feature and add `required-features = [...]` to the bin entry. The Python wheel (`frogql` on PyPI) MUST stay independent of `repl` / `bench` — never reference `rustyline`, `ureq`, `zstd`, `tar`, `sysinfo`, or `toml` from library code.
 - Do **not** put semantic lowering in `src/optimizer/`. The optimizer is performance-preserving; anything that changes which rows the query produces belongs in `src/elaborate/`.
-- Do **not** persist a rebuilt structure *by default*, and do **not** put one in the `.gdb`. "Cheap to rebuild" is a statement about a scale, not about a structure: the TripleIndex is 670 ms on 1.5 M edges and 252 s on 617 M, and the auto-built secondary indexes are 420 ms on 327 K nodes and ~74 s on 160 M. So the LTJ index *can* be persisted — `ltj_build` writes `<db>.ltj` and `Runtime::load_or_build_triple_index` reads it — but only on request, into a **sidecar** rather than the `.gdb`, so the format is untouched, the file can be deleted to force a rebuild, and nobody pays 25 GiB of disk they did not ask for. Every rejection (absent, stale fingerprint, other representation, truncated) is a rebuild and never an error. The auto-built secondary indexes have no such escape yet.
+- Do **not** put a rebuilt structure in the `.gdb`, and do **not** persist one without a fingerprint that refuses a graph it no longer describes. "Cheap to rebuild" is a statement about a scale, not about a structure: the TripleIndex is 670 ms on 1.5 M edges and 252 s on 617 M, and the auto-built secondary indexes are 420 ms on 327 K nodes and ~74 s on 160 M. The LTJ index is therefore written to a **sidecar** — `<db>.ltj`, written automatically the first time a database is opened without a usable one — so the format is untouched, the file can be deleted to force a rebuild, and the `.gdb` does not grow. Every rejection (absent, stale fingerprint, other representation, truncated) is a rebuild and never an error, and a write that fails is neither.
+
+  This rule used to read "do not persist by default … nobody pays 25 GiB of disk they did not ask for", and the change is deliberate: both sides of that trade moved. The default representation is now the compact one, roughly a third the size, and what the write buys is 252 seconds at *every* open of a large graph rather than one. Disk that can be deleted, against minutes that cannot be recovered, is not the trade the rule was written against. What survives from it: the `.gdb` is still untouched, deleting the sidecar is still the whole recovery story, and `FROGQL_LTJ_PERSIST=0` is the opt-out. The auto-built secondary indexes still have no escape at all.
 - Do **not** skip `cargo test` before commit even if `cargo fmt` and `cargo clippy` pass. Lexer / grammar regressions slip past linters; the `--` line-comment change that broke `-->` edge sugar across three suites is the standing precedent.
 - Do **not** call `run_dm` on a raw query. The MATCH chain must go through `elaborate::elaborate_query` first, otherwise descriptor `value_filters` (`{name: 'Alice'}`) get silently ignored at runtime and the DM matches too many rows.
 - Do **not** re-gitignore `node/index.js` or `node/index.d.ts`. They're auto-generated by `napi build` but committed to git (canonical napi-rs pattern). The npm publish job needs them at the checked-out SHA; the platform `.node` binaries arrive via build-job artifacts but the dispatcher JS + TS types do not. `0.2.0-rc.2` shipped a broken host package on npm because they were excluded from the tarball — only LICENSE + README + package.json reached the registry, and `require('frogql')` returned "Cannot find module".

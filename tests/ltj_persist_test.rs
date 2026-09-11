@@ -21,6 +21,7 @@ use std::sync::Mutex;
 
 use frogql::model::graph::MemoryGraphStore;
 use frogql::model::graph_access::GraphAccess;
+use frogql::model::graph_access::SidecarKey;
 use frogql::model::value::Value;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::ltj::persist::{self, Reject};
@@ -28,8 +29,8 @@ use frogql::runtime::ltj::triple_index::TripleIndex;
 use frogql::runtime::result::QueryResult;
 use frogql::store::lazy::LazyGraphStore;
 
-/// `FROGQL_LTJ_COMPACT` is process-global; these cases all read it, so
-/// they must not run concurrently with one that sets it.
+/// `FROGQL_LTJ_REPR` is process-global; these cases all read it, so they
+/// must not run concurrently with one that sets it.
 static ENV: Mutex<()> = Mutex::new(());
 
 const NODES: usize = 60;
@@ -81,18 +82,23 @@ fn build_db(name: &str) -> PathBuf {
     db
 }
 
-fn counts(db: &Path) -> (usize, usize) {
+/// The sidecar key `db` currently carries, re-borrowed onto `db` itself
+/// so it outlives the store it was read from.
+fn key_for(db: &Path) -> SidecarKey<'_> {
     let store = LazyGraphStore::open(db).unwrap();
-    store.index_sidecar_key().map(|(_, n, e)| (n, e)).unwrap()
+    let k = store
+        .index_sidecar_key()
+        .expect("an on-disk store has a key");
+    SidecarKey { path: db, ..k }
 }
 
 /// Write the sidecar for `db` in the representation this process is
 /// configured for, the way `ltj_build` does.
 fn write_sidecar(db: &Path) {
     let store = LazyGraphStore::open(db).unwrap();
-    let (n, e) = store.index_sidecar_key().map(|(_, n, e)| (n, e)).unwrap();
+    let key = store.index_sidecar_key().unwrap();
     let idx = TripleIndex::from_graph(&store);
-    persist::write_to_path(&idx, &persist::path_for(db), n, e).unwrap();
+    persist::write_for(&idx, &key).unwrap();
 }
 
 /// Every query shape that goes through LTJ: a chain, a comma-join, a
@@ -153,11 +159,11 @@ fn encode_decode_round_trip() {
     let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("roundtrip");
     let store = LazyGraphStore::open(&db).unwrap();
-    let (n, e) = counts(&db);
+    let key = key_for(&db);
     let idx = TripleIndex::from_graph(&store);
 
-    let bytes = persist::encode(&idx, n, e);
-    let back = persist::decode(&bytes, n, e, TripleIndex::compact_selected()).unwrap();
+    let bytes = persist::encode(&idx, &key);
+    let back = persist::decode(&bytes, &key, TripleIndex::compact_selected()).unwrap();
 
     assert_eq!(back.len(), idx.len());
     assert!(!idx.is_empty(), "the fixture must have triples");
@@ -171,9 +177,8 @@ fn encode_decode_round_trip() {
 #[test]
 fn missing_sidecar_is_not_an_error() {
     let db = build_db("missing");
-    let (n, e) = counts(&db);
     assert_eq!(
-        persist::read_for(&db, n, e, false).err(),
+        persist::read_for(&key_for(&db), false).err(),
         Some(Reject::Missing)
     );
 }
@@ -186,19 +191,31 @@ fn a_changed_graph_is_refused() {
     let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("stale");
     write_sidecar(&db);
-    let (n, e) = counts(&db);
+    let key = key_for(&db);
+    let compact = TripleIndex::compact_selected();
 
-    // The real signal is the edge count; vary each half independently so
-    // neither alone can be the thing being checked.
-    assert!(matches!(
-        persist::read_for(&db, n, e + 1, TripleIndex::compact_selected()),
-        Err(Reject::Fingerprint { .. })
-    ));
-    assert!(matches!(
-        persist::read_for(&db, n + 1, e, TripleIndex::compact_selected()),
-        Err(Reject::Fingerprint { .. })
-    ));
-    assert!(persist::read_for(&db, n, e, TripleIndex::compact_selected()).is_ok());
+    // Vary each part independently, so no one of them alone can be the
+    // thing actually being checked.
+    for changed in [
+        SidecarKey {
+            edge_count: key.edge_count + 1,
+            ..key
+        },
+        SidecarKey {
+            node_count: key.node_count + 1,
+            ..key
+        },
+        SidecarKey {
+            graph_id: key.graph_id ^ 0xdead_beef,
+            ..key
+        },
+    ] {
+        assert!(matches!(
+            persist::read_for(&changed, compact),
+            Err(Reject::Fingerprint { .. })
+        ));
+    }
+    assert!(persist::read_for(&key, compact).is_ok());
 }
 
 /// A sidecar holding the other representation must be refused rather than
@@ -208,13 +225,13 @@ fn the_other_representation_is_refused() {
     let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("repr");
     let store = LazyGraphStore::open(&db).unwrap();
-    let (n, e) = counts(&db);
+    let key = key_for(&db);
     let idx = TripleIndex::from_graph(&store);
     // Whatever this process built, ask for the opposite.
-    let bytes = persist::encode(&idx, n, e);
+    let bytes = persist::encode(&idx, &key);
     let other = !TripleIndex::compact_selected();
     assert!(matches!(
-        persist::decode(&bytes, n, e, other),
+        persist::decode(&bytes, &key, other),
         Err(Reject::Repr { .. })
     ));
 }
@@ -227,7 +244,7 @@ fn damaged_sidecars_are_refused_without_panicking() {
     let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("damaged");
     write_sidecar(&db);
-    let (n, e) = counts(&db);
+    let key = key_for(&db);
     let path = persist::path_for(&db);
     let good = std::fs::read(&path).unwrap();
     let compact = TripleIndex::compact_selected();
@@ -235,14 +252,14 @@ fn damaged_sidecars_are_refused_without_panicking() {
     // Not one of ours.
     std::fs::write(&path, b"this is not an index at all, not even close").unwrap();
     assert_eq!(
-        persist::read_for(&db, n, e, compact).err(),
+        persist::read_for(&key, compact).err(),
         Some(Reject::BadMagic)
     );
 
     // Shorter than the header.
     std::fs::write(&path, &good[..8]).unwrap();
     assert_eq!(
-        persist::read_for(&db, n, e, compact).err(),
+        persist::read_for(&key, compact).err(),
         Some(Reject::TooShort)
     );
 
@@ -250,7 +267,7 @@ fn damaged_sidecars_are_refused_without_panicking() {
     // the point; that it reports a truncation instead of panicking is.
     std::fs::write(&path, &good[..good.len() / 2]).unwrap();
     assert!(matches!(
-        persist::read_for(&db, n, e, compact),
+        persist::read_for(&key, compact),
         Err(Reject::Truncated(_))
     ));
 
@@ -259,13 +276,13 @@ fn damaged_sidecars_are_refused_without_panicking() {
     wrong_version[8] = 99;
     std::fs::write(&path, &wrong_version).unwrap();
     assert!(matches!(
-        persist::read_for(&db, n, e, compact),
+        persist::read_for(&key, compact),
         Err(Reject::Version(_))
     ));
 
     // And the good file still loads, so the damage above was the cause.
     std::fs::write(&path, &good).unwrap();
-    assert!(persist::read_for(&db, n, e, compact).is_ok());
+    assert!(persist::read_for(&key, compact).is_ok());
 }
 
 /// A damaged sidecar must not stop the engine: the query still runs, off
@@ -330,4 +347,152 @@ fn order_by_without_limit_does_not_overflow() {
     let mut want = ids.clone();
     want.sort_unstable();
     assert_eq!(ids, want);
+}
+
+// ---------------------------------------------------------------------------
+// Writing the sidecar without being asked, and the two holes that opens.
+// ---------------------------------------------------------------------------
+
+/// Opening a database that has no sidecar leaves one behind, so the next
+/// session reads instead of rebuilding.
+#[test]
+fn a_first_query_leaves_a_sidecar() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let db = build_db("autowrite");
+    let path = persist::path_for(&db);
+    assert!(!path.exists(), "a fresh database starts with no sidecar");
+
+    let first = run_all(&db);
+    assert!(path.exists(), "the first query must leave a sidecar");
+
+    // And what it left is usable: the second session loads it and agrees.
+    assert!(persist::read_for(&key_for(&db), TripleIndex::compact_selected()).is_ok());
+    assert_eq!(run_all(&db), first);
+}
+
+/// `FROGQL_LTJ_PERSIST=0` keeps the index and declines the file.
+#[test]
+fn the_write_has_a_kill_switch() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let db = build_db("nowrite");
+
+    std::env::set_var("FROGQL_LTJ_PERSIST", "0");
+    let got = run_all(&db);
+    std::env::remove_var("FROGQL_LTJ_PERSIST");
+
+    assert!(
+        !persist::path_for(&db).exists(),
+        "the kill switch must leave no sidecar"
+    );
+    // The rows are still right — it declines the file, not the index.
+    std::env::set_var("FROGQL_LTJ_SOURCE", "build");
+    let want = run_all(&db);
+    std::env::remove_var("FROGQL_LTJ_SOURCE");
+    assert_eq!(got, want);
+}
+
+/// The hole a size-only fingerprint leaves: delete one edge, insert
+/// another, save. Both counts come back exactly as they were, while
+/// `materialize_to_graph` has compacted every id past the deletion — so
+/// the old sidecar's triples carry edge ids that now name other edges,
+/// and its `(src, label, tgt)` still describes the edge that was
+/// removed.
+///
+/// This is the case auto-writing turns from narrow into ordinary: before
+/// it, a sidecar only existed if someone had run `ltj_build` by hand.
+#[test]
+fn a_delete_plus_an_equal_sized_insert_is_refused() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let db = build_db("identity");
+    write_sidecar(&db);
+    let before = key_for(&db);
+
+    {
+        use frogql::model::graph_access::GraphAccessMut;
+        use frogql::typing::label_type::LabelType;
+        let store = LazyGraphStore::open(&db).unwrap();
+        // One edge out, one edge in: both counts end where they started.
+        let victim = *store.edges_directed().first().unwrap();
+        store.delete_edge(victim);
+        let nodes = store.nodes();
+        store.insert_edge(
+            nodes[0],
+            nodes[1],
+            true,
+            LabelType::Label("P999".into()),
+            Default::default(),
+        );
+        store.save(&db).unwrap();
+    }
+
+    let after = key_for(&db);
+    assert_eq!(
+        (before.node_count, before.edge_count),
+        (after.node_count, after.edge_count),
+        "the premise: the counts must be unchanged, or this proves nothing \
+         about what the counts can catch"
+    );
+    assert_ne!(
+        before.graph_id, after.graph_id,
+        "a save must stamp a new identity"
+    );
+
+    // `save` deletes the sidecar outright, so there is nothing to load.
+    // Put the old one back to check the fingerprint would have refused it
+    // anyway: deletion is hygiene, the fingerprint is the guarantee.
+    assert!(
+        !persist::path_for(&db).exists(),
+        "save must clear the sidecar"
+    );
+    let store = LazyGraphStore::open(&db).unwrap();
+    let stale = TripleIndex::from_graph(&store);
+    persist::write_to_path(&stale, &persist::path_for(&db), &before).unwrap();
+    assert!(matches!(
+        persist::read_for(&after, TripleIndex::compact_selected()),
+        Err(Reject::Fingerprint { .. })
+    ));
+}
+
+/// A session holding an unsaved mutation must not read the sidecar: the
+/// file describes the graph before the insert, and the counts it is
+/// checked against are the on-disk ones, so the fingerprint matches and
+/// the index comes back without the new edge.
+#[test]
+fn a_pending_mutation_does_not_read_the_sidecar() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let db = build_db("pending");
+    write_sidecar(&db);
+
+    use frogql::model::graph_access::GraphAccessMut;
+    use frogql::typing::label_type::LabelType;
+    let store = LazyGraphStore::open(&db).unwrap();
+    let rt = Runtime::new(&store);
+
+    let q = "MATCH (a:Img)-[:P999]->(b:Img) RETURN a.id, b.id";
+    let compiled = frogql::compile_query(q).unwrap();
+    let rows = |rt: &Runtime<'_, LazyGraphStore>| match rt.run_query(&compiled, 0) {
+        QueryResult::Projected(rows) => rows.len(),
+        other => panic!("expected a projection, got {other:?}"),
+    };
+    assert_eq!(rows(&rt), 0, "the fixture has no P999 edge yet");
+
+    let nodes = store.nodes();
+    store.insert_edge(
+        nodes[0],
+        nodes[1],
+        true,
+        LabelType::Label("P999".into()),
+        Default::default(),
+    );
+    rt.invalidate_caches();
+
+    assert!(
+        store.index_sidecar_key().is_none(),
+        "a pending topology change must withdraw the sidecar key"
+    );
+    assert_eq!(
+        rows(&rt),
+        1,
+        "the query must see the inserted edge, not the sidecar's graph"
+    );
 }

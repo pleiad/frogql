@@ -1,12 +1,14 @@
 //! Build the LTJ index once and write it beside the database.
 //!
 //! ```text
-//! ltj_build <db.gdb> [--compact] [--force]
+//! ltj_build <db.gdb> [--array | --compact] [--force]
 //!
-//!   --compact   build the CLTJ succinct representation instead of the
-//!               six sorted arrays (same as FROGQL_LTJ_COMPACT=1). The
-//!               sidecar records which one it holds, and a session
-//!               configured for the other rebuilds rather than loading it.
+//!   --array     build the six sorted arrays instead of the CLTJ succinct
+//!               tries (same as FROGQL_LTJ_REPR=array). The sidecar records
+//!               which representation it holds, and a session configured
+//!               for the other rebuilds rather than loading it.
+//!   --compact   build the succinct tries — the default, so this only
+//!               states it explicitly.
 //!   --force     rewrite even when a valid sidecar is already there
 //! ```
 //!
@@ -21,11 +23,9 @@
 //! is that opening reads instead of sorting.
 //!
 //! Rerun it after any change to the database. The sidecar carries a
-//! `(node count, edge count)` fingerprint and is ignored when the graph no
-//! longer matches, so a stale file costs a rebuild rather than a wrong
-//! answer — but it is a coarse signature, and a delete plus an
-//! equal-sized insert would slip past it. Deleting the sidecar always
-//! forces a rebuild.
+//! fingerprint of the graph it was built from and is ignored when the
+//! graph no longer matches, so a stale file costs a rebuild rather than a
+//! wrong answer. Deleting the sidecar always forces a rebuild.
 
 use std::path::{Path, PathBuf};
 use std::process;
@@ -38,10 +38,11 @@ use frogql::store::lazy::LazyGraphStore;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: ltj_build <db.gdb> [--compact] [--force]\n\
+        "usage: ltj_build <db.gdb> [--array | --compact] [--force]\n\
          \n\
          options:\n  \
-           --compact   build the succinct CLTJ representation (smaller, slower to query)\n  \
+           --array     build the six sorted arrays (larger, faster to query)\n  \
+           --compact   build the succinct CLTJ representation (the default)\n  \
            --force     rewrite even when a valid sidecar already exists"
     );
     process::exit(2)
@@ -49,11 +50,12 @@ fn usage() -> ! {
 
 fn main() {
     let mut db: Option<PathBuf> = None;
-    let mut compact = false;
+    let mut repr: Option<&'static str> = None;
     let mut force = false;
     for a in std::env::args().skip(1) {
         match a.as_str() {
-            "--compact" => compact = true,
+            "--compact" => repr = Some("compact"),
+            "--array" => repr = Some("array"),
             "--force" => force = true,
             "-h" | "--help" => usage(),
             other if other.starts_with('-') => {
@@ -72,9 +74,11 @@ fn main() {
     let db = db.unwrap_or_else(|| usage());
 
     // The representation is chosen by the same env var the engine reads,
-    // so the flag cannot select one thing and the build another.
-    if compact {
-        std::env::set_var("FROGQL_LTJ_COMPACT", "1");
+    // so the flag cannot select one thing and the build another. With no
+    // flag the environment (and past it, the default) decides, which is
+    // what makes `ltj_build db.gdb` write what `frogql db.gdb` wants.
+    if let Some(r) = repr {
+        std::env::set_var("FROGQL_LTJ_REPR", r);
     }
     let compact = TripleIndex::compact_selected();
 
@@ -86,13 +90,14 @@ fn main() {
             process::exit(1);
         }
     };
-    let (nodes, edges) = match store.index_sidecar_key() {
-        Some((_, n, e)) => (n, e),
+    let key = match store.index_sidecar_key() {
+        Some(k) => k,
         None => {
             eprintln!("error: {} has no on-disk identity", db.display());
             process::exit(1);
         }
     };
+    let (nodes, edges) = (key.node_count, key.edge_count);
     eprintln!(
         "opened {} ({nodes} nodes, {edges} edges) in {:.1}s",
         db.display(),
@@ -101,7 +106,7 @@ fn main() {
 
     let path = persist::path_for(&db);
     if !force {
-        if let Ok(existing) = persist::read_for(&db, nodes, edges, compact) {
+        if let Ok(existing) = persist::read_for(&key, compact) {
             let n = existing.len();
             println!(
                 "{} is already current ({n} triples, {} representation); \
@@ -123,7 +128,7 @@ fn main() {
     );
 
     let t_write = Instant::now();
-    if let Err(e) = persist::write_to_path(&index, &path, nodes, edges) {
+    if let Err(e) = persist::write_to_path(&index, &path, &key) {
         eprintln!("error: cannot write {}: {e}", path.display());
         process::exit(1);
     }
@@ -140,7 +145,7 @@ fn main() {
     // A sidecar that cannot be read back is worse than none: the engine
     // would fall through to a rebuild and the file would be dead weight
     // nobody notices. Prove the round trip before claiming success.
-    match persist::read_for(&db, nodes, edges, compact) {
+    match persist::read_for(&key, compact) {
         Ok(back) if back.len() == index.len() => {
             eprintln!("verified: reads back as {} triples", back.len())
         }

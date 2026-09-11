@@ -56,6 +56,7 @@ database ready for `INSERT` + `.save`.
 | `FROGQL_AUTO_INDEX_KINDS=both\|hash\|btree\|none` | Which kinds the auto-builder produces (default `both`; same as `--auto-indexes`). |
 | `FROGQL_DISABLE_INDEX_FOLD=1` | Keep the indexes, but skip the LTJ pre-pass that folds `x.attr = k` into a pinned constant and range predicates into a `NodeInSet`. Isolates "does the index exist" from "does the optimizer use it". |
 | `FROGQL_LTJ_SOURCE=build` | Ignore `<db>.ltj` and rebuild the LTJ index from the graph. The kill switch the persistence differential test A/Bs against. |
+| `FROGQL_LTJ_PERSIST=0` | Build the index but do not write `<db>.ltj`. Declines the file, not the index. |
 
 **Which kind serves what.** The auto-builder indexes every `(label, prop)`
 whose values are unique within the label, and by default builds a hash
@@ -81,11 +82,14 @@ killed by the OOM reaper:
 `--no-auto-indexes` predates this and is all-or-nothing; `hash` is usually
 what an RDF-shaped workload wants.
 
-**Persisting the LTJ index.** `ltj_build <db.gdb> [--compact]` writes
-`<db>.ltj` once, and every later open reads it instead of rebuilding:
+**Persisting the LTJ index.** This happens on its own: the first open of
+a database with no usable `<db>.ltj` builds the index, writes it, and
+every later open reads it instead of rebuilding. `ltj_build <db.gdb>
+[--array | --compact] [--force]` does the same ahead of time, for a
+database you would rather warm than wait on:
 
 ```bash
-ltj_build db.gdb --compact     # once, after building or changing the graph
+ltj_build db.gdb               # optional; the first query would do it anyway
 frogql db.gdb                  # finds db.gdb.ltj and loads it
 ```
 
@@ -101,18 +105,23 @@ same structure the builder produces, filled from a file rather than
 computed, so a query cannot tell them apart — pinned by
 `tests/ltj_persist_test.rs`.
 
-Rerun `ltj_build` after any change to the database. The sidecar carries a
-`(node count, edge count)` fingerprint and is ignored when the graph no
-longer matches; deleting it always forces a rebuild. A sidecar that cannot
-be used — absent, stale, wrong representation, truncated, foreign — is
-always a rebuild and never an error. `FROGQL_TRACE_OPEN=1` prints the
-reason, so a sidecar that is silently never used is diagnosable.
+`.save` deletes the sidecar, and the next open writes a fresh one, so
+there is nothing to rerun after changing the database. The fingerprint is
+`(graph id, node count, edge count)` — the graph id is stamped fresh in
+the file header on every save, which is what catches a delete plus an
+equal-sized insert, where both counts come back unchanged and every id
+past the deletion has moved. A sidecar that cannot be used — absent,
+stale, wrong representation, truncated, foreign — is always a rebuild and
+never an error; so is a write that fails, since the index is in hand and
+the query runs regardless. `FROGQL_TRACE_OPEN=1` prints both, so a
+sidecar that never appears, or silently never loads, is diagnosable.
+`FROGQL_LTJ_PERSIST=0` declines the write.
 
 ### 3.2 Join strategy
 
 | Variable | Effect |
 |---|---|
-| `FROGQL_LTJ_COMPACT=1` | Build the LTJ index as six LOUDS succinct tries instead of six sorted arrays. 2.87× smaller, 1.4–2.1× slower on IC latency. |
+| `FROGQL_LTJ_REPR=array` | Build the LTJ index as six sorted arrays instead of six LOUDS succinct tries. 2.87× larger, 1.4–2.1× faster on IC latency. The tries are the **default**; this restores the old representation. Same rows either way. |
 | `FROGQL_DISABLE_ANYDIR_LTJ=1` | Force the hash-join fallback for any-direction (`-[e]-`) patterns, and skip building the mirrored index entirely. |
 | `FROGQL_DISABLE_SEEDED_REPEAT=1` | Use the legacy global repetition path instead of the seeded adjacency traversal. |
 | `FROGQL_DISABLE_REPEAT_UNROLL=1` | Keep bounded `{n,m}` repetitions as `Repeat` instead of unrolling to a Union of LTJ-eligible arms. |
@@ -205,22 +214,26 @@ Reproduce the first two with `cargo run --release --bin ltj_index_stats -- <db.g
 frogql db.gdb --no-auto-indexes
 ```
 
-That is the whole recipe. Adding `FROGQL_LTJ_COMPACT=1` makes peak RSS
-**worse**, not better. Measured at SF0.1 on `MATCH (p:Person) RETURN
-COUNT(p)`, same run, peak RSS:
+That is the whole recipe. The compact index — the default since the flip
+— is what lowers *resident* size, and it raises the **peak**, so a run
+measuring the floor wants `--no-auto-indexes` and not a representation
+change. Measured at SF0.1 on `MATCH (p:Person) RETURN COUNT(p)`, same
+run, peak RSS, with the labels as they were before compact became the
+default:
 
 | Configuration | Peak RSS |
 |---|---|
-| default | 482 MiB |
-| `--no-auto-indexes` | **365 MiB** |
-| `FROGQL_LTJ_COMPACT=1` | 516 MiB |
-| both | 415 MiB |
+| arrays | 482 MiB |
+| arrays + `--no-auto-indexes` | **365 MiB** |
+| compact | 516 MiB |
+| compact + `--no-auto-indexes` | 415 MiB |
 
 The compact index is 2.87× smaller *once built*, but building it sorts a
 temporary vector per trie, and that transient exceeds what the smaller
-steady-state structure saves. Reach for `FROGQL_LTJ_COMPACT` when the
-session is long-lived and you care about resident size after warm-up; reach
-for `--no-auto-indexes` when you care about the peak.
+steady-state structure saves. The saving is what a long-lived session
+lives on; `--no-auto-indexes` is what moves the peak. Note the
+sidecar changes this: an index that is *loaded* rather than built pays no
+transient at all.
 
 Queries get slower either way. This is a mode for measuring the memory
 floor, not for latency numbers.
@@ -233,9 +246,11 @@ and the process is killed before it answers anything. What that machine
 runs is:
 
 ```bash
-ltj_build db.gdb --compact      # once
-FROGQL_LTJ_COMPACT=1 FROGQL_AUTO_INDEX_KINDS=hash frogql db.gdb
+FROGQL_AUTO_INDEX_KINDS=hash frogql db.gdb
 ```
+
+The compact index and the sidecar are both defaults now, so the only
+thing left to say is which index kinds to build.
 
 | | default | above |
 |---|---|---|
@@ -290,19 +305,19 @@ error.
 
 ## 6. Gotchas
 
-**The LTJ sidecar is opt-in and never written by itself.** Nothing creates
-`<db>.ltj` except `ltj_build`, and nothing deletes it when the graph
-changes. The fingerprint stops a stale one from being *used*, but it is
-`(node count, edge count)` — coarse enough that a delete plus an
-equal-sized insert followed by a save would slip past it. Rerun `ltj_build`
-after changing the database, or delete the sidecar.
+**Opening a database writes a file next to it.** The first open with no
+usable `<db>.ltj` leaves one behind, sized with the index — a large graph
+means a large sidecar. `FROGQL_LTJ_PERSIST=0` declines it, and a
+directory you cannot write to declines it for you, silently, since the
+index is already in hand. Only the plain six-ordering index is written;
+the any-direction mirror stays lazy and unpersisted.
 
 **A sidecar written for the other representation is refused, not
-converted.** `FROGQL_LTJ_COMPACT` selects which index a session wants, and
-loading the other one would silently change which algorithm runs. So
-`ltj_build db.gdb` followed by `FROGQL_LTJ_COMPACT=1 frogql db.gdb` rebuilds
-from scratch and the sidecar is dead weight. Build the one you intend to
-run, and check with `FROGQL_TRACE_OPEN=1`:
+converted.** `FROGQL_LTJ_REPR` selects which index a session wants, and
+loading the other one would silently change which algorithm runs. So a
+sidecar built under `FROGQL_LTJ_REPR=array` is dead weight for a default
+session, which rebuilds from scratch and overwrites it. Check with
+`FROGQL_TRACE_OPEN=1`:
 
 ```
 LTJ sidecar not used: sidecar holds the array index, this session wants compact
@@ -334,11 +349,13 @@ LIMIT 1` at SF0.1: 0.71 GiB / 0.9 s with mixed LTJ, versus 1.88 GiB / 4.0 s
 with `FROGQL_DISABLE_ANYDIR_LTJ=1`. Use the switch for differential testing,
 not to save memory.
 
-**`FROGQL_LTJ_COMPACT` raises peak RSS while lowering steady-state.** The
-compact index is 2.87× smaller once built (47.6 vs 136.6 MiB), but the build
-sorts a temporary vector per trie, and that transient costs more than the
-structure saves: 516 MiB peak versus 482 MiB on the default path. It is a
-resident-size optimization, not a peak-memory one.
+**The compact index raises peak RSS while lowering steady-state.** It is
+2.87× smaller once built (47.6 vs 136.6 MiB), but the build sorts a
+temporary vector per trie, and that transient costs more than the
+structure saves: 516 MiB peak versus 482 MiB with arrays. It is a
+resident-size win, not a peak-memory one — and only on the *build*: an
+index loaded from `<db>.ltj` pays no transient, which is the other half
+of why the sidecar is now written without being asked.
 
 **`--no-typecheck` is not just a speed knob.** The typechecker is what
 rejects unbounded repetition without a §16.6 prefix. Without it, the query

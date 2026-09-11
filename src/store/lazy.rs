@@ -170,6 +170,11 @@ pub struct LazyGraphStore {
     /// Read-only after open, so it is a plain field rather than a
     /// `RefCell`: `&self` methods hand out `&VectorSet` directly.
     vectors: VectorStore,
+
+    /// The header's identity stamp for this file image, carried so the
+    /// sidecar key can include it. `0` for a legacy file written before
+    /// the slot existed. See `FileHeader::graph_id`.
+    graph_id: u64,
 }
 
 impl LazyGraphStore {
@@ -330,6 +335,7 @@ impl LazyGraphStore {
 
         let catalog_root = pager.header.catalog_root;
         let secondary_index_root = pager.header.secondary_index_root;
+        let graph_id = pager.header.graph_id;
         let mut store = LazyGraphStore {
             pager: RefCell::new(pager),
             strings,
@@ -354,6 +360,7 @@ impl LazyGraphStore {
             overlay: RefCell::new(MutationOverlay::default()),
             db_path: db_path.to_path_buf(),
             vectors: VectorStore::empty(),
+            graph_id,
         };
 
         let t2 = std::time::Instant::now();
@@ -1069,7 +1076,21 @@ impl LazyGraphStore {
         // pass populates buckets from the on-disk node records, then
         // replays the DDL list on top.
         let specs: Vec<_> = self.secondary.borrow().list().to_vec();
-        super::io::save_graph_with_catalog_and_indexes_atomic(&g, &cat, &specs, db_path)
+        super::io::save_graph_with_catalog_and_indexes_atomic(&g, &cat, &specs, db_path)?;
+        // The saved file is a new image: `materialize_to_graph` compacted
+        // the ids, so every id in the old `<db>.ltj` may now name a
+        // different element. The identity stamp in the new header already
+        // makes that sidecar unusable — this deletes it so the disk it
+        // occupies goes back, rather than leaving a file that is only
+        // ever read far enough to be refused.
+        //
+        // Deleted rather than rebuilt: rebuilding here would put the
+        // whole index build inside `.save` (252 s, measured, at 617 M
+        // edges) for a session that may never query again. The next open
+        // rebuilds it and writes it, which is where that cost already
+        // belongs.
+        let _ = crate::runtime::ltj::persist::remove_for(db_path);
+        Ok(())
     }
 }
 
@@ -1450,23 +1471,30 @@ impl GraphAccess for LazyGraphStore {
         self.secondary.borrow().ordered_ids(label, prop, ascending)
     }
 
-    /// Vector search is suspended while the session holds an unsaved
-    /// node insert or delete. Sidecar rows key on graph-internal node
-    /// ids: the overlay hands out ids above the base watermark that no
-    /// sidecar covers, and a delete makes `save()` renumber everything.
-    /// Same guard, and the same reasoning, as `lookup_node_eq` above.
-    /// Property and label mutations are deliberately not a trigger —
-    /// they cannot move a node's id, and a vector is not a property.
-    fn index_sidecar_key(&self) -> Option<(&std::path::Path, usize, usize)> {
-        // The base counts, not the overlay's: a session with pending DML
-        // must not match a sidecar written before it, and `node_count` /
-        // `edge_count` here are the on-disk figures the sidecar was
-        // fingerprinted against.
-        Some((
-            &self.db_path,
-            self.node_count as usize,
-            self.edge_count as usize,
-        ))
+    /// No sidecar while the session holds a mutation the index would not
+    /// know about.
+    ///
+    /// The counts reported here are the **base** ones — the on-disk
+    /// figures a sidecar was fingerprinted against — so a pending insert
+    /// does not move them and the fingerprint check would happily accept
+    /// a file describing the pre-mutation graph. It was reachable: every
+    /// successful DML drops the cached index, and the next query rebuilt
+    /// it by *loading* that file, answering without the row just
+    /// inserted. Refusing the key outright is what closes it; the query
+    /// then builds from base + overlay, which is the state it must see.
+    ///
+    /// Property and node-label mutations are deliberately not a trigger.
+    /// They cannot appear in a triple, so the index is still exact.
+    fn index_sidecar_key(&self) -> Option<crate::model::graph_access::SidecarKey<'_>> {
+        if self.overlay.borrow().affects_triples() {
+            return None;
+        }
+        Some(crate::model::graph_access::SidecarKey {
+            path: &self.db_path,
+            node_count: self.node_count as usize,
+            edge_count: self.edge_count as usize,
+            graph_id: self.graph_id,
+        })
     }
 
     fn vectors(&self, attr: &str) -> Option<&VectorSet> {

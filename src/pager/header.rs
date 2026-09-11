@@ -46,7 +46,9 @@ pub const MIN_READABLE_VERSION: u16 = 1;
 ///   without persisted indexes; auto-builds run normally on open)
 /// bytes 104-107: element-name table root (u32 LE, 0 = legacy file whose
 ///   names live in the main string table)
-/// bytes 108+:  reserved (zeroed)
+/// bytes 108-115: graph identity stamp (u64 LE, 0 = legacy file written
+///   before the slot existed)
+/// bytes 116+:  reserved (zeroed)
 /// ```
 ///
 /// Note: page 0 does NOT use the standard slotted-page cell machinery.
@@ -109,6 +111,27 @@ pub struct FileHeader {
     /// `0` means a legacy file whose names are interned in the main
     /// string table; readers fall back to resolving there.
     pub names_root: u32,
+
+    /// A fresh value stamped on **every** save, identifying this
+    /// particular image of the graph.
+    ///
+    /// Sidecars (the LTJ index, and in time the vectors) key on
+    /// graph-internal ids, and `save` renumbers them: `materialize_to_graph`
+    /// compacts ids, so deleting one node and inserting another leaves
+    /// `(node_count, edge_count)` untouched while every id past the
+    /// deletion now names a different element. A size-only fingerprint
+    /// accepts that file and answers with the wrong elements, silently.
+    /// An identity stamp cannot: it changes whenever the file is
+    /// rewritten, whether or not the counts moved.
+    ///
+    /// It is deliberately not a content hash. Hashing the graph to decide
+    /// whether the index is stale costs a pass over the graph, which is
+    /// the same order as rebuilding the index it was meant to save.
+    ///
+    /// `0` means a legacy file written before the slot existed. Readers
+    /// fall back to the counts alone, which is exactly the guarantee
+    /// those files already had.
+    pub graph_id: u64,
 }
 
 impl Default for FileHeader {
@@ -133,6 +156,7 @@ impl Default for FileHeader {
             csr_adjacency_root: 0,
             secondary_index_root: 0,
             names_root: 0,
+            graph_id: 0,
         }
     }
 }
@@ -162,6 +186,26 @@ fn decode_active_name(bytes: &[u8]) -> Option<String> {
     std::str::from_utf8(&bytes[..end])
         .ok()
         .map(|s| s.to_string())
+}
+
+/// A value that differs from every other this build hands out: a fresh
+/// `RandomState` (its seed advances per call within a process) mixed with
+/// the wall clock (so two processes starting at once still differ).
+///
+/// No dependency, and none needed: this identifies a file image against
+/// the sidecars written for it, so "unpredictable" is not a requirement
+/// and "collides only by accident" is.
+pub fn new_graph_id() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    h.write_u64(nanos);
+    h.write_u32(std::process::id());
+    // 0 is the legacy sentinel, so never hand it out.
+    h.finish() | 1
 }
 
 impl FileHeader {
@@ -195,6 +239,7 @@ impl FileHeader {
         d[96..100].copy_from_slice(&self.csr_adjacency_root.to_le_bytes());
         d[100..104].copy_from_slice(&self.secondary_index_root.to_le_bytes());
         d[104..108].copy_from_slice(&self.names_root.to_le_bytes());
+        d[108..116].copy_from_slice(&self.graph_id.to_le_bytes());
 
         page
     }
@@ -232,6 +277,12 @@ impl FileHeader {
             // re-saved with this field present.
             secondary_index_root: u32::from_le_bytes([d[100], d[101], d[102], d[103]]),
             names_root: u32::from_le_bytes([d[104], d[105], d[106], d[107]]),
+            // Legacy files have 0 here: the range was reserved + zeroed.
+            // `0` is read as "this file has no identity", and a sidecar
+            // for it is judged on the counts alone.
+            graph_id: u64::from_le_bytes([
+                d[108], d[109], d[110], d[111], d[112], d[113], d[114], d[115],
+            ]),
         })
     }
 }

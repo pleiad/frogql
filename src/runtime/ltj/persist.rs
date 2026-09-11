@@ -34,12 +34,17 @@
 //! | word size + endianness | a sidecar written on another machine |
 //! | graph fingerprint | a `.gdb` that changed under it |
 //!
-//! The fingerprint is `(node_count, edge_count)`, the same coarse
-//! signature the vector sidecars use, with the same known limit: it will
-//! not catch a delete plus an equal-sized insert followed by a save. The
-//! in-session guard covers that while a session lasts — `invalidate_caches`
-//! drops the index after every DML — and `.ltj` is only ever written by an
-//! explicit command, never as a side effect of a mutation.
+//! The fingerprint mixes the graph's **identity stamp** with its node and
+//! edge counts. The counts alone were the earlier signature and they miss
+//! the case that matters most once the sidecar is written automatically:
+//! `save` compacts ids, so a delete plus an equal-sized insert comes back
+//! with both counts unchanged while every id past the deletion names a
+//! different element — the sidecar is accepted and answers about the
+//! wrong nodes, in silence. `FileHeader::graph_id` is stamped fresh on
+//! every save, so it moves whenever the file was rewritten, whatever the
+//! counts did. A legacy `.gdb` written before the slot existed reports
+//! `0` and is judged on the counts alone, which is the guarantee it
+//! already had.
 //!
 //! # Layout
 //!
@@ -55,7 +60,7 @@
 //! version      4   u32
 //! word_bits    4   u32   (8 * size_of::<usize>())
 //! endian       8   u64   0x0102_0304_0506_0708, read back to detect a swap
-//! fingerprint  8   u64
+//! fingerprint  8   u64   (graph id + node count + edge count)
 //! repr         1   u8    0 = six sorted arrays, 1 = compact LOUDS
 //! pad          7
 //! labels          u64 count, then per label: u64 byte length + bytes + pad
@@ -65,11 +70,16 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::model::graph_access::SidecarKey;
+
 use super::compact::{CompactTrie, CompactTripleIndex, IntSeq, SelectBitVec};
 use super::triple_index::{IndexEntry, IndexRepr, TripleIndex};
 
 const MAGIC: &[u8; 8] = b"FROGLTJ1";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+// v1 fingerprinted on the counts alone. The bump is what makes an old
+// sidecar report "version 1 is not 2" instead of the misleading "graph
+// changed" the new fingerprint would produce for a file nobody touched.
 /// Written as-is and compared on read: a byte-swapped value means the
 /// sidecar came from the other endianness and the payload cannot be
 /// reinterpreted.
@@ -85,13 +95,13 @@ pub fn path_for(db: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Coarse signature of the graph the index was built from.
-pub fn fingerprint(node_count: usize, edge_count: usize) -> u64 {
+/// Signature of the graph image the index was built from.
+pub fn fingerprint(key: &SidecarKey<'_>) -> u64 {
     // Same mixing as `vector::sidecar::fingerprint`, kept separate so the
     // two sidecars can diverge without silently accepting each other's
     // values.
     let mut h = 0xcbf2_9ce4_8422_2325u64;
-    for v in [node_count as u64, edge_count as u64] {
+    for v in [key.graph_id, key.node_count as u64, key.edge_count as u64] {
         h ^= v;
         h = h.wrapping_mul(0x1000_0000_01b3);
     }
@@ -188,15 +198,15 @@ fn put_u64_array(out: &mut Vec<u8>, v: &[u64]) {
     }
 }
 
-/// Serialize an index. The graph's counts go in so the reader can tell
-/// whether the `.gdb` moved underneath it.
-pub fn encode(index: &TripleIndex, node_count: usize, edge_count: usize) -> Vec<u8> {
+/// Serialize an index. The graph's signature goes in so the reader can
+/// tell whether the `.gdb` moved underneath it.
+pub fn encode(index: &TripleIndex, key: &SidecarKey<'_>) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
     out.extend_from_slice(&(8 * std::mem::size_of::<usize>() as u32).to_le_bytes());
     put_u64(&mut out, ENDIAN_PROBE);
-    put_u64(&mut out, fingerprint(node_count, edge_count));
+    put_u64(&mut out, fingerprint(key));
     out.push(match index.repr_ref() {
         IndexRepr::Array(_) => REPR_ARRAY,
         IndexRepr::Compact(_) => REPR_COMPACT,
@@ -249,15 +259,27 @@ pub fn encode(index: &TripleIndex, node_count: usize, edge_count: usize) -> Vec<
 /// Write the sidecar atomically: full contents to `<path>.tmp`, then
 /// rename. A crash mid-write must never leave a half-parsed index that
 /// the header would nonetheless accept.
-pub fn write_to_path(
-    index: &TripleIndex,
-    path: &Path,
-    node_count: usize,
-    edge_count: usize,
-) -> io::Result<()> {
+pub fn write_to_path(index: &TripleIndex, path: &Path, key: &SidecarKey<'_>) -> io::Result<()> {
     let tmp = path.with_extension("ltj.tmp");
-    std::fs::write(&tmp, encode(index, node_count, edge_count))?;
+    std::fs::write(&tmp, encode(index, key))?;
     std::fs::rename(&tmp, path)
+}
+
+/// Write the sidecar for the database `key` names. The path is derived
+/// rather than passed, so a caller cannot write one graph's index beside
+/// another graph's file.
+pub fn write_for(index: &TripleIndex, key: &SidecarKey<'_>) -> io::Result<()> {
+    write_to_path(index, &path_for(key.path), key)
+}
+
+/// Remove the sidecar beside `db`, if there is one. Absence is success:
+/// the caller wants "no stale index here", not "a file was deleted".
+pub fn remove_for(db: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path_for(db)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -335,12 +357,7 @@ impl<'a> Cursor<'a> {
 /// `want_compact` is the representation the session is configured for:
 /// loading the other one would silently change which algorithm runs, so
 /// it is a rejection rather than a conversion.
-pub fn decode(
-    buf: &[u8],
-    node_count: usize,
-    edge_count: usize,
-    want_compact: bool,
-) -> Result<TripleIndex, Reject> {
+pub fn decode(buf: &[u8], key: &SidecarKey<'_>, want_compact: bool) -> Result<TripleIndex, Reject> {
     let mut c = Cursor { buf, at: 0 };
     if buf.len() < 40 {
         return Err(Reject::TooShort);
@@ -359,7 +376,7 @@ pub fn decode(
     if c.u64("endian probe")? != ENDIAN_PROBE {
         return Err(Reject::Endianness);
     }
-    let want_fp = fingerprint(node_count, edge_count);
+    let want_fp = fingerprint(key);
     let got_fp = c.u64("fingerprint")?;
     if got_fp != want_fp {
         return Err(Reject::Fingerprint {
@@ -451,16 +468,11 @@ pub fn decode(
 }
 
 /// Load a sidecar for `db`, or say why it cannot be used.
-pub fn read_for(
-    db: &Path,
-    node_count: usize,
-    edge_count: usize,
-    want_compact: bool,
-) -> Result<TripleIndex, Reject> {
-    let path = path_for(db);
+pub fn read_for(key: &SidecarKey<'_>, want_compact: bool) -> Result<TripleIndex, Reject> {
+    let path = path_for(key.path);
     if !path.exists() {
         return Err(Reject::Missing);
     }
     let buf = std::fs::read(&path).map_err(|e| Reject::Io(e.to_string()))?;
-    decode(&buf, node_count, edge_count, want_compact)
+    decode(&buf, key, want_compact)
 }

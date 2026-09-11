@@ -4,6 +4,25 @@ use crate::typing::label_type::LabelType;
 
 /// Trait abstracting graph data access.
 /// All IDs are internal u32 identifiers. String conversion is only at boundaries.
+/// What identifies the graph an index sidecar was built from.
+///
+/// `node_count` and `edge_count` catch the ordinary changes: an insert or
+/// a delete moves one of them and the sidecar is refused. They cannot
+/// catch a delete plus an equal-sized insert, because `save` compacts ids
+/// and the counts come back equal while every id past the deletion names
+/// a different element — which is why `graph_id` is here. It is stamped
+/// fresh on every save, so it differs whenever the file was rewritten,
+/// whatever the counts did. `0` means a legacy file that predates the
+/// stamp; such a file is judged on the counts alone, which is exactly the
+/// guarantee it already had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidecarKey<'a> {
+    pub path: &'a std::path::Path,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub graph_id: u64,
+}
+
 pub trait GraphAccess {
     /// All node internal IDs.
     fn nodes(&self) -> Vec<Id>;
@@ -101,19 +120,21 @@ pub trait GraphAccess {
     // --- Index sidecars ---
 
     /// Where a persisted index for this store would live, and what graph
-    /// it would have to describe: `(db path, node count, edge count)`.
+    /// it would have to describe.
     ///
-    /// Both halves travel together because neither is useful alone — the
-    /// path says which file to read and the counts say whether to believe
-    /// it — and because the counts are free on the backends that have a
-    /// path and would cost a full `nodes()` walk on the one that does not.
+    /// The parts travel together because none is useful alone — the path
+    /// says which file to read and the rest say whether to believe it —
+    /// and because they are free on the backends that have a path and
+    /// would cost a full `nodes()` walk on the one that does not.
     ///
-    /// `None` means "never look for a persisted index", which is right for
-    /// an in-RAM graph: there is no file for a sidecar to sit beside.
+    /// `None` means "never look for a persisted index, and never write
+    /// one". That is right for an in-RAM graph, which has no file for a
+    /// sidecar to sit beside, and for a session holding mutations a
+    /// sidecar cannot describe.
     ///
     /// On the trait, like `vectors`, because the caller that needs it —
     /// `Runtime::triple_index` — is generic over the backend.
-    fn index_sidecar_key(&self) -> Option<(&std::path::Path, usize, usize)> {
+    fn index_sidecar_key(&self) -> Option<SidecarKey<'_>> {
         None
     }
 
