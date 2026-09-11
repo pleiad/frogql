@@ -18,10 +18,12 @@ pub enum TrieOrder {
 /// The meaning of each component depends on the TrieOrder.
 pub type IndexEntry = (u32, u32, u32, u32);
 
-/// Physical representation of the six orderings. `Array` is the original
-/// simplified implementation (six fully-materialized sorted tuple arrays);
-/// `Compact` is the CLTJ port (six LOUDS succinct tries + an eid side table,
-/// issue #66). Selected at build time via `FROGQL_LTJ_COMPACT=1`.
+/// Physical representation of the six orderings. `Compact` is the CLTJ
+/// port (six LOUDS succinct tries + an eid side table, issue #66) and the
+/// **default**; `Array` is the original simplified implementation (six
+/// fully-materialized sorted tuple arrays), kept as the opt-in for a
+/// workload that would rather spend 2.9× the memory than 1.4–2.1× the
+/// query latency. Selected at build time by `compact_selected`.
 pub(crate) enum IndexRepr {
     Array([Vec<IndexEntry>; 6]),
     Compact(Box<CompactTripleIndex>),
@@ -172,13 +174,34 @@ impl TripleIndex {
         }
     }
 
-    /// `FROGQL_LTJ_COMPACT=1` selects the compact CLTJ representation at
-    /// build time; default stays on the array implementation.
-    /// Whether this process wants the succinct representation. Public so
-    /// `ltj_build` selects exactly what a session would, rather than
-    /// duplicating the rule and drifting from it.
+    /// Whether this process wants the succinct representation.
+    ///
+    /// **Compact is the default.** The two representations answer
+    /// identically (`tests/compact_ltj_test.rs` pins that), so the choice
+    /// is entirely about what the index costs: at SF0.1 compact is 47.6
+    /// MiB against 136.6 MiB, 2.87× smaller, and 1.4–2.1× slower on IC
+    /// medians. That ratio does not stay abstract at scale — a 617 M-edge
+    /// RDF dump is ~20 GB compact against ~59 GB in arrays, and the arrays
+    /// stop fitting long before the tries do. An index that does not fit
+    /// is infinitely slower than one that does, so the smaller structure
+    /// is the right default and the faster one is the opt-in for a
+    /// workload that has the memory to spend.
+    ///
+    /// `FROGQL_LTJ_REPR=array` is the escape hatch, in the shape
+    /// `FROGQL_VEO=simple` already established. `FROGQL_LTJ_COMPACT` is
+    /// honoured as a legacy alias — `0` means arrays, anything else
+    /// compact — so scripts written before the flip still select what
+    /// they named.
+    ///
+    /// Public so `ltj_build` selects exactly what a session would, rather
+    /// than duplicating the rule and drifting from it.
     pub fn compact_selected() -> bool {
-        std::env::var("FROGQL_LTJ_COMPACT").is_ok_and(|v| v == "1")
+        match std::env::var("FROGQL_LTJ_REPR").as_deref() {
+            Ok("array") => return false,
+            Ok("compact") => return true,
+            _ => {}
+        }
+        std::env::var("FROGQL_LTJ_COMPACT").as_deref() != Ok("0")
     }
 
     /// The array orderings, when this index was built in array mode.
@@ -363,13 +386,18 @@ mod tests {
 
     #[test]
     fn test_build_from_fraud_graph() {
+        // This case is about the array representation's own invariants
+        // (six equal-length orderings, SPO sorted), so it asks for it by
+        // name rather than relying on the default, which is compact.
+        std::env::set_var("FROGQL_LTJ_REPR", "array");
         let graph = MemoryGraphStore::from_file(Path::new("test_data/fraud.json")).unwrap();
         let idx = TripleIndex::from_graph(&graph);
+        std::env::remove_var("FROGQL_LTJ_REPR");
         assert!(!idx.is_empty());
 
         // All 6 orderings have the same length
         let n = idx.len();
-        let orderings = idx.array().expect("default build is array mode");
+        let orderings = idx.array().expect("built in array mode above");
         for ordering in orderings {
             assert_eq!(ordering.len(), n);
         }

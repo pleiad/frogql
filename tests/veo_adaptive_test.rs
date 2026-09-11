@@ -49,15 +49,12 @@ fn rich() -> MemoryGraphStore {
 
 fn run(g: &MemoryGraphStore, q: &str, adaptive: bool, compact: bool) -> Vec<String> {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // Both sides are set explicitly. The adaptive order is the default
-    // now, so *removing* the variable would run adaptive twice and the
-    // comparison would pass for the wrong reason.
+    // Both sides of both axes are set explicitly. The adaptive order and
+    // the compact representation are the defaults now, so *removing* a
+    // variable would run the same side twice and the comparison would
+    // pass for the wrong reason.
     std::env::set_var("FROGQL_VEO", if adaptive { "adaptive" } else { "simple" });
-    if compact {
-        std::env::set_var("FROGQL_LTJ_COMPACT", "1");
-    } else {
-        std::env::remove_var("FROGQL_LTJ_COMPACT");
-    }
+    std::env::set_var("FROGQL_LTJ_REPR", if compact { "compact" } else { "array" });
     let rt = Runtime::new(g);
     let query = compile_query(q).unwrap();
     let out = match rt.run_query(&query, 0) {
@@ -65,7 +62,7 @@ fn run(g: &MemoryGraphStore, q: &str, adaptive: bool, compact: bool) -> Vec<Stri
         other => panic!("expected projected, got {other:?}"),
     };
     std::env::remove_var("FROGQL_VEO");
-    std::env::remove_var("FROGQL_LTJ_COMPACT");
+    std::env::remove_var("FROGQL_LTJ_REPR");
     let mut keys: Vec<String> = out.iter().map(|r| format!("{r:?}")).collect();
     keys.sort();
     keys

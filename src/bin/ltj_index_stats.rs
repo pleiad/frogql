@@ -29,18 +29,15 @@ fn main() {
 
     #[allow(clippy::type_complexity)]
     let mut results: Vec<(&str, f64, usize, usize, [usize; 6], usize)> = Vec::new();
-    for (name, env) in [("array", None), ("compact", Some("1"))] {
-        match env {
-            Some(v) => std::env::set_var("FROGQL_LTJ_COMPACT", v),
-            None => std::env::remove_var("FROGQL_LTJ_COMPACT"),
-        }
+    for name in ["array", "compact"] {
+        std::env::set_var("FROGQL_LTJ_REPR", name);
         let t0 = Instant::now();
         let idx = TripleIndex::from_graph(&store);
         let secs = t0.elapsed().as_secs_f64();
         let (per, shared) = idx.heap_breakdown();
         results.push((name, secs, idx.heap_bytes(), idx.len(), per, shared));
     }
-    std::env::remove_var("FROGQL_LTJ_COMPACT");
+    std::env::remove_var("FROGQL_LTJ_REPR");
 
     // The store's own resident cost, component by component. Reported
     // alongside the index because the two are what an open database is:
