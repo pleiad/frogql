@@ -595,15 +595,44 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         self.triple_index().clone()
     }
 
-    /// Drop the cached LTJ TripleIndex and EXISTS memo. The next query
-    /// that needs the index will rebuild it from the (possibly mutated)
-    /// graph. Callers invoke this after a successful DML so subsequent
-    /// reads see the post-mutation state.
+    /// The cached index, without building one. `None` means the cache is
+    /// cold — after a mutation, that a refresh fell back to a rebuild.
+    /// Exists so a test can tell "maintained" from "dropped and rebuilt",
+    /// which every answer-level comparison is blind to.
+    pub fn peek_triple_index(&self) -> Option<Arc<TripleIndex>> {
+        self.triple_index.borrow().clone()
+    }
+
+    /// Bring the cached LTJ indexes up to date with the graph, and drop
+    /// the EXISTS / value-subquery memos. Callers invoke this after a
+    /// successful DML so subsequent reads see the post-mutation state.
+    ///
+    /// This used to drop the indexes outright, which made every mutation
+    /// cost a full rebuild — `O(E log E)`, 670 ms at LDBC SF0.1 and 252
+    /// seconds, measured, at 617 M edges — to account for a change of a
+    /// handful of edges. Now the static payload is kept and a small
+    /// delta is recomputed beside it (`ltj::delta`); the rebuild happens
+    /// only when there is no delta that can express the change: a
+    /// backend with no overlay to read, an edge whose *labels* moved
+    /// (the delta can add and remove, not relabel), or a delta grown
+    /// past `MAX_DELTA_TRIPLES`.
+    ///
+    /// Dropping is always the safe answer, so every one of those cases
+    /// falls back to it rather than to a guess.
     pub fn invalidate_caches(&self) {
-        *self.triple_index.borrow_mut() = None;
-        *self.anydir_index.borrow_mut() = None;
+        self.refresh_or_drop(&self.triple_index);
+        self.refresh_or_drop(&self.anydir_index);
         self.exists_cache.borrow_mut().clear();
         self.value_subquery_cache.borrow_mut().clear();
+    }
+
+    fn refresh_or_drop(&self, slot: &RefCell<Option<Arc<TripleIndex>>>) {
+        let current = slot.borrow().clone();
+        let next = current
+            .as_deref()
+            .and_then(|idx| crate::runtime::ltj::delta::refresh(idx, self.graph))
+            .map(Arc::new);
+        *slot.borrow_mut() = next;
     }
 
     /// Read the persisted index if there is a usable one, else build it.
@@ -632,7 +661,17 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         if !forced_build {
             if let Some(key) = &key {
                 match persist::read_for(key, want_compact) {
-                    Ok(idx) => return idx,
+                    Ok(mut idx) => {
+                        // A loaded index describes the on-disk image. The
+                        // sidecar key is withheld while the overlay holds
+                        // anything that would change a triple, so there
+                        // is nothing to catch up on — but the stamp still
+                        // has to record where the overlay stands, or the
+                        // *next* mutation would be measured from zero and
+                        // re-add edges the base already holds.
+                        idx.stamp_overlay(self.graph);
+                        return idx;
+                    }
                     Err(persist::Reject::Missing) => {}
                     Err(why) => {
                         if std::env::var("FROGQL_TRACE_OPEN").is_ok() {

@@ -385,7 +385,16 @@ impl Connection {
         let exec =
             frogql_core::runtime::dm::run_dm(&self.store, &dm, schema_for_validation.as_ref())
                 .map_err(err)?;
-        *self.triple_index.borrow_mut() = None;
+        // Same as the Python binding: keep the static payload and
+        // recompute the delta beside it, falling back to a rebuild only
+        // when no delta can express the change.
+        let refreshed = self
+            .triple_index
+            .borrow()
+            .as_deref()
+            .and_then(|idx| frogql_core::runtime::ltj::delta::refresh(idx, &self.store))
+            .map(Arc::new);
+        *self.triple_index.borrow_mut() = refreshed;
         self.store.catalog_mut().mark_default_dirty();
         Ok(json!({
             "nodesInserted": exec.nodes_inserted,

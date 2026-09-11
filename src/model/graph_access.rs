@@ -138,6 +138,22 @@ pub trait GraphAccess {
         None
     }
 
+    /// What this store's mutation overlay currently holds, in the form
+    /// the LTJ delta needs: the live edges the overlay allocated, the
+    /// tombstoned ids, and the watermark that separates the two from the
+    /// on-disk image.
+    ///
+    /// `None` means "this backend has no overlay", which is the honest
+    /// answer for a purely disk-backed store and the reason a refresh
+    /// falls back to a full rebuild there rather than assuming nothing
+    /// changed.
+    ///
+    /// Deliberately overlay-sized: the point of the delta is not to walk
+    /// the graph, so a method that returned every edge would defeat it.
+    fn edge_mutations(&self) -> Option<crate::runtime::ltj::delta::EdgeMutations> {
+        None
+    }
+
     // --- Vector attributes ---
 
     /// The vectors stored for `attr`, or `None` when the backend has no

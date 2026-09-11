@@ -385,6 +385,31 @@ impl MemoryGraphStore {
 }
 
 impl super::graph_access::GraphAccess for MemoryGraphStore {
+    /// Same shape as `LazyGraphStore`'s: this backend carries the very
+    /// same `MutationOverlay`, so a DML session over an in-RAM graph gets
+    /// the same incremental index. It has no sidecar and no `.gdb`, which
+    /// is a different question from whether its index can be refreshed.
+    fn edge_mutations(&self) -> Option<crate::runtime::ltj::delta::EdgeMutations> {
+        let overlay = self.overlay.borrow();
+        if !overlay.mod_edge_labels.is_empty() {
+            return None;
+        }
+        let live_overlay = overlay
+            .new_edges
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, e)| {
+                let id = overlay.base_edge_count + offset as u32;
+                (!overlay.is_edge_deleted(id)).then_some((id, e.directed))
+            })
+            .collect();
+        Some(crate::runtime::ltj::delta::EdgeMutations {
+            live_overlay,
+            deleted: overlay.deleted_edges.clone(),
+            next_edge_id: overlay.next_edge_id(),
+        })
+    }
+
     fn nodes(&self) -> Vec<Id> {
         let overlay = self.overlay.borrow();
         let mut out: Vec<Id> = (0..overlay.base_node_count)

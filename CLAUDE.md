@@ -81,6 +81,7 @@ Runtime/store toggles for A/B testing and tracing (all read at query/open time; 
 | Var | Effect |
 |---|---|
 | `FROGQL_LTJ_SOURCE=build` | ignore `<db>.ltj` and rebuild the LTJ index from the graph (the kill switch the persistence differential test A/Bs against) |
+| `FROGQL_DISABLE_LTJ_DELTA` | drop the cached LTJ index after every DML instead of maintaining a delta beside it — the kill switch `tests/ltj_delta_test.rs` A/Bs against |
 | `FROGQL_LTJ_PERSIST=0` | build the LTJ index but do not write `<db>.ltj`. The index is written automatically the first time a database is opened without a usable sidecar; this declines the file, not the index |
 | `FROGQL_LTJ_REPR=compact\|array` | which physical representation the LTJ `TripleIndex` is built in (**default `compact`**): six LOUDS succinct tries (issue #66) or six sorted arrays — compact is ~2.9× smaller and 1.4–2.1× slower on IC latency (IC11 faster); differential suite `tests/compact_ltj_test.rs`, size/build stats via the `ltj_index_stats` bin. `FROGQL_LTJ_COMPACT` is honoured as a legacy alias (`0` means arrays) |
 | `FROGQL_DISABLE_ANYDIR_LTJ` | force the hash-join fallback for any-direction (`-[e]-`) patterns instead of the mirrored-index LTJ (`try_ltj_mixed`); checked at the *call site* (`pattern_extract::anydir_ltj_disabled`) so the mirror is never built when disabled |
@@ -258,7 +259,7 @@ The optimizer is reserved for performance-preserving transforms (predicate pushd
 - `Runtime::warm_triple_index() -> Arc<TripleIndex>` — force the cache to build now and hand back the Arc for sharing
 - `Runtime::run_query(&query, limit)` — execute with RETURN projection
 - `Runtime::run_with_limit(&pattern, limit)` — early termination after N results
-- `Runtime::invalidate_caches()` — drops cached `TripleIndex` + EXISTS memo; called after every successful DML so the next query rebuilds against the post-mutation graph
+- `Runtime::invalidate_caches()` — brings the cached `TripleIndex` (and the any-direction mirror) up to date with a `TripleDelta` and clears the EXISTS / value-subquery memos; called after every successful DML. Falls back to dropping the index when no delta can express the change
 - `runtime::dm::run_dm(&store, &dm, schema_for_validation)` — execute one ISO §13 data-modifying statement (INSERT / DELETE / DETACH DELETE). `schema_for_validation` is `Some(&Schema)` only when G2000 should fire (active type is neither DEFAULT nor absent)
 - `LazyGraphStore::open_or_create(path)` — sqlite3-style; creates an empty `.gdb` if `path` doesn't exist, then opens it
 - `LazyGraphStore::save(path)` — atomic save of the merged base+overlay view (tmp+rename); refreshes DEFAULT before persisting
@@ -307,7 +308,7 @@ Operational invariants Claude must keep in mind:
 - **Match-chain elaboration**: `run_dm` runs the MATCH chain through `elaborate::elaborate_query` before iterating. **Skipping elaboration silently drops `value_filters` on descriptors** (`{name: 'Alice'}` becomes equivalent to `{}`) and matches too many rows. The elaborate call lives inside `run_dm` for this reason.
 - **G2000 validation**: per-element check via `typing::validate::*`, fires from `apply_insert_pattern` only when the active GRAPH TYPE is non-DEFAULT (DEFAULT is data-derived).
 - **DEFAULT lifecycle**: `GraphTypeCatalog.default_dirty` (in-RAM only, `#[serde(skip)]`) flips after every successful DML; `refresh_default_if_dirty` re-runs `infer_simple_schema` lazily on `handle_show("DEFAULT")` and `LazyGraphStore::save`. Eager refresh would cost O(N+E) per mutation.
-- **Cache invalidation**: every successful DML calls `Runtime::invalidate_caches()` (REPL) or clears `Connection.triple_index` (Python); next query rebuilds the six-ordering index from base+overlay (~670 ms SF0.1).
+- **Cache invalidation**: every successful DML calls `Runtime::invalidate_caches()` (REPL) or the equivalent `ltj::delta::refresh` on `Connection.triple_index` (Python, Node). The six-ordering index is *kept* and a delta recomputed beside it; a full rebuild happens only when no delta can express the change. See *Join strategy → Maintained incrementally across DML*.
 
 **Persistence (`.save`).** `LazyGraphStore::save(path)` materialises merged base+overlay into a temporary `MemoryGraphStore` and calls `save_graph_with_catalog_and_indexes_atomic` (writes graph + catalog + persisted DDL index list to `<path>.tmp`, atomic `rename`). `LazyGraphStore::open_or_create(path)` mirrors SQLite — non-existent path writes an empty `.gdb` first.
 
@@ -512,6 +513,41 @@ order of rebuilding the index it was meant to save.
 **Two physical representations** (issue #66), selected at index-build time; both drive the same `LtjAlgorithm` through the `LtjIterator` enum:
 - **Array** (`FROGQL_LTJ_REPR=array`): six fully-materialized sorted `Vec<(u32,u32,u32,u32)>`. The iterator recomputes its range from scratch per call (simple, cache-friendly).
 - **Compact CLTJ** (the default): a port of the reference `cltj_index_spo_basic` — six LOUDS succinct tries (`compact.rs`: topology bitvector with sampled select-0 + bit-packed symbol sequence), navigated by a stateful handle-stack iterator (`CompactLtjIterator`, ported from `ltj_iterator_basic.hpp`). Property-graph divergence from the RDF reference: parallel edges collapse into one trie leaf, so the index keeps an SPO-ordered eid side table (`leaf_offsets`/`leaf_eids`) that the base case consults for ISO bag multiplicity. At SF0.1 (1.49 M triples): 47.6 MiB vs 136.6 MiB (**2.87× smaller**), build 1.13 s vs 0.92 s, IC medians 1.4–2.1× slower (succinct-navigation trade-off; IC11 runs 1.5× *faster* compact). **Compact is the default**: the ratio does not stay abstract at scale — a 617 M-edge RDF dump is ~20 GB compact against ~59 GB in arrays, and the arrays stop fitting long before the tries do, at which point the faster representation is infinitely slower than the smaller one. Arrays remain the opt-in for a workload with the memory to spend. Equivalence pinned by `tests/compact_ltj_test.rs`; per-repr size/build stats via the `ltj_index_stats` bin. The metatrie tier (root-sharing across ordering pairs) and the paper's RDF/BGP benchmark remain open in #66.
+
+**Maintained incrementally across DML** (`runtime/ltj/delta.rs`). A
+successful mutation used to drop the cached index, so the next query
+rebuilt all six orderings from the whole graph — `O(E log E)` to account
+for a change of a handful of edges. `Runtime::invalidate_caches` now keeps
+the static payload (behind an `Arc`, so a version that differs only in its
+delta shares it) and recomputes a small `TripleDelta`: six sorted arrays
+of the triples added since, plus the set of edge ids removed.
+`DeltaLtjIterator` merges the two — a leap is the smaller of the two
+sides' leaps, a descent is offered to both — and deletions are enforced
+at the base case, where `current_eids_all` drops the removed ids and an
+empty result is already a rejection. The search still descends into a
+triple whose every edge is gone; that costs a visit and never a row.
+
+Measured on LDBC SF0.3 (908 K nodes / 4.58 M edges, `dml_bench`), first
+query after one DML statement:
+
+| | delta | `FROGQL_DISABLE_LTJ_DELTA=1` |
+|---|---|---|
+| after a node insert | 474 ms | 2879 ms |
+| after an edge insert | 458 ms | 3155 ms |
+| the query after that | 455 ms | 461 ms |
+
+The third row is the cost the design moves onto the query path — every
+`leap` asks two sources — and at this delta size it is under the noise.
+
+Three things fall back to the old full rebuild, because no delta can
+express them: a backend with no overlay to read (`GraphAccess::
+edge_mutations` returns `None`), an edge whose **labels** moved (the
+delta adds and removes, it does not relabel), and a delta grown past
+`MAX_DELTA_TRIPLES`. A delta is always measured from `OverlayStamp` —
+where the overlay stood when the base was built — not from the previous
+delta, so refreshing twice is the same as refreshing once. Compact tries
+are static structures with no insert, which is why "incremental" here
+cannot mean "edit the index" and has to mean a second one alongside.
 
 **Activation** (`run_join`, `run_concat_pattern`): kicks in automatically when the pattern decomposes into triples — chains / comma-joins of directed (`-[]->`), reverse (`<-[]-`), and undirected (`~[e]~`) edges, with or without labels. **Any-direction** (`-[e]-`) chains / comma-joins also run through LTJ — pure *and* mixed with directed / `~` edges. `try_ltj_mixed` decomposes with a per-triple `EdgeKind::AnyDir` tag and routes each iterator to the index its edge kind selects: any-direction triples query a separate mirrored index (`TripleIndex::from_graph_anydir`, every edge stored in both senses), the rest the plain index. The leapfrog intersection joins candidates across the two indexes transparently (node ids are global; both indexes assign label ids in the same edge order). `has_any_direction` gates the choice between `try_ltj` (plain only, mirror stays lazy) and `try_ltj_mixed`; `FROGQL_DISABLE_ANYDIR_LTJ=1` forces the fallback. Falls back to pairwise hash-join only for Unions and Repeats not handled by the unroll optimiser.
 
@@ -926,4 +962,4 @@ Run + chart: `bench_setup` (downloads LDBC SF0.1) → `install_python_deps.sh` �
 
 ## Pending and roadmap
 
-ISO/IEC 39075:2024 features and known carve-outs live in `docs/internals/iso-gql-gaps.md`. Storage-format roadmap (incremental secondary indexes under DML overlay, persisting the TripleIndex, WAL) lives in `docs/internals/storage-architecture.md`.
+ISO/IEC 39075:2024 features and known carve-outs live in `docs/internals/iso-gql-gaps.md`. Storage-format roadmap (incremental secondary indexes under DML overlay, WAL) lives in `docs/internals/storage-architecture.md`. Persisting the TripleIndex and maintaining it under DML are done — see *Join strategy* above.

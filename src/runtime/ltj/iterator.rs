@@ -63,13 +63,27 @@ fn choose_order(fixed: &[SpoPos], querying: SpoPos) -> TrieOrder {
 pub enum LtjIterator<'a> {
     Array(ArrayLtjIterator<'a>),
     Compact(CompactLtjIterator<'a>),
+    /// A static base plus the triples a session has changed since it was
+    /// built. See `DeltaLtjIterator`.
+    Delta(Box<DeltaLtjIterator<'a>>),
 }
 
 impl<'a> LtjIterator<'a> {
     pub fn new(pattern: TriplePattern, index: &'a TripleIndex) -> Self {
-        match index.compact() {
-            Some(c) => LtjIterator::Compact(CompactLtjIterator::new(pattern, c)),
-            None => LtjIterator::Array(ArrayLtjIterator::new(pattern, index)),
+        let base = match index.compact() {
+            Some(c) => LtjIterator::Compact(CompactLtjIterator::new(pattern.clone(), c)),
+            None => LtjIterator::Array(ArrayLtjIterator::new(
+                pattern.clone(),
+                index.array().expect("an index is compact or array"),
+            )),
+        };
+        match index.delta() {
+            None => base,
+            Some(d) => LtjIterator::Delta(Box::new(DeltaLtjIterator {
+                base,
+                added: ArrayLtjIterator::new(pattern, d.orderings()),
+                removed: d.removed(),
+            })),
         }
     }
 
@@ -78,6 +92,7 @@ impl<'a> LtjIterator<'a> {
         match self {
             LtjIterator::Array(it) => it.leap(var_pos, c),
             LtjIterator::Compact(it) => it.leap(var_pos, c),
+            LtjIterator::Delta(it) => it.leap(var_pos, c),
         }
     }
 
@@ -86,6 +101,7 @@ impl<'a> LtjIterator<'a> {
         match self {
             LtjIterator::Array(it) => it.down(var_pos, val),
             LtjIterator::Compact(it) => it.down(var_pos, val),
+            LtjIterator::Delta(it) => it.down(var_pos, val),
         }
     }
 
@@ -94,6 +110,7 @@ impl<'a> LtjIterator<'a> {
         match self {
             LtjIterator::Array(it) => it.up(var_pos),
             LtjIterator::Compact(it) => it.up(var_pos),
+            LtjIterator::Delta(it) => it.up(var_pos),
         }
     }
 
@@ -102,6 +119,7 @@ impl<'a> LtjIterator<'a> {
         match self {
             LtjIterator::Array(it) => it.seek_all(var_pos),
             LtjIterator::Compact(it) => it.seek_all(var_pos),
+            LtjIterator::Delta(it) => it.seek_all(var_pos),
         }
     }
 
@@ -110,6 +128,7 @@ impl<'a> LtjIterator<'a> {
         match self {
             LtjIterator::Array(it) => it.children_count(var_pos),
             LtjIterator::Compact(it) => it.children_count(var_pos),
+            LtjIterator::Delta(it) => it.children_count(var_pos),
         }
     }
 
@@ -132,6 +151,7 @@ impl<'a> LtjIterator<'a> {
         match self {
             LtjIterator::Array(it) => it.subtree_size(var_pos),
             LtjIterator::Compact(it) => it.subtree_size(var_pos),
+            LtjIterator::Delta(it) => it.subtree_size(var_pos),
         }
     }
 
@@ -140,6 +160,7 @@ impl<'a> LtjIterator<'a> {
         match self {
             LtjIterator::Array(it) => it.in_last_level(),
             LtjIterator::Compact(it) => it.in_last_level(),
+            LtjIterator::Delta(it) => it.in_last_level(),
         }
     }
 
@@ -148,6 +169,7 @@ impl<'a> LtjIterator<'a> {
         match self {
             LtjIterator::Array(it) => it.nfixed(),
             LtjIterator::Compact(it) => it.nfixed(),
+            LtjIterator::Delta(it) => it.nfixed(),
         }
     }
 
@@ -157,6 +179,7 @@ impl<'a> LtjIterator<'a> {
         match self {
             LtjIterator::Array(it) => it.current_eid(),
             LtjIterator::Compact(it) => it.current_eid(),
+            LtjIterator::Delta(it) => it.current_eid(),
         }
     }
 
@@ -166,6 +189,7 @@ impl<'a> LtjIterator<'a> {
         match self {
             LtjIterator::Array(it) => it.current_eids_all(),
             LtjIterator::Compact(it) => it.current_eids_all(),
+            LtjIterator::Delta(it) => it.current_eids_all(),
         }
     }
 }
@@ -176,7 +200,10 @@ impl<'a> LtjIterator<'a> {
 /// On each leap/down/up, recomputes the trie ordering and range from scratch.
 /// This is simple and correct; optimization can come later.
 pub struct ArrayLtjIterator<'a> {
-    index: &'a TripleIndex,
+    /// The six sorted orderings this iterator navigates. A slice rather
+    /// than a `TripleIndex` because the delta's orderings are exactly the
+    /// same shape and carry no dictionary of their own.
+    orderings: &'a [Vec<IndexEntry>; 6],
     /// Constants from the triple pattern: always at the bottom of the effective stack
     constants: Vec<(SpoPos, u32)>,
     /// Stack of variable bindings (pushed by down(), popped by up())
@@ -184,7 +211,7 @@ pub struct ArrayLtjIterator<'a> {
 }
 
 impl<'a> ArrayLtjIterator<'a> {
-    pub fn new(pattern: TriplePattern, index: &'a TripleIndex) -> Self {
+    pub fn new(pattern: TriplePattern, orderings: &'a [Vec<IndexEntry>; 6]) -> Self {
         let mut constants = Vec::new();
         for (i, term) in pattern.terms.iter().enumerate() {
             if let Term::Constant(val) = term {
@@ -198,7 +225,7 @@ impl<'a> ArrayLtjIterator<'a> {
             }
         }
         ArrayLtjIterator {
-            index,
+            orderings,
             constants,
             stack: Vec::with_capacity(3),
         }
@@ -237,7 +264,7 @@ impl<'a> ArrayLtjIterator<'a> {
     /// Returns (ordering_slice, begin, end, query_depth).
     fn compute_range(&self, querying: SpoPos) -> (&'a [IndexEntry], usize, usize, usize) {
         let order = self.choose_ordering(querying);
-        let slice = self.index.get_ordering(order);
+        let slice = &self.orderings[order as usize];
         let mut begin = 0;
         let mut end = slice.len();
         let eff = self.effective_stack();
@@ -339,7 +366,7 @@ impl<'a> ArrayLtjIterator<'a> {
     /// reference and the matched range. Bails if any position is still
     /// unbound — callers should only invoke this at the base case.
     fn current_range(&self) -> Option<(&'a [IndexEntry], usize, usize)> {
-        let slice = self.index.get_ordering(TrieOrder::SPO);
+        let slice = &self.orderings[TrieOrder::SPO as usize];
         let mut by_pos: [Option<u32>; 3] = [None; 3];
         for &(pos, val) in self.constants.iter().chain(self.stack.iter()) {
             by_pos[pos as usize] = Some(val);
@@ -591,6 +618,119 @@ impl<'a> CompactLtjIterator<'a> {
             [Some(s), Some(p), Some(o)] => self.index.eids_for(s, p, o),
             _ => &[],
         }
+    }
+}
+
+/// A static base index plus the triples one session has changed since it
+/// was built.
+///
+/// # Why merge at query time
+///
+/// Rebuilding is `O(E log E)` and the graph did not change by `O(E)` — a
+/// DML statement touches a handful of edges. At 617 M edges that rebuild
+/// is 252 seconds, measured, and it used to run after *every* successful
+/// mutation, because `invalidate_caches` dropped the index and the next
+/// query built it again from scratch. The compact representation makes
+/// editing in place impossible in any case: six LOUDS tries with sampled
+/// select are static structures, so "incremental" cannot mean "edit the
+/// index". It has to mean a second, small index consulted alongside.
+///
+/// This is the shape the store already uses for the graph itself
+/// (`MutationOverlay`), and it moves the cost to the same place: every
+/// `leap` now asks two sources instead of one.
+///
+/// # How
+///
+/// Additions merge on the way down: a leap is the smaller of the two
+/// sides' leaps, and a descent is offered to both. Neither side needs to
+/// be told that the other has a value it lacks — the array iterator
+/// answers from an empty range and the compact one from `dead_from`, and
+/// both already report `None` from every leap below such a point.
+///
+/// Deletions are filtered at the base case instead, where
+/// `current_eids_all` drops the removed ids. That is the *only* place it
+/// has to happen: the algorithm emits one row per edge id at the bound
+/// `(s, p, o)` and already rejects a tuple whose iterator reports none,
+/// so a triple whose every edge is gone stops being a match. The search
+/// still descends into it and finds nothing, which costs a visit and
+/// never a wrong row — pruning is best-effort, correctness is not.
+pub struct DeltaLtjIterator<'a> {
+    base: LtjIterator<'a>,
+    added: ArrayLtjIterator<'a>,
+    removed: &'a std::collections::HashSet<u32>,
+}
+
+impl DeltaLtjIterator<'_> {
+    fn leap(&mut self, var_pos: SpoPos, c: u32) -> Option<u32> {
+        match (self.base.leap(var_pos, c), self.added.leap(var_pos, c)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (x, None) => x,
+            (None, y) => y,
+        }
+    }
+
+    fn down(&mut self, var_pos: SpoPos, val: u32) {
+        self.base.down(var_pos, val);
+        self.added.down(var_pos, val);
+    }
+
+    fn up(&mut self, var_pos: SpoPos) {
+        self.base.up(var_pos);
+        self.added.up(var_pos);
+    }
+
+    fn seek_all(&mut self, var_pos: SpoPos) -> Vec<u32> {
+        let mut all = self.base.seek_all(var_pos);
+        all.extend(self.added.seek_all(var_pos));
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
+
+    /// The two sides' counts added. An **upper bound**, not the exact
+    /// count: a value present in both sides is one child and is counted
+    /// twice. Exactness would mean materialising both value lists, and
+    /// nothing in the engine reads this — `seek_all` is what the search
+    /// uses, and it does deduplicate.
+    fn children_count(&self, var_pos: SpoPos) -> usize {
+        self.base
+            .children_count(var_pos)
+            .saturating_add(self.added.children_count(var_pos))
+    }
+
+    /// An estimate, like both sides' own: the base's count plus the
+    /// delta's. `usize::MAX` means "nothing fixed yet", which the two
+    /// sides always agree on because it is a property of the pattern, so
+    /// it propagates rather than being added to.
+    fn subtree_size(&self, var_pos: SpoPos) -> usize {
+        let b = self.base.subtree_size(var_pos);
+        if b == usize::MAX {
+            return usize::MAX;
+        }
+        b.saturating_add(self.added.subtree_size(var_pos))
+    }
+
+    fn in_last_level(&self) -> bool {
+        self.base.in_last_level()
+    }
+
+    fn nfixed(&self) -> usize {
+        self.base.nfixed()
+    }
+
+    fn current_eid(&self) -> Option<u32> {
+        self.current_eids_all().into_iter().next()
+    }
+
+    /// Every edge id at the bound `(s, p, o)`, from both sides, minus the
+    /// ones the session deleted. Deletion is enforced here and nowhere
+    /// else, so this must stay the single gate — an eid that escapes it
+    /// becomes a row for an edge that no longer exists.
+    fn current_eids_all(&self) -> Vec<u32> {
+        let mut eids = self.base.current_eids_all();
+        eids.extend(self.added.current_eids_all());
+        eids.retain(|e| !self.removed.contains(e));
+        eids
     }
 }
 

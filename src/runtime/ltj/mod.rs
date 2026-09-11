@@ -1,5 +1,6 @@
 pub mod algorithm;
 pub mod compact;
+pub mod delta;
 pub mod iterator;
 pub mod pattern_extract;
 pub mod persist;

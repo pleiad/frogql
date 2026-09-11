@@ -57,6 +57,7 @@ database ready for `INSERT` + `.save`.
 | `FROGQL_DISABLE_INDEX_FOLD=1` | Keep the indexes, but skip the LTJ pre-pass that folds `x.attr = k` into a pinned constant and range predicates into a `NodeInSet`. Isolates "does the index exist" from "does the optimizer use it". |
 | `FROGQL_LTJ_SOURCE=build` | Ignore `<db>.ltj` and rebuild the LTJ index from the graph. The kill switch the persistence differential test A/Bs against. |
 | `FROGQL_LTJ_PERSIST=0` | Build the index but do not write `<db>.ltj`. Declines the file, not the index. |
+| `FROGQL_DISABLE_LTJ_DELTA=1` | Drop the LTJ index after every DML instead of keeping it and maintaining a small delta. Restores the pre-delta behaviour: the next query rebuilds all six orderings from the whole graph. |
 
 **Which kind serves what.** The auto-builder indexes every `(label, prop)`
 whose values are unique within the label, and by default builds a hash
@@ -302,6 +303,31 @@ cargo run --release --bin bench_setup -- --rebuild --skip-download
 A `.gdb` written by an older binary keeps its stale persisted DEFAULT
 schema, which can degrade compile-time numbers by ~3000× with no visible
 error.
+
+### A session that mutates
+
+Nothing to configure — this is what the defaults do — but it is worth
+knowing what changed. A successful `INSERT` / `DELETE` / `SET` used to
+drop the LTJ index, so the next query rebuilt all six orderings from the
+whole graph. The index is now kept and a small delta maintained beside
+it. Measured on LDBC SF0.3 (908 K nodes / 4.58 M edges), first query
+after one statement:
+
+| | default | `FROGQL_DISABLE_LTJ_DELTA=1` |
+|---|---|---|
+| after a node insert | 474 ms | 2879 ms |
+| after an edge insert | 458 ms | 3155 ms |
+| the query after that | 455 ms | 461 ms |
+
+The third row is what the delta costs: every `leap` consults two sources
+instead of one. At this size it is under the noise, and it grows with the
+delta — which is why a delta past 200 000 triples gives up and the next
+query rebuilds instead.
+
+Three changes still force the full rebuild, because no delta can express
+them: a backend with no mutation overlay, an edge whose **labels** were
+changed (`SET e:Label` — the delta adds and removes, it does not
+relabel), and a delta past that ceiling.
 
 ## 6. Gotchas
 

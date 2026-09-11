@@ -52,6 +52,29 @@ fn run_dml(store: &LazyGraphStore, rt: &Runtime<LazyGraphStore>, text: &str) -> 
     dt
 }
 
+/// A few `:Person` ids to hang benchmark edges off. Read from the graph
+/// rather than assumed, so the phase skips itself on a dataset that has
+/// no such nodes instead of inserting edges between ids that do not
+/// exist.
+fn person_ids(rt: &Runtime<LazyGraphStore>, want: usize) -> Vec<i64> {
+    let q = match frogql::compile_query_unchecked(&format!(
+        "MATCH (p:Person) RETURN p.id AS id LIMIT {want}"
+    )) {
+        Ok(q) => q,
+        Err(_) => return Vec::new(),
+    };
+    match rt.run_query(&q, 0) {
+        frogql::runtime::result::QueryResult::Projected(rows) => rows
+            .iter()
+            .filter_map(|r| match r.first() {
+                Some(frogql::model::value::Value::Int(n)) => Some(*n),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Run the probe query once, return wall seconds.
 fn run_probe(rt: &Runtime<LazyGraphStore>, query: &frogql::syntax::query::Query) -> f64 {
     let t = Instant::now();
@@ -170,6 +193,48 @@ fn main() {
         "rebuild_penalty_median;{:.4};s",
         (first_med - second_med).max(0.0)
     );
+
+    // --- 2b. Post-DML penalty when the mutation is an *edge* -------------
+    // Phase 2 inserts a lone node, which changes no triple: with the
+    // delta overlay the index needs no work at all there, so it measures
+    // the refresh and not the merge. An inserted edge is what puts
+    // triples in the delta and makes every later `leap` consult two
+    // sources — the cost the overlay design moves onto the query path,
+    // and the one worth watching as the delta grows.
+    //
+    // The endpoints are pinned by id so the MATCH is two index lookups
+    // and not a cross product: this phase times the probe, not the
+    // statement that sets it up.
+    let ids = person_ids(&rt, probe_iters + 1);
+    let mut edge_first: Vec<f64> = Vec::new();
+    let mut edge_second: Vec<f64> = Vec::new();
+    if ids.len() > 1 {
+        for k in 0..probe_iters {
+            run_dml(
+                &store,
+                &rt,
+                &format!(
+                    "MATCH (a:Person), (b:Person) WHERE a.id = {} AND b.id = {} \
+                     INSERT (a)-[:knows]->(b)",
+                    ids[k % ids.len()],
+                    ids[(k + 1) % ids.len()],
+                ),
+            );
+            edge_first.push(run_probe(&rt, &probe));
+            edge_second.push(run_probe(&rt, &probe));
+        }
+        let edge_first_med = median(&mut edge_first);
+        let edge_second_med = median(&mut edge_second);
+        eprintln!(
+            "post-edge-DML probe: first {:.1} ms, second {:.1} ms",
+            edge_first_med * 1e3,
+            edge_second_med * 1e3
+        );
+        println!("probe_first_after_edge_dml_median;{edge_first_med:.4};s");
+        println!("probe_second_after_edge_dml_median;{edge_second_med:.4};s");
+    } else {
+        eprintln!("post-edge-DML probe: skipped (no :Person nodes with an id)");
+    }
 
     // --- 3. SET throughput ----------------------------------------------
     let t = Instant::now();

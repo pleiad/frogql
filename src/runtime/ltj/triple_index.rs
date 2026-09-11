@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::compact::CompactTripleIndex;
+use super::delta::{EdgeMutations, OverlayStamp, TripleDelta};
 use crate::model::graph_access::GraphAccess;
 
 /// Which of the 6 SPO orderings to use.
@@ -32,7 +34,21 @@ pub(crate) enum IndexRepr {
 /// Index of all directed edges as (src, label_id, tgt) triples, stored in 6 sorted orderings.
 /// Each entry also carries the original edge_id for result reconstruction.
 pub struct TripleIndex {
-    repr: IndexRepr,
+    /// The static payload, behind an `Arc` so a version that differs only
+    /// in its delta shares it. That sharing is the point: the payload is
+    /// 20 GB on the graph this was built for, and cloning it per mutation
+    /// would be worse than the rebuild it replaces.
+    repr: Arc<IndexRepr>,
+    /// The triples changed since `stamp`. Empty on a freshly built index,
+    /// and `LtjIterator::new` skips the merging iterator when it is.
+    delta: TripleDelta,
+    /// Where the store's overlay stood when `repr` was built. What a
+    /// delta is measured from.
+    stamp: OverlayStamp,
+    /// Whether `repr` is the mirrored any-direction index. Carried so a
+    /// refresh emits the delta's triples under the same rule the base
+    /// was built with.
+    mirrored: bool,
     pub label_to_id: HashMap<String, u32>,
     pub id_to_label: Vec<String>,
 }
@@ -41,6 +57,50 @@ impl TripleIndex {
     /// The physical representation, for the serializer.
     pub(crate) fn repr_ref(&self) -> &IndexRepr {
         &self.repr
+    }
+
+    /// The triples changed since this index was built, or `None` when
+    /// there are none — which is the ordinary case and the one that must
+    /// not pay for the merging iterator.
+    pub(super) fn delta(&self) -> Option<&TripleDelta> {
+        if self.delta.is_empty() {
+            None
+        } else {
+            Some(&self.delta)
+        }
+    }
+
+    /// Where the store's overlay stood when this index was built.
+    pub(super) fn overlay_stamp(&self) -> &OverlayStamp {
+        &self.stamp
+    }
+
+    /// Whether this is the mirrored any-direction index.
+    pub(super) fn is_mirrored(&self) -> bool {
+        self.mirrored
+    }
+
+    /// The same static payload under a new delta.
+    ///
+    /// The `Arc` is cloned, not the payload, so this is `O(delta)` and
+    /// not `O(E)` — which is the whole reason the payload sits behind
+    /// one. The stamp is carried across unchanged: every delta is
+    /// measured from where the base was built, so refreshing twice is
+    /// the same as refreshing once.
+    pub(super) fn rebased(
+        &self,
+        delta: TripleDelta,
+        label_to_id: HashMap<String, u32>,
+        id_to_label: Vec<String>,
+    ) -> Self {
+        TripleIndex {
+            repr: Arc::clone(&self.repr),
+            delta,
+            stamp: self.stamp.clone(),
+            mirrored: self.mirrored,
+            label_to_id,
+            id_to_label,
+        }
     }
 
     /// The label dictionary, in id order.
@@ -58,9 +118,32 @@ impl TripleIndex {
             .map(|(i, l)| (l.clone(), i as u32))
             .collect();
         TripleIndex {
-            repr,
+            repr: Arc::new(repr),
+            delta: TripleDelta::default(),
+            stamp: OverlayStamp::default(),
+            mirrored: false,
             label_to_id,
             id_to_label,
+        }
+    }
+
+    /// Record where the store's overlay stands, so a later refresh knows
+    /// what this index already contains. Called right after a build, and
+    /// after a sidecar load — a loaded index describes the on-disk image,
+    /// and the sidecar key is withheld while the overlay holds anything
+    /// that would change a triple, so the stamp there is empty by
+    /// construction.
+    pub fn stamp_overlay<G: GraphAccess>(&mut self, graph: &G) {
+        if let Some(EdgeMutations {
+            next_edge_id,
+            deleted,
+            ..
+        }) = graph.edge_mutations()
+        {
+            self.stamp = OverlayStamp {
+                next_edge_id,
+                deleted,
+            };
         }
     }
 
@@ -167,11 +250,16 @@ impl TripleIndex {
             IndexRepr::Array([spo, sop, pos, pso, osp, ops])
         };
 
-        TripleIndex {
-            repr,
+        let mut idx = TripleIndex {
+            repr: Arc::new(repr),
+            delta: TripleDelta::default(),
+            stamp: OverlayStamp::default(),
+            mirrored: mirror_directed,
             label_to_id,
             id_to_label,
-        }
+        };
+        idx.stamp_overlay(graph);
+        idx
     }
 
     /// Whether this process wants the succinct representation.
@@ -206,7 +294,7 @@ impl TripleIndex {
 
     /// The array orderings, when this index was built in array mode.
     pub(super) fn array(&self) -> Option<&[Vec<IndexEntry>; 6]> {
-        match &self.repr {
+        match &*self.repr {
             IndexRepr::Array(o) => Some(o),
             IndexRepr::Compact(_) => None,
         }
@@ -214,7 +302,7 @@ impl TripleIndex {
 
     /// The compact index, when this index was built in compact mode.
     pub(super) fn compact(&self) -> Option<&CompactTripleIndex> {
-        match &self.repr {
+        match &*self.repr {
             IndexRepr::Array(_) => None,
             IndexRepr::Compact(c) => Some(c),
         }
@@ -222,7 +310,7 @@ impl TripleIndex {
 
     /// Approximate heap footprint of the index payload (excludes label maps).
     pub fn heap_bytes(&self) -> usize {
-        match &self.repr {
+        match &*self.repr {
             IndexRepr::Array(orderings) => orderings
                 .iter()
                 .map(|o| o.len() * std::mem::size_of::<IndexEntry>())
@@ -236,7 +324,7 @@ impl TripleIndex {
     /// materialized copy); compact mode shares the eid side table, which
     /// belongs to no single trie. The pair sums to `heap_bytes()`.
     pub fn heap_breakdown(&self) -> ([usize; 6], usize) {
-        match &self.repr {
+        match &*self.repr {
             IndexRepr::Array(orderings) => (
                 std::array::from_fn(|i| orderings[i].len() * std::mem::size_of::<IndexEntry>()),
                 0,
@@ -366,11 +454,16 @@ impl TripleIndex {
     }
 
     /// Total number of triples in the index (duplicates included).
+    /// Triples in the base plus triples the delta adds. Deletions are
+    /// **not** subtracted: they are enforced at the base case by edge id,
+    /// and the triple may still be reachable through another edge, so
+    /// there is no count to take away.
     pub fn len(&self) -> usize {
-        match &self.repr {
+        let base = match &*self.repr {
             IndexRepr::Array(orderings) => orderings[0].len(),
             IndexRepr::Compact(c) => c.len(),
-        }
+        };
+        base + self.delta.added_len()
     }
 
     pub fn is_empty(&self) -> bool {

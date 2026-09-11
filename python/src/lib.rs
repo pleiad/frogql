@@ -244,10 +244,17 @@ impl Connection {
         let exec =
             frogql_core::runtime::dm::run_dm(&self.store, &dm, schema_for_validation.as_ref())
                 .map_err(PyValueError::new_err)?;
-        // Any successful mutation invalidates the cached LTJ TripleIndex
-        // — the next query on this connection rebuilds it from the
-        // post-mutation graph.
-        *self.triple_index.borrow_mut() = None;
+        // Bring the cached LTJ index up to date with the mutation. The
+        // static payload is kept and a small delta recomputed beside it;
+        // `refresh` returns `None` only when no delta can express the
+        // change, and then the next query rebuilds from scratch.
+        let refreshed = self
+            .triple_index
+            .borrow()
+            .as_deref()
+            .and_then(|idx| frogql_core::runtime::ltj::delta::refresh(idx, &self.store))
+            .map(Arc::new);
+        *self.triple_index.borrow_mut() = refreshed;
         // Mark DEFAULT dirty so the next read of DEFAULT re-infers it
         // from the live store (Fase 7).
         self.store.catalog_mut().mark_default_dirty();

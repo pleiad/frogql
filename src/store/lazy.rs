@@ -1485,6 +1485,36 @@ impl GraphAccess for LazyGraphStore {
     ///
     /// Property and node-label mutations are deliberately not a trigger.
     /// They cannot appear in a triple, so the index is still exact.
+    /// The overlay's edges, as the LTJ delta needs them. Overlay-sized:
+    /// `new_edges` is what this session inserted and `deleted_edges` what
+    /// it removed, so neither walks the graph.
+    ///
+    /// An edge-label mutation on a *base* edge is not representable here
+    /// — it moves a triple the base index already holds, and the delta
+    /// can only add and remove. `affects_triples` therefore also covers
+    /// `mod_edge_labels`, and the caller drops the index rather than
+    /// refreshing it when one is present.
+    fn edge_mutations(&self) -> Option<crate::runtime::ltj::delta::EdgeMutations> {
+        let overlay = self.overlay.borrow();
+        if !overlay.mod_edge_labels.is_empty() {
+            return None;
+        }
+        let live_overlay = overlay
+            .new_edges
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, e)| {
+                let id = overlay.base_edge_count + offset as u32;
+                (!overlay.is_edge_deleted(id)).then_some((id, e.directed))
+            })
+            .collect();
+        Some(crate::runtime::ltj::delta::EdgeMutations {
+            live_overlay,
+            deleted: overlay.deleted_edges.clone(),
+            next_edge_id: overlay.next_edge_id(),
+        })
+    }
+
     fn index_sidecar_key(&self) -> Option<crate::model::graph_access::SidecarKey<'_>> {
         if self.overlay.borrow().affects_triples() {
             return None;
