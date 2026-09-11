@@ -584,7 +584,7 @@ fn main() {
                         .collect();
                     let str_rows: Vec<Vec<String>> = rows
                         .iter()
-                        .map(|row| row.iter().map(|v| format!("{v}")).collect())
+                        .map(|row| row.iter().map(|v| format_value_rich(&store, v)).collect())
                         .collect();
                     emit(&render_table(&headers, &str_rows), pager);
                 }
@@ -914,42 +914,86 @@ fn render_raw_table(store: &LazyGraphStore, ir: &IntermediateResult) -> String {
     render_table(&headers, &display_rows)
 }
 
+/// An element as `Label {k: v, ...}` — what a user asked to see when they
+/// named the variable.
+///
+/// Properties are sorted by key. They live in a `HashMap`, so without
+/// this the column would come out in a different order on every run and
+/// two rows of the same table would not line up.
+///
+/// Falls back to `n123` / `e123` only when the element carries no label,
+/// because then there is nothing else to call it.
+fn format_element_rich(
+    prefix: char,
+    id: u32,
+    label_strs: Vec<&str>,
+    props: &std::collections::HashMap<String, frogql::model::value::Value>,
+) -> String {
+    let label_part = if label_strs.is_empty() {
+        format!("{prefix}{id}")
+    } else {
+        label_strs.join("&")
+    };
+    if props.is_empty() {
+        return label_part;
+    }
+    let mut keys: Vec<&String> = props.keys().collect();
+    keys.sort();
+    let prop_parts: Vec<String> = keys.iter().map(|k| format!("{k}: {}", props[*k])).collect();
+    format!("{label_part} {{{}}}", prop_parts.join(", "))
+}
+
+fn format_node_rich(store: &LazyGraphStore, id: u32) -> String {
+    let labels = store.node_labels(id);
+    format_element_rich('n', id, labels.required_labels(), &store.node_props(id))
+}
+
+fn format_edge_rich(store: &LazyGraphStore, id: u32) -> String {
+    let labels = store.edge_labels(id);
+    format_element_rich('e', id, labels.required_labels(), &store.edge_props(id))
+}
+
+/// A projected `Value` with its elements resolved.
+///
+/// `Display` on `Value` can only print `n123`: it has no graph to ask.
+/// That is the right answer for a type that travels without one, and the
+/// wrong thing to show someone who wrote `RETURN x` — an internal id is
+/// not what they were looking at the row for, and it is not even stable,
+/// since `save` renumbers. The REPL *has* the store, so it resolves.
+///
+/// Elements nested inside a list, a record or a path resolve too: a
+/// `COLLECT_LIST(x)` column would otherwise be a list of ids.
+fn format_value_rich(store: &LazyGraphStore, v: &frogql::model::value::Value) -> String {
+    use frogql::model::value::Value;
+    match v {
+        Value::Node(id) => format_node_rich(store, *id),
+        Value::Edge(id) => format_edge_rich(store, *id),
+        Value::List(items) => {
+            let parts: Vec<String> = items.iter().map(|i| format_value_rich(store, i)).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        Value::Record(fields) => {
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|(k, i)| format!("{k}: {}", format_value_rich(store, i)))
+                .collect();
+            format!("{{{}}}", parts.join(", "))
+        }
+        Value::Path(items) => {
+            let parts: Vec<String> = items.iter().map(|i| format_value_rich(store, i)).collect();
+            format!("<{}>", parts.join(", "))
+        }
+        // Everything else is already self-describing.
+        other => format!("{other}"),
+    }
+}
+
 /// Format a PathValue with labels and properties (for variable columns).
 fn format_pathvalue_rich(store: &LazyGraphStore, pv: &PathValue) -> String {
     match pv {
-        PathValue::Node(id) => {
-            let labels = store.node_labels(*id);
-            let label_strs = labels.required_labels();
-            let props = store.node_props(*id);
-            let label_part = if label_strs.is_empty() {
-                format!("n{id}")
-            } else {
-                label_strs.join("&")
-            };
-            if props.is_empty() {
-                label_part
-            } else {
-                let prop_parts: Vec<String> =
-                    props.iter().map(|(k, v)| format!("{k}: {v}")).collect();
-                format!("{label_part} {{{}}}", prop_parts.join(", "))
-            }
-        }
+        PathValue::Node(id) => format_node_rich(store, *id),
         PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => {
-            let labels = store.edge_labels(*id);
-            let label_strs = labels.required_labels();
-            let props = store.edge_props(*id);
-            let label_part = if label_strs.is_empty() {
-                format!("e{id}")
-            } else {
-                label_strs.join("&")
-            };
-            if props.is_empty() {
-                label_part
-            } else {
-                let prop_parts: Vec<String> =
-                    props.iter().map(|(k, v)| format!("{k}: {v}")).collect();
-                format!("{label_part} {{{}}}", prop_parts.join(", "))
-            }
+            format_edge_rich(store, *id)
         }
         PathValue::Nothing => "-".to_string(),
         PathValue::Group(items) => {

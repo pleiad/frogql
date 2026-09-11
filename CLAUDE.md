@@ -281,6 +281,19 @@ DDL surface today: `CREATE / USE / DROP GRAPH TYPE`, plus inspection / validatio
 
 REPL meta-commands follow the SQLite dot-prefix convention (see `src/bin/frogql.rs`): `.schema` aliases `SHOW GRAPH TYPE DEFAULT`, `.schema simple` switches to the grouped by-label renderer in `print_schema_simple` (which lists every node type unconditionally — the earlier "standalone-only" filter hid all nodes on connected graphs and was removed in commit `e23d04d`), `.graph-types` aliases `SHOW GRAPH TYPES`, `.save` materialises the merged base+overlay view to the open `.gdb` atomically (see *Data Modification*), `.dump-json <path>` writes a pg_dump-style JSON snapshot, `.dump-gql <path>` writes a GQL script that recreates the graph, `.vec` reads or writes one vector-search knob (`strategy` / `source` / `level` / `tau-eps` / `memo-cuts` / `debug`) and bare `.vec` also prints the last `NEAREST` query's counters, `.timeout <secs>` bounds each query (`.timeout off` removes it), `.pager on|off|always` routes results through `$PAGER` (default `on` — psql's naming and psql's meaning: page when stdout is a terminal) and `.limit <n>|off` caps how many rows the engine produces (default off), `.help` lists meta-commands and DDL surface, and `.quit` / `.exit` (plus bare `quit` / `exit`) leave the REPL.
 
+**A projected element prints its labels and properties, not its id.**
+`RETURN x` used to render `n123`, because `Display` on `Value` has no
+graph to ask — the right answer for a type that travels without one, and
+the wrong thing to show someone who named the variable precisely to see
+what is in it (an internal id is also not stable: `save` renumbers). The
+REPL has the store, so `format_value_rich` resolves nodes and edges to
+`Label {k: v, ...}`, recursing through lists, records and paths so a
+`COLLECT_LIST(x)` column is not a list of ids either. This is what a
+bare pattern (`(x:Movie)`, no RETURN) already showed via
+`format_pathvalue_rich`; the two paths now agree, and both sort the
+properties, which a `HashMap` was otherwise reordering per run. The
+Python, Node and WASM bindings already resolved elements this way.
+
 `.vec` exists because the knobs are read from the environment at startup, which is right for a benchmark process and wrong for a session: a database that costs minutes to open cannot be reopened once per arm.
 
 `.pager` and `.limit` replaced a hard-wired `run_query(&query, 100)`. That was not a display cap but an execution one, and it told two lies: a 172-row answer printed 100 and reported `100 rows`, which reads as *there are exactly 100*; and an explicit `LIMIT 200` came back with 100, because the runtime takes the smaller of the caller's cap and the query's. Now an explicit `LIMIT` is passed alone (the session cap gets no vote — it is a default for when the user did not say), and a session cap that actually bit says so. Paging is delegated to `$PAGER` rather than implemented, exactly as psql does: the keys people expect from a pager are `less`'s, and reimplementing them would be reimplementing `less`. A bare `less` is given `-F -R -S -X` **as arguments, not through the `LESS` environment variable** — `less` reads `LESS` as if it preceded the command line, so psql's set-it-only-if-unset trick silently does nothing for anyone who already has one, and a `LESS=-R` in a shell profile was enough to make a three-row answer stop at `(END)`.
