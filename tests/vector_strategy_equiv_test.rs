@@ -198,7 +198,10 @@ static VEO_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// row here would silently be measuring the order it did not ask for.
 fn run(db: &Path, q: &str, cfg: VecCfg) -> Vec<Vec<Value>> {
     let _g = VEO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    std::env::remove_var("FROGQL_VEO");
+    // Set, not removed: the adaptive order is the default, so removing the
+    // variable would make this the adaptive baseline and the comparison
+    // below would hold trivially.
+    std::env::set_var("FROGQL_VEO", "simple");
     run_inner(db, q, cfg)
 }
 

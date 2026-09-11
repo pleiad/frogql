@@ -490,7 +490,7 @@ never any-direction *matching*; conflating the two is how `-[e]-` looks
 "already supported" when it is not.
 
 
-## 11. Adaptive VEO (`FROGQL_VEO=adaptive`)
+## 11. Adaptive VEO (the default; `FROGQL_VEO=simple` opts out)
 
 `VeoSimple` fixes the whole variable order before the search, from a
 syntactic weight: an equality filter counts as one binding, a range as a
@@ -621,9 +621,18 @@ A/B against the commit before this one measures IC2 1.004×, IC5 1.034×,
 IC9 1.000×.
 
 The honest summary: **adaptive wins where the pins have already made the
-triples' cardinalities differ, and is a coin flip everywhere else.** That
-is a per-query decision, which is why the flag exists and why neither
-order is the default for both.
+triples' cardinalities differ, and is a coin flip everywhere else.**
+
+It is the default on that balance — a 170× win on IC4 against a 10–15%
+loss on IC9, with the full test sweep returning identical results under
+either order (1602 tests, both ways). `FROGQL_VEO=simple` stays as the
+escape hatch and as what the differential test A/Bs against.
+
+What that decision rests on is one dataset. LDBC SF0.1 is 327 K nodes with
+short patterns; the RDF corpus this engine also targets is 617 M edges
+with six-join patterns whose variables are mostly lonely, and the
+per-binding re-weighing is paid once per binding there too. That has not
+been measured.
 
 ### Not wired to the vector-search arms
 

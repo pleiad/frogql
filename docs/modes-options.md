@@ -117,7 +117,7 @@ reason, so a sidecar that is silently never used is diagnosable.
 | `FROGQL_DISABLE_SEEDED_REPEAT=1` | Use the legacy global repetition path instead of the seeded adjacency traversal. |
 | `FROGQL_DISABLE_REPEAT_UNROLL=1` | Keep bounded `{n,m}` repetitions as `Repeat` instead of unrolling to a Union of LTJ-eligible arms. |
 | `FROGQL_DISABLE_SHORTEST_BFS=1` | Force the generic k-shortest-walk enumerator instead of the BFS fast path. Expect IC1/IC13 to go from ~25 ms to tens of seconds, and IC14 to OOM. |
-| `FROGQL_VEO=adaptive` | Re-pick the variable order per binding from the subtree sizes the index reports, instead of fixing it before the search. Same rows either way; the cost swings both directions — IC4 166× faster, IC5 1.36× slower. See below. |
+| `FROGQL_VEO=simple` | Fix the variable order before the search, from a syntactic weight. The adaptive order — re-picked per binding from the subtree sizes the index reports — is the **default**; this restores the old one. Same rows either way. See below. |
 
 ### 3.3 Correlated subqueries and clauses
 
@@ -138,9 +138,9 @@ reason, so a sidecar that is silently never used is diagnosable.
 
 #### Which VEO to run
 
-`FROGQL_VEO=adaptive` is not a faster mode; it is a different bet, and
-which one pays depends on the query. LDBC SF0.1 medians, lazy backend,
-two independent repetitions:
+The adaptive order is the default. It is not a faster mode; it is a
+different bet, and which one pays depends on the query. LDBC SF0.1
+medians, lazy backend, two independent repetitions:
 
 | IC | simple | adaptive |
 |---|---|---|
@@ -163,8 +163,10 @@ number of descents, costing more each. Which is why `FROGQL_DEBUG_VEO=1`
 prints visits alongside the executed order: an order that visits less and
 costs more is a normal outcome, not a bug.
 
-Row counts are identical under both on every IC, so it is safe to try per
-query.
+Row counts are identical under both on every IC, and the full test sweep
+passes identically either way, which is what the default rests on.
+`FROGQL_VEO=simple` restores the old order if a query is on the wrong side
+of the trade.
 
 ## 4. What each phase costs
 

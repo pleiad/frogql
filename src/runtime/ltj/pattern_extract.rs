@@ -133,10 +133,18 @@ pub fn anydir_ltj_disabled() -> bool {
     std::env::var("FROGQL_DISABLE_ANYDIR_LTJ").is_ok()
 }
 
-/// `FROGQL_VEO=adaptive` asks for the order to be re-picked per binding
-/// (issue #101). Any other value, or none, keeps `VeoSimple`.
+/// Whether to re-pick the variable order per binding (issue #101).
+///
+/// The default. `FROGQL_VEO=simple` opts out, and is what the differential
+/// tests A/B against — the switch stays so "adaptive ≡ simple" remains
+/// checkable, which is the discipline every optimization here follows.
+///
+/// Promoted from opt-in on the LDBC evidence: the full test sweep returns
+/// identical results under either order, IC4 runs 123.6 ms → 0.7 ms and
+/// IC11 1.7 → 1.0, most ICs are flat, and IC9 pays 10–15%. One dataset is
+/// the whole of the evidence; the RDF corpus is not measured.
 fn adaptive_requested() -> bool {
-    std::env::var("FROGQL_VEO").is_ok_and(|v| v.eq_ignore_ascii_case("adaptive"))
+    !std::env::var("FROGQL_VEO").is_ok_and(|v| v.eq_ignore_ascii_case("simple"))
 }
 
 /// True when the pattern contains at least one any-direction (`-[e]-`)
@@ -503,11 +511,10 @@ fn try_ltj_inner<G: GraphAccess>(
             Box::new(over)
         }
         _ => {
-            // `FROGQL_VEO=adaptive` re-picks the order per binding from
-            // the cardinalities the index reports (issue #101). Off by
-            // default: it is the arm under study, and a differential test
-            // pins it against `simple` on the answer while the costs
-            // diverge.
+            // The adaptive order re-picks per binding from the
+            // cardinalities the index reports (issue #101). On by
+            // default; `FROGQL_VEO=simple` is the escape hatch the
+            // differential test A/Bs against.
             if adaptive_requested() && !veo::order_is_forced(&var_info) {
                 // Which variables share a triple: the adaptive VEO
                 // re-weighs exactly this neighbourhood after each binding,

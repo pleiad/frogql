@@ -49,11 +49,10 @@ fn rich() -> MemoryGraphStore {
 
 fn run(g: &MemoryGraphStore, q: &str, adaptive: bool, compact: bool) -> Vec<String> {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if adaptive {
-        std::env::set_var("FROGQL_VEO", "adaptive");
-    } else {
-        std::env::remove_var("FROGQL_VEO");
-    }
+    // Both sides are set explicitly. The adaptive order is the default
+    // now, so *removing* the variable would run adaptive twice and the
+    // comparison would pass for the wrong reason.
+    std::env::set_var("FROGQL_VEO", if adaptive { "adaptive" } else { "simple" });
     if compact {
         std::env::set_var("FROGQL_LTJ_COMPACT", "1");
     } else {
