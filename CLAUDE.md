@@ -17,7 +17,8 @@ The crate package is still named `gqlrust` for legacy reasons; the user-facing b
 just lint        # fmt --check + cargo check + clippy -D warnings (CI parity)
 just lint-fix    # rewrite formatting + apply machine-applicable clippy fixes
 just fmt         # format only, no compile
-just test        # full sweep: cargo test (lib + all tests/*.rs)
+just t [targets] # fast: lib unit tests + the targets you touched (~5 s)
+just test        # full sweep, warmed in parallel — the pre-commit gate
 just repl movies.gdb [--import-csv dir/ | --no-typecheck]   # rebuild + open REPL
 
 # Underlying commands (what the recipes wrap):
@@ -25,22 +26,14 @@ just repl movies.gdb [--import-csv dir/ | --no-typecheck]   # rebuild + open REP
 # unqualified form so the set never drifts as tests are added:
 cargo test                       # everything (lib + all tests/*.rs)
 cargo test --lib                 # just the in-crate unit tests (fast)
-# Sweep wall clock is dominated by a first-execution cost per binary,
-# not by your code. Measured on macOS (2026-08, same commit, back to back):
-#   7.5 min  after relinking every target
-#    55  s   with the same binaries already run once
-# The tests themselves total 5.5 s of that (bench_test 3.1, the vector
-# equivalence suite 0.9, everything else under 0.1 each). The gap is
-# ~5-8 s per freshly linked file, spent at 0% CPU — the process is
-# blocked, not computing. A byte-identical copy at a new path pays it
-# again, so it is keyed on the file, not its contents.
+# The sweep's wall clock is a first-execution cost macOS charges per
+# freshly linked test binary (~5-8 s each, at 0% CPU, once per file), not
+# the tests themselves (~5.5 s total). `cargo test` runs targets one at a
+# time, so 108 of them serialise. `just test` links everything, warms all
+# the binaries 16-wide in parallel, then tests — ~30 s of warming instead
+# of ~30 min of waiting. Do not hand-roll `cargo test` for a full sweep;
+# use the recipe, which is where that warming lives.
 #
-# It only bites when many targets relink at once — touching store/,
-# pager/ or model/ rebuilds everything. The checks serialise because
-# `cargo test` runs targets one at a time, so warming them in parallel
-# first collapses it (~29 s for ~200 binaries against ~30 min serial):
-#   find target/debug/deps -type f -perm +111 ! -name '*.d' \
-#     | xargs -P 16 -I{} sh -c '{} --list >/dev/null 2>&1'
 # Do NOT re-diagnose this as "macOS rescanning" without measuring — an
 # earlier version of this note claimed that and was wrong.
 cargo test --test runtime_test --test typecheck_test --test parser_test
@@ -107,12 +100,33 @@ Runtime/store toggles for A/B testing and tracing (all read at query/open time; 
 | `FROGQL_DISABLE_VECTORS` | ignore every vector sidecar; queries see no vector attribute |
 | `FROGQL_DEBUG_VEC` | print the executed vector-search arm and its counters |
 
+### While iterating
+
+`just t [targets...]` — the in-crate unit tests plus whichever integration
+targets you touched. **~5 seconds.** This is what runs between edits.
+
+The full sweep is a **pre-commit** gate and not a per-edit one. Running it
+after every change costs minutes for no information: its wall clock is not
+the tests (they total ~5 s), it is a first-execution cost macOS charges per
+freshly linked binary, and a one-line edit under `store/` relinks all 108.
+
 ### Pre-commit checklist for Rust changes (non-negotiable)
 
 1. `just fmt` (or `just lint-fix` to also apply clippy fixes)
 2. `just lint` — fmt-check + `cargo check` + clippy `-D warnings`
-3. **`just test`** — run the full sweep. Skipping this has burned commits before, e.g. a `--` line-comment lexer change broke `-->` edge sugar across three test suites. fmt + clippy alone do not catch lexer/grammar regressions.
+3. **`just test`** — the full sweep. It links every target, warms them 16-wide
+   in parallel, then runs; the warming is what turns ~30 minutes of serial
+   waiting into ~30 seconds (see the recipe for why). Skipping the sweep has
+   burned commits before, e.g. a `--` line-comment lexer change broke `-->`
+   edge sugar across three test suites. fmt + clippy alone do not catch
+   lexer/grammar regressions.
 4. Stage + commit.
+
+**Before a *class* of failure, grep instead of iterating.** When the sweep
+reports a test asserting behaviour a change deliberately altered, search the
+whole test tree for that construct and fix every site at once. Re-running the
+sweep to discover the next one costs a full sweep per site — four of them,
+in the `-->` case.
 
 ## Workspace layout
 

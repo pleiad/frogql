@@ -1282,6 +1282,32 @@ fn fresh_var(
     id
 }
 
+/// The conjunct whose slice of the index is smallest.
+///
+/// Every match carries every conjunct, so pinning any one of them is
+/// correct and the choice is purely how much of the index the search
+/// then walks. `subtree_size` with the predicate fixed is exactly "how
+/// many triples carry this label", and both representations answer it in
+/// O(1) — the array from its range, the trie from its node — so this
+/// costs one throwaway iterator per conjunct and nothing per row.
+///
+/// `None` when no conjunct is in the graph at all, which the caller
+/// turns into a predicate that matches nothing.
+fn rarest_label_id(labels: &[&str], index: &TripleIndex) -> Option<u32> {
+    let probe = |lid: u32| {
+        let pat = TriplePattern {
+            terms: [Term::Variable(0), Term::Constant(lid), Term::Variable(1)],
+        };
+        LtjIterator::new(pat, index).subtree_size(SpoPos::S)
+    };
+    labels
+        .iter()
+        .filter_map(|n| index.label_to_id.get(*n).copied())
+        .map(|lid| (probe(lid), lid))
+        .min()
+        .map(|(_, lid)| lid)
+}
+
 /// Build the P-term of a triple pattern from an edge descriptor: a label
 /// constant when there's exactly one required label, a fresh variable
 /// otherwise (wildcard / multi-label), together with what the base case
@@ -1296,18 +1322,36 @@ fn build_p_term(
 ) -> (Term, EdgeLabelReq) {
     if let Some(d) = edge_desc {
         let labels = d.dtype.label.required_labels();
-        if labels.len() == 1 {
-            let term = match index.label_to_id.get(labels[0]) {
-                Some(&lid) => Term::Constant(lid),
+        // A label every match must carry can be pinned, whether it is
+        // the whole expression (`A`) or one conjunct of it (`A&B`) — an
+        // edge satisfying `A&B` necessarily has `A`, so the pin loses no
+        // match. That matters beyond tidiness: without it a conjunction
+        // fell to the free predicate and the search walked *every* label
+        // in the graph to reject all but one.
+        if !labels.is_empty() {
+            let term = match rarest_label_id(&labels, index) {
+                Some(lid) => Term::Constant(lid),
                 None => Term::Constant(u32::MAX), // label not in graph
             };
-            // The search visits exactly the label the pattern named, so
-            // a stored edge reaching the base case carries it by
-            // construction. Nothing to re-check.
-            return (term, EdgeLabelReq::Pinned);
+            return if labels.len() == 1 {
+                // The pin *is* the whole expression: a stored edge
+                // reaching the base case satisfies it by construction.
+                (term, EdgeLabelReq::Pinned)
+            } else {
+                // Pinned to the rarest conjunct; the rest is checked
+                // per edge. Any of them would be correct — every match
+                // carries all of them — so the choice is purely how much
+                // of the index the search then has to walk.
+                (
+                    term,
+                    EdgeLabelReq::PinnedPartial {
+                        label: d.dtype.label.clone(),
+                    },
+                )
+            };
         }
     }
-    // No single required label — `A|B`, `A&B`, or no label at all. The
+    // No label every match must carry — `A|B`, or no label at all. The
     // index has no "label in this set" cursor, so the predicate is left
     // free and the search walks *every* label *every* edge carries. Two
     // things then have to be checked at the base case, and until they

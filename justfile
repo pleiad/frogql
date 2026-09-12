@@ -38,10 +38,29 @@ lint-fix:
 
 # --- Tests -------------------------------------------------------------------
 
-# Unqualified so the set never drifts as tests are added. Includes the slow
-# bench_test (~1 min); during tight iteration name the targets you touched.
-# Full sweep: cargo test (lib unit tests + every integration target).
+# What to run while iterating: the in-crate unit tests plus whichever
+# integration targets you touched. Seconds, not minutes.
+#   just t                          # lib only
+#   just t runtime_test parser_test # lib + those targets
+t *targets:
+    cargo test --lib
+    @if [ -n "{{targets}}" ]; then cargo test $(for t in {{targets}}; do printf -- "--test $t "; done); fi
+
+# Full sweep — the pre-commit gate, not a per-edit one.
+#
+# Its wall clock is not the tests: they total ~5 s. It is a first-execution
+# cost macOS charges per freshly linked binary — ~5-8 s each, at 0% CPU,
+# once per file — and `cargo test` runs targets one at a time, so 108 of
+# them serialise into minutes. Touching store/, pager/ or model/ relinks
+# everything and you pay it in full.
+#
+# So: link everything first, then run every binary once in parallel to
+# absorb that cost 16-wide, then let cargo do the actual testing against
+# already-warm files. ~30 s of warming replaces ~30 min of serial waiting.
 test:
+    cargo test --no-run
+    @find target/debug/deps -type f -perm +111 ! -name '*.d' \
+        | xargs -P 16 -I{} sh -c '{} --list >/dev/null 2>&1' || true
     cargo test
 
 # --- REPL --------------------------------------------------------------------

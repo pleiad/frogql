@@ -134,10 +134,21 @@ impl EdgeDirReq {
 /// got depended on which join strategy the optimizer picked.
 #[derive(Debug, Clone)]
 pub enum EdgeLabelReq {
-    /// The predicate is a constant. Nothing to re-check.
+    /// The predicate is a constant and it is the pattern's *whole* label
+    /// expression. Nothing to re-check.
     Pinned,
-    /// The predicate is a free variable. `label` is the pattern's label
-    /// expression; `p_var` is where the current label sits in the tuple.
+    /// The predicate is pinned to **one of several** labels the pattern
+    /// requires — a conjunction, `A&B`. An edge satisfying the whole
+    /// expression necessarily carries the pinned one, so the pin loses no
+    /// match and narrows the search to that label's slice instead of
+    /// walking every label in the graph. Being pinned, the edge is
+    /// visited exactly once and there is no duplicate to remove; what is
+    /// left is the rest of the conjunction.
+    PinnedPartial { label: LabelType },
+    /// The predicate is a free variable — a disjunction (`A|B`), or no
+    /// label at all. Neither names a label every match must carry, so
+    /// there is nothing to pin to. `label` is the pattern's expression;
+    /// `p_var` is where the current label sits in the tuple.
     Free { label: LabelType, p_var: u8 },
 }
 
@@ -1066,14 +1077,25 @@ impl<'a> LtjAlgorithm<'a> {
                 // it holds one triple per label — so a predicate the
                 // pattern could not pin is checked here, against the
                 // stored edge. See `EdgeLabelReq`.
-                if let Some(EdgeLabelReq::Free { label, p_var }) = self.triple_label.get(i) {
-                    // `tuple` is indexed by *level*, not by variable id —
-                    // the order is chosen per query and, under the
-                    // adaptive VEO, per binding. So the predicate's
-                    // current value is found by its id, not its position.
-                    if let Some(&(_, p)) = tuple[..self.num_vars].iter().find(|(v, _)| v == p_var) {
-                        eids.retain(|&e| self.free_label_admits(graph, label, e, p));
+                match self.triple_label.get(i) {
+                    // Pinned to one conjunct, so each edge is seen once
+                    // and only the rest of the conjunction is open.
+                    Some(EdgeLabelReq::PinnedPartial { label }) => {
+                        eids.retain(|&e| LabelType::is_subtype(&graph.edge_labels(e), label));
                     }
+                    Some(EdgeLabelReq::Free { label, p_var }) => {
+                        // `tuple` is indexed by *level*, not by variable
+                        // id — the order is chosen per query and, under
+                        // the adaptive VEO, per binding. So the
+                        // predicate's current value is found by its id,
+                        // not its position.
+                        if let Some(&(_, p)) =
+                            tuple[..self.num_vars].iter().find(|(v, _)| v == p_var)
+                        {
+                            eids.retain(|&e| self.free_label_admits(graph, label, e, p));
+                        }
+                    }
+                    _ => {}
                 }
                 if eids.is_empty() {
                     return true;
