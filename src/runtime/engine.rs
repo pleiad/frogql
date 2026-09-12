@@ -4772,6 +4772,28 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     fn eval_binop(op: &BinOp, lv: &Value, rv: &Value) -> ExprResult {
         // Return (a, b, true) if both numeric; a/b as f64 if either operand is Float.
         // Returns None if either is non-numeric.
+        /// Whether ISO §22.14 orders these two values against each
+        /// other. Numbers compare across the int/float split, the rest
+        /// only within their own kind; lists, records, nodes, edges and
+        /// paths are equality-comparable and not ordered.
+        ///
+        /// Separate from `cmp_values`, which answers `false` for an
+        /// undefined pair because it is a keep/drop verdict. Here the
+        /// distinction matters: `false` would silently mean "not less
+        /// than", and the honest answer is that the question is a type
+        /// error.
+        fn orderable_pair(lv: &Value, rv: &Value) -> bool {
+            matches!(
+                (lv, rv),
+                (
+                    Value::Int(_) | Value::Float(_),
+                    Value::Int(_) | Value::Float(_)
+                ) | (Value::Str(_), Value::Str(_))
+                    | (Value::Bool(_), Value::Bool(_))
+                    | (Value::Date(_), Value::Date(_))
+                    | (Value::LocalDatetime(_), Value::LocalDatetime(_))
+            )
+        }
         fn as_num_pair(lv: &Value, rv: &Value) -> Option<(Value, Value)> {
             match (lv, rv) {
                 (Value::Int(_), Value::Int(_)) => Some((lv.clone(), rv.clone())),
@@ -4873,40 +4895,25 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 },
                 _ => ExprResult::Failure("MOD requires integer operands".into()),
             },
-            // §22.14 ordering comparisons for same-type temporal values.
-            BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le
-                if matches!(
-                    (lv, rv),
-                    (Value::Date(_), Value::Date(_))
-                        | (Value::LocalDatetime(_), Value::LocalDatetime(_))
-                ) =>
-            {
+            // ISO §22.14 ordering. Numbers (widening across the int/float
+            // split), strings, booleans and same-type temporal values are
+            // all totally ordered; lists, records and reference values are
+            // equality-comparable only.
+            //
+            // Delegated to `cmp_values` so this path and the pushed-down
+            // one cannot drift. They had: `cmp_values` ordered strings and
+            // booleans, this arm rejected them, so whether `a.name <
+            // b.name` matched depended on whether the optimizer could push
+            // the predicate into the index — and in the residual case it
+            // answered zero rows with no error the user could see.
+            BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le => {
+                if !orderable_pair(lv, rv) {
+                    return ExprResult::Failure(format!(
+                        "{op:?} is not defined between these operands"
+                    ));
+                }
                 ExprResult::Success(Value::Bool(cmp_values(lv, *op, rv)))
             }
-            BinOp::Gt => match as_num_pair(lv, rv) {
-                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a > b)),
-                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Bool(a > b)),
-                _ => ExprResult::Failure("> requires numeric operands".into()),
-            },
-            BinOp::Lt => match as_num_pair(lv, rv) {
-                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a < b)),
-                Some((Value::Float(a), Value::Float(b))) => ExprResult::Success(Value::Bool(a < b)),
-                _ => ExprResult::Failure("< requires numeric operands".into()),
-            },
-            BinOp::Ge => match as_num_pair(lv, rv) {
-                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a >= b)),
-                Some((Value::Float(a), Value::Float(b))) => {
-                    ExprResult::Success(Value::Bool(a >= b))
-                }
-                _ => ExprResult::Failure(">= requires numeric operands".into()),
-            },
-            BinOp::Le => match as_num_pair(lv, rv) {
-                Some((Value::Int(a), Value::Int(b))) => ExprResult::Success(Value::Bool(a <= b)),
-                Some((Value::Float(a), Value::Float(b))) => {
-                    ExprResult::Success(Value::Bool(a <= b))
-                }
-                _ => ExprResult::Failure("<= requires numeric operands".into()),
-            },
             // Eq/Ne recurse into composite values under 3VL: a null *inside*
             // a list or record makes that position unknown, so
             // `[1, null] = [1, null]` is null, not true (see `eq_verdict`).

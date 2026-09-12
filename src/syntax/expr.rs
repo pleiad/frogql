@@ -42,6 +42,53 @@ impl BinOp {
             || !SimpleType::meet(ty1, ty2).is_empty()
     }
 
+    /// Whether two types share an orderable domain, so `<` between them
+    /// can mean something.
+    ///
+    /// Two conditions, both needed. The operands must overlap at all —
+    /// the same `meet` test equality uses, so `1 < 'a'` is rejected — and
+    /// what they overlap *in* must be a type ISO §22.14 orders. That
+    /// second half is what keeps `[1] < [2]` and `n1 < n2` out: lists,
+    /// records and reference values are equality-comparable and not
+    /// ordering-comparable, and the runtime answers `false` for every
+    /// ordering operator on them.
+    ///
+    /// Null is consistent with anything, because ordering propagates it:
+    /// `x.age < null` is null, not an error.
+    fn order_consistent(ty1: &SimpleType, ty2: &SimpleType) -> bool {
+        if *ty1 == SimpleType::Null || *ty2 == SimpleType::Null {
+            return true;
+        }
+        let common = SimpleType::meet(ty1, ty2);
+        !common.is_empty() && Self::orderable(&common)
+    }
+
+    /// ISO §22.14 `<orderable>`. Kept beside `order_consistent` rather
+    /// than shared with the checker's sort-key version: that one answers
+    /// "can this be a sort key", where a bare `Null` column is fine
+    /// (NULLS FIRST/LAST), and this one answers "can these two be
+    /// compared", where the null case is already handled above.
+    fn orderable(t: &SimpleType) -> bool {
+        match t {
+            SimpleType::Z
+            | SimpleType::F
+            | SimpleType::B
+            | SimpleType::S
+            | SimpleType::Star
+            | SimpleType::Date
+            | SimpleType::LocalDatetime
+            | SimpleType::Null => true,
+            SimpleType::Union(a, b) => Self::orderable(a) && Self::orderable(b),
+            SimpleType::Zero
+            | SimpleType::List(_)
+            | SimpleType::Record(_)
+            | SimpleType::Group(_)
+            | SimpleType::Node
+            | SimpleType::Edge
+            | SimpleType::Path => false,
+        }
+    }
+
     /// Returns (expected_left_type, expected_right_type, result_type) for the operator.
     pub fn delta(
         &self,
@@ -68,8 +115,27 @@ impl BinOp {
                 (orn(num.clone()), orn(num.clone()), res(num))
             }
             BinOp::Mod => (orn(SimpleType::Z), orn(SimpleType::Z), res(SimpleType::Z)),
+            // ISO §22.14 orderability is wider than "numeric": strings,
+            // booleans and same-type temporal values are totally ordered
+            // too, and `ORDER BY` has always sorted them. Restricting `<`
+            // to numbers made `WHERE a.name < b.name` — the standard way
+            // to keep one of each unordered pair — type as ⊥ and return
+            // **zero rows in silence**, while `ORDER BY a.name` right
+            // beside it worked.
+            //
+            // Same shape as `=` below, and for the same reason: what is
+            // being decided is not whether an operand is admissible but
+            // whether the two share a domain to be ordered *in*. A ⊤
+            // domain leaves nothing to push the other operand out of, and
+            // the whole verdict rides in the codomain — so `1 < 'a'` is
+            // still ⊥, and reported.
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                (orn(num.clone()), orn(num), res(SimpleType::B))
+                let result = if Self::order_consistent(ty1, ty2) {
+                    res(SimpleType::B)
+                } else {
+                    SimpleType::Zero
+                };
+                (SimpleType::Star, SimpleType::Star, result)
             }
             // `=` is total on values, so its domain is the top type: it never
             // rejects an operand. What varies is whether the answer means

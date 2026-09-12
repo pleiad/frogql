@@ -480,8 +480,15 @@ impl Typechecker {
         let has_expr = items.iter().any(|i| !self.item_has_row_aggregate(i));
         if has_agg && has_expr {
             self.errors.push(
+                // The placement matters and the message used to get it
+                // backwards: `GROUP BY` follows `RETURN` in this grammar
+                // (`RETURN ... GROUP BY ... ORDER BY ... LIMIT`), so
+                // "before the RETURN" sent the reader to write something
+                // that does not parse.
                 "RETURN mixes aggregate and non-aggregate items but no GROUP BY \
-                 clause is present. Add `GROUP BY <expr>...` before the RETURN."
+                 clause is present. Add `GROUP BY <variable or expression>` \
+                 after the RETURN list, e.g. \
+                 `RETURN p.name, COUNT(*) GROUP BY p`."
                     .to_string(),
             );
         }
