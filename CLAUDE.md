@@ -1007,4 +1007,14 @@ Run + chart: `bench_setup` (downloads LDBC SF0.1) → `install_python_deps.sh` �
 
 ## Pending and roadmap
 
+`docs/frogql-for-agents.md` is the whole user-facing surface in one file,
+written for an AI agent consuming froGQL rather than developing it: the
+Cypher-isms that do not parse, the functions that do exist, the start-up
+options, and an explicit list of what froGQL lacks. **Every example in it
+was executed before it was written down.** Keep it that way — a guide
+that is confidently wrong is worse for its reader than no guide, and its
+whole reason for existing is that agents invent surface. Update it in the
+same commit as any change to the query language, the DML surface, the
+builtin functions, the CLI flags or the env vars.
+
 ISO/IEC 39075:2024 features and known carve-outs live in `docs/internals/iso-gql-gaps.md`. Storage-format roadmap (incremental secondary indexes under DML overlay, WAL) lives in `docs/internals/storage-architecture.md`. Persisting the TripleIndex and maintaining it under DML are done — see *Join strategy* above.

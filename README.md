@@ -20,6 +20,7 @@
 <p align="center">
   <b><a href="https://pleiad.github.io/frogql/#playground">Live playground</a></b> ·
   <a href="https://pleiad.github.io/frogql/">Website</a> ·
+  <a href="docs/frogql-for-agents.md">Guide for AI agents</a> ·
   <a href="docs/query-language.md">Query language</a> ·
   <a href="docs/data-modification.md">Data modification</a> ·
   <a href="docs/internals/storage-architecture.md">Storage format</a>
@@ -303,6 +304,7 @@ Other binaries in `src/bin/`:
 ## Documentation
 
 User-facing:
+- [`docs/frogql-for-agents.md`](docs/frogql-for-agents.md) — **the whole surface in one file, written for an AI coding agent**: the Cypher-isms that do not parse, the functions that do exist, and what froGQL deliberately lacks
 - [`docs/data-import.md`](docs/data-import.md) — CSV / LDBC / JSON loaders
 - [`docs/query-language.md`](docs/query-language.md) — `MATCH`, `OPTIONAL MATCH`, `EXISTS`, repetition, label algebra
 - [`docs/data-modification.md`](docs/data-modification.md) — ISO §13 surface (`INSERT`, `SET`, `REMOVE`, `DELETE`), persistence, dumps
