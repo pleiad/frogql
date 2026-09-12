@@ -150,7 +150,13 @@ fn test_concat_any_right() {
 
 #[test]
 fn test_repetition() {
-    assert_eq!(fraud_run("-->{1,2}"), 23);
+    // `-->` is one forward edge, so this is one or two directed hops:
+    // 5 single edges plus 5 two-edge paths. It read 23 while the lexer
+    // made `-->` mean `-[]-` followed by `-[]->`, where the quantifier
+    // repeated only the second over an any-direction first hop.
+    assert_eq!(fraud_run("-->{1,2}"), 10);
+    // The spelled-out form must agree, which is the point of the sugar.
+    assert_eq!(fraud_run("-[]->{1,2}"), 10);
 }
 
 #[test]

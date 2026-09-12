@@ -1155,11 +1155,43 @@ fn test_lexer_block_comment() {
 
 #[test]
 fn test_lexer_dash_dash_arrow_is_edge_not_comment() {
-    // `-->` is the unlabeled forward-edge sugar from §5.x — it must
-    // tokenize as Minus + RightArrow, not be eaten by the `--` line
-    // comment. Without disambiguation in the lexer, the rest of the
-    // line gets consumed and parsing dies on EOF.
-    let _ = parse("-->{1,2}").expect("--> must lex as edge, not comment");
+    // `-->` is the unlabeled forward-edge sugar from §5.x. Two things
+    // have to be true and this case used to check only the first: it
+    // must not be eaten by the `--` line comment, *and* it must be one
+    // forward edge.
+    //
+    // It was neither — it lexed as `Minus` + `RightArrow`, which the
+    // grammar reads as an any-direction edge followed by a directed one,
+    // joined through an anonymous node. `(x)-->(y)` matched
+    // `(x)-[]-(anon)-[]->(y)`: on a two-node, four-edge fixture it
+    // returned 16 rows where there are 4 edges, with both endpoints
+    // bound to the same node. The old assertion passed throughout,
+    // because parsing is exactly what it did.
+    let p = parse("-->").expect("--> must lex as edge, not comment");
+    assert!(
+        matches!(p, PathPattern::EdgeRight(_)),
+        "`-->` must be one forward edge, got {p:?}"
+    );
+    // The mirror form, wrong in the mirror way (`LeftArrow` + `Minus`).
+    let p = parse("<--").expect("<-- must lex as edge");
+    assert!(
+        matches!(p, PathPattern::EdgeLeft(_)),
+        "`<--` must be one leftward edge, got {p:?}"
+    );
+    // And the shorter spellings are unchanged.
+    assert!(matches!(parse("->").unwrap(), PathPattern::EdgeRight(_)));
+    assert!(matches!(parse("<-").unwrap(), PathPattern::EdgeLeft(_)));
+    assert!(matches!(
+        parse("-").unwrap(),
+        PathPattern::EdgeAnyDirection(_)
+    ));
+    // A real `--` comment still swallows its line and no more.
+    let q = parse_query(
+        "MATCH (p) -- a comment
+RETURN p.x AS x",
+    )
+    .unwrap();
+    assert_eq!(q.matches.len(), 1);
 }
 
 #[test]

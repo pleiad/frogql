@@ -54,7 +54,12 @@ impl Connection {
         self.store.edge_count()
     }
 
-    #[pyo3(signature = (query, limit = 100))]
+    // No row cap by default. A cap *is* an execution cap here, not a
+    // display one: the engine stops producing, so a truncated answer is
+    // indistinguishable from a complete one and `len(rows)` reads as the
+    // whole of it. A hundred was a quiet lie for every caller who did
+    // not know to pass `limit=0`. Pass a limit when you want one.
+    #[pyo3(signature = (query, limit = 0))]
     fn execute<'py>(&self, py: Python<'py>, query: &str, limit: usize) -> PyResult<PyObject> {
         // Top-level dispatch: DDL goes through the catalog, queries
         // through the runtime.

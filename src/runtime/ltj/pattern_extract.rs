@@ -8,7 +8,11 @@ use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::BinOp;
 use crate::syntax::path_pattern::PathPattern;
 
-use super::algorithm::{EdgeDirReq, FilterKind, LtjAlgorithm, PlacedFilter, ResultTuple, VecCtx};
+use crate::typing::label_type::LabelType;
+
+use super::algorithm::{
+    EdgeDirReq, EdgeLabelReq, FilterKind, LtjAlgorithm, PlacedFilter, ResultTuple, VecCtx,
+};
 use super::iterator::{LtjIterator, SpoPos, Term, TriplePattern};
 use super::triple_index::TripleIndex;
 use super::veo::{self, AdaptiveVeo, IterSizes, Veo, VeoOverride, VeoSimple};
@@ -22,11 +26,11 @@ struct Decomposition {
     filters: Vec<ExtractedFilter>,
     /// Variables that are internal (anonymous) — excluded from final assignment
     internal_vars: Vec<u8>,
-    /// For each triple: (src_var, tgt_var, edge_var_name, kind).
+    /// For each triple: (src_var, tgt_var, edge_var_name, kind, label).
     /// `src_var` and `tgt_var` reflect the order of the *triple*, after the
     /// leftward swap; `kind` lets result reconstruction recover the
     /// original pattern direction for path display and edge lookup.
-    triple_info: Vec<(u8, u8, Option<String>, EdgeKind)>,
+    triple_info: Vec<(u8, u8, Option<String>, EdgeKind, EdgeLabelReq)>,
     /// Join boundaries: triple index ranges for each sub-query in a Join.
     /// E.g., for `Q1, Q2` with 3 triples from Q1 and 2 from Q2: [(0,3), (3,5)].
     /// Empty means the whole pattern is a single path.
@@ -619,12 +623,24 @@ fn try_ltj_inner<G: GraphAccess>(
         decomp
             .triple_info
             .iter()
-            .map(|(_, _, _, kind)| match kind {
+            .map(|(_, _, _, kind, _)| match kind {
                 EdgeKind::Right | EdgeKind::Left => EdgeDirReq::Directed,
                 EdgeKind::Undirected => EdgeDirReq::Undirected,
                 EdgeKind::AnyDir => EdgeDirReq::Any,
             })
             .collect(),
+    )
+    // Same reason as the directions above, for the other half of what a
+    // triple cannot express: the index holds one triple per label, so a
+    // label *expression* (`A|B`, `A&B`, or none at all) leaves the
+    // predicate free and the check has to travel with the triple.
+    .with_edge_labels(
+        decomp
+            .triple_info
+            .iter()
+            .map(|(_, _, _, _, req)| req.clone())
+            .collect(),
+        &index.label_to_id,
     );
 
     let tuples = match nn {
@@ -969,7 +985,7 @@ fn decompose_pattern_top(
     id_to_name: &mut Vec<String>,
     filters: &mut Vec<ExtractedFilter>,
     internal: &mut Vec<u8>,
-    triple_info: &mut Vec<(u8, u8, Option<String>, EdgeKind)>,
+    triple_info: &mut Vec<(u8, u8, Option<String>, EdgeKind, EdgeLabelReq)>,
     fresh: &mut u32,
     join_boundaries: &mut Vec<(usize, usize)>,
 ) -> Option<u8> {
@@ -1037,7 +1053,7 @@ fn decompose_pattern(
     id_to_name: &mut Vec<String>,
     filters: &mut Vec<ExtractedFilter>,
     internal: &mut Vec<u8>,
-    triple_info: &mut Vec<(u8, u8, Option<String>, EdgeKind)>,
+    triple_info: &mut Vec<(u8, u8, Option<String>, EdgeKind, EdgeLabelReq)>,
     fresh: &mut u32,
 ) -> Option<u8> {
     match pattern {
@@ -1132,7 +1148,7 @@ fn decompose_flat_chain(
     id_to_name: &mut Vec<String>,
     filters: &mut Vec<ExtractedFilter>,
     internal: &mut Vec<u8>,
-    triple_info: &mut Vec<(u8, u8, Option<String>, EdgeKind)>,
+    triple_info: &mut Vec<(u8, u8, Option<String>, EdgeKind, EdgeLabelReq)>,
     fresh: &mut u32,
 ) -> Option<u8> {
     if elems.is_empty() {
@@ -1165,7 +1181,8 @@ fn decompose_flat_chain(
         };
 
         let edge_var_name = edge_desc.and_then(|d| d.var.clone());
-        let p_term = build_p_term(*edge_desc, index, names, id_to_name, internal, fresh);
+        let (p_term, label_req) =
+            build_p_term(*edge_desc, index, names, id_to_name, internal, fresh);
 
         // Forward (`-[L]->`) and undirected (`~[L]~`) emit a triple
         // (current, L, next). Leftward (`<-[L]-`) emits (next, L, current)
@@ -1180,7 +1197,7 @@ fn decompose_flat_chain(
         triples.push(TriplePattern {
             terms: [Term::Variable(src_var), p_term, Term::Variable(tgt_var)],
         });
-        triple_info.push((src_var, tgt_var, edge_var_name, *kind));
+        triple_info.push((src_var, tgt_var, edge_var_name, *kind, label_req));
 
         current_node = next_var;
         i += advance;
@@ -1267,7 +1284,8 @@ fn fresh_var(
 
 /// Build the P-term of a triple pattern from an edge descriptor: a label
 /// constant when there's exactly one required label, a fresh variable
-/// otherwise (wildcard / multi-label).
+/// otherwise (wildcard / multi-label), together with what the base case
+/// still has to check about the stored edge.
 fn build_p_term(
     edge_desc: Option<&Descriptor>,
     index: &TripleIndex,
@@ -1275,18 +1293,36 @@ fn build_p_term(
     id_to_name: &mut Vec<String>,
     internal: &mut Vec<u8>,
     fresh: &mut u32,
-) -> Term {
+) -> (Term, EdgeLabelReq) {
     if let Some(d) = edge_desc {
         let labels = d.dtype.label.required_labels();
         if labels.len() == 1 {
-            return match index.label_to_id.get(labels[0]) {
+            let term = match index.label_to_id.get(labels[0]) {
                 Some(&lid) => Term::Constant(lid),
                 None => Term::Constant(u32::MAX), // label not in graph
             };
+            // The search visits exactly the label the pattern named, so
+            // a stored edge reaching the base case carries it by
+            // construction. Nothing to re-check.
+            return (term, EdgeLabelReq::Pinned);
         }
     }
+    // No single required label — `A|B`, `A&B`, or no label at all. The
+    // index has no "label in this set" cursor, so the predicate is left
+    // free and the search walks *every* label *every* edge carries. Two
+    // things then have to be checked at the base case, and until they
+    // were, both went wrong in silence: the expression was not enforced
+    // (`-[:A|B]->` matched every edge), and an edge with two labels was
+    // reached through two triples and counted twice (even `-[r]->`
+    // over-counted it).
     let p_var = fresh_var(names, id_to_name, internal, fresh);
-    Term::Variable(p_var)
+    let want = edge_desc
+        .map(|d| d.dtype.label.clone())
+        .unwrap_or(LabelType::Star);
+    (
+        Term::Variable(p_var),
+        EdgeLabelReq::Free { label: want, p_var },
+    )
 }
 
 // ---- Result conversion ----
@@ -1324,7 +1360,7 @@ fn convert_results<G: GraphAccess>(
         for &(start, end) in &ranges {
             let mut path_elements = Vec::new();
             for ti in start..end {
-                let (src_var, tgt_var, ref edge_var, kind) = decomp.triple_info[ti];
+                let (src_var, tgt_var, ref edge_var, kind, _) = decomp.triple_info[ti];
                 let src_id = tuple
                     .vars
                     .iter()

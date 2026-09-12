@@ -576,7 +576,10 @@ mod tests {
             1
         );
         assert_eq!(disk_fraud_run("(x: Dummy) | (y: Account)"), 5);
-        assert_eq!(disk_fraud_run("-->{1,2}"), 23);
+        // See the note in `store::lazy::tests::test_lazy_complex`:
+        // `-->` is one forward edge now, so this is 5 + 5.
+        assert_eq!(disk_fraud_run("-->{1,2}"), 10);
+        assert_eq!(disk_fraud_run("-[]->{1,2}"), 10);
         assert_eq!(disk_fraud_run("(x: Dummy & Person)"), 1);
     }
 }

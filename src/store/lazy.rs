@@ -1923,7 +1923,13 @@ mod tests {
             1
         );
         assert_eq!(lazy_fraud_run("(x: Dummy) | (y: Account)"), 5);
-        assert_eq!(lazy_fraud_run("-->{1,2}"), 23);
+        // `-->` is one forward edge, so this is one-or-two directed
+        // hops: 5 single edges plus 5 two-edge paths. It read 23 while
+        // the lexer made `-->` mean `-[]-` followed by `-[]->` — the
+        // quantifier then repeated only the second, over an
+        // any-direction first hop.
+        assert_eq!(lazy_fraud_run("-->{1,2}"), 10);
+        assert_eq!(lazy_fraud_run("-[]->{1,2}"), 10);
     }
 
     #[test]

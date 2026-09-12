@@ -145,7 +145,11 @@ fn test_any_direction() {
 }
 #[test]
 fn test_repetition() {
-    assert_eq!(fraud_store_run("-->{1,2}"), 23);
+    // `-->` is one forward edge: 5 single edges plus 5 two-edge paths.
+    // It read 23 while the lexer made `-->` two edges — see
+    // `test_lexer_dash_dash_arrow_is_edge_not_comment`.
+    assert_eq!(fraud_store_run("-->{1,2}"), 10);
+    assert_eq!(fraud_store_run("-[]->{1,2}"), 10);
 }
 #[test]
 fn test_repetition_desc() {

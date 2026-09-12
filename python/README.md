@@ -84,7 +84,7 @@ A `DEFAULT` graph type is auto-inferred at import time. Auto-built secondary ind
 | `frogql.open(path)` | `Connection` |
 | `frogql.import_json(db_path, json_path)` | `None` |
 | `frogql.import_csv(db_path, csv_dir)` | `None` |
-| `Connection.execute(query, limit=100)` | `list[dict]` (with `RETURN`: keys = aliases or `colN`; without `RETURN`: keys = pattern variables plus `_paths`) |
+| `Connection.execute(query, limit=0)` | `list[dict]` (with `RETURN`: keys = aliases or `colN`; without `RETURN`: keys = pattern variables plus `_paths`) |
 | `Connection.schema()` | `dict` |
 | `Connection.graph_types()` | `list[dict]` |
 | `Connection.node_count` / `Connection.edge_count` | `int` |

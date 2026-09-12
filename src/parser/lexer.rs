@@ -410,6 +410,22 @@ impl Lexer {
                             self.advance();
                             self.tokens.push(Token::DashLB); // -[
                         }
+                        // `-->` is one unlabelled forward edge, not two
+                        // edges. It reaches here as a bare `-` because
+                        // `skip_whitespace` declined to read `--` as a
+                        // line comment on seeing the `>`; without this
+                        // arm the parser then saw `Minus` + `RightArrow`
+                        // and built `-[]-` followed by `-[]->`, joined
+                        // through an anonymous node. `(x)-->(y)` matched
+                        // `(x)<-[]-(anon)-[]->(y)` — the wrong shape, the
+                        // wrong count, and no error. The lexer test that
+                        // guarded this only asserted `-->` parses, which
+                        // it did.
+                        Some('-') if self.input.get(self.pos + 1).copied() == Some('>') => {
+                            self.advance(); // second -
+                            self.advance(); // >
+                            self.tokens.push(Token::RightArrow);
+                        }
                         _ => self.tokens.push(Token::Minus),
                     }
                 }
@@ -422,6 +438,12 @@ impl Lexer {
                                 self.advance();
                                 self.tokens.push(Token::LtDashLB); // <-[
                             } else {
+                                // `<--`, the mirror of `-->`, and wrong in
+                                // the mirror way: `LeftArrow` + `Minus`
+                                // built `<-[]-` followed by `-[]-`.
+                                if self.peek() == Some('-') {
+                                    self.advance();
+                                }
                                 self.tokens.push(Token::LeftArrow); // <-
                             }
                         }

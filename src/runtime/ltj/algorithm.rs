@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use crate::model::graph_access::GraphAccess;
 use crate::model::value::Value;
 use crate::runtime::cmp_values;
 use crate::syntax::expr::BinOp;
+use crate::typing::label_type::LabelType;
 
 use super::iterator::{LtjIterator, SpoPos};
 use super::veo::{IterSizes, Veo};
@@ -104,6 +107,38 @@ impl EdgeDirReq {
             EdgeDirReq::Undirected => !graph.is_directed(eid),
         }
     }
+}
+
+/// What a triple's pattern edge requires of the stored edge's **labels**.
+///
+/// The index holds one triple per label, and the search binds the
+/// predicate position to one label at a time. When the pattern names a
+/// single label that position is a constant, the search visits only that
+/// label, and a stored edge reaching the base case satisfies the pattern
+/// by construction.
+///
+/// It is the other case that needs this type. `A|B`, `A&B` and "no label
+/// at all" have no single required name, the index has no "label in this
+/// set" cursor, and so the predicate is left **free** — the search then
+/// walks every label every edge carries. Two things go wrong without a
+/// check here, and both went wrong in silence:
+///
+/// - the expression was never enforced, so `-[:A|B]->` matched *every*
+///   edge between the endpoints (and `-[:A&B]->` likewise);
+/// - an edge carrying two labels was reached through two different
+///   triples and counted **twice**, so even the unlabelled `-[r]->`
+///   over-counted it.
+///
+/// The scan / hash-join path checks labels with `DescriptorType::
+/// is_subtype` and always answered correctly, so which answer a query
+/// got depended on which join strategy the optimizer picked.
+#[derive(Debug, Clone)]
+pub enum EdgeLabelReq {
+    /// The predicate is a constant. Nothing to re-check.
+    Pinned,
+    /// The predicate is a free variable. `label` is the pattern's label
+    /// expression; `p_var` is where the current label sits in the tuple.
+    Free { label: LabelType, p_var: u8 },
 }
 
 /// A result tuple: variable bindings as (var_id, value), plus the source
@@ -464,6 +499,14 @@ pub struct LtjAlgorithm<'a> {
     /// `iterators` order. Empty means "no requirement", which is what a
     /// caller that builds triples by hand gets.
     triple_dir: Vec<EdgeDirReq>,
+    /// What each triple's pattern edge requires of the stored edge's
+    /// labels, in `iterators` order. Empty means "no requirement".
+    triple_label: Vec<EdgeLabelReq>,
+    /// The label dictionary, for turning a stored edge's label names back
+    /// into the ids the search binds. Needed only by the canonical-label
+    /// rule below. `None` leaves that rule off, which is what a caller
+    /// building triples by hand gets.
+    label_dict: Option<&'a HashMap<String, u32>>,
 }
 
 impl<'a> LtjAlgorithm<'a> {
@@ -489,6 +532,8 @@ impl<'a> LtjAlgorithm<'a> {
             filters_dyn: Vec::new(),
             visits: 0,
             triple_dir: Vec::new(),
+            triple_label: Vec::new(),
+            label_dict: None,
         }
     }
 
@@ -497,6 +542,58 @@ impl<'a> LtjAlgorithm<'a> {
     pub fn with_edge_directions(mut self, dirs: Vec<EdgeDirReq>) -> Self {
         self.triple_dir = dirs;
         self
+    }
+
+    /// Declare what each triple's pattern edge requires of the stored
+    /// edge's labels, and supply the dictionary the canonical-label rule
+    /// reads. Parallel to the iterators; see `EdgeLabelReq`.
+    pub fn with_edge_labels(
+        mut self,
+        labels: Vec<EdgeLabelReq>,
+        dict: &'a HashMap<String, u32>,
+    ) -> Self {
+        self.triple_label = labels;
+        self.label_dict = Some(dict);
+        self
+    }
+
+    /// Whether this stored edge is a match for a triple whose predicate
+    /// was left free, with the current label bound to `p`.
+    ///
+    /// Two conditions. The edge's own labels must satisfy the pattern's
+    /// expression — the same `is_subtype` test the scan path uses, so the
+    /// two strategies cannot disagree. And the edge must be emitted at
+    /// exactly **one** of its labels, or a two-label edge would be one
+    /// match per label: the canonical one is the smallest id, which is a
+    /// choice of representative and not a preference, since every label
+    /// of the edge leads the search here.
+    fn free_label_admits<G: GraphAccess>(
+        &self,
+        graph: &G,
+        want: &LabelType,
+        eid: u32,
+        p: u32,
+    ) -> bool {
+        let actual = graph.edge_labels(eid);
+        if !LabelType::is_subtype(&actual, want) {
+            return false;
+        }
+        let Some(dict) = self.label_dict else {
+            return true;
+        };
+        let names = actual.required_labels();
+        let canonical = if names.is_empty() {
+            // An unlabelled edge is stored under the empty label.
+            dict.get("").copied()
+        } else {
+            names.iter().filter_map(|n| dict.get(*n).copied()).min()
+        };
+        match canonical {
+            Some(c) => c == p,
+            // A label the index does not know cannot have led the search
+            // here; keeping the row is the conservative answer.
+            None => true,
+        }
     }
 
     /// Supply the per-variable filter table an adaptive VEO needs.
@@ -964,6 +1061,19 @@ impl<'a> LtjAlgorithm<'a> {
                 let mut eids = it.current_eids_all();
                 if let Some(&req) = self.triple_dir.get(i) {
                     eids.retain(|&e| req.admits(graph, e));
+                }
+                // The index cannot express a label *expression* either —
+                // it holds one triple per label — so a predicate the
+                // pattern could not pin is checked here, against the
+                // stored edge. See `EdgeLabelReq`.
+                if let Some(EdgeLabelReq::Free { label, p_var }) = self.triple_label.get(i) {
+                    // `tuple` is indexed by *level*, not by variable id —
+                    // the order is chosen per query and, under the
+                    // adaptive VEO, per binding. So the predicate's
+                    // current value is found by its id, not its position.
+                    if let Some(&(_, p)) = tuple[..self.num_vars].iter().find(|(v, _)| v == p_var) {
+                        eids.retain(|&e| self.free_label_admits(graph, label, e, p));
+                    }
                 }
                 if eids.is_empty() {
                     return true;

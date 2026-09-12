@@ -16,7 +16,7 @@ a function.
 
 **1. Writing Cypher.** `CREATE`, `MERGE`, `WITH`, `UNION`, `STARTS WITH`,
 `-[:R*1..2]->` and `size()` are all parse errors here. The GQL spellings
-are `INSERT`, (no MERGE), (no WITH — see §5.6), (no UNION), (no string
+are `INSERT`, (no MERGE), (no WITH — see §5.7), (no statement-level UNION — but see the path union in §5.3), (no string
 operators), `-[:R]->{1,2}` and (no size). §12 lists every one.
 
 **2. Building patterns out of triples.** froGQL indexes edges as triples
@@ -42,9 +42,12 @@ way to avoid learning `INSERT`.
 not the function missing — the commonest cause is a missing `GROUP BY`,
 which in this grammar goes **after** the `RETURN` list.
 
-**5. Trusting a truncated answer.** The Python and Node `execute()` take
-`limit = 100` **by default**. A hundred rows back does not mean a hundred
-rows exist. Pass `limit=0` for all of them.
+**5. Passing a row limit and reading it as the whole answer.** `limit` on
+`execute()` is an *execution* cap, not a display one: the engine stops
+producing, so a truncated result is indistinguishable from a complete
+one. It defaults to 0 — no cap — so you get everything unless you ask
+otherwise. If you do pass one, `len(rows) == limit` means "there may be
+more", not "there are exactly this many".
 
 ---
 
@@ -90,9 +93,8 @@ conn.schema()                           # inferred schema, with a 'formatted' st
 conn.graph_types()
 ```
 
-`limit` defaults to **100**. Pass `limit=0` when you want the whole
-answer. `frogql.import_json(db, json)` and `frogql.import_csv(db, dir)`
-build a database from a file.
+`limit` defaults to 0, meaning no cap. `frogql.import_json(db, json)` and
+`frogql.import_csv(db, dir)` build a database from a file.
 
 With a `RETURN`, a row is `{alias: value}`; an unaliased projection is
 keyed `col0`, `col1`, …. **Without** a `RETURN`, a row is
@@ -232,7 +234,12 @@ anything.
 ~[:R]~      undirected edges only
 -->         unlabelled directed edge (sugar for -[]->)
 -[:A|B]->   either label
+-[:A&B]->   both labels
 ```
+
+The same algebra works on edges and on nodes. `(x:A|B)` and `-[:A|B]->`
+are "either label"; `(x:A&B)` and `-[:A&B]->` are "both". An edge
+carrying two labels is **one** match, not one per label.
 
 ### 5.2 Joining
 
@@ -253,7 +260,37 @@ That `a.name < b.name` is the idiom for "one of each unordered pair", and
 it works: strings, booleans, numbers and same-type temporal values are
 all ordered.
 
-### 5.3 Repetition
+### 5.3 Union of paths
+
+`|` between two path terms is a **union of whole patterns**, not just of
+labels. The arms may differ in length and may bind different variables;
+the result is the bag union of both.
+
+```gql
+-- every acting-or-directing pair, in one pattern
+MATCH (p:Person)-[:ACTED_IN]->(m:Movie) | (p:Person)-[:DIRECTED]->(m:Movie)
+RETURN p.name, m.title
+
+-- arms of different lengths: one hop or two
+MATCH (a:Person)-[:FOLLOWS]->(b:Person)
+    | (a:Person)-[:FOLLOWS]->(x:Person)-[:FOLLOWS]->(b:Person)
+RETURN a.name, b.name
+```
+
+Parenthesise it to concatenate more pattern onto the union:
+`((a)-[:R]->(b) | (a)-[:S]->(b))-[:T]->(c)`.
+
+This is the closest thing to SQL's `UNION`, and it is not the same
+thing: it unions *patterns inside one query*, not two independent
+queries with their own `RETURN` lists. There is no statement-level
+`UNION`.
+
+Do not confuse it with the **label** union `-[:A|B]->` and `(x:A|B)`,
+which is a different operator in a different position (§5.1). The label
+form picks which edges match; the path form picks which *shapes* match,
+and the arms can differ in length and in the variables they bind.
+
+### 5.4 Repetition
 
 ```gql
 -[:FOLLOWS]->{1,2}      one or two hops
@@ -277,7 +314,7 @@ MATCH TRAIL (p:Person)-[:FOLLOWS]->*(q:Person) RETURN p.name, q.name
 Cypher's `*1..2` is **not** valid here; the quantifier goes after the
 whole edge, `-[:R]->{1,2}`.
 
-### 5.4 Path prefixes (ISO §16.6)
+### 5.5 Path prefixes (ISO §16.6)
 
 Prefixes scope to one comma operand.
 
@@ -293,7 +330,7 @@ Prefixes scope to one comma operand.
 | `SHORTEST n GROUPS` | every path at the n shortest lengths |
 | `ANY SHORTEST` / `ALL SHORTEST` | the common spellings of `SHORTEST 1 PATHS` / `GROUPS` |
 
-### 5.5 Named paths
+### 5.6 Named paths
 
 ```gql
 MATCH path = ANY SHORTEST (a:Person {name: 'Tom Hanks'})
@@ -305,7 +342,7 @@ RETURN PATH_LENGTH(path) AS len
 `PATH_LENGTH` (edges), `CARDINALITY` (nodes + edges) and `ELEMENTS` are
 ISO. `NODES` and `EDGES` also work and are a froGQL extension.
 
-### 5.6 OPTIONAL MATCH
+### 5.7 OPTIONAL MATCH
 
 There is no `WITH`, so the way to chain is a second match clause:
 
@@ -549,6 +586,8 @@ costs rather than what it answers:
 
 ## 11. Reading answers
 
+- A `limit` you passed is an execution cap: `len(rows) == limit` means
+  there may be more, not that there are exactly that many.
 - `RETURN x` on a node or edge variable prints its labels and properties,
   not an id. Internal ids are not stable — saving renumbers them — so do
   not store one or use it as a key. Use a property you control.
@@ -570,7 +609,7 @@ agent has tried.
 | `CREATE (n:Foo)` | `INSERT (:Foo)` |
 | `MERGE (n:Foo)` | `MATCH` first, then `INSERT` if empty |
 | `WITH x AS y` | a second `MATCH` clause, or `OPTIONAL MATCH` |
-| `UNION` between queries | pattern union `\|` inside one pattern |
+| `UNION` between two queries | path union `\|` between two patterns in one query (§5.3) |
 | `-[:R*1..2]->` | `-[:R]->{1,2}` |
 | `STARTS WITH`, `CONTAINS`, `=~` | no string operators at all |
 | `upper()`, `lower()`, `size()`, `length()`, `substring()`, `split()`, `coalesce()` | no string or list functions |

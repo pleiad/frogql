@@ -192,7 +192,10 @@ impl Connection {
     /// `const rows = conn.execute("MATCH ...") as Array<{ x: NodeRef }>`
     #[napi(ts_return_type = "unknown")]
     pub fn execute(&self, query: String, limit: Option<u32>) -> napi::Result<JsonValue> {
-        let limit = limit.unwrap_or(100) as usize;
+        // No row cap by default — see the note on the Python binding.
+        // The cap stops the engine producing, so a truncated answer is
+        // indistinguishable from a complete one.
+        let limit = limit.unwrap_or(0) as usize;
         let stmt = parse_statement(&query).map_err(err)?;
         match stmt {
             Statement::CreateGraphType { name, body } => self.exec_create(&name, &body),
