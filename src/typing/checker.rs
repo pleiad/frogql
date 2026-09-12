@@ -941,8 +941,36 @@ impl Typechecker {
                 let arg_types: Vec<SimpleType> =
                     args.iter().map(|a| self.check_expr(a, env)).collect();
                 match name.as_str() {
-                    // FLOOR(numeric) → Float (the runtime narrows via CAST).
-                    "FLOOR" => SimpleType::F,
+                    // Scalar math (issue #97). `ABS` and `SIGN` preserve an
+                    // integer argument, because an integer answer is exact
+                    // there; everything else is float-valued, `FLOOR`
+                    // included — ISO says so of `FLOOR`, and the three
+                    // rounding functions have to agree with each other.
+                    // Wrap in `CAST(... AS INTEGER)` for an int.
+                    //
+                    // A provably non-numeric argument is a hard error;
+                    // `Star` is tolerated, matching the gradual rule the
+                    // temporal and path functions follow. `Null` is
+                    // tolerated too: a missing property reads as null and
+                    // `sqrt` of it is unknown, not wrong.
+                    "FLOOR" | "CEIL" | "ROUND" | "SQRT" | "ABS" | "SIGN" | "SIN" | "COS"
+                    | "TAN" | "EXP" | "LN" | "RADIANS" | "DEGREES" | "POW" | "LOG" => {
+                        for t in &arg_types {
+                            if !numeric_arg_ok(t) {
+                                self.errors
+                                    .push(format!("{name} expects a numeric argument, got {t}"));
+                            }
+                        }
+                        match (name.as_str(), arg_types.first()) {
+                            ("ABS" | "SIGN", Some(SimpleType::Z)) => SimpleType::Z,
+                            // A union like `int | NULL` keeps its null in
+                            // the result: the function propagates it.
+                            _ if arg_types.iter().any(type_admits_null) => {
+                                SimpleType::union(&SimpleType::F, &SimpleType::Null)
+                            }
+                            _ => SimpleType::F,
+                        }
+                    }
                     // ISO §20.27 temporal constructors. Zero args = current
                     // date/datetime; one arg = a <date/datetime string> or a
                     // field record. A provably wrong argument type is a hard
@@ -1606,6 +1634,41 @@ fn describe_property_alternatives(candidates: &[&DescriptorType]) -> String {
 /// look cleaner with the bracket-style query syntax instead. Unions (a
 /// common output from `refine` against schemas with overlapping label
 /// combinations) are rendered as "(:A) or (:B)".
+/// Whether a math function can accept an argument of this type.
+///
+/// Optimistic, like the rest of the gradual rules here: `Star` passes
+/// because the type is unknown, not wrong, and `int | NULL` passes
+/// because that is exactly what inference reports for an optional
+/// property — rejecting it would make every math function unusable on
+/// the schemas this engine produces.
+///
+/// What null does **not** do is rescue a union: `str | NULL` is a type
+/// error, because no value it admits is a number. Null passes only when
+/// it is the whole type, which is the `null` literal.
+fn numeric_arg_ok(t: &SimpleType) -> bool {
+    matches!(t, SimpleType::Null) || has_numeric_branch(t)
+}
+
+fn has_numeric_branch(t: &SimpleType) -> bool {
+    match t {
+        // Zero is already empty; reporting it as a second error adds
+        // nothing to the one that emptied it.
+        SimpleType::Z | SimpleType::F | SimpleType::Star | SimpleType::Zero => true,
+        SimpleType::Union(a, b) => has_numeric_branch(a) || has_numeric_branch(b),
+        _ => false,
+    }
+}
+
+/// Whether `null` is one of the values this type admits, so a function
+/// over it reports `F | NULL` rather than a bare `F`.
+fn type_admits_null(t: &SimpleType) -> bool {
+    match t {
+        SimpleType::Null | SimpleType::Star => true,
+        SimpleType::Union(a, b) => type_admits_null(a) || type_admits_null(b),
+        _ => false,
+    }
+}
+
 fn short_var_type(t: &VariableType) -> String {
     match t {
         VariableType::Node(d) => format!("(:{})", d.label),

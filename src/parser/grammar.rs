@@ -1906,6 +1906,33 @@ impl Parser {
                         self.expect(&Token::RParen)?;
                         return Ok(Expr::Call { name: canon, args });
                     }
+                    // Scalar math functions (issue #97). Same soft-keyword
+                    // discipline as the path and temporal functions: only
+                    // the call form is special, so `abs`, `round`, `sign`
+                    // and the rest stay usable as variable, label and
+                    // property names — which matters, because they are
+                    // exactly the words a schema uses for columns.
+                    //
+                    // Arity is checked here rather than at runtime so the
+                    // message names the function instead of pointing at a
+                    // parenthesis, which is what the report on #97 had to
+                    // work back from.
+                    if let Some((canon, arity)) = math_function_name(&name) {
+                        self.advance(); // consume '('
+                        let mut args = vec![self.expr()?];
+                        while self.eat(&Token::Comma) {
+                            args.push(self.expr()?);
+                        }
+                        self.expect(&Token::RParen)?;
+                        if args.len() != arity {
+                            return Err(format!(
+                                "{canon} takes {arity} argument{}, got {}",
+                                if arity == 1 { "" } else { "s" },
+                                args.len()
+                            ));
+                        }
+                        return Ok(Expr::Call { name: canon, args });
+                    }
                     // Non-ISO: `VECTOR(<node id>, '<attr>')` reads a stored
                     // vector, so a query can say "nearest to the embedding
                     // of this example entity" instead of pasting hundreds
@@ -2892,6 +2919,33 @@ fn const_of(e: &Expr) -> Option<Value> {
         },
         _ => None,
     }
+}
+
+/// A scalar math function and how many arguments it takes.
+///
+/// `FLOOR` is absent on purpose: ISO gives it its own `<floor function>`
+/// production and the lexer already has a token for it. The rest have no
+/// ISO spelling, so they ride the soft-keyword path and stay usable as
+/// ordinary names.
+///
+/// `DEGREES` is here although #97 asked only for `RADIANS`: a conversion
+/// that goes one way is a trap, and the pair costs one line.
+fn math_function_name(name: &str) -> Option<(String, usize)> {
+    let upper = name.to_ascii_uppercase();
+    let arity = match upper.as_str() {
+        "SQRT" | "ABS" | "CEIL" | "CEILING" | "ROUND" | "SIN" | "COS" | "TAN" | "EXP" | "LN"
+        | "SIGN" | "RADIANS" | "DEGREES" => 1,
+        "POW" | "POWER" | "LOG" => 2,
+        _ => return None,
+    };
+    // `CEILING` and `POWER` are the SQL spellings of `CEIL` and `POW`;
+    // accept both and canonicalise, so the runtime has one arm each.
+    let canon = match upper.as_str() {
+        "CEILING" => "CEIL".to_string(),
+        "POWER" => "POW".to_string(),
+        other => other.to_string(),
+    };
+    Some((canon, arity))
 }
 
 fn path_function_name(name: &str) -> Option<String> {

@@ -4062,15 +4062,110 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// non-numeric argument surfaces as `Failure` (Null under 3VL).
     fn eval_call(&self, mu: &Assignment, name: &str, args: &[Expr]) -> ExprResult {
         match name {
-            "FLOOR" => {
+            // Scalar math (issue #97), with ISO's `FLOOR` alongside them
+            // because they answer the same way and differ only in which
+            // production the grammar reaches them through.
+            //
+            // Three rules, shared by all of them:
+            //
+            // - **Null in, null out.** A missing property reads as null,
+            //   and `sqrt(null)` is not an error, it is unknown. (Both
+            //   spellings end as a null cell in `RETURN` and a dropped row
+            //   in `WHERE`, so this is a clarity fix, not a behaviour one.)
+            // - **A non-numeric argument is a `Failure`**, which empties
+            //   the path rather than aborting the query — the same
+            //   convention `CAST` and the path functions follow.
+            // - **Float out, except where an integer answer is exact.**
+            //   `ABS` and `SIGN` of an integer are integers; `FLOOR`,
+            //   `CEIL` and `ROUND` return floats, which is what ISO says
+            //   of `FLOOR` and what keeps the three of them consistent
+            //   with each other. Wrap in `CAST(... AS INTEGER)` for an int.
+            "FLOOR" | "CEIL" | "ROUND" | "SQRT" | "ABS" | "SIGN" | "SIN" | "COS" | "TAN"
+            | "EXP" | "LN" | "RADIANS" | "DEGREES" => {
                 let v = match self.run_expr(mu, &args[0]) {
                     ExprResult::Success(v) => v,
                     e @ ExprResult::Failure(_) => return e,
                 };
-                match v {
-                    Value::Int(n) => ExprResult::Success(Value::Float(n as f64)),
-                    Value::Float(x) => ExprResult::Success(Value::Float(x.floor())),
-                    _ => ExprResult::Failure("FLOOR requires a numeric argument".into()),
+                if matches!(v, Value::Null) {
+                    return ExprResult::Success(Value::Null);
+                }
+                // `ABS` and `SIGN` keep an integer argument integral;
+                // every other function is float-valued whatever came in.
+                if let Value::Int(n) = v {
+                    match name {
+                        "ABS" => return ExprResult::Success(Value::Int(n.abs())),
+                        "SIGN" => return ExprResult::Success(Value::Int(n.signum())),
+                        _ => {}
+                    }
+                }
+                let x = match numeric_arg(&v) {
+                    Some(x) => x,
+                    None => {
+                        return ExprResult::Failure(format!("{name} requires a numeric argument"))
+                    }
+                };
+                let out = match name {
+                    "FLOOR" => x.floor(),
+                    "CEIL" => x.ceil(),
+                    // Away from zero at .5, the spelling every SQL engine
+                    // and `f64::round` agree on.
+                    "ROUND" => x.round(),
+                    "SQRT" => x.sqrt(),
+                    "ABS" => x.abs(),
+                    "SIGN" => {
+                        // `f64::signum` reports 1.0 for +0.0 and -1.0 for
+                        // -0.0, which is not what a sign function means.
+                        if x == 0.0 {
+                            0.0
+                        } else {
+                            x.signum()
+                        }
+                    }
+                    "SIN" => x.sin(),
+                    "COS" => x.cos(),
+                    "TAN" => x.tan(),
+                    "EXP" => x.exp(),
+                    "LN" => x.ln(),
+                    "RADIANS" => x.to_radians(),
+                    "DEGREES" => x.to_degrees(),
+                    _ => unreachable!("guarded by the outer match arm"),
+                };
+                // `sqrt(-1)` and `ln(0)` are NaN and -inf. Neither is a
+                // value this engine can store or compare, so they become
+                // null — the same answer 3VL gives a division by zero.
+                if out.is_finite() {
+                    ExprResult::Success(Value::Float(out))
+                } else {
+                    ExprResult::Success(Value::Null)
+                }
+            }
+            // Two-argument math. `POW(x, y)`; `LOG(base, x)`, base first,
+            // the SQL order.
+            "POW" | "LOG" => {
+                let a = match self.run_expr(mu, &args[0]) {
+                    ExprResult::Success(v) => v,
+                    e @ ExprResult::Failure(_) => return e,
+                };
+                let b = match self.run_expr(mu, &args[1]) {
+                    ExprResult::Success(v) => v,
+                    e @ ExprResult::Failure(_) => return e,
+                };
+                if matches!(a, Value::Null) || matches!(b, Value::Null) {
+                    return ExprResult::Success(Value::Null);
+                }
+                let (x, y) = match (numeric_arg(&a), numeric_arg(&b)) {
+                    (Some(x), Some(y)) => (x, y),
+                    _ => return ExprResult::Failure(format!("{name} requires numeric arguments")),
+                };
+                let out = match name {
+                    "POW" => x.powf(y),
+                    "LOG" => y.log(x),
+                    _ => unreachable!("guarded by the outer match arm"),
+                };
+                if out.is_finite() {
+                    ExprResult::Success(Value::Float(out))
+                } else {
+                    ExprResult::Success(Value::Null)
                 }
             }
             "CAST" => {
@@ -5941,6 +6036,18 @@ fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
             (true, false) => Ordering::Greater,
             _ => Ordering::Equal,
         }),
+        _ => None,
+    }
+}
+
+/// A numeric argument as `f64`, or `None` for anything that is not a
+/// number. Ints widen, which is the same widening `cmp_values` applies,
+/// so a math function and a comparison cannot disagree about `3` and
+/// `3.0`.
+fn numeric_arg(v: &Value) -> Option<f64> {
+    match v {
+        Value::Int(n) => Some(*n as f64),
+        Value::Float(x) => Some(*x),
         _ => None,
     }
 }
