@@ -25,6 +25,7 @@ use crate::syntax::descriptor::Descriptor;
 use crate::syntax::expr::{BinOp, Expr};
 use crate::syntax::path_pattern::PathPattern;
 use crate::syntax::query::{MatchStatement, Query, ReturnItem, SortKey};
+use crate::typing::simple_type::SimpleType;
 
 pub fn elaborate_query(q: Query) -> Query {
     let fresh = FreshVars::new(&q);
@@ -270,9 +271,49 @@ where
                 desc.var = Some(fresh.next());
             }
             let var = desc.var.clone().unwrap();
+            for (attr, val) in &filters {
+                if let Some(t) = literal_property_type(val) {
+                    desc.dtype.props.extend(attr.clone(), t);
+                }
+            }
             let cond = filters_to_expr(&var, filters);
             PathPattern::Filter(Box::new(ctor(Some(desc))), cond)
         }
+    }
+}
+
+/// The property type a constant value filter licenses on its own key.
+///
+/// `(x:L {k: v})` lowers to a filter on `x.k`, but it also *states a type*:
+/// only an element whose `k` can equal `v` matches. Recording that in the
+/// descriptor's `PropertyType` is what lets the typechecker meet it against
+/// the schema — and, more to the point, against a sibling operand. With an
+/// imprecise schema (`(:Movie {*})`) the comparison `x.title = 'Q'` types
+/// fine on both sides and `(x:Movie {title: 'Q'}), (x:Movie {title: 42})`
+/// runs; with the type recorded, `TypeEnvironment::meet` takes
+/// `str ⊓ int = ⊥` on the shared key and the join is statically empty.
+///
+/// **A numeric literal contributes `int | float`, not its own type.** The
+/// descriptor is enforced at runtime too (`filter_node` → `is_subtype`), and
+/// `cmp_values` compares across the int/float split, so `1999 = 1999.0` is
+/// true. Recording `float` for `{released: 1999.0}` would make the runtime
+/// reject the very int-valued nodes the filter accepts — a silently narrower
+/// answer. The union keeps the runtime check a no-op while still meeting to
+/// `⊥` against a `str` or `bool` key, which is the case worth catching.
+///
+/// Non-constant expressions contribute nothing (no type in hand at
+/// elaboration time), and so does `null`: `SimpleType::Null` is terminal and
+/// meets every base type at `⊥`, so recording it would report a contradiction
+/// for a perfectly ordinary `IS NULL`-shaped filter.
+fn literal_property_type(e: &Expr) -> Option<SimpleType> {
+    match e {
+        Expr::Const(Value::Int(_)) | Expr::Const(Value::Float(_)) => Some(SimpleType::Union(
+            Box::new(SimpleType::Z),
+            Box::new(SimpleType::F),
+        )),
+        Expr::Const(Value::Str(_)) => Some(SimpleType::S),
+        Expr::Const(Value::Bool(_)) => Some(SimpleType::B),
+        _ => None,
     }
 }
 

@@ -14,7 +14,7 @@ const moviesDb = resolve(examplesDir, "movies.gdb");
 
 // Skip the whole suite if the binding hasn't been built yet. CI will fail
 // at the build step before reaching here.
-const { open, importJson, importCsv } = await import("../index.js");
+const { open, importJson, importJsonString, importCsv } = await import("../index.js");
 
 test("movies.gdb opens and reports node/edge counts", () => {
   assert.ok(existsSync(moviesDb), `expected ${moviesDb} to exist`);
@@ -95,5 +95,46 @@ test("edges expose props in _paths and RETURN e (symmetric with nodes)", () => {
 
 test("module exports import helpers", () => {
   assert.equal(typeof importJson, "function");
+  assert.equal(typeof importJsonString, "function");
   assert.equal(typeof importCsv, "function");
+});
+
+// A caller that has just built the graph in memory should not have to
+// serialise it to a temporary file purely so this library can read it
+// back. That intermediate file is what `importJsonString` removes.
+test("importJsonString loads a graph with no file on the way in", async () => {
+  const { rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const db = join(tmpdir(), `frogql_import_str_${process.pid}.gdb`);
+  for (const suffix of ["", ".ltj"]) {
+    try { rmSync(db + suffix); } catch {}
+  }
+
+  const json = JSON.stringify({
+    nodes: [
+      { id: "a", labels: ["Aerodromo"], props: { oaci: "SCEL" } },
+      { id: "f", labels: ["Fpl"], props: { fplId: 7000001 } },
+    ],
+    edges: [{
+      id: "e", labels: ["SALE_DE"], props: {},
+      endpoints: ["f", "a"], directionality: "->",
+    }],
+  });
+
+  importJsonString(db, json);
+  const conn = open(db);
+  assert.equal(conn.nodeCount, 2);
+  assert.equal(conn.edgeCount, 1);
+
+  const rows = conn.execute(
+    "MATCH (f:Fpl)-[:SALE_DE]->(a:Aerodromo) RETURN f.fplId, a.oaci",
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].col0, 7000001);
+  assert.equal(rows[0].col1, "SCEL");
+
+  for (const suffix of ["", ".ltj"]) {
+    try { rmSync(db + suffix); } catch {}
+  }
 });

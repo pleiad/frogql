@@ -12,7 +12,7 @@
 //! Both kinds are in-memory (rebuilt every open). Persistence in the .gdb
 //! file header chain is on the roadmap.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 
 use crate::model::graph::MemoryGraphStore;
@@ -135,7 +135,7 @@ impl PartialOrd for IndexKey {
 
 /// Convert a `Bound<Value>` to a `Bound<IndexKey>` for BTree range queries.
 /// Returns None if the bound's value is not indexable (a list, record or null).
-fn bound_to_key(b: Bound<Value>) -> Option<Bound<IndexKey>> {
+pub(crate) fn bound_to_key(b: Bound<Value>) -> Option<Bound<IndexKey>> {
     match b {
         Bound::Included(v) => Some(Bound::Included(IndexKey::from_value(&v)?)),
         Bound::Excluded(v) => Some(Bound::Excluded(IndexKey::from_value(&v)?)),
@@ -391,6 +391,35 @@ impl SecondaryIndex {
             out.extend_from_slice(ids.as_slice());
         }
         Some(out)
+    }
+
+    /// Every `(label, prop)` this index covers, hash or btree.
+    ///
+    /// The overlay-side delta files only these pairs: a lookup on any other
+    /// pair gets `None` from here and scans regardless, so indexing it in
+    /// the delta would cost memory and change no answer.
+    pub fn indexed_pairs(&self) -> HashSet<(String, String)> {
+        self.hashes
+            .keys()
+            .chain(self.btrees.keys())
+            .cloned()
+            .collect()
+    }
+
+    /// `(key, ids)` for `(label, prop)` in ascending key order.
+    ///
+    /// `ordered_ids` throws the keys away, which is right for its own
+    /// caller and useless for merging with the overlay delta — two ordered
+    /// id lists cannot be interleaved without the keys they were ordered
+    /// by. Same walk, keys kept.
+    pub fn ordered_entries(&self, label: &str, prop: &str) -> Option<Vec<(IndexKey, Vec<Id>)>> {
+        let bucket = self.btrees.get(&(label.to_string(), prop.to_string()))?;
+        Some(
+            bucket
+                .iter()
+                .map(|(k, p)| (k.clone(), p.as_slice().to_vec()))
+                .collect(),
+        )
     }
 
     /// True when a btree index exists for `(label, prop)`. Used by the

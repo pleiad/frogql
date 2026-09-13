@@ -246,9 +246,13 @@ impl Connection {
             None | Some("DEFAULT") => None,
             _ => Some(self.store.catalog().active_schema()),
         };
-        let exec =
-            frogql_core::runtime::dm::run_dm(&self.store, &dm, schema_for_validation.as_ref())
-                .map_err(PyValueError::new_err)?;
+        let exec = frogql_core::runtime::dm::run_dm_with_index(
+            &self.store,
+            &dm,
+            schema_for_validation.as_ref(),
+            self.triple_index.borrow().clone(),
+        )
+        .map_err(PyValueError::new_err)?;
         // Bring the cached LTJ index up to date with the mutation. The
         // static payload is kept and a small delta recomputed beside it;
         // `refresh` returns `None` only when no delta can express the
@@ -594,6 +598,24 @@ fn import_json(db_path: &str, json_path: &str) -> PyResult<()> {
     Ok(())
 }
 
+/// Import a JSON graph given **as a string**, rather than as a path.
+///
+/// Same format and same result as `import_json`, and the difference is not
+/// cosmetic: a caller that has just built the graph in memory otherwise
+/// has to serialise it to a temporary file purely so this library can read
+/// it back. That intermediate file is the thing people building a loader
+/// complain about, and `MemoryGraphStore::from_json_str` — which the WASM
+/// binding has always used — removes the need for it. Overwrites the
+/// destination, exactly as `import_json` does.
+#[pyfunction]
+fn import_json_str(db_path: &str, json: &str) -> PyResult<()> {
+    let g = MemoryGraphStore::from_json_str(json)
+        .map_err(|e| PyRuntimeError::new_err(format!("load json: {e}")))?;
+    g.save(Path::new(db_path))
+        .map_err(|e| PyRuntimeError::new_err(format!("save: {e}")))?;
+    Ok(())
+}
+
 #[pyfunction]
 fn import_csv(db_path: &str, csv_dir: &str) -> PyResult<()> {
     let g = csv_loader::load_from_csv_dir(Path::new(csv_dir))
@@ -765,6 +787,7 @@ fn frogql(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Connection>()?;
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(import_json, m)?)?;
+    m.add_function(wrap_pyfunction!(import_json_str, m)?)?;
     m.add_function(wrap_pyfunction!(import_csv, m)?)?;
     Ok(())
 }

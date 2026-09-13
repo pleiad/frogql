@@ -160,6 +160,101 @@ One residual: `build_declared` still has no completeness guard, so a manual
 index on a property holding a **list** or **record** value is partial in the
 same way. Floats were the only common case, but the guard is the general fix.
 
+## Staged mutations: the delta, not a surrender
+
+The index is built from the on-disk records at open and never updated, so
+anything the session stages in the mutation overlay makes it lie. The store
+used to answer that by refusing to answer at all: `lookup_node_eq` returned
+`None` the moment a node had been inserted or deleted, and the caller
+scanned.
+
+Correct, and ruinous. The overlay lives until `.save`, so **one `INSERT`
+sent every later lookup of the session to a full label scan with a per-node
+property decode, permanently.** On `examples/fraud_detection.gdb` (1 200
+`ACCOUNT` nodes) a point lookup went from 0.0 ms to 2–4 ms after inserting
+one unrelated node; on a 26 k-node graph the same shape cost 64 ms. That is
+what made loading a graph by `INSERT` quadratic — every edge needs a
+`MATCH` for its endpoints, and every one of those pays the scan.
+
+`store/overlay_index.rs` keeps the base index and maintains an
+`OverlayNodeIndex` delta beside it, the shape `runtime::ltj::delta` already
+uses for the triple index. A lookup is
+
+```
+base hits  −  {deleted}  −  {shadowed}  +  overlay hits
+```
+
+*Shadowed* is the half worth understanding. A base node the overlay has
+touched may no longer hold the value the base index filed it under, so it
+must leave **every** base answer — one `HashSet<Id>` cannot say which
+property changed. The delta therefore re-files **all** of a touched node's
+indexed pairs, so whatever still matches comes back through the overlay
+half. Only the `(label, prop)` pairs the base index already covers are
+filed; any other pair gets `None` from the base and scans regardless, so
+filing it would cost memory and buy nothing.
+
+Absorption is incremental by offset over
+`MutationOverlay::touched_node_log`, so a sync costs only the nodes touched
+since the last one and a bulk load stays linear. N rounds of (point lookup
++ insert) on the same database:
+
+| N | delta | `FROGQL_DISABLE_OVERLAY_INDEX=1` |
+|---|---|---|
+| 300 | 0.04 s | 0.48 s |
+| 1200 | 0.07 s | 2.00 s |
+| 4800 | 0.21 s | 10.16 s |
+
+×16 the rounds costs ×5 with the delta and ×21 without: linear against
+quadratic, so the speed-up grows with the load (12× → 29× → 48×).
+
+### Two silent wrong answers, same gap
+
+The old guard was not only expensive, it was incomplete, and each gap
+produced a wrong answer rather than a slow one.
+
+`lookup_node_eq` and `lookup_node_range` checked `new_nodes` and
+`deleted_nodes` and never `mod_node_props`. So after
+
+```
+gql> MATCH (a:ACCOUNT {account_number: 'VLKF...'}) SET a.account_number = 'MUTADO'
+gql> MATCH (a:ACCOUNT {account_number: 'MUTADO'}) RETURN a.account_number
+0 rows
+```
+
+the node was right there and the index, still keyed by the old value, said
+no. Inserting any unrelated node made it appear, because that tripped the
+other half of the guard.
+
+`lookup_node_ordered` had no guard at all, so the btree-driven top-k
+(`try_btree_ltj_real`) dropped every node inserted this session:
+
+```
+gql> INSERT (:ACCOUNT {account_number: 'ZZZZ9999...'})
+gql> MATCH (a:ACCOUNT) RETURN a.account_number ORDER BY a.account_number DESC LIMIT 3
+"ZZUF3450..."   <- the inserted maximum is missing
+```
+
+Hence one predicate, `sync_overlay_index`, consulted by all three, and a
+**witness** on top of it: the sizes of the overlay's four node-state
+collections are recorded at each sync, and a change in them with no new
+entry in the touch log means some path mutated without calling
+`MutationOverlay::touch_node`. That declines the index rather than
+answering from a stale one. It is a detector and not a proof — a call that
+logs one node and quietly mutates another slips through — but it catches
+the "added a mutating method, forgot the hook" case, which is how both bugs
+got in.
+
+`FROGQL_DISABLE_OVERLAY_INDEX=1` restores the decline-and-scan behaviour;
+`tests/overlay_index_test.rs` pins the delta equal to it, and both equal to
+a plain scan of the merged view.
+
+### Still missing
+
+A bulk-load mode that declines the indexes outright and rebuilds them at
+`.save` — SQLite's "create the indexes after the load" advice. The delta
+makes the general case linear; a load that knows it will not look anything
+up until it finishes should not pay per-insert index maintenance at all.
+
 ## Persistence
 
 Auto-built indexes are memory-only — they live in `RefCell<SecondaryIndex>`

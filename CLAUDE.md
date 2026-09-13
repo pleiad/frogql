@@ -88,6 +88,7 @@ Runtime/store toggles for A/B testing and tracing (all read at query/open time; 
 | `FROGQL_DISABLE_EXISTS_PIN` | force materialise-once for correlated EXISTS instead of pinned LTJ probes |
 | `FROGQL_DISABLE_VALUE_SUBQUERY_PIN` | force materialise-once for `VALUE { … }` subqueries |
 | `FROGQL_DISABLE_AUTO_INDEXES` | skip the secondary-index auto-build at open |
+| `FROGQL_DISABLE_OVERLAY_INDEX` | drop the overlay-side secondary-index delta, so any staged node mutation sends every indexed lookup to a scan — the kill switch `tests/overlay_index_test.rs` A/Bs against |
 | `FROGQL_AUTO_INDEX_KINDS=both\|hash\|btree\|none` | which kinds the auto-builder produces (default `both`). `hash` serves `=`, `btree` serves ranges and ORDER BY; the pair is two full copies of the postings, so an equality-only workload can decline half. CLI sugar: `--auto-indexes <k>` |
 | `FROGQL_ORDERBY_FORCE=pdqsort\|topk` | force one ORDER BY strategy (bypass the btree-LTJ-real top-k) |
 | `FROGQL_DEBUG_INDEXES` | print auto-built indexes + pinned variables |
@@ -174,9 +175,9 @@ Cargo workspace with four members and `resolver = "2"`:
 
 Top-level dirs: `src/` (library: parser, elaborate, typing, optimizer, runtime, model, store), `tests/` (integration), `examples/*.gdb` (committed sample databases), `docs/internals/` (architecture write-ups — see `JOIN_STRATEGY_NOTES.md`, `implemented-optimizations.md`, `storage-architecture.md`, `iso-gql-gaps.md`), `bench/` (LDBC scaffolding; `bench/data/` is gitignored, downloaded via `bench_setup`).
 
-**Python API** (`python/src/lib.rs`): `frogql.open(path)`, `frogql.import_json`, `frogql.import_csv`, and a `Connection` class (`execute(query, limit)`, `schema()`, `graph_types()`, `node_count`, `edge_count`). `execute` returns a list of dicts: `{alias: value}` rows when `RETURN` is present (unaliased projections fall back to `col0`, `col1`, …); otherwise `{var: {kind, id, labels, props}}` per pattern variable plus a `_paths` key (list per comma-join sub-pattern, each a list of node/edge dicts in match order). `Connection` is `unsendable` (not thread-safe). `frogql.open` is SQLite-style create-on-open (`LazyGraphStore::open_or_create`): a missing path yields an empty DB (DEFAULT active) ready for `INSERT` + `save()`, mirroring `sqlite3.connect`. It also eagerly warms the LTJ TripleIndex; the Arc is reused across every `execute`.
+**Python API** (`python/src/lib.rs`): `frogql.open(path)`, `frogql.import_json`, `frogql.import_json_str`, `frogql.import_csv`, and a `Connection` class (`execute(query, limit)`, `schema()`, `graph_types()`, `node_count`, `edge_count`). `execute` returns a list of dicts: `{alias: value}` rows when `RETURN` is present (unaliased projections fall back to `col0`, `col1`, …); otherwise `{var: {kind, id, labels, props}}` per pattern variable plus a `_paths` key (list per comma-join sub-pattern, each a list of node/edge dicts in match order). `Connection` is `unsendable` (not thread-safe). `frogql.open` is SQLite-style create-on-open (`LazyGraphStore::open_or_create`): a missing path yields an empty DB (DEFAULT active) ready for `INSERT` + `save()`, mirroring `sqlite3.connect`. It also eagerly warms the LTJ TripleIndex; the Arc is reused across every `execute`.
 
-**Node API** (`node/src/lib.rs`): same module + class surface as Python, camelCased per napi-rs convention: `open(path)`, `importJson`, `importCsv`, and `Connection` with `execute(query, limit?)`, `save()`, `schema()`, `graphTypes()`, `nodeCount`, `edgeCount`. Polymorphic `execute()` returns `unknown` in TS; cast to one of the exported interfaces (`SchemaSummary`, `GraphTypeSummary`, `NodeRef`, `EdgeRef`, `DmCounters`, `DdlOk`, `IndexResult`, `IndexSummary`) per statement kind. `schema()` and `graphTypes()` return strongly-typed structs directly. `Connection` is `unsafe impl Send` — napi runtime is single-threaded per V8 isolate so Sync is not required. `open()` is SQLite-style create-on-open (missing path → empty DB) and eagerly warms the TripleIndex, same as Python.
+**Node API** (`node/src/lib.rs`): same module + class surface as Python, camelCased per napi-rs convention: `open(path)`, `importJson`, `importJsonString`, `importCsv`, and `Connection` with `execute(query, limit?)`, `save()`, `schema()`, `graphTypes()`, `nodeCount`, `edgeCount`. Polymorphic `execute()` returns `unknown` in TS; cast to one of the exported interfaces (`SchemaSummary`, `GraphTypeSummary`, `NodeRef`, `EdgeRef`, `DmCounters`, `DdlOk`, `IndexResult`, `IndexSummary`) per statement kind. `schema()` and `graphTypes()` return strongly-typed structs directly. `Connection` is `unsafe impl Send` — napi runtime is single-threaded per V8 isolate so Sync is not required. `open()` is SQLite-style create-on-open (missing path → empty DB) and eagerly warms the TripleIndex, same as Python.
 
 ## Dependencies and feature gating
 
@@ -206,7 +207,21 @@ Cut a release by bumping **six files** in lock-step plus regenerating `Cargo.loc
 - `node/package.json` (host version + the 5 `optionalDependencies` versions)
 - `wasm/Cargo.toml` (semver; the published `frogql-wasm` version is derived from it by wasm-pack)
 
-Then `git tag vX.Y.Z && git push origin vX.Y.Z`. All four registries reject re-publishing, so always bump. The npm release also requires `node/index.js` + `node/index.d.ts` to be committed at the tagged SHA; regenerate them with `npm run build` inside `node/` whenever the API surface changes and commit the diff.
+Then `git tag vX.Y.Z && git push origin vX.Y.Z`. All four registries reject re-publishing, so always bump. The npm release also requires `node/index.js` + `node/index.d.ts` to be committed at the tagged SHA; **regenerate them with `npm run build` inside `node/` on every version bump**, not only when the API surface changes, and commit the diff.
+
+The "every bump" part is easy to miss and was: `napi build` bakes the version into the loader's `NAPI_RS_ENFORCE_VERSION_CHECK` guard, one copy per platform, so a committed `index.js` generated at `0.4.2` still said `0.4.2` at `0.5.1` — fourteen stale literals in a file nobody re-reads. It is dormant because the check is opt-in (`NAPI_RS_ENFORCE_VERSION_CHECK` unset means skip), which is exactly why it survived two releases: a consumer who *does* set it gets "Native binding package version mismatch, expected 0.4.2" on a correctly-installed 0.5.1.
+
+**`import_json_str` / `importJsonString` take the JSON itself, not a path.**
+`import_json` wraps `MemoryGraphStore::from_file`, so a caller holding a
+graph it just built in memory had to serialise it to a temporary file
+purely so this library could read it back. That intermediate file is the
+concrete complaint people building a loader arrive with, and
+`MemoryGraphStore::from_json_str` — which the WASM binding has used since
+it existed — removes the need for it; the two native bindings simply never
+exposed it. Same format, same overwrite-the-destination behaviour. Worth
+reaching for whenever a loader would otherwise write a file it does not
+want: on 2 400 nodes / 4 000 edges the JSON route costs 33 ms against
+560 ms for the best statement-based loader and 13 426 ms for the naive one.
 
 **npm auth is trusted publishing (OIDC), not a token.** All seven npm
 packages have a trusted publisher configured on npmjs.com, each pinned to
@@ -364,7 +379,8 @@ Surface today: `INSERT`, `SET <x.prop = expr | x = {...}>`, `REMOVE x.prop`, `SE
 
 Operational invariants Claude must keep in mind:
 - **Atomicity**: per-statement all-or-nothing. `run_dm` collects bindings first, applies in a closure, on error calls `store.rollback_session()` (clears the entire overlay — coarser than per-statement, no smaller transaction boundary until WAL).
-- **Match-chain elaboration**: `run_dm` runs the MATCH chain through `elaborate::elaborate_query` before iterating. **Skipping elaboration silently drops `value_filters` on descriptors** (`{name: 'Alice'}` becomes equivalent to `{}`) and matches too many rows. The elaborate call lives inside `run_dm` for this reason.
+- **Match-chain elaboration *and optimization***: `run_dm` runs the MATCH chain through `elaborate::elaborate_query` and then `optimizer::compile`, both inside `prepare_match_pattern`. Each half is load-bearing for a different reason. **Skipping elaboration silently drops `value_filters` on descriptors** (`{name: 'Alice'}` becomes equivalent to `{}`) and matches too many rows — a correctness bug. **Skipping the optimizer costs the index**: elaboration lowers the filter into a `WHERE` conjunct, and it is the optimizer's value-predicate pushdown that puts it back on the descriptor as a `value_pred`, which is the field `Runtime::indexed_candidates` reads. `run_dm` elaborated and stopped until 2026-09, so a DM's MATCH could not use an index at all: it scanned every node carrying the label and decoded its properties, once per pattern variable, per statement. Measured on 1 200 nodes, 2 000 `MATCH (x:ACCOUNT {account_number: 'A…'}), (y:…) INSERT (x)-[:PAYS]->(y)` statements took **5.6 s against 0.04 s** for the same 2 000 `MATCH`es run as plain queries — 130×, and the larger half of why loading a graph by `INSERT` looked quadratic. The optimize half is guarded exactly as `lib::optimize_query` guards it (OPTIONAL and §16.6 prefixes are evaluated in isolation and are not collapsed across). Pinned by `tests/dm_match_optimized_test.rs`.
+- **The DM's own `Runtime` must be handed the session's index**: `run_dm` evaluates the MATCH chain through a `Runtime` it constructs, and the `TripleIndex` is cached **on the `Runtime`** (`RefCell<Option<Arc<TripleIndex>>>`), not on the store — `Runtime::new` starts it empty. A comma-join in a DM's MATCH takes the ordinary LTJ path and asks for that index, so until 2026-09 **every such statement rebuilt all six orderings from the graph**. The `<db>.ltj` sidecar does not rescue it: `index_sidecar_key` returns `None` once the overlay holds a triple-affecting mutation, so from the first insert onwards the file is refused for the rest of the session. That is what made the cost *flat* — proportional to the base graph, not to what had been inserted, which is exactly the shape a user reports as "one mutation makes everything slow forever". Measured on 26 178 nodes / 90 132 edges, one `MATCH (f:Fpl {fplId: …}), (a:Aerodromo {oaci: …}) INSERT (f)-[:R]->(a)` cost **118 ms against 0.0 ms**, while the same comma-join as a plain *query* cost 0.02 ms and a single-pattern MATCH + INSERT cost nothing. The edge is incidental — a comma-join with a *node* insert costs the same, and a standalone `INSERT (:A)-[:R]->(:B)` costs nothing. `run_dm_with_index` takes the caller's `Option<Arc<TripleIndex>>`; the REPL passes `Runtime::triple_index_handle()`, the Python and Node `Connection`s pass their own. Plain `run_dm` still exists and delegates with `None`. Pinned by `tests/dm_shares_triple_index_test.rs`, whose guard is a *ratio* against the same join run as a query (three orders of magnitude when broken, so a 25× bound cannot flake).
 - **G2000 validation**: per-element check via `typing::validate::*`, fires from `apply_insert_pattern` only when the active GRAPH TYPE is non-DEFAULT (DEFAULT is data-derived).
 - **DEFAULT lifecycle**: `GraphTypeCatalog.default_dirty` (in-RAM only, `#[serde(skip)]`) flips after every successful DML; `refresh_default_if_dirty` re-runs `infer_simple_schema` lazily on `handle_show("DEFAULT")` and `LazyGraphStore::save`. Eager refresh would cost O(N+E) per mutation.
 - **Cache invalidation**: every successful DML calls `Runtime::invalidate_caches()` (REPL) or the equivalent `ltj::delta::refresh` on `Connection.triple_index` (Python, Node). The six-ordering index is *kept* and a delta recomputed beside it; a full rebuild happens only when no delta can express the change. See *Join strategy → Maintained incrementally across DML*.
@@ -961,9 +977,64 @@ narrows to nothing rather than wrongly to `A`. Pinned by
 
 **Persistence (commit `2153319`).** Auto entries are memory-only (rebuilt every open, deterministic). DDL entries (`auto = false`) ARE persisted in the `.gdb` via `header.secondary_index_root` → chained `PageType::SecondaryIndex` pages → JSON-encoded `Vec<PersistedSpec>`. Save side: `save_graph_with_catalog_and_indexes_atomic` (`store/io.rs`). Load side: `LazyGraphStore::open` reads the list and replays each entry via `build_declared` after the auto-build. See `store/secondary_index_io.rs` and `docs/secondary-indexes.md`.
 
+**Maintained across the overlay, not abandoned at the first mutation**
+(`store/overlay_index.rs`). The base index is built from the on-disk
+records at open and never updated, so anything staged in the overlay makes
+it lie. The store used to answer that by declining the index outright —
+`lookup_node_eq` returned `None`, the caller scanned. Correct, and
+ruinous: the overlay lives until `.save`, so **one `INSERT` sent every
+later lookup of the session to a full label scan with a per-node property
+decode**, permanently. That is what made loading a graph by `INSERT`
+quadratic — each edge needs a `MATCH` for its endpoints, and each of those
+`MATCH`es pays the scan.
+
+Now the base index is kept and an `OverlayNodeIndex` delta maintained
+beside it, the same shape `runtime::ltj::delta` uses for the triple index.
+A lookup is `base − {deleted} − {shadowed} + overlay`. *Shadowed* is the
+subtle half: a base node the overlay touched may no longer hold the value
+it was filed under, so it leaves **every** base answer, and the delta
+re-files **all** of its indexed pairs so whatever still matches comes back.
+Only the `(label, prop)` pairs the base index already covers are filed —
+any other pair scans regardless.
+
+Absorption is incremental by offset over
+`MutationOverlay::touched_node_log`, so a sync costs only the nodes touched
+since the last one. Measured on `examples/fraud_detection.gdb`, N rounds of
+(point lookup + insert):
+
+| N | delta | `FROGQL_DISABLE_OVERLAY_INDEX=1` |
+|---|---|---|
+| 300 | 0.04 s | 0.48 s |
+| 1200 | 0.07 s | 2.00 s |
+| 4800 | 0.21 s | 10.16 s |
+
+Linear against quadratic: ×16 the rounds costs ×5 with the delta and ×21
+without, so the speed-up grows with the load (12× → 29× → 48×).
+
+**Two silent wrong answers came from the same gap**, and are what the
+guard's *completeness* now closes. `lookup_node_eq` / `lookup_node_range`
+checked only `new_nodes` / `deleted_nodes`, never `mod_node_props`: after
+`SET a.k = 'new'`, a lookup of `'new'` returned **nothing** while the node
+sat right there — and inserting any unrelated node made it appear, because
+that tripped the other half. And `lookup_node_ordered` had no guard at
+all, so a btree-driven `ORDER BY … DESC LIMIT 3` over a freshly inserted
+maximum returned the three runners-up. Hence `sync_overlay_index` is one
+predicate consulted by all three, and it carries a **witness**: the sizes
+of the overlay's four node-state collections are recorded per sync, and a
+change with no new log entry means some path mutated without calling
+`MutationOverlay::touch_node`, which declines the index rather than
+answering from a stale one. A detector, not a proof — but it catches the
+"added a method, forgot the hook" case that produced both bugs.
+
+Still open (the `C` half): a bulk-load mode that declines the indexes
+outright and rebuilds them at `.save`, SQLite's "create the indexes after
+the load" advice. The delta makes the general case linear; that would take
+the per-insert index maintenance out of a load that knows it does not need
+lookups yet.
+
 **Backward compat**: legacy `.gdb` files have `secondary_index_root == 0` (the slot was previously reserved + zeroed); `read_specs` reports an empty list, behaviour identical to the pre-persistence path. TODO comment in `pager/header.rs` to drop the legacy interpretation eventually.
 
-Diagnostic env vars: `FROGQL_DEBUG_INDEXES=1` (auto-built indexes + pinned variables), `FROGQL_DISABLE_INDEX_FOLD=1` (LTJ pre-pass off, A/B), `FROGQL_DISABLE_AUTO_INDEXES=1` (skip the auto-build at open), `FROGQL_TRACE_OPEN=1` (per-phase open timings).
+Diagnostic env vars: `FROGQL_DEBUG_INDEXES=1` (auto-built indexes + pinned variables), `FROGQL_DISABLE_INDEX_FOLD=1` (LTJ pre-pass off, A/B), `FROGQL_DISABLE_AUTO_INDEXES=1` (skip the auto-build at open), `FROGQL_DISABLE_OVERLAY_INDEX=1` (overlay delta off, A/B), `FROGQL_TRACE_OPEN=1` (per-phase open timings).
 
 LDBC IC2 on `bench/data/ldbc-sf0.1.gdb` (15 params × 3 iters, lazy backend, `--limit 20`): 2417 ms (no indexes) → 1377 ms (auto hash+btree) → **8.7 ms** (TripleIndex cached + warmed at open, 276× total). Reference: GraphQLite (SQLite + Cypher) measures 32.8 ms median on the same query.
 
@@ -1013,7 +1084,7 @@ Run + chart: `bench_setup` (downloads LDBC SF0.1) → `install_python_deps.sh` �
 
   This rule used to read "do not persist by default … nobody pays 25 GiB of disk they did not ask for", and the change is deliberate: both sides of that trade moved. The default representation is now the compact one, roughly a third the size, and what the write buys is 252 seconds at *every* open of a large graph rather than one. Disk that can be deleted, against minutes that cannot be recovered, is not the trade the rule was written against. What survives from it: the `.gdb` is still untouched, deleting the sidecar is still the whole recovery story, and `FROGQL_LTJ_PERSIST=0` is the opt-out. The auto-built secondary indexes still have no escape at all.
 - Do **not** skip `cargo test` before commit even if `cargo fmt` and `cargo clippy` pass. Lexer / grammar regressions slip past linters; the `--` line-comment change that broke `-->` edge sugar across three suites is the standing precedent.
-- Do **not** call `run_dm` on a raw query. The MATCH chain must go through `elaborate::elaborate_query` first, otherwise descriptor `value_filters` (`{name: 'Alice'}`) get silently ignored at runtime and the DM matches too many rows.
+- Do **not** call `run_dm` on a raw query, and do **not** hand it a merely *elaborated* one. The MATCH chain goes through `prepare_match_pattern`, which elaborates **and** optimizes. Without elaboration, descriptor `value_filters` (`{name: 'Alice'}`) are silently ignored and the DM matches too many rows. Without the optimizer, the filter never becomes a `value_pred`, `Runtime::indexed_candidates` has nothing to read, and every DM MATCH is a full label scan with a per-node property decode — 130× on the measured bulk-load shape, silently.
 - Do **not** re-gitignore `node/index.js` or `node/index.d.ts`. They're auto-generated by `napi build` but committed to git (canonical napi-rs pattern). The npm publish job needs them at the checked-out SHA; the platform `.node` binaries arrive via build-job artifacts but the dispatcher JS + TS types do not. `0.2.0-rc.2` shipped a broken host package on npm because they were excluded from the tarball — only LICENSE + README + package.json reached the registry, and `require('frogql')` returned "Cannot find module".
 - Do **not** hand-edit `.github/workflows/release.yml`. `dist` regenerates it wholesale from `dist-workspace.toml` + `[package.metadata.dist]`, and `dist plan` fails the moment the file drifts. Change the config, then run `dist init`. The PyPI/crates.io half of the release lives in `release-pypi.yml`.
 - Do **not** add a `[[bin]]` that uses an optional dep without `required-features`. Auto-discovery leaves it ungated, and it builds fine locally (defaults are on) while breaking the CLI release, which builds `--no-default-features --features repl`. `internal_bench` shipped that way until the `dist` build caught it.

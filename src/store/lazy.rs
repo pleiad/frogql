@@ -148,6 +148,10 @@ pub struct LazyGraphStore {
     // properties. Memory-only for now (rebuilt every open). Used by the LTJ
     // optimizer to constant-fold `(x:L {prop: literal})` start lookups.
     secondary: RefCell<SecondaryIndex>,
+    /// Delta over `secondary` covering everything the overlay has staged.
+    /// Kept current lazily by `sync_overlay_index`, which every indexed
+    /// lookup calls first. See `store::overlay_index`.
+    overlay_index: RefCell<crate::store::overlay_index::OverlayNodeIndex>,
     /// Last persisted secondary-index DDL chain root. `0` means "no
     /// chain" — for legacy files written before this slot existed and
     /// for fresh databases that never declared a DDL index. Tracked
@@ -356,6 +360,7 @@ impl LazyGraphStore {
             catalog: RefCell::new(GraphTypeCatalog::new()),
             catalog_root: Cell::new(catalog_root),
             secondary: RefCell::new(SecondaryIndex::new()),
+            overlay_index: RefCell::new(Default::default()),
             secondary_index_root: Cell::new(secondary_index_root),
             overlay: RefCell::new(MutationOverlay::default()),
             db_path: db_path.to_path_buf(),
@@ -1003,6 +1008,118 @@ impl LazyGraphStore {
         )
     }
 
+    /// Base-index hits that the overlay has not invalidated.
+    ///
+    /// A deleted node is gone; a *shadowed* one (any node the overlay
+    /// touched) may no longer hold the value it was filed under, so it is
+    /// dropped here and comes back through the delta if it still matches.
+    /// Dropping it for every property, not only the mutated one, is why
+    /// the delta re-files all of a touched node's indexed pairs.
+    fn surviving_base(
+        &self,
+        base: Vec<Id>,
+        idx: &crate::store::overlay_index::OverlayNodeIndex,
+    ) -> Vec<Id> {
+        let overlay = self.overlay.borrow();
+        base.into_iter()
+            .filter(|id| !overlay.is_node_deleted(*id) && !idx.is_shadowed(*id))
+            .collect()
+    }
+
+    /// Bring the overlay-side index delta up to date, and report whether
+    /// the base index plus that delta can be trusted to answer.
+    ///
+    /// The base `SecondaryIndex` is built from the on-disk records at open
+    /// and never updated, so a staged mutation makes it lie. The store used
+    /// to answer that by declining the index outright once anything was
+    /// staged — correct, and ruinous: one `INSERT` sent every later lookup
+    /// of the session to a full label scan with a per-node property decode,
+    /// which is what made loading by `INSERT` quadratic. Now the mutations
+    /// are absorbed into a delta and merged at read time, the same shape
+    /// `runtime::ltj::delta` uses for the triple index.
+    ///
+    /// Absorption is **incremental by offset** over
+    /// `MutationOverlay::touched_node_log`: a sync costs only the nodes
+    /// touched since the last one, so a bulk load stays linear.
+    ///
+    /// Returning `false` is always safe — the caller scans. Three things
+    /// produce it:
+    ///
+    /// - the overlay was reset under us (`save` / `rollback_session` clear
+    ///   the log), which drops the delta and rebuilds it from nothing;
+    /// - a node in the log can no longer be read;
+    /// - **the witness disagrees.** Every node-mutating path is supposed to
+    ///   call `MutationOverlay::touch_node`; one that forgets would
+    ///   otherwise produce silently wrong answers, which is the exact bug
+    ///   class this delta exists to close. So the sizes of the overlay's
+    ///   four node-state collections are recorded at each sync, and a
+    ///   change in them with no new log entry means an untracked mutation.
+    ///   It is a detector, not a proof — a call that logs one node and
+    ///   quietly mutates another slips through — but it catches the whole
+    ///   "added a method, forgot the hook" case.
+    fn sync_overlay_index(&self) -> bool {
+        if crate::store::overlay_index::overlay_index_disabled() {
+            return self.overlay.borrow().node_state_len() == 0;
+        }
+        let (pending, base_node_count, witness, log_len) = {
+            let overlay = self.overlay.borrow();
+            let idx = self.overlay_index.borrow();
+            let log_len = overlay.touched_node_log.len();
+            let witness = (
+                overlay.new_nodes.len(),
+                overlay.deleted_nodes.len(),
+                overlay.mod_node_props.len(),
+                overlay.mod_node_labels.len(),
+            );
+            if log_len < idx.absorbed {
+                // The overlay was cleared (save / rollback). Start over.
+                drop(idx);
+                drop(overlay);
+                self.overlay_index.borrow_mut().clear();
+                return true;
+            }
+            if log_len == idx.absorbed && witness != idx.witness && idx.absorbed > 0 {
+                return false;
+            }
+            let pending: Vec<Id> = overlay.touched_node_log[idx.absorbed..].to_vec();
+            (pending, overlay.base_node_count, witness, log_len)
+        };
+
+        if !pending.is_empty() {
+            let pairs = self.secondary.borrow().indexed_pairs();
+            for id in pending {
+                if !self.is_node_alive_for_index(id) {
+                    self.overlay_index.borrow_mut().forget(base_node_count, id);
+                    continue;
+                }
+                let labels =
+                    crate::model::graph::MemoryGraphStore::label_strings(&self.node_labels(id));
+                let props = self.node_props(id);
+                self.overlay_index.borrow_mut().reindex(
+                    &pairs,
+                    base_node_count,
+                    id,
+                    &labels,
+                    &props,
+                );
+            }
+        }
+
+        let mut idx = self.overlay_index.borrow_mut();
+        idx.absorbed = log_len;
+        idx.witness = witness;
+        true
+    }
+
+    /// `is_node_alive` without the `GraphAccessMut` import at the call site.
+    fn is_node_alive_for_index(&self, id: Id) -> bool {
+        let overlay = self.overlay.borrow();
+        if overlay.is_node_deleted(id) {
+            return false;
+        }
+        id < overlay.base_node_count || overlay.get_new_node(id).is_some()
+    }
+
     /// Refresh the catalog's `DEFAULT` schema from the live store iff the
     /// dirty flag is set. Idempotent: every read path that fetches the
     /// active schema or pretty-prints DEFAULT calls through here, so DML
@@ -1441,16 +1558,14 @@ impl GraphAccess for LazyGraphStore {
     }
 
     fn lookup_node_eq(&self, label: &str, prop: &str, value: &Value) -> Option<Vec<Id>> {
-        // Secondary indexes capture only the base nodes. With overlay
-        // mutations in flight, returning a base-only set would silently
-        // hide newly inserted matches and pre-tombstone existing ones, so
-        // we conservatively force the caller to fall back to a scan
-        // (`None`). A future MVP-2 will maintain the indexes incrementally.
-        let overlay = self.overlay.borrow();
-        if !overlay.new_nodes.is_empty() || !overlay.deleted_nodes.is_empty() {
+        if !self.sync_overlay_index() {
             return None;
         }
-        self.secondary.borrow().lookup_eq(label, prop, value)
+        let base = self.secondary.borrow().lookup_eq(label, prop, value)?;
+        let idx = self.overlay_index.borrow();
+        let mut out = self.surviving_base(base, &idx);
+        out.extend(idx.lookup_eq(label, prop, value));
+        Some(out)
     }
 
     fn lookup_node_range(
@@ -1460,15 +1575,70 @@ impl GraphAccess for LazyGraphStore {
         lo: std::ops::Bound<Value>,
         hi: std::ops::Bound<Value>,
     ) -> Option<Vec<Id>> {
-        let overlay = self.overlay.borrow();
-        if !overlay.new_nodes.is_empty() || !overlay.deleted_nodes.is_empty() {
+        if !self.sync_overlay_index() {
             return None;
         }
-        self.secondary.borrow().lookup_range(label, prop, lo, hi)
+        let base = self
+            .secondary
+            .borrow()
+            .lookup_range(label, prop, lo.clone(), hi.clone())?;
+        let (lo_k, hi_k) = (
+            crate::store::secondary_index::bound_to_key(lo)?,
+            crate::store::secondary_index::bound_to_key(hi)?,
+        );
+        let idx = self.overlay_index.borrow();
+        let mut out = self.surviving_base(base, &idx);
+        out.extend(idx.lookup_range(label, prop, lo_k, hi_k));
+        Some(out)
     }
 
+    /// Ids in btree-key order, merged across base and delta.
+    ///
+    /// Unlike the two point paths this cannot just concatenate: the caller
+    /// (`try_btree_ltj_real`) reads the result as *sorted*, and stops early
+    /// on it. So the two ordered streams are interleaved by key, which is
+    /// why `ordered_entries` keeps the keys that `ordered_ids` discards.
     fn lookup_node_ordered(&self, label: &str, prop: &str, ascending: bool) -> Option<Vec<Id>> {
-        self.secondary.borrow().ordered_ids(label, prop, ascending)
+        if !self.sync_overlay_index() {
+            return None;
+        }
+        let base = self.secondary.borrow().ordered_entries(label, prop)?;
+        let idx = self.overlay_index.borrow();
+        let delta = idx.ordered_entries(label, prop);
+
+        let mut merged: Vec<(crate::store::secondary_index::IndexKey, Vec<Id>)> =
+            Vec::with_capacity(base.len() + delta.len());
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < base.len() || j < delta.len() {
+            let take_base = match (base.get(i), delta.get(j)) {
+                (Some((bk, _)), Some((dk, _))) => bk <= dk,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if take_base {
+                let (k, ids) = &base[i];
+                let live = self.surviving_base(ids.clone(), &idx);
+                if !live.is_empty() {
+                    merged.push((k.clone(), live));
+                }
+                i += 1;
+            } else {
+                merged.push(delta[j].clone());
+                j += 1;
+            }
+        }
+
+        let mut out: Vec<Id> = Vec::new();
+        if ascending {
+            for (_, ids) in &merged {
+                out.extend_from_slice(ids);
+            }
+        } else {
+            for (_, ids) in merged.iter().rev() {
+                out.extend_from_slice(ids);
+            }
+        }
+        Some(out)
     }
 
     /// No sidecar while the session holds a mutation the index would not
@@ -1676,6 +1846,7 @@ impl crate::model::graph_access::GraphAccessMut for LazyGraphStore {
 
     fn set_node_prop(&self, id: Id, prop: &str, value: crate::model::value::Value) {
         let mut overlay = self.overlay.borrow_mut();
+        overlay.touch_node(id);
         if id >= overlay.base_node_count {
             // New (overlay-tracked) node: write directly into its
             // OverlayNode entry, no PropMods bookkeeping needed.
@@ -1705,6 +1876,7 @@ impl crate::model::graph_access::GraphAccessMut for LazyGraphStore {
 
     fn replace_node_props(&self, id: Id, props: Props) {
         let mut overlay = self.overlay.borrow_mut();
+        overlay.touch_node(id);
         if id >= overlay.base_node_count {
             let off = (id - overlay.base_node_count) as usize;
             if let Some(n) = overlay.new_nodes.get_mut(off) {
@@ -1746,6 +1918,7 @@ impl crate::model::graph_access::GraphAccessMut for LazyGraphStore {
 
     fn remove_node_prop(&self, id: Id, prop: &str) {
         let mut overlay = self.overlay.borrow_mut();
+        overlay.touch_node(id);
         if id >= overlay.base_node_count {
             let off = (id - overlay.base_node_count) as usize;
             if let Some(n) = overlay.new_nodes.get_mut(off) {
@@ -1774,6 +1947,7 @@ impl crate::model::graph_access::GraphAccessMut for LazyGraphStore {
 
     fn add_node_label(&self, id: Id, label: &str) {
         let mut overlay = self.overlay.borrow_mut();
+        overlay.touch_node(id);
         if id >= overlay.base_node_count {
             let off = (id - overlay.base_node_count) as usize;
             if let Some(n) = overlay.new_nodes.get_mut(off) {
@@ -1802,6 +1976,7 @@ impl crate::model::graph_access::GraphAccessMut for LazyGraphStore {
 
     fn remove_node_label(&self, id: Id, label: &str) {
         let mut overlay = self.overlay.borrow_mut();
+        overlay.touch_node(id);
         if id >= overlay.base_node_count {
             let off = (id - overlay.base_node_count) as usize;
             if let Some(n) = overlay.new_nodes.get_mut(off) {

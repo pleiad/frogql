@@ -94,6 +94,19 @@ export declare function importCsv(dbPath: string, csvDir: string): void
  */
 export declare function importJson(dbPath: string, jsonPath: string): void
 
+/**
+ * Import a JSON graph given **as a string**, rather than as a path.
+ *
+ * Same format and same result as `importJson`, and the difference is not
+ * cosmetic: a caller that has just built the graph in memory otherwise
+ * has to serialise it to a temporary file purely so this library can read
+ * it back. That intermediate file is the thing people building a loader
+ * complain about, and `MemoryGraphStore::from_json_str` — which the WASM
+ * binding has always used — removes the need for it. Overwrites the
+ * destination, exactly as `importJson` does.
+ */
+export declare function importJsonString(dbPath: string, json: string): void
+
 /** Result envelope for `CREATE / DROP INDEX`. */
 export interface IndexResult {
   ok: boolean

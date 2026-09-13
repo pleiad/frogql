@@ -51,6 +51,32 @@ pub struct DmExecution {
     pub edges_modified: usize,
 }
 
+/// Elaborate-then-optimize a data-modifying statement's MATCH chain.
+///
+/// Elaboration alone lowers `{account_number: 'A1'}` into a `WHERE`
+/// conjunct; it is the **optimizer's** value-predicate pushdown that puts
+/// it back on the descriptor as a `value_pred`, and `value_preds` is what
+/// `Runtime::indexed_candidates` reads to reach the secondary index.
+///
+/// `run_dm` used to elaborate and stop, so a DM's MATCH chain could not use
+/// an index at all: `MATCH (x:ACCOUNT {account_number: 'A1'}) INSERT …`
+/// scanned every `ACCOUNT` and decoded its properties, once per endpoint,
+/// per statement. Measured on 1 200 nodes, 2 000 such statements took 5.3 s
+/// against 0.04 s for the same 2 000 `MATCH`es run as *queries* — 130×, and
+/// the larger half of why loading a graph by `INSERT` looked quadratic.
+///
+/// The guard mirrors `lib::optimize_query`: OPTIONAL and §16.6 prefixes are
+/// evaluated in isolation and must not be collapsed across, so they keep
+/// the unoptimized pattern rather than risk a semantic change.
+pub fn prepare_match_pattern(elaborated: &crate::syntax::query::Query) -> PathPattern {
+    let pattern = elaborated.collapsed_pattern();
+    if !elaborated.has_any_optional() && !elaborated.has_any_selected() {
+        crate::optimizer::compile(pattern)
+    } else {
+        pattern
+    }
+}
+
 /// Execute one DML statement against a mutable store.
 ///
 /// `validation_schema` lets the caller plug in ISO §13 G2000 validation:
@@ -74,10 +100,47 @@ pub fn run_dm<G>(
 where
     G: GraphAccess + GraphAccessMut,
 {
+    run_dm_with_index(graph, dm, validation_schema, None)
+}
+
+/// `run_dm`, given the caller's already-built LTJ index.
+///
+/// A DM's MATCH chain is an ordinary pattern and a comma-join in it takes
+/// the ordinary LTJ path, which needs the `TripleIndex`. `run_dm` used to
+/// build its own `Runtime` with an empty cache, so **every statement whose
+/// MATCH joined two patterns rebuilt all six orderings from scratch**.
+/// Measured on a 26 178-node / 90 132-edge graph, one statement of the
+/// shape
+///
+/// ```text
+/// MATCH (f:Fpl {fplId: …}), (a:Aerodromo {oaci: …}) INSERT (f)-[:R]->(a)
+/// ```
+///
+/// cost **37 ms**, flat, against **0.0 ms** for the same statement with a
+/// single-pattern MATCH and 0.02 ms for the same comma-join run as a plain
+/// query. The edge was a red herring: a comma-join with a *node* insert
+/// costs the same 37 ms, and a standalone `INSERT (:A)-[:R]->(:B)` costs
+/// nothing. It is the join, and it is the index.
+///
+/// Every embedder that keeps a warm index (the REPL, the Python and Node
+/// `Connection`s) passes it here; `None` keeps the old build-on-demand
+/// behaviour for callers that have none.
+pub fn run_dm_with_index<G>(
+    graph: &G,
+    dm: &DmStatement,
+    validation_schema: Option<&crate::typing::variable_type::Schema>,
+    triple_index: Option<std::sync::Arc<crate::runtime::ltj::triple_index::TripleIndex>>,
+) -> Result<DmExecution, String>
+where
+    G: GraphAccess + GraphAccessMut,
+{
     // The runtime stays alive through both phases so the apply step can
     // call `runtime.run_expr` on property expressions like `{who: a.name}`
     // (MVP-1 INSERT non-literal property values).
-    let runtime = crate::runtime::engine::Runtime::new(graph);
+    let runtime = match triple_index {
+        Some(idx) => crate::runtime::engine::Runtime::with_triple_index(graph, idx),
+        None => crate::runtime::engine::Runtime::new(graph),
+    };
 
     // 1. Resolve the MATCH chain (read-only). Standalone INSERT runs once
     // with a single empty assignment.
@@ -94,7 +157,21 @@ where
         // actually filter rows. Without this the Descriptor's
         // `value_filters` field would be silently ignored at runtime.
         let elaborated = crate::elaborate::elaborate_query(q);
-        let ir = runtime.run(&elaborated.collapsed_pattern());
+        // ...and through the optimizer too. Elaboration alone lowers
+        // `{account_number: 'A1'}` into a `WHERE` conjunct; it is the
+        // optimizer's value-predicate pushdown that puts it back on the
+        // descriptor as a `value_pred`, and `value_preds` is what
+        // `Runtime::indexed_candidates` reads to reach the secondary index.
+        // Without this call a DM's MATCH chain could not use an index at
+        // all: `MATCH (x:ACCOUNT {account_number: 'A1'}) INSERT ...` scanned
+        // every ACCOUNT and decoded its properties, once per endpoint, per
+        // statement. Measured on 1 200 nodes, 2 000 such statements took
+        // 5.3 s against 0.04 s for the same 2 000 MATCHes run as queries —
+        // 130×, and the reason loading a graph by `INSERT` looked quadratic.
+        // The guard mirrors `lib::optimize_query`: OPTIONAL and §16.6
+        // prefixes are evaluated in isolation and must not be collapsed
+        // across.
+        let ir = runtime.run(&prepare_match_pattern(&elaborated));
         ir.rows.into_iter().map(|r| r.assignment).collect()
     };
 

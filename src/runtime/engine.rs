@@ -619,6 +619,20 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     ///
     /// Dropping is always the safe answer, so every one of those cases
     /// falls back to it rather than to a guess.
+    /// The cached plain LTJ index, if one is built, for handing to another
+    /// `Runtime` that should share it rather than build its own.
+    ///
+    /// `run_dm` builds a `Runtime` of its own to evaluate a DM's MATCH
+    /// chain, and a comma-join there takes the ordinary LTJ path. Without
+    /// this handle that `Runtime` starts cold and rebuilds all six
+    /// orderings per statement — 37 ms on a 90 k-edge graph, flat, against
+    /// 0.0 ms for the same statement with a single-pattern MATCH. Returns
+    /// `None` when nothing is warm yet, which is exactly the old
+    /// build-on-demand behaviour.
+    pub fn triple_index_handle(&self) -> Option<Arc<TripleIndex>> {
+        self.triple_index.borrow().clone()
+    }
+
     pub fn invalidate_caches(&self) {
         self.refresh_or_drop(&self.triple_index);
         self.refresh_or_drop(&self.anydir_index);

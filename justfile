@@ -54,13 +54,21 @@ t *targets:
 # them serialise into minutes. Touching store/, pager/ or model/ relinks
 # everything and you pay it in full.
 #
-# So: link everything first, then run every binary once in parallel to
-# absorb that cost 16-wide, then let cargo do the actual testing against
+# So: link everything first, then run every *test* binary once in parallel
+# to absorb that cost 16-wide, then let cargo do the actual testing against
 # already-warm files. ~30 s of warming replaces ~30 min of serial waiting.
+#
+# The warm list comes from cargo, not from `find target/debug/deps`. That
+# directory also holds the **benchmark** binaries, and `orderby_bench --list`
+# / `vec_bench --list` do not parse the flag — they ignore it and run the
+# whole benchmark at 100% CPU. The warming step then never finishes, which
+# reads exactly like a slow test suite: `cargo test` sits waiting behind the
+# build lock while three benches burn the machine. `--message-format=json`
+# reports `profile.test` per artifact, so only real test binaries get warmed.
 test:
-    cargo test --no-run
-    @find target/debug/deps -type f -perm +111 ! -name '*.d' \
-        | xargs -P 16 -I{} sh -c '{} --list >/dev/null 2>&1' || true
+    cargo test --no-run --message-format=json > /tmp/frogql-testbins.json
+    @python3 -c "import json,sys;[print(m['executable']) for l in open('/tmp/frogql-testbins.json') for m in [json.loads(l)] if m.get('profile',{}).get('test') and m.get('executable')]" \
+        | sort -u | xargs -P 16 -I{} sh -c '{} --list >/dev/null 2>&1' || true
     cargo test
 
 # --- REPL --------------------------------------------------------------------

@@ -105,6 +105,16 @@ pub struct MutationOverlay {
     /// edge is recorded once per endpoint (so both `new_undirected[src]`
     /// and `new_undirected[tgt]` contain the same edge id).
     pub new_undirected: HashMap<Id, Vec<Id>>,
+
+    /// Append-only log of every node id whose overlay state changed, in
+    /// the order the change was staged. Duplicates are expected and fine.
+    ///
+    /// It exists so the overlay-side secondary index (`OverlayNodeIndex`)
+    /// can absorb *what changed since it last looked* by offset, instead of
+    /// re-deriving it from `new_nodes` / `deleted_nodes` / `mod_node_props`
+    /// / `mod_node_labels`, which is O(overlay) and turns a bulk load back
+    /// into a quadratic one. Not persisted, and cleared with the overlay.
+    pub touched_node_log: Vec<Id>,
 }
 
 impl MutationOverlay {
@@ -177,7 +187,27 @@ impl MutationOverlay {
     pub fn insert_node(&mut self, labels: LabelType, props: Props) -> Id {
         let id = self.next_node_id();
         self.new_nodes.push(OverlayNode { labels, props });
+        self.touch_node(id);
         id
+    }
+
+    /// Record that `id`'s overlay state changed. Every node-mutating path
+    /// must call this; a path that forgets costs a scan, never a wrong
+    /// answer, because `LazyGraphStore::sync_overlay_index` cross-checks
+    /// the log against the overlay's own collection sizes and declines the
+    /// index when they disagree.
+    pub fn touch_node(&mut self, id: Id) {
+        self.touched_node_log.push(id);
+    }
+
+    /// The witness `sync_overlay_index` checks the absorbed log against:
+    /// how much node state the overlay holds, counted independently of the
+    /// log itself.
+    pub fn node_state_len(&self) -> usize {
+        self.new_nodes.len()
+            + self.deleted_nodes.len()
+            + self.mod_node_props.len()
+            + self.mod_node_labels.len()
     }
 
     /// Schedule a new edge and update the appropriate adjacency map.
@@ -220,6 +250,7 @@ impl MutationOverlay {
     /// caller (NODETACH validation lives in the runtime, not here).
     pub fn delete_node(&mut self, id: Id) {
         self.deleted_nodes.insert(id);
+        self.touch_node(id);
     }
 
     /// Restore the overlay to "no mutations applied". Used by save() after
@@ -239,6 +270,7 @@ impl MutationOverlay {
         self.new_outgoing.clear();
         self.new_incoming.clear();
         self.new_undirected.clear();
+        self.touched_node_log.clear();
     }
 }
 

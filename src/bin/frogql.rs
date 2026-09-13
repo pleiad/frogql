@@ -467,7 +467,16 @@ fn main() {
                     None | Some("DEFAULT") => None,
                     _ => Some(store.catalog().active_schema()),
                 };
-                match frogql::runtime::dm::run_dm(&store, &dm, schema_for_validation.as_ref()) {
+                // Hand the DM the session's warm LTJ index: a comma-join
+                // in its MATCH takes the ordinary LTJ path, and building a
+                // fresh index per statement costs 37 ms on a 90 k-edge
+                // graph (see `run_dm_with_index`).
+                match frogql::runtime::dm::run_dm_with_index(
+                    &store,
+                    &dm,
+                    schema_for_validation.as_ref(),
+                    rt.triple_index_handle(),
+                ) {
                     Ok(exec) => {
                         rt.invalidate_caches();
                         // ISO §13 doesn't mention DEFAULT specifically, but

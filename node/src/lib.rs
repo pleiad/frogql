@@ -385,9 +385,13 @@ impl Connection {
             None | Some("DEFAULT") => None,
             _ => Some(self.store.catalog().active_schema()),
         };
-        let exec =
-            frogql_core::runtime::dm::run_dm(&self.store, &dm, schema_for_validation.as_ref())
-                .map_err(err)?;
+        let exec = frogql_core::runtime::dm::run_dm_with_index(
+            &self.store,
+            &dm,
+            schema_for_validation.as_ref(),
+            self.triple_index.borrow().clone(),
+        )
+        .map_err(err)?;
         // Same as the Python binding: keep the static payload and
         // recompute the delta beside it, falling back to a rebuild only
         // when no delta can express the change.
@@ -809,6 +813,23 @@ pub fn open(path: String) -> napi::Result<Connection> {
 pub fn import_json(db_path: String, json_path: String) -> napi::Result<()> {
     let g = MemoryGraphStore::from_file(Path::new(&json_path))
         .map_err(|e| err(format!("load json: {e}")))?;
+    g.save(Path::new(&db_path))
+        .map_err(|e| err(format!("save: {e}")))?;
+    Ok(())
+}
+
+/// Import a JSON graph given **as a string**, rather than as a path.
+///
+/// Same format and same result as `importJson`, and the difference is not
+/// cosmetic: a caller that has just built the graph in memory otherwise
+/// has to serialise it to a temporary file purely so this library can read
+/// it back. That intermediate file is the thing people building a loader
+/// complain about, and `MemoryGraphStore::from_json_str` — which the WASM
+/// binding has always used — removes the need for it. Overwrites the
+/// destination, exactly as `importJson` does.
+#[napi]
+pub fn import_json_string(db_path: String, json: String) -> napi::Result<()> {
+    let g = MemoryGraphStore::from_json_str(&json).map_err(|e| err(format!("load json: {e}")))?;
     g.save(Path::new(&db_path))
         .map_err(|e| err(format!("save: {e}")))?;
     Ok(())

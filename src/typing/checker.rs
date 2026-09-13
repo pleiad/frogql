@@ -134,7 +134,22 @@ impl Typechecker {
         if !self.errors.is_empty() {
             r.ok = false;
         }
+        self.dedup_warnings();
         r
+    }
+
+    /// Drop exact-duplicate warnings, keeping first-occurrence order.
+    ///
+    /// One contradiction is reported by every check it reaches: an empty
+    /// variable type is diagnosed where the join meets it *and* again where
+    /// each clause reads it, so `MATCH (x:Movie {title: 42})` printed
+    /// "Variable x is bound to empty type" twice. Deduplicating by text is
+    /// coarse — two genuinely distinct sites that happen to phrase a finding
+    /// identically collapse into one — but the reader cannot tell those apart
+    /// anyway, since the message carries no span.
+    fn dedup_warnings(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        self.warnings.retain(|w| seen.insert(w.clone()));
     }
 
     /// Check a `NEAREST` clause and bind its distance variable.
@@ -1302,12 +1317,12 @@ impl Typechecker {
                 continue;
             }
             match (l_t, r_t) {
-                (Some(l), Some(r)) => self.warnings.push(format!(
-                    "variable {} cannot be both {} and {} under the active schema",
-                    var,
-                    short_var_type(l),
-                    short_var_type(r)
-                )),
+                (Some(l), Some(r)) => {
+                    let (ls, rs) = distinguishing_var_types(l, r);
+                    self.warnings.push(format!(
+                        "variable {var} cannot be both {ls} and {rs} under the active schema"
+                    ))
+                }
                 (Some(l), None) => self.warnings.push(format!(
                     "variable {} bound to {} collapses to empty under the active schema",
                     var,
@@ -1673,6 +1688,24 @@ fn type_admits_null(t: &SimpleType) -> bool {
         SimpleType::Null | SimpleType::Star => true,
         SimpleType::Union(a, b) => type_admits_null(a) || type_admits_null(b),
         _ => false,
+    }
+}
+
+/// Render two conflicting types so the reader can see *what* conflicts.
+///
+/// `short_var_type` keeps a message readable by printing the label alone,
+/// which was enough while a join only ever conflicted on labels. Elaboration
+/// now records a constant value filter's type in the descriptor
+/// (`(x:Movie {title: 42})` carries `title :: int | float`), so the conflict
+/// is routinely *inside the properties* and the short form degenerates to
+/// "cannot be both (:Movie) and (:Movie)". When the short forms collide, fall
+/// back to the full `Display`, which carries the record.
+fn distinguishing_var_types(l: &VariableType, r: &VariableType) -> (String, String) {
+    let (ls, rs) = (short_var_type(l), short_var_type(r));
+    if ls == rs {
+        (l.to_string(), r.to_string())
+    } else {
+        (ls, rs)
     }
 }
 

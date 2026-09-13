@@ -5,6 +5,7 @@ pub mod dump;
 pub mod io;
 pub mod lazy;
 pub mod overlay;
+pub mod overlay_index;
 pub mod record;
 pub mod secondary_index;
 pub mod secondary_index_io;
