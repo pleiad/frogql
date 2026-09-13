@@ -322,7 +322,7 @@ impl Connection {
     }
 
     fn exec_query(&self, query: &str, limit: usize) -> napi::Result<JsonValue> {
-        let active = self.store.catalog().active_schema();
+        let active = self.store.active_schema();
         let result = frogql_core::compile_query_with_diagnostics_with(&active, query)
             .map_err(|e| err(e.message()))?;
         let q = result.query;
@@ -383,7 +383,7 @@ impl Connection {
         let active_name = self.store.catalog().active_name().map(str::to_string);
         let schema_for_validation = match active_name.as_deref() {
             None | Some("DEFAULT") => None,
-            _ => Some(self.store.catalog().active_schema()),
+            _ => Some(self.store.active_schema()),
         };
         let exec = frogql_core::runtime::dm::run_dm_with_index(
             &self.store,
@@ -807,15 +807,38 @@ pub fn open(path: String) -> napi::Result<Connection> {
     })
 }
 
+/// Persist `g` to `db_path` **with a catalog naming DEFAULT active**.
+///
+/// `MemoryGraphStore::save` writes the graph and no catalog, so a database
+/// created by these importers opened with no active graph type and a
+/// permissive typechecker — a misspelled property (`document` for
+/// `documento`) then filtered everything and reported nothing. The REPL's
+/// own import path has always called `install_default`; the bindings never
+/// did, and that asymmetry is the whole bug.
+///
+/// The schema is inferred here, where the graph is already fully in RAM
+/// and the walk is paid once at import rather than on someone's first
+/// query.
+fn save_with_default(g: &MemoryGraphStore, db_path: &str) -> napi::Result<()> {
+    g.save(Path::new(db_path))
+        .map_err(|e| err(format!("save: {e}")))?;
+    let store = LazyGraphStore::open(Path::new(db_path))
+        .map_err(|e| err(format!("reopen to install DEFAULT: {e}")))?;
+    let schema = frogql_core::typing::inference::infer_simple_schema(&store);
+    store.catalog_mut().install_default(schema);
+    store
+        .save_catalog()
+        .map_err(|e| err(format!("persist catalog: {e}")))?;
+    Ok(())
+}
+
 /// Import a JSON graph (`{nodes: [...], edges: [...]}`) into a fresh
 /// `.gdb` at `dbPath`. Overwrites the destination.
 #[napi]
 pub fn import_json(db_path: String, json_path: String) -> napi::Result<()> {
     let g = MemoryGraphStore::from_file(Path::new(&json_path))
         .map_err(|e| err(format!("load json: {e}")))?;
-    g.save(Path::new(&db_path))
-        .map_err(|e| err(format!("save: {e}")))?;
-    Ok(())
+    save_with_default(&g, &db_path)
 }
 
 /// Import a JSON graph given **as a string**, rather than as a path.
@@ -830,9 +853,7 @@ pub fn import_json(db_path: String, json_path: String) -> napi::Result<()> {
 #[napi]
 pub fn import_json_string(db_path: String, json: String) -> napi::Result<()> {
     let g = MemoryGraphStore::from_json_str(&json).map_err(|e| err(format!("load json: {e}")))?;
-    g.save(Path::new(&db_path))
-        .map_err(|e| err(format!("save: {e}")))?;
-    Ok(())
+    save_with_default(&g, &db_path)
 }
 
 /// Import a directory of CSVs (configured via `spanner_import_config.json`)
@@ -841,7 +862,5 @@ pub fn import_json_string(db_path: String, json: String) -> napi::Result<()> {
 pub fn import_csv(db_path: String, csv_dir: String) -> napi::Result<()> {
     let g = csv_loader::load_from_csv_dir(Path::new(&csv_dir))
         .map_err(|e| err(format!("load csv: {e}")))?;
-    g.save(Path::new(&db_path))
-        .map_err(|e| err(format!("save: {e}")))?;
-    Ok(())
+    save_with_default(&g, &db_path)
 }

@@ -2119,8 +2119,18 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 let is_right = matches!(p, PathPattern::EdgeRight(_));
                 let var = desc.as_ref().and_then(|d| d.var.as_deref());
 
+                // Cooperative cancellation on the global edge scan. This is
+                // where an unbounded repetition spends most of its time:
+                // `run_repetition_unbounded_mode` materialises every match
+                // of its inner pattern before its worklist starts, so a
+                // `-[:R]->*` over a 16.4 M-edge graph decodes and filters
+                // every `:R` edge first. With the check only in the
+                // worklist, a `.timeout 5` on that shape was honoured 31
+                // seconds late (36.0 s), because the clock was never read
+                // until the scan finished.
                 let rows: Vec<ResultRow> = candidates
                     .iter()
+                    .take_while(|_| !self.budget.expired())
                     .filter(|id| self.filter_edge(**id, desc.as_ref()))
                     .map(|&eid| {
                         let edge_pv = PathValue::EdgeDirectional(eid);
@@ -2884,6 +2894,15 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             }
             let cur_start = rows.len();
             for i in prev_start..prev_end {
+                // Cooperative cancellation. A bounded repetition always
+                // terminates, which is not the same as terminating in a
+                // time anyone will wait for: each level multiplies the row
+                // count by the average out-degree, so `{1,8}` over a
+                // 16 M-edge graph is finite and unbounded in practice.
+                // Same reason the unbounded-mode worklist checks.
+                if self.budget.expired() {
+                    break;
+                }
                 let Some(last) = rows[i].path().last_node_id() else {
                     continue;
                 };
@@ -3541,8 +3560,14 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             return IntermediateResult::new(result);
         }
 
+        // Both loops below walk the whole materialised inner result, so
+        // both read the clock. See the `EdgeRight` scan for why the check
+        // has to live outside the worklist too.
         let mut grouped_by_first: HashMap<Id, Vec<usize>> = HashMap::new();
         for (i, r) in grouped.rows.iter().enumerate() {
+            if self.budget.expired() {
+                break;
+            }
             if let Some(first) = r.path().first_node_id() {
                 grouped_by_first.entry(first).or_default().push(i);
             }
@@ -3552,6 +3577,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // mode-satisfying single applications (level 1).
         let mut worklist: Vec<(ResultRow, usize)> = Vec::new();
         for r in &grouped.rows {
+            if self.budget.expired() {
+                break;
+            }
             if path_satisfies_mode(r.path(), mode) {
                 if lb <= 1 {
                     result.push(r.clone());
@@ -3561,6 +3589,20 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         }
 
         while let Some((row, reps)) = worklist.pop() {
+            // Cooperative cancellation. TRAIL / SIMPLE / ACYCLIC bound this
+            // search by |E| or |V|, which is finite and can still be
+            // astronomically large: `SIMPLE (:Fpl)-[:REEMPLAZA_A]->*(:Fpl)`
+            // over 16.4 M edges enumerates simple paths, and there is no
+            // useful bound on how long that takes. Without this check the
+            // REPL's Ctrl-C raised its flag and *nothing read it* — the
+            // session was unkillable short of killing the process, and
+            // `.timeout` was equally powerless, because the budget is
+            // cooperative and this loop did not cooperate. `expired()`
+            // reads the clock once every 4096 calls, so the check is free
+            // next to a `concat_group` per iteration.
+            if self.budget.expired() {
+                break;
+            }
             if limit > 0 && result.len() >= limit {
                 break;
             }

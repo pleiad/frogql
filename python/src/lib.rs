@@ -166,7 +166,7 @@ impl Connection {
     }
 
     fn exec_query<'py>(&self, py: Python<'py>, query: &str, limit: usize) -> PyResult<PyObject> {
-        let active = self.store.catalog().active_schema();
+        let active = self.store.active_schema();
         let result = frogql_core::compile_query_with_diagnostics_with(&active, query)
             .map_err(|e| PyValueError::new_err(e.message()))?;
         let q = result.query;
@@ -244,7 +244,7 @@ impl Connection {
         let active_name = self.store.catalog().active_name().map(str::to_string);
         let schema_for_validation = match active_name.as_deref() {
             None | Some("DEFAULT") => None,
-            _ => Some(self.store.catalog().active_schema()),
+            _ => Some(self.store.active_schema()),
         };
         let exec = frogql_core::runtime::dm::run_dm_with_index(
             &self.store,
@@ -589,13 +589,36 @@ fn open(path: &str) -> PyResult<Connection> {
     })
 }
 
+/// Persist `g` to `db_path` **with a catalog naming DEFAULT active**.
+///
+/// `MemoryGraphStore::save` writes the graph and no catalog, so a database
+/// created by these importers opened with no active graph type and a
+/// permissive typechecker — a misspelled property (`document` for
+/// `documento`) then filtered everything and reported nothing. The REPL's
+/// own import path has always called `install_default`; the bindings never
+/// did, and that asymmetry is the whole bug.
+///
+/// The schema is inferred here, where the graph is already fully in RAM
+/// and the walk is paid once at import rather than on someone's first
+/// query.
+fn save_with_default(g: &MemoryGraphStore, db_path: &str) -> PyResult<()> {
+    g.save(Path::new(db_path))
+        .map_err(|e| PyRuntimeError::new_err(format!("save: {e}")))?;
+    let store = LazyGraphStore::open(Path::new(db_path))
+        .map_err(|e| PyRuntimeError::new_err(format!("reopen to install DEFAULT: {e}")))?;
+    let schema = frogql_core::typing::inference::infer_simple_schema(&store);
+    store.catalog_mut().install_default(schema);
+    store
+        .save_catalog()
+        .map_err(|e| PyRuntimeError::new_err(format!("persist catalog: {e}")))?;
+    Ok(())
+}
+
 #[pyfunction]
 fn import_json(db_path: &str, json_path: &str) -> PyResult<()> {
     let g = MemoryGraphStore::from_file(Path::new(json_path))
         .map_err(|e| PyRuntimeError::new_err(format!("load json: {e}")))?;
-    g.save(Path::new(db_path))
-        .map_err(|e| PyRuntimeError::new_err(format!("save: {e}")))?;
-    Ok(())
+    save_with_default(&g, db_path)
 }
 
 /// Import a JSON graph given **as a string**, rather than as a path.
@@ -611,18 +634,14 @@ fn import_json(db_path: &str, json_path: &str) -> PyResult<()> {
 fn import_json_str(db_path: &str, json: &str) -> PyResult<()> {
     let g = MemoryGraphStore::from_json_str(json)
         .map_err(|e| PyRuntimeError::new_err(format!("load json: {e}")))?;
-    g.save(Path::new(db_path))
-        .map_err(|e| PyRuntimeError::new_err(format!("save: {e}")))?;
-    Ok(())
+    save_with_default(&g, db_path)
 }
 
 #[pyfunction]
 fn import_csv(db_path: &str, csv_dir: &str) -> PyResult<()> {
     let g = csv_loader::load_from_csv_dir(Path::new(csv_dir))
         .map_err(|e| PyRuntimeError::new_err(format!("load csv: {e}")))?;
-    g.save(Path::new(db_path))
-        .map_err(|e| PyRuntimeError::new_err(format!("save: {e}")))?;
-    Ok(())
+    save_with_default(&g, db_path)
 }
 
 fn value_to_py<'py>(py: Python<'py>, store: &LazyGraphStore, v: &Value) -> PyResult<PyObject> {

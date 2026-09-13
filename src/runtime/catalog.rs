@@ -119,6 +119,19 @@ impl GraphTypeCatalog {
         self.default_dirty = false;
     }
 
+    /// Name `DEFAULT` as active without computing its schema.
+    ///
+    /// `install_default` needs a `Schema`, which costs an O(N+E) walk. At
+    /// open time that walk is exactly what must not happen, so this sets
+    /// the name and raises `default_dirty`; the first schema fetch runs
+    /// `refresh_default_if_dirty` and fills the entry in.
+    pub fn activate_default_lazily(&mut self) {
+        self.active = Some(DEFAULT_NAME.to_string());
+        if !self.types.contains_key(DEFAULT_NAME) {
+            self.default_dirty = true;
+        }
+    }
+
     /// Drop a graph type. Rejects DEFAULT. If the dropped name was active,
     /// the catalog reverts to "no active type" (callers fall back to
     /// `Schema::star()`).

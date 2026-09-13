@@ -404,14 +404,44 @@ fn save_minimal_graph(path: &std::path::Path) {
     g.save(path).unwrap();
 }
 
+/// `MemoryGraphStore::save` still writes **no catalog entry** — but opening
+/// the result now names DEFAULT active anyway.
+///
+/// The two halves used to be one assertion, and conflating them is what let
+/// a real bug through: a database created by the bindings' `import_json`
+/// (which is exactly `from_file` + `save`) opened with no active type, so
+/// the typechecker went permissive and a misspelled property filtered
+/// everything while reporting nothing. Activating DEFAULT costs nothing at
+/// open — only the *name* is set, and inference stays lazy — so there is no
+/// reason for a database to sit unschema'd just because whoever wrote it
+/// did not think to install one.
+///
+/// What is pinned here: `save` writes no entry (the `types` map is empty
+/// until something infers), and `open` still names DEFAULT active.
 #[test]
-fn store_default_load_yields_empty_catalog_on_legacy_save() {
+fn a_bare_save_writes_no_catalog_entry_but_still_activates_default() {
     let path = temp_db("legacy.gdb");
     save_minimal_graph(&path);
     let store = LazyGraphStore::open(&path).unwrap();
-    // MemoryGraphStore::save doesn't populate DEFAULT — that's done by the import
-    // pipeline in the gqlite binary. The catalog is empty here.
-    assert!(store.catalog().active_name().is_none());
+
+    assert_eq!(
+        store.catalog().active_name(),
+        Some("DEFAULT"),
+        "a catalog naming no active type falls back to DEFAULT at open"
+    );
+    assert!(
+        !store.catalog().contains("DEFAULT"),
+        "the entry itself is still absent — inference is lazy, and paying \
+         O(N+E) at open is exactly what this must not do"
+    );
+
+    // And asking for the schema is what fills it in.
+    let schema = store.active_schema();
+    assert!(
+        schema.nodes.iter().any(|n| format!("{n:?}").contains("Person")),
+        "the first schema fetch infers DEFAULT from the data, got {schema:?}"
+    );
+    assert!(store.catalog().contains("DEFAULT"));
 }
 
 #[test]

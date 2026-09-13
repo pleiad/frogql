@@ -494,6 +494,11 @@ impl LazyGraphStore {
             );
         }
 
+        // A catalog that names no active type gets DEFAULT, lazily. See
+        // `activate_default_if_none` for why this is not a `.gdb` written
+        // wrong but a `.gdb` written without a catalog at all.
+        store.activate_default_if_none();
+
         Ok(store)
     }
 
@@ -1120,11 +1125,49 @@ impl LazyGraphStore {
         id < overlay.base_node_count || overlay.get_new_node(id).is_some()
     }
 
+    /// The active schema, with `DEFAULT` brought up to date first.
+    ///
+    /// Every caller that compiles a query wants *this*, not
+    /// `catalog().active_schema()`. The bare accessor returns
+    /// `Schema::star()` whenever the active name has no entry in `types`,
+    /// and `DEFAULT` legitimately has no entry until something infers it —
+    /// so a database whose catalog says "DEFAULT is active" would have
+    /// typechecked permissively, which is the opposite of what activating
+    /// it means.
+    pub fn active_schema(&self) -> crate::typing::variable_type::Schema {
+        self.refresh_default_if_dirty();
+        self.catalog().active_schema()
+    }
+
     /// Refresh the catalog's `DEFAULT` schema from the live store iff the
     /// dirty flag is set. Idempotent: every read path that fetches the
     /// active schema or pretty-prints DEFAULT calls through here, so DML
     /// statements get O(1) "mark dirty" while the schema-consulting paths
     /// pay the O(N+E) inference at most once per dirty cycle.
+    /// Make `DEFAULT` the active graph type when the catalog names none.
+    ///
+    /// A `.gdb` written by `MemoryGraphStore::save` — which is what the
+    /// bindings' `import_json` / `import_csv` call — carries **no catalog
+    /// at all**, so it opened with no active type and the typechecker went
+    /// permissive. That is how `(:Persona {document: '...'})` — the
+    /// property is `documento` — ran to completion over 16.4 M edges and
+    /// returned zero rows without a word of warning, while the same typo
+    /// against `examples/movies.gdb` (whose catalog *does* name DEFAULT)
+    /// is a compile-time error.
+    ///
+    /// Only the *name* is set here, never the schema: inference is O(N+E)
+    /// and stays lazy, so this costs nothing at open. `default_dirty` is
+    /// raised so the first schema fetch computes it.
+    ///
+    /// A catalog that already names an active type is left alone — this
+    /// fills a gap, it does not override a decision.
+    fn activate_default_if_none(&self) {
+        let mut cat = self.catalog.borrow_mut();
+        if cat.active_name().is_none() {
+            cat.activate_default_lazily();
+        }
+    }
+
     pub fn refresh_default_if_dirty(&self) {
         let needs_refresh = {
             let cat = self.catalog.borrow();

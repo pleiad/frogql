@@ -465,7 +465,7 @@ fn main() {
                 let active_name = store.catalog().active_name().map(str::to_string);
                 let schema_for_validation = match active_name.as_deref() {
                     None | Some("DEFAULT") => None,
-                    _ => Some(store.catalog().active_schema()),
+                    _ => Some(store.active_schema()),
                 };
                 // Hand the DM the session's warm LTJ index: a comma-join
                 // in its MATCH takes the ordinary LTJ path, and building a
@@ -502,7 +502,7 @@ fn main() {
             }
             Statement::Query(q) => {
                 if typecheck {
-                    let active = store.catalog().active_schema();
+                    let active = store.active_schema();
                     match frogql::compile_query_with_diagnostics_with(&active, line) {
                         Ok(r) => {
                             for w in &r.warnings {
