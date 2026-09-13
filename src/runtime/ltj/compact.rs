@@ -31,17 +31,106 @@
 /// Plain bitvector with select-0 (position of the k-th zero, 1-indexed) and
 /// succ-0 (position of the first zero at or after `i`) support. Select is
 /// sample-accelerated: every `SAMPLE`-th zero position is stored, the rest
-/// is a popcount word scan. Bits past `len` read as ones so they never count
-/// as zeros.
+/// is a popcount word scan. Succ-0 is answered in constant time from a
+/// two-level table (`succ_basic` / `succ_super`, see `build_succ_tables`).
+/// Bits past `len` read as ones so they never count as zeros.
 pub struct SelectBitVec {
     words: Vec<u64>,
     len: usize,
     /// Positions of the (k·SAMPLE + 1)-th zeros.
     samples: Vec<u32>,
     num_zeros: usize,
+    /// Basic blocks, one `u16` per word — see `build_succ_tables`.
+    succ_basic: Vec<u16>,
+    /// Super blocks, one `u64` per `SUCC_W2` bits — see `build_succ_tables`.
+    succ_super: Vec<u64>,
 }
 
 const SAMPLE: usize = 512;
+
+/// Bits per basic block: one machine word, the unit `succ0` already scans.
+const SUCC_W: usize = 64;
+/// Bits per super block (`SUCC_W` basic blocks), and the saturation cap of a
+/// basic-block entry — 4096 is the largest gap a `u16` needs to distinguish,
+/// because anything longer is answered by the super block instead.
+const SUCC_W2: usize = 4096;
+
+/// Nanoseconds spent building succ-0 tables in this process, so the cost can
+/// be reported as its own `FROGQL_TRACE_OPEN` phase.
+///
+/// The counter is process-global rather than threaded through twelve call
+/// sites (six tries × build-or-load) because it exists to be *seen*, not to
+/// be consumed: a sidecar exists precisely because open-time work on a large
+/// graph once cost two minutes, and nothing built at open should be able to
+/// grow back into that invisibly.
+static SUCC_TABLE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Total nanoseconds spent building succ-0 tables so far. Callers snapshot it
+/// before and after an index build or load and print the difference.
+pub(crate) fn succ_table_nanos() -> u64 {
+    SUCC_TABLE_NANOS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Build the two-level succ-0 acceleration table, a port of
+/// `cltj/include/cds/succ_support_v.hpp` (the `t_b = 0` specialisation).
+///
+/// Why it exists: `children(it)` is `succ0(it + 1) - it`, called once per
+/// candidate inside a `leap`. Without the table `succ0` scans forward word by
+/// word, which is fine while every trie node is small and ruinous the moment
+/// one is not — an unlabelled edge (`-[]->`, or an `A|B` label expression)
+/// puts every edge of the graph under a single predicate node, and the scan
+/// walks millions of bits per call. Measured on a 3.85 M-node / 16.4 M-edge
+/// database, `MATCH (:Persona {documento: '…'})-[]->(x:Fpl) RETURN x.fplId`
+/// took **67.9 s** compact against 2.58 s for the array representation, with
+/// 95% of the profile inside `CompactLtjIterator::child_block`. The same
+/// query with a named label answered in 0.006 s. The port was incomplete:
+/// `select0` already used its samples, `succ0` used nothing.
+///
+/// The layout, indexed exactly as the reference indexes it:
+///   - `succ_basic[b]` = `succ0((b + 1) * SUCC_W)` − `((b + 1) * SUCC_W - 1)`,
+///     saturated at `SUCC_W2`. A distance, so it fits a `u16`.
+///   - `succ_super[m]` = `succ0((m + 1) * SUCC_W2)`, the absolute answer for
+///     when the distance saturated.
+///
+/// A single backward pass fills both: `succ` carries the first zero seen so
+/// far, updated whenever a word has one.
+///
+/// Rebuilt on load rather than serialised into the `.ltj` sidecar. The build
+/// is one linear pass — 0.21 s measured over a 1.16 GiB bitvector, so ~4 s
+/// extrapolated to a 22 GB sidecar, against the 252 s of `O(E log E)` trie
+/// construction the sidecar exists to avoid. Serialising would not even save
+/// that: the table is dense and derived, so the ~6 GB not computed would have
+/// to be read (2–3 s of SSD) and stored. And being derived from `words`, it
+/// cannot fall out of sync; a serialised copy could. The sidecar format is
+/// therefore unchanged, and no existing file is rejected.
+fn build_succ_tables(words: &[u64], len: usize) -> (Vec<u16>, Vec<u64>) {
+    let t0 = std::time::Instant::now();
+    let n_basic = words.len();
+    // Ceil over *words*, not over `len`, so the query's `i / SUCC_W2` index
+    // is in range for every `i < len` (the reference divides `capacity`).
+    let n_super = (n_basic + SUCC_W - 1) / SUCC_W;
+    let mut basic = vec![0u16; n_basic.max(1)];
+    let mut sup = vec![0u64; n_super.max(1)];
+    // No zero has been seen yet to the right of the last word, and `len` is
+    // what `succ0` answers when there is none.
+    let mut succ = len;
+    for i in (1..n_basic).rev() {
+        let d = !words[i];
+        if d != 0 {
+            succ = i * SUCC_W + d.trailing_zeros() as usize;
+        }
+        // `succ >= i * SUCC_W` always holds here, so the subtraction is safe.
+        basic[i - 1] = (succ - (i * SUCC_W - 1)).min(SUCC_W2) as u16;
+        if i % SUCC_W == 0 {
+            sup[i / SUCC_W - 1] = succ as u64;
+        }
+    }
+    SUCC_TABLE_NANOS.fetch_add(
+        t0.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    (basic, sup)
+}
 
 impl SelectBitVec {
     /// Build from the set of zero positions over a domain of `len` bits
@@ -62,11 +151,14 @@ impl SelectBitVec {
             words[p / 64] &= !(1u64 << (p % 64));
         }
         let samples = zero_positions.iter().step_by(SAMPLE).copied().collect();
+        let (succ_basic, succ_super) = build_succ_tables(&words, len);
         SelectBitVec {
             words,
             len,
             samples,
             num_zeros: zero_positions.len(),
+            succ_basic,
+            succ_super,
         }
     }
 
@@ -109,25 +201,37 @@ impl SelectBitVec {
     }
 
     /// Position of the first zero at or after `i`; `len` if none.
+    ///
+    /// Three arithmetic branches, no loop: the zero is inside `i`'s own word,
+    /// or the basic block records how far past that word it sits, or the
+    /// distance saturated and the super block holds the answer outright. See
+    /// `build_succ_tables` for the layout and for what the scan this replaced
+    /// cost.
+    #[inline]
     pub fn succ0(&self, i: usize) -> usize {
         if i >= self.len {
             return self.len;
         }
-        let mut wi = i / 64;
-        let mut w = !self.words[wi] & (!0u64 << (i % 64));
-        while w == 0 {
-            wi += 1;
-            if wi >= self.words.len() {
-                return self.len;
-            }
-            w = !self.words[wi];
+        let b = i / SUCC_W;
+        let w = !self.words[b] & (!0u64 << (i % SUCC_W));
+        if w != 0 {
+            return (b * SUCC_W + w.trailing_zeros() as usize).min(self.len);
         }
-        let pos = wi * 64 + w.trailing_zeros() as usize;
-        pos.min(self.len)
+        if b + 1 >= self.words.len() {
+            return self.len;
+        }
+        let bb = self.succ_basic[b] as usize;
+        if bb < SUCC_W2 {
+            return ((b + 1) * SUCC_W - 1 + bb).min(self.len);
+        }
+        (self.succ_super[i / SUCC_W2] as usize).min(self.len)
     }
 
     pub fn heap_bytes(&self) -> usize {
-        self.words.len() * 8 + self.samples.len() * 4
+        self.words.len() * 8
+            + self.samples.len() * 4
+            + self.succ_basic.len() * 2
+            + self.succ_super.len() * 8
     }
 
     // --- Serialization accessors ---
@@ -156,11 +260,19 @@ impl SelectBitVec {
         samples: Vec<u32>,
         num_zeros: usize,
     ) -> Self {
+        // The succ-0 table is derived, not read: see `build_succ_tables` for
+        // why it is cheaper to recompute than to store, and why recomputing
+        // it is the only way it cannot disagree with `words`. Building it in
+        // both constructors is what makes "the struct exists, so the table
+        // exists" an invariant with no intermediate state to reason about.
+        let (succ_basic, succ_super) = build_succ_tables(&words, len);
         SelectBitVec {
             words,
             len,
             samples,
             num_zeros,
+            succ_basic,
+            succ_super,
         }
     }
 }
@@ -623,6 +735,91 @@ mod tests {
             let expect = zeros.get(zi).map(|&z| z as usize).unwrap_or(len);
             assert_eq!(bv.succ0(i), expect, "succ0({i})");
         }
+    }
+
+    /// The two-level table against the scan it replaced, over gap lengths
+    /// chosen to hit each of `succ0`'s three branches and the boundaries
+    /// between them.
+    ///
+    /// A naive `succ0` is the oracle precisely because it is the code this
+    /// replaced: the bug was never a wrong answer, it was the cost of
+    /// getting the right one, so the test that matters is that the answer
+    /// did not move.
+    #[test]
+    fn test_succ0_two_level_matches_linear_scan() {
+        fn naive(zeros: &[u32], len: usize, i: usize) -> usize {
+            zeros
+                .iter()
+                .map(|&z| z as usize)
+                .find(|&z| z >= i)
+                .unwrap_or(len)
+        }
+
+        // Each case is (gap, trailing) — zeros every `gap` bits, then
+        // `trailing` bits with no zero at all before the end.
+        //   1      : dense, every answer comes from the word itself
+        //   63/64/65: gaps that straddle the word boundary
+        //   4095/4096/4097: gaps that straddle the super-block span, i.e.
+        //                   where the basic block saturates
+        //   9000   : a gap several super blocks long
+        for &(gap, trailing) in &[
+            (1usize, 0usize),
+            (63, 0),
+            (64, 0),
+            (65, 0),
+            (200, 5000),
+            (4095, 0),
+            (4096, 0),
+            (4097, 0),
+            (9000, 20_000),
+            (1, 70),
+        ] {
+            let body = 40_000;
+            let len = body + trailing;
+            let zeros: Vec<u32> = (0..body).step_by(gap).map(|z| z as u32).collect();
+            let bv = SelectBitVec::from_zero_positions(len, &zeros);
+            for i in 0..=len {
+                assert_eq!(
+                    bv.succ0(i),
+                    naive(&zeros, len, i),
+                    "succ0({i}) with gap={gap} trailing={trailing} len={len}"
+                );
+            }
+        }
+    }
+
+    /// The `b + 1 >= words.len()` branch: an `i` inside the final word, with
+    /// no zero at or after it, must answer `len` and not read a basic block
+    /// that describes a word which does not exist.
+    #[test]
+    fn test_succ0_last_block() {
+        for len in [1usize, 63, 64, 65, 127, 128, 4096, 4097] {
+            // A single zero at the very start, so every later query falls
+            // through to the tail.
+            let bv = SelectBitVec::from_zero_positions(len, &[0]);
+            assert_eq!(bv.succ0(0), 0);
+            for i in 1..=len {
+                assert_eq!(bv.succ0(i), len, "succ0({i}) with len={len}");
+            }
+            // And a bitvector with no zeros at all.
+            let bv = SelectBitVec::from_zero_positions(len, &[]);
+            for i in 0..=len {
+                assert_eq!(bv.succ0(i), len, "empty succ0({i}) with len={len}");
+            }
+        }
+    }
+
+    /// A zero in the last word, reached from a query in an earlier word —
+    /// the basic-block branch pointing at the final block.
+    #[test]
+    fn test_succ0_zero_in_final_word() {
+        let len = 5000;
+        let zeros = [4999u32];
+        let bv = SelectBitVec::from_zero_positions(len, &zeros);
+        for i in 0..=4999 {
+            assert_eq!(bv.succ0(i), 4999, "succ0({i})");
+        }
+        assert_eq!(bv.succ0(5000), 5000);
     }
 
     #[test]

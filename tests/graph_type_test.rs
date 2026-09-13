@@ -438,7 +438,10 @@ fn a_bare_save_writes_no_catalog_entry_but_still_activates_default() {
     // And asking for the schema is what fills it in.
     let schema = store.active_schema();
     assert!(
-        schema.nodes.iter().any(|n| format!("{n:?}").contains("Person")),
+        schema
+            .nodes
+            .iter()
+            .any(|n| format!("{n:?}").contains("Person")),
         "the first schema fetch infers DEFAULT from the data, got {schema:?}"
     );
     assert!(store.catalog().contains("DEFAULT"));

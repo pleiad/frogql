@@ -76,7 +76,7 @@ Runtime/store toggles for A/B testing and tracing (all read at query/open time; 
 | `FROGQL_LTJ_SOURCE=build` | ignore `<db>.ltj` and rebuild the LTJ index from the graph (the kill switch the persistence differential test A/Bs against) |
 | `FROGQL_DISABLE_LTJ_DELTA` | drop the cached LTJ index after every DML instead of maintaining a delta beside it — the kill switch `tests/ltj_delta_test.rs` A/Bs against |
 | `FROGQL_LTJ_PERSIST=0` | build the LTJ index but do not write `<db>.ltj`. The index is written automatically the first time a database is opened without a usable sidecar; this declines the file, not the index |
-| `FROGQL_LTJ_REPR=compact\|array` | which physical representation the LTJ `TripleIndex` is built in (**default `compact`**): six LOUDS succinct tries (issue #66) or six sorted arrays — compact is ~2.9× smaller and 1.4–2.1× slower on IC latency (IC11 faster); differential suite `tests/compact_ltj_test.rs`, size/build stats via the `ltj_index_stats` bin. `FROGQL_LTJ_COMPACT` is honoured as a legacy alias (`0` means arrays) |
+| `FROGQL_LTJ_REPR=compact\|array` | which physical representation the LTJ `TripleIndex` is built in (**default `compact`**): six LOUDS succinct tries (issue #66) or six sorted arrays — compact is ~2.9× smaller and, since the succ-0 tables landed, within noise of array on most LDBC IC (IC5 1.5×, IC8 3.4×, the rest 0.5–1.0×); differential suite `tests/compact_ltj_test.rs`, size/build stats via the `ltj_index_stats` bin. `FROGQL_LTJ_COMPACT` is honoured as a legacy alias (`0` means arrays) |
 | `FROGQL_DISABLE_ANYDIR_LTJ` | force the hash-join fallback for any-direction (`-[e]-`) patterns instead of the mirrored-index LTJ (`try_ltj_mixed`); checked at the *call site* (`pattern_extract::anydir_ltj_disabled`) so the mirror is never built when disabled |
 | `FROGQL_DISABLE_SEEDED_REPEAT` | force the legacy global repetition path instead of the seeded adjacency traversal |
 | `FROGQL_DISABLE_REPEAT_UNROLL` | keep bounded `{n,m}` repetitions as `Repeat` instead of unrolling to a Union |
@@ -587,7 +587,34 @@ order of rebuilding the index it was meant to save.
 
 **Two physical representations** (issue #66), selected at index-build time; both drive the same `LtjAlgorithm` through the `LtjIterator` enum:
 - **Array** (`FROGQL_LTJ_REPR=array`): six fully-materialized sorted `Vec<(u32,u32,u32,u32)>`. The iterator recomputes its range from scratch per call (simple, cache-friendly).
-- **Compact CLTJ** (the default): a port of the reference `cltj_index_spo_basic` — six LOUDS succinct tries (`compact.rs`: topology bitvector with sampled select-0 + bit-packed symbol sequence), navigated by a stateful handle-stack iterator (`CompactLtjIterator`, ported from `ltj_iterator_basic.hpp`). Property-graph divergence from the RDF reference: parallel edges collapse into one trie leaf, so the index keeps an SPO-ordered eid side table (`leaf_offsets`/`leaf_eids`) that the base case consults for ISO bag multiplicity. At SF0.1 (1.49 M triples): 47.6 MiB vs 136.6 MiB (**2.87× smaller**), build 1.13 s vs 0.92 s, IC medians 1.4–2.1× slower (succinct-navigation trade-off; IC11 runs 1.5× *faster* compact). **Compact is the default**: the ratio does not stay abstract at scale — a 617 M-edge RDF dump is ~20 GB compact against ~59 GB in arrays, and the arrays stop fitting long before the tries do, at which point the faster representation is infinitely slower than the smaller one. Arrays remain the opt-in for a workload with the memory to spend. Equivalence pinned by `tests/compact_ltj_test.rs`; per-repr size/build stats via the `ltj_index_stats` bin. The metatrie tier (root-sharing across ordering pairs) and the paper's RDF/BGP benchmark remain open in #66.
+- **Compact CLTJ** (the default): a port of the reference `cltj_index_spo_basic` — six LOUDS succinct tries (`compact.rs`: topology bitvector with sampled select-0 + bit-packed symbol sequence), navigated by a stateful handle-stack iterator (`CompactLtjIterator`, ported from `ltj_iterator_basic.hpp`). Property-graph divergence from the RDF reference: parallel edges collapse into one trie leaf, so the index keeps an SPO-ordered eid side table (`leaf_offsets`/`leaf_eids`) that the base case consults for ISO bag multiplicity. At SF0.1 (1.49 M triples): 47.6 MiB vs 136.6 MiB (**2.87× smaller**), build 1.13 s vs 0.92 s.
+
+  **Navigation is `succ0`, and `succ0` used to scan.** `children(it)` is
+  `succ0(it + 1) - it`, called once per candidate inside a `leap`; the port
+  gave `select0` its samples and left `succ0` walking the bitvector word by
+  word. That is fine while every trie node is small and ruinous the moment
+  one is not — an unlabelled edge (`-[]->`, or an `A|B` label expression)
+  puts every edge of the graph under a single predicate node. Measured on a
+  3.85 M-node / 16.4 M-edge database, `MATCH (:Persona {documento: '…'})
+  -[]->(x:Fpl) RETURN x.fplId` took **67.9 s** compact against 2.58 s array,
+  95% of the profile inside `CompactLtjIterator::child_block`; the same
+  query with a named label answered in 0.006 s. The two-level table ported
+  from `cltj/include/cds/succ_support_v.hpp` (see `build_succ_tables`)
+  answers in three arithmetic branches and brings that query to **2.5 s**,
+  at parity with array. It is rebuilt on load rather than serialised — one
+  linear pass, 3 ms for this database's six tries, printed as its own
+  `FROGQL_TRACE_OPEN` phase.
+
+  The IC medians this section used to quote (1.4–2.1× slower) predate that
+  fix, and no LDBC IC uses a free edge label, which is why the case never
+  entered the evidence. Re-measured at SF0.1 after it, the same suite moves
+  1.3–1.8× in compact's favour (IC5 488 → 272 ms, IC8 242 → 193 ms, IC9
+  2458 → 1632 ms, IC14 857 → 508 ms) and the ratios against array become:
+  IC4 0.69×, IC11 0.46×, IC12 0.81×, IC2/IC3/IC7 0.91–0.94×, IC1/IC6/IC9/
+  IC13/IC14 within 5% either way, **IC5 1.51× and IC8 3.42×** — two
+  genuinely slower shapes rather than a uniform tax.
+
+  **Compact is the default**: the ratio does not stay abstract at scale — a 617 M-edge RDF dump is ~20 GB compact against ~59 GB in arrays, and the arrays stop fitting long before the tries do, at which point the faster representation is infinitely slower than the smaller one. Arrays remain the opt-in for a workload with the memory to spend. Equivalence pinned by `tests/compact_ltj_test.rs`; per-repr size/build stats via the `ltj_index_stats` bin. The metatrie tier (root-sharing across ordering pairs) and the paper's RDF/BGP benchmark remain open in #66.
 
 **Maintained incrementally across DML** (`runtime/ltj/delta.rs`). A
 successful mutation used to drop the cached index, so the next query
@@ -782,6 +809,7 @@ See `docs/internals/storage-architecture.md` for the full spec.
 | secondary index auto-build | ~420 ms | `build_auto_indexes_bulk` — single pass over node records, u32-keyed buckets |
 | secondary index DDL replay | ~per-DDL | `secondary_index_io::read_specs` + `build_declared` per persisted entry; `0 ms` when the file has no DDL list (legacy or no `CREATE INDEX`) |
 | LTJ TripleIndex (eager) | ~670 ms | `Runtime::warm_triple_index` — six sorted orderings of all triples |
+| LTJ succ0 tables | ~1 ms | `compact::build_succ_tables` — one linear pass per trie, on the compact representation only, on both the build and the sidecar-load path. 3 ms on a 16.4 M-edge graph. Traced separately on purpose: the sidecar exists because open-time work on a large graph once cost two minutes, so nothing added to open should be able to grow back into that invisibly |
 | **total** | **~570 ms warm** | (from a 6.30 s baseline before the optimisation series) |
 
 `FROGQL_TRACE_OPEN=1` prints the per-phase timings. The current dominant phases (TripleIndex, secondary index) are both cheap to write to disk and would drop to a memory-map at the cost of ~12% (TripleIndex) and ~3% (secondary index) extra `.gdb` file size — not yet implemented.

@@ -667,7 +667,23 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     ///
     /// `FROGQL_LTJ_SOURCE=build` forces the rebuild, which is what the
     /// differential test needs to compare the two against each other.
+    ///
+    /// The succ-0 acceleration tables are rebuilt here on either path — from
+    /// the sidecar as well as from the graph — so their cost gets a trace
+    /// phase of its own. The sidecar exists because open-time work on a
+    /// large graph once cost two minutes; nothing added to open should be
+    /// able to grow back into that without showing up in the trace first.
     fn load_or_build_triple_index(&self) -> TripleIndex {
+        let before = crate::runtime::ltj::compact::succ_table_nanos();
+        let index = self.load_or_build_triple_index_inner();
+        if std::env::var("FROGQL_TRACE_OPEN").is_ok() {
+            let spent = crate::runtime::ltj::compact::succ_table_nanos() - before;
+            eprintln!("  LTJ succ0 tables: {:.0} ms", spent as f64 / 1_000_000.0);
+        }
+        index
+    }
+
+    fn load_or_build_triple_index_inner(&self) -> TripleIndex {
         use crate::runtime::ltj::persist;
         let forced_build = std::env::var("FROGQL_LTJ_SOURCE").as_deref() == Ok("build");
         let key = self.graph.index_sidecar_key();
