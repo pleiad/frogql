@@ -53,3 +53,4 @@ latex
 **/.DS_Store
 /.playwright-mcp/
 /asd
+pkg-smoke/

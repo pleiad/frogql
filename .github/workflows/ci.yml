@@ -63,3 +63,34 @@ jobs:
                   | awk '{print "--test " $0}' | tr '\n' ' ')
           echo "Running $(echo "$TESTS" | wc -w | awk '{print $1/2}') integration test binaries"
           cargo test $TESTS
+
+  # Compiling for wasm32 proves nothing about running there: the target
+  # has no filesystem and no clock, and `SystemTime::now()` /
+  # `Instant::now()` *panic* rather than degrade — a wasm panic unwinds as
+  # `RuntimeError: unreachable`, so the call never returns. 0.5.3 shipped
+  # an `open_json` that failed on every input, the README's one-node
+  # example included, because a diagnostic timer landed on the
+  # index-build path the browser backend takes. This job runs the
+  # published surface under Node so that class of break is caught before
+  # the release job publishes it.
+  wasm-smoke:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install wasm-pack
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      # `--target nodejs` so plain `require` works; the published package
+      # uses `--target web`, and the two differ only in the JS shim, not
+      # in the wasm the engine compiles to.
+      - name: Build frogql-wasm for Node
+        run: wasm-pack build wasm --target nodejs --out-dir ../pkg-smoke
+      - name: Smoke test
+        run: node wasm/smoke/smoke.cjs

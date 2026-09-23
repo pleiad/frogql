@@ -1,6 +1,6 @@
 [package]
 name = "frogql"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 # MSRV of the engine library (default-features = false). Verified by
 # building `--lib --no-default-features` on 1.71.0. Clippy reads this and
@@ -43,6 +43,15 @@ features = ["repl"]
 default = ["repl", "bench"]
 repl = ["dep:rustyline", "dep:signal-hook"]
 bench = ["dep:sysinfo", "dep:toml", "dep:ureq", "dep:zstd", "dep:tar", "dep:sha2"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The browser's clock. `wasm32-unknown-unknown` has no time source in std:
+# `SystemTime::now()` there panics ("time not implemented on this
+# platform"), which is how `DATE()` / `LOCAL_DATETIME()` took the whole
+# module down instead of returning a date. `js-sys` is target-gated, so no
+# native, Python or Node build ever sees it, and the browser gets the real
+# answer rather than an error.
+js-sys = "0.3"
 
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"] }

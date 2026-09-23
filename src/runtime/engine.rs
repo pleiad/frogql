@@ -5474,11 +5474,25 @@ fn now_epoch_days() -> i32 {
 }
 
 /// Milliseconds since 1970-01-01T00:00:00 UTC (`LOCAL_DATETIME()`).
+///
+/// Two implementations, because `wasm32-unknown-unknown` has no clock in
+/// std at all. `SystemTime::now()` there does not return a wrong time, it
+/// **panics** — "time not implemented on this platform" — and a wasm panic
+/// unwinds as `RuntimeError: unreachable`, so a browser `RETURN DATE()`
+/// took the module down rather than answering. `js_sys::Date::now()` is
+/// the clock the host already has; the dependency is target-gated, so no
+/// native, Python or Node build links it.
+#[cfg(not(target_arch = "wasm32"))]
 fn now_epoch_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_epoch_millis() -> i64 {
+    js_sys::Date::now() as i64
 }
 
 /// Read an integer field from a §20.27 constructor record.

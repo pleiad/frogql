@@ -65,6 +65,38 @@ const SUCC_W2: usize = 4096;
 /// grow back into that invisibly.
 static SUCC_TABLE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// A clock reading, where there is a clock.
+///
+/// `wasm32-unknown-unknown` has no time source at all: `Instant::now()`
+/// there is not inaccurate, it **panics** — "time not implemented on this
+/// platform" — and a panic in wasm unwinds as `RuntimeError: unreachable`,
+/// so the call never returns. That is not a failure mode a *diagnostic
+/// counter* is allowed to have, and it is exactly what it did: this
+/// function's caller runs for every trie built, `MemoryGraphStore` is the
+/// browser backend, so `open_json` panicked on **any** input, one-node
+/// graphs included (frogql-wasm 0.5.3; 0.5.0-0.5.2 predate the table).
+///
+/// The measurement is therefore compiled out where no clock exists rather
+/// than guarded at the call site: a `cfg` on the *source of time* cannot be
+/// forgotten by the next person who wants to time something here, and the
+/// browser has nothing to report the phase to anyway — `FROGQL_TRACE_OPEN`
+/// reads an environment variable.
+///
+/// Note this is the second std facility the wasm target simply lacks, after
+/// the filesystem. Anything reached from `MemoryGraphStore` is browser code
+/// whether or not it was written as such; `cargo build -p frogql-wasm
+/// --target wasm32-unknown-unknown` compiles it, and only running it says
+/// whether it works.
+#[cfg(not(target_arch = "wasm32"))]
+fn succ_table_clock() -> Option<std::time::Instant> {
+    Some(std::time::Instant::now())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn succ_table_clock() -> Option<std::time::Instant> {
+    None
+}
+
 /// Total nanoseconds spent building succ-0 tables so far. Callers snapshot it
 /// before and after an index build or load and print the difference.
 pub(crate) fn succ_table_nanos() -> u64 {
@@ -104,7 +136,7 @@ pub(crate) fn succ_table_nanos() -> u64 {
 /// cannot fall out of sync; a serialised copy could. The sidecar format is
 /// therefore unchanged, and no existing file is rejected.
 fn build_succ_tables(words: &[u64], len: usize) -> (Vec<u16>, Vec<u64>) {
-    let t0 = std::time::Instant::now();
+    let t0 = succ_table_clock();
     let n_basic = words.len();
     // Ceil over *words*, not over `len`, so the query's `i / SUCC_W2` index
     // is in range for every `i < len` (the reference divides `capacity`).
@@ -125,10 +157,12 @@ fn build_succ_tables(words: &[u64], len: usize) -> (Vec<u16>, Vec<u64>) {
             sup[i / SUCC_W - 1] = succ as u64;
         }
     }
-    SUCC_TABLE_NANOS.fetch_add(
-        t0.elapsed().as_nanos() as u64,
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    if let Some(t0) = t0 {
+        SUCC_TABLE_NANOS.fetch_add(
+            t0.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
     (basic, sup)
 }
 

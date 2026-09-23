@@ -66,12 +66,14 @@ pub fn open_json(json: &str) -> Result<Connection, JsError> {
 impl Connection {
     #[wasm_bindgen(getter)]
     pub fn node_count(&self) -> u32 {
-        self.store.node_count() as u32
+        // The merged view, so this agrees with `COUNT(n)` on the same
+        // connection after an INSERT. See `live_node_count`.
+        self.store.live_node_count() as u32
     }
 
     #[wasm_bindgen(getter)]
     pub fn edge_count(&self) -> u32 {
-        self.store.edge_count() as u32
+        self.store.live_edge_count() as u32
     }
 
     /// Execute one GQL statement. Read queries return an array of row

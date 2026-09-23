@@ -65,6 +65,32 @@ impl MemoryGraphStore {
         self.edge_names.len()
     }
 
+    /// Nodes in the **merged** view: base, plus what the overlay staged,
+    /// minus what it deleted.
+    ///
+    /// Distinct from `node_count`, which is the *base* count and must
+    /// stay that way — it bounds the id space the overlay allocates
+    /// above (`MutationOverlay::next_node_id`), so folding mutations into
+    /// it would move the watermark the overlay measures itself against.
+    ///
+    /// What reports a count to a *user* wants this one. The browser
+    /// binding's `node_count` getter read the base, so the README's own
+    /// example was wrong: after `INSERT (b:Person {name: 'Bob'})` it
+    /// answered 1 while `COUNT(n)` in a query answered 2 — the query goes
+    /// through `GraphAccess`, which merges. A count that disagrees with
+    /// the query on the same connection is not a smaller number, it is a
+    /// wrong one.
+    pub fn live_node_count(&self) -> usize {
+        let overlay = self.overlay.borrow();
+        overlay.next_node_id() as usize - overlay.deleted_nodes.len()
+    }
+
+    /// Edges in the merged view. See `live_node_count`.
+    pub fn live_edge_count(&self) -> usize {
+        let overlay = self.overlay.borrow();
+        overlay.next_edge_id() as usize - overlay.deleted_edges.len()
+    }
+
     /// Load a graph from a JSON file path.
     pub fn from_file(path: &Path) -> Result<Self, GraphError> {
         let content = fs::read_to_string(path).map_err(|e| GraphError::Io(e.to_string()))?;
