@@ -40,6 +40,40 @@ Verified: a fresh project that `npm install`s the package and runs
 `vite build` bundles the `.wasm` (≈300 kB gzip) with no plugin.
 
 - `open_json(json)` → `Connection`. Parses `{ "nodes": [...], "edges": [...] }`.
+- `open_bytes(gdb, ltj?)` → `Connection`. Opens a real `.gdb` image fetched
+  over the network, paged out of RAM. `ltj` is the matching
+  `<db>.gdb.ltj` sidecar, or `null` to rebuild the index at open.
+
+  ```js
+  const [gdb, ltj] = await Promise.all([
+    fetch("/santiago.gdb").then(r => r.arrayBuffer()),
+    fetch("/santiago.gdb.ltj").then(r => r.arrayBuffer()),
+  ]);
+  const conn = open_bytes(new Uint8Array(gdb), new Uint8Array(ltj));
+  ```
+
+  Prefer it over `open_json` for anything large: a JSON document is parsed
+  and rebuilt node by node and carries no index, while a `.gdb` is already
+  in the engine's layout and its catalog supplies the schema instead of
+  it being re-inferred. Measured on a 459 127-node / 2 244 154-edge graph
+  (309 MB `.gdb`): `open_bytes` in 3.7 s, first query 13 ms.
+
+  **Whether to fetch the sidecar depends on size.** It exists so the six
+  LTJ trie orderings are not rebuilt, which is `O(E log E)` — 252 s
+  measured on a 617 M-edge graph. But decoding it is not free either, and
+  on the 2.2 M-edge graph above the 70 MB sidecar *cost* ~0.8 s against
+  rebuilding in ~1.7 s. Fetch it for a graph big enough that the rebuild
+  hurts; skip it otherwise and save the download. A sidecar that does not
+  describe the database is refused and the index rebuilt, so a mismatched
+  pair costs time and never correctness.
+
+  Read-only as to storage: DML works through the same overlay as every
+  other backend, but there is nowhere to write pages back to, so the
+  durable copy stays whatever the server serves. `to_json()` gives a
+  snapshot of the merged view. Two things a file gives that bytes do not,
+  and which are skipped rather than faked: the legacy-format upgrade
+  (re-save such a database with a native build before serving it) and
+  vector sidecars.
 - `Connection.execute(query, limit?)` → rows array (read queries) or a
   counters object (INSERT / SET / REMOVE / DELETE). `limit` defaults to 100.
 - `Connection.to_json()` → JSON string of the live merged view (base +

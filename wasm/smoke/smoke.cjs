@@ -15,7 +15,9 @@
 // query semantics are covered by the Rust suites. What belongs here is
 // anything std might not have in a browser.
 const assert = require("node:assert");
-const { open_json } = require("../../pkg-smoke/frogql_wasm.js");
+const { open_json, open_bytes } = require("../../pkg-smoke/frogql_wasm.js");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const GRAPH = JSON.stringify({
   nodes: [{ id: "a", labels: ["Person"], props: { name: "Alice" } }],
@@ -46,5 +48,25 @@ assert.match(dt, /^\d{4}-\d{2}-\d{2}T/, `LOCAL_DATETIME() must return one, got $
 // The persistence story the README documents: to_json round-trips.
 const restored = open_json(conn.to_json());
 assert.strictEqual(restored.node_count, 2, "to_json must round-trip through open_json");
+
+// `open_bytes`: a real `.gdb` image, the browser's other entry point.
+// A committed example is used so this needs no fixture of its own.
+const gdb = path.join(__dirname, "..", "..", "examples", "fraud_detection.gdb");
+const image = fs.readFileSync(gdb);
+const db = open_bytes(image, null);
+assert.ok(db.node_count > 0, "open_bytes must load a real .gdb image");
+assert.ok(db.edge_count > 0, "and its edges");
+assert.ok(
+  Array.isArray(db.execute("MATCH (a)-[e]->(b) RETURN a LIMIT 3", 3)),
+  "a query must run against a byte-opened database",
+);
+
+// A truncated download must be refused at open, not one page at a time
+// somewhere deep inside name resolution.
+assert.throws(
+  () => open_bytes(image.subarray(0, Math.floor(image.length / 2)), null),
+  /truncated/,
+  "a half-downloaded image must be refused, and say so",
+);
 
 console.log("frogql-wasm smoke: ok");

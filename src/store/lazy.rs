@@ -170,6 +170,13 @@ pub struct LazyGraphStore {
     /// sidecars are named after it (`<db>.vec.<attr>`) and nothing else
     /// in the store had a reason to remember the path.
     db_path: PathBuf,
+    /// The `.ltj` bytes handed to `from_bytes`, if any.
+    ///
+    /// A file-backed store finds its sidecar next to the `.gdb`; a
+    /// byte-backed one has no path to look beside, so the caller supplies
+    /// the bytes and they are parked here for the runtime to find. `None`
+    /// for every file-backed store, which keeps looking on disk.
+    ltj_sidecar: Option<Vec<u8>>,
     /// Vector attributes loaded from the sidecars next to `db_path`.
     /// Read-only after open, so it is a plain field rather than a
     /// `RefCell`: `&self` methods hand out `&VectorSet` directly.
@@ -179,6 +186,28 @@ pub struct LazyGraphStore {
     /// sidecar key can include it. `0` for a legacy file written before
     /// the slot existed. See `FileHeader::graph_id`.
     graph_id: u64,
+}
+
+/// A phase clock for `FROGQL_TRACE_OPEN`, absent where there is no clock.
+///
+/// `wasm32-unknown-unknown` has no time source in std: `Instant::now()`
+/// panics there, and a wasm panic unwinds as `RuntimeError: unreachable`,
+/// so it takes the module down. Opening a database from bytes runs this
+/// whole function in a browser, which is why the clock is compiled out at
+/// the source rather than guarded at seven call sites. Nothing is lost:
+/// the switch is an environment variable, and a browser has none.
+#[cfg(not(target_arch = "wasm32"))]
+fn phase_clock() -> Option<std::time::Instant> {
+    Some(std::time::Instant::now())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn phase_clock() -> Option<std::time::Instant> {
+    None
+}
+
+fn phase_secs(t: Option<std::time::Instant>) -> f64 {
+    t.map_or(0.0, |t| t.elapsed().as_secs_f64())
 }
 
 impl LazyGraphStore {
@@ -298,11 +327,51 @@ impl LazyGraphStore {
 
     pub fn open_with_cache(db_path: &Path, cache_size: usize) -> io::Result<Self> {
         let trace = std::env::var("FROGQL_TRACE_OPEN").is_ok();
-        let t0 = std::time::Instant::now();
-        let mut pager = Pager::open_with_cache(db_path, cache_size)?;
+        let t0 = phase_clock();
+        let pager = Pager::open_with_cache(db_path, cache_size)?;
         if trace {
-            eprintln!("  pager open:           {:.3}s", t0.elapsed().as_secs_f64());
+            eprintln!("  pager open:           {:.3}s", phase_secs(t0));
         }
+        Self::from_pager(pager, Some(db_path))
+    }
+
+    /// Open a database that arrived as bytes rather than as a file.
+    ///
+    /// For the browser, which has no filesystem: a page server hands over
+    /// the whole `.gdb` and it is paged out of RAM. `ltj` is the matching
+    /// `<db>.gdb.ltj` sidecar when the caller has it — the six LTJ trie
+    /// orderings are `O(E log E)` to rebuild, 252 s measured on a 617 M
+    /// edge graph, and the whole point of fetching a second file is not
+    /// paying that in a browser tab. Pass `None` to rebuild instead.
+    ///
+    /// Read-only: there is nowhere to write a page back to. DML still
+    /// works, because the mutation overlay holds it in RAM without
+    /// touching the pager; what is unavailable is `save`.
+    ///
+    /// Two things a file gives that bytes do not, and which are therefore
+    /// skipped rather than faked: a **legacy-format upgrade**, which
+    /// rewrites index pages into the file (such a database has to be
+    /// re-saved by a native build before it is served), and **vector
+    /// sidecars**, which are further files this signature does not take.
+    pub fn from_bytes(bytes: Vec<u8>, ltj: Option<Vec<u8>>) -> io::Result<Self> {
+        let pager = Pager::from_bytes(bytes, 2000)?;
+        let mut store = Self::from_pager(pager, None)?;
+        store.ltj_sidecar = ltj;
+        Ok(store)
+    }
+
+    /// The `.ltj` bytes a byte-opened database was handed, if any. The
+    /// runtime consults this before rebuilding the index, which is the
+    /// in-memory counterpart of looking for `<db>.gdb.ltj` on disk.
+    pub fn ltj_sidecar_bytes(&self) -> Option<&[u8]> {
+        self.ltj_sidecar.as_deref()
+    }
+
+    /// The shared body of both openers. `db_path` is `None` when the
+    /// database came from bytes, which is exactly the set of steps that
+    /// need a file.
+    fn from_pager(mut pager: Pager, db_path: Option<&Path>) -> io::Result<Self> {
+        let trace = std::env::var("FROGQL_TRACE_OPEN").is_ok();
 
         let string_table_root = pager.header.string_table_root;
         let node_locs_root = pager.header.node_locs_root;
@@ -312,7 +381,7 @@ impl LazyGraphStore {
         let adjacency_root = pager.header.adjacency_root;
 
         // Load string table (needed to resolve label names for indexes)
-        let t1 = std::time::Instant::now();
+        let t1 = phase_clock();
         let st_pages = if string_table_root != 0 {
             disk_index::read_u32_chain(&mut pager, string_table_root)?
         } else {
@@ -329,7 +398,7 @@ impl LazyGraphStore {
             None
         };
         if trace {
-            eprintln!("  string table load:    {:.3}s", t1.elapsed().as_secs_f64());
+            eprintln!("  string table load:    {:.3}s", phase_secs(t1));
         }
 
         // All three roots must be set for a valid fast index.
@@ -363,12 +432,13 @@ impl LazyGraphStore {
             overlay_index: RefCell::new(Default::default()),
             secondary_index_root: Cell::new(secondary_index_root),
             overlay: RefCell::new(MutationOverlay::default()),
-            db_path: db_path.to_path_buf(),
+            db_path: db_path.map(|p| p.to_path_buf()).unwrap_or_default(),
+            ltj_sidecar: None,
             vectors: VectorStore::empty(),
             graph_id,
         };
 
-        let t2 = std::time::Instant::now();
+        let t2 = phase_clock();
         if has_fast_index {
             // Fast path: read pre-built indexes directly
             store.load_from_indexes(
@@ -381,12 +451,19 @@ impl LazyGraphStore {
         } else {
             // Legacy file: full page scan, then upgrade the file with new indexes
             store.load_from_page_scan()?;
-            store.upgrade_file(db_path)?;
+            // A legacy file is upgraded in place by appending index
+            // pages. With no file there is nothing to append to, and the
+            // scan above already produced the same in-RAM state, so the
+            // database is usable — it just pays the scan on every open
+            // until someone re-saves it with a native build.
+            if let Some(db_path) = db_path {
+                store.upgrade_file(db_path)?;
+            }
         }
         if trace {
             eprintln!(
                 "  topology + indexes:   {:.3}s  ({} nodes, {} edges)",
-                t2.elapsed().as_secs_f64(),
+                phase_secs(t2),
                 store.node_count,
                 store.edge_count
             );
@@ -398,20 +475,20 @@ impl LazyGraphStore {
 
         // Load the catalog chain (if any). A legacy file with
         // catalog_root=0 yields an empty catalog and stays permissive.
-        let t3 = std::time::Instant::now();
+        let t3 = phase_clock();
         if store.catalog_root.get() != 0 {
             let mut pager = store.pager.borrow_mut();
             let cat = catalog_io::read_catalog(&mut pager, store.catalog_root.get())?;
             *store.catalog.borrow_mut() = cat;
         }
         if trace {
-            eprintln!("  catalog load:         {:.3}s", t3.elapsed().as_secs_f64());
+            eprintln!("  catalog load:         {:.3}s", phase_secs(t3));
         }
 
         // Auto-infer secondary indexes. Bulk path: walk node records once,
         // decode each exactly once, and build hash+btree per (label, prop)
         // in a single pass. Skip with FROGQL_DISABLE_AUTO_INDEXES=1.
-        let t4 = std::time::Instant::now();
+        let t4 = phase_clock();
         if std::env::var("FROGQL_DISABLE_AUTO_INDEXES").is_err() {
             let idx = store.build_auto_indexes_bulk();
             if std::env::var("FROGQL_DEBUG_INDEXES").is_ok() {
@@ -428,7 +505,7 @@ impl LazyGraphStore {
         if trace {
             eprintln!(
                 "  secondary index auto-build: {:.3}s  ({} indexes)",
-                t4.elapsed().as_secs_f64(),
+                phase_secs(t4),
                 store.secondary.borrow().list().len()
             );
         }
@@ -443,7 +520,7 @@ impl LazyGraphStore {
         // empty list, so this path is a no-op for old files. TODO:
         // drop the `0` legacy path once all stored databases have been
         // re-saved with the slot present.
-        let t5 = std::time::Instant::now();
+        let t5 = phase_clock();
         let specs = {
             let mut pager = store.pager.borrow_mut();
             super::secondary_index_io::read_specs(&mut pager, store.secondary_index_root.get())?
@@ -462,7 +539,7 @@ impl LazyGraphStore {
         if trace {
             eprintln!(
                 "  secondary index DDL replay:  {:.3}s  ({} indexes total)",
-                t5.elapsed().as_secs_f64(),
+                phase_secs(t5),
                 store.secondary.borrow().list().len()
             );
         }
@@ -472,12 +549,18 @@ impl LazyGraphStore {
         // missing or stale one only costs a warning. The fingerprint is
         // computed here rather than stored, so it always reflects the
         // graph as just loaded.
-        let t6 = std::time::Instant::now();
+        let t6 = phase_clock();
         let fp = crate::vector::sidecar::fingerprint(
             store.node_count as usize,
             store.edge_count as usize,
         );
-        let (vectors, warnings) = VectorStore::open(db_path, fp);
+        let (vectors, warnings) = match db_path {
+            Some(db_path) => VectorStore::open(db_path, fp),
+            // Sidecars are separate files; `from_bytes` takes the `.gdb`
+            // and the `.ltj` and nothing else. A vector attribute would
+            // need its own argument, which no caller has asked for.
+            None => (VectorStore::default(), Vec::new()),
+        };
         for w in warnings {
             eprintln!("warning: {w}");
         }
@@ -488,7 +571,7 @@ impl LazyGraphStore {
         if trace && !store.vectors.is_empty() {
             eprintln!(
                 "  vector sidecars:      {:.3}s  ({} attributes: {})",
-                t6.elapsed().as_secs_f64(),
+                phase_secs(t6),
                 store.vectors.attrs().len(),
                 store.vectors.attrs().join(", ")
             );
@@ -500,6 +583,20 @@ impl LazyGraphStore {
         store.activate_default_if_none();
 
         Ok(store)
+    }
+
+    /// Nodes in the merged view: base, plus what the overlay staged,
+    /// minus what it deleted. See `MemoryGraphStore::live_node_count` for
+    /// why this is separate from the base count.
+    pub fn live_node_count(&self) -> usize {
+        let overlay = self.overlay.borrow();
+        overlay.next_node_id() as usize - overlay.deleted_nodes.len()
+    }
+
+    /// Edges in the merged view. See `live_node_count`.
+    pub fn live_edge_count(&self) -> usize {
+        let overlay = self.overlay.borrow();
+        overlay.next_edge_id() as usize - overlay.deleted_edges.len()
     }
 
     /// The path this database was opened from.
@@ -1738,6 +1835,16 @@ impl GraphAccess for LazyGraphStore {
             edge_count: self.edge_count as usize,
             graph_id: self.graph_id,
         })
+    }
+
+    fn index_sidecar_bytes(&self) -> Option<&[u8]> {
+        // Same gate as `index_sidecar_key`: an overlay that changes a
+        // triple makes any persisted index describe a graph that is no
+        // longer in front of us.
+        if self.overlay.borrow().affects_triples() {
+            return None;
+        }
+        self.ltj_sidecar_bytes()
     }
 
     fn vectors(&self, attr: &str) -> Option<&VectorSet> {

@@ -1,6 +1,6 @@
 //! froGQL compiled to WebAssembly: an in-browser, in-RAM graph engine.
 //!
-//! Wraps `MemoryGraphStore` (the in-memory backend) plus the shared
+//! Wraps either in-RAM backend plus the shared
 //! compiler/runtime, exposing a `Connection` to JavaScript via
 //! `wasm-bindgen`. There is no filesystem in the browser, so this binding
 //! works entirely with the JSON shape `MemoryGraphStore::from_json_str`
@@ -27,16 +27,57 @@ use frogql_core::parser::parse_statement;
 use frogql_core::runtime::engine::Runtime;
 use frogql_core::runtime::ltj::triple_index::TripleIndex;
 use frogql_core::runtime::result::{IntermediateResult, QueryResult};
+use frogql_core::store::lazy::LazyGraphStore;
 use frogql_core::syntax::expr::Expr;
 use frogql_core::syntax::query::ReturnItem;
 use frogql_core::syntax::statement::Statement;
 use frogql_core::typing::inference::infer_simple_schema;
 use frogql_core::typing::variable_type::Schema;
 
-/// A live in-memory graph plus the caches that keep query latency flat.
+/// Which backend a `Connection` is reading.
+///
+/// `Json` is a graph parsed from the JSON document shape; `Bytes` is a
+/// real `.gdb` image fetched over HTTP and paged out of RAM. They differ
+/// in how the data arrived, not in what the engine does with it — both
+/// implement `GraphAccess`, both take DML through the same overlay.
+///
+/// Why bytes at all: a JSON document has to be parsed and every node and
+/// edge rebuilt, and it carries no index. A `.gdb` is already in the
+/// engine's own layout, and its `.ltj` sidecar carries the six LTJ trie
+/// orderings, which cost `O(E log E)` to rebuild — 252 s measured on a
+/// 617 M-edge graph. Not paying that in a browser tab is the point.
+enum Backend {
+    Json(Box<MemoryGraphStore>),
+    Bytes(Box<LazyGraphStore>),
+}
+
+/// Run `$body` against whichever backend is live.
+///
+/// Every use site is generic over `GraphAccess` and identical in both
+/// arms; the macro exists so adding a method does not mean writing the
+/// two-arm match again and risking the arms drifting apart.
+macro_rules! with_store {
+    ($conn:expr, $s:ident => $body:expr) => {
+        match &$conn.store {
+            // Both arms are boxed — `MemoryGraphStore` alone is ~1 KB
+            // inline — so the enum stays a pointer and each arm binds
+            // through its box, leaving `$s` a plain `&Store` either way.
+            Backend::Json(boxed) => {
+                let $s = &**boxed;
+                $body
+            }
+            Backend::Bytes(boxed) => {
+                let $s = &**boxed;
+                $body
+            }
+        }
+    };
+}
+
+/// A live graph plus the caches that keep query latency flat.
 #[wasm_bindgen]
 pub struct Connection {
-    store: MemoryGraphStore,
+    store: Backend,
     /// Shared LTJ TripleIndex, built lazily on first query and reused
     /// across calls. Cleared after every successful DML.
     triple_index: RefCell<Option<Arc<TripleIndex>>>,
@@ -53,11 +94,47 @@ pub fn open_json(json: &str) -> Result<Connection, JsError> {
     console_error_panic_hook::set_once();
     let store = MemoryGraphStore::from_json_str(json).map_err(|e| JsError::new(&format!("{e}")))?;
     let conn = Connection {
-        store,
+        store: Backend::Json(Box::new(store)),
         triple_index: RefCell::new(None),
         schema: RefCell::new(None),
     };
     // Warm the index once at open, matching the Python/Node bindings.
+    let _ = conn.triple_index_arc();
+    Ok(conn)
+}
+
+/// Open a `.gdb` image fetched over the network, with its `.ltj` sidecar
+/// when the caller has it.
+///
+/// ```js
+/// const [gdb, ltj] = await Promise.all([
+///   fetch("/santiago.gdb").then(r => r.arrayBuffer()),
+///   fetch("/santiago.gdb.ltj").then(r => r.arrayBuffer()),
+/// ]);
+/// const conn = open_bytes(new Uint8Array(gdb), new Uint8Array(ltj));
+/// ```
+///
+/// `ltj` is optional and is the reason to prefer this over `open_json`
+/// for anything large: without it the six LTJ trie orderings are rebuilt
+/// at open, which is `O(E log E)`. A sidecar that does not describe this
+/// database is **refused, not trusted** — the same `(graph_id,
+/// node_count, edge_count)` fingerprint a file-backed open checks — and
+/// the index is rebuilt instead, so a mismatched pair costs time and
+/// never correctness.
+///
+/// The connection is read-mostly: DML works, through the same overlay as
+/// every other backend, but there is nowhere to write pages back to, so
+/// the durable copy is whatever the server serves. `to_json()` still
+/// gives a snapshot of the merged view.
+#[wasm_bindgen]
+pub fn open_bytes(gdb: Vec<u8>, ltj: Option<Vec<u8>>) -> Result<Connection, JsError> {
+    console_error_panic_hook::set_once();
+    let store = LazyGraphStore::from_bytes(gdb, ltj).map_err(|e| JsError::new(&format!("{e}")))?;
+    let conn = Connection {
+        store: Backend::Bytes(Box::new(store)),
+        triple_index: RefCell::new(None),
+        schema: RefCell::new(None),
+    };
     let _ = conn.triple_index_arc();
     Ok(conn)
 }
@@ -68,12 +145,12 @@ impl Connection {
     pub fn node_count(&self) -> u32 {
         // The merged view, so this agrees with `COUNT(n)` on the same
         // connection after an INSERT. See `live_node_count`.
-        self.store.live_node_count() as u32
+        with_store!(self, s => s.live_node_count()) as u32
     }
 
     #[wasm_bindgen(getter)]
     pub fn edge_count(&self) -> u32 {
-        self.store.live_edge_count() as u32
+        with_store!(self, s => s.live_edge_count()) as u32
     }
 
     /// Execute one GQL statement. Read queries return an array of row
@@ -96,30 +173,45 @@ impl Connection {
     /// the unit to hand IndexedDB for persistence. Re-open it later with
     /// `open_json`.
     pub fn to_json(&self) -> String {
-        self.store.to_json_string()
+        match &self.store {
+            Backend::Json(s) => s.to_json_string(),
+            // A paged database has no JSON writer; materialising the
+            // merged view into an in-RAM graph is what `.save` and the
+            // dump utilities already do, and it compacts ids on the way.
+            Backend::Bytes(s) => s.materialize_to_graph().to_json_string(),
+        }
     }
 
     /// `{ node_labels, edge_labels, node_count, edge_count }`, mirroring
     /// the Python/Node `schema()` summary.
+    // `node_count` returns `usize` on one backend and `u32` on the other,
+    // and `with_store!` expands both arms, so whichever cast is needed for
+    // one is redundant for the other. Narrowing before the match would
+    // just move the same problem.
+    #[allow(clippy::unnecessary_cast)]
     pub fn schema(&self) -> Result<JsValue, JsError> {
         use std::collections::BTreeSet;
         let mut node_labels: BTreeSet<String> = BTreeSet::new();
-        for nid in 0..self.store.node_count() as u32 {
-            for l in self.store.node_labels(nid).required_labels() {
-                node_labels.insert(l.to_string());
+        with_store!(self, s => {
+            for nid in 0..s.node_count() as u32 {
+                for l in s.node_labels(nid).required_labels() {
+                    node_labels.insert(l.to_string());
+                }
             }
-        }
+        });
         let mut edge_labels: BTreeSet<String> = BTreeSet::new();
-        for eid in 0..self.store.edge_count() as u32 {
-            for l in self.store.edge_labels(eid).required_labels() {
-                edge_labels.insert(l.to_string());
+        with_store!(self, s => {
+            for eid in 0..s.edge_count() as u32 {
+                for l in s.edge_labels(eid).required_labels() {
+                    edge_labels.insert(l.to_string());
+                }
             }
-        }
+        });
         let v = json!({
             "node_labels": node_labels.into_iter().collect::<Vec<_>>(),
             "edge_labels": edge_labels.into_iter().collect::<Vec<_>>(),
-            "node_count": self.store.node_count(),
-            "edge_count": self.store.edge_count(),
+            "node_count": with_store!(self, s => s.node_count() as u64),
+            "edge_count": with_store!(self, s => s.edge_count() as u64),
         });
         to_js(&v)
     }
@@ -130,8 +222,8 @@ impl Connection {
     /// Build (once) and return the shared TripleIndex Arc.
     fn triple_index_arc(&self) -> Arc<TripleIndex> {
         if self.triple_index.borrow().is_none() {
-            let scratch = Runtime::new(&self.store);
-            *self.triple_index.borrow_mut() = Some(scratch.warm_triple_index());
+            let idx = with_store!(self, s => Runtime::new(s).warm_triple_index());
+            *self.triple_index.borrow_mut() = Some(idx);
         }
         self.triple_index
             .borrow()
@@ -139,14 +231,25 @@ impl Connection {
             .expect("triple index just built")
     }
 
-    fn runtime(&self) -> Runtime<'_, MemoryGraphStore> {
-        Runtime::with_triple_index(&self.store, self.triple_index_arc())
-    }
-
     /// The inferred DEFAULT schema, cached until the next mutation.
     fn active_schema(&self) -> Schema {
         if self.schema.borrow().is_none() {
-            *self.schema.borrow_mut() = Some(infer_simple_schema(&self.store));
+            let sch = match &self.store {
+                // The JSON backend has no catalog, so the schema is
+                // derived from the data every time it is invalidated.
+                Backend::Json(s) => infer_simple_schema(&**s),
+                // A `.gdb` carries its own: `active_schema` reads the
+                // catalog and only re-infers when DML marked DEFAULT
+                // dirty. Inferring unconditionally instead walks every
+                // node and edge decoding properties — on a 459 127-node /
+                // 2 244 154-edge graph that is **8.4 s of every first
+                // query** in wasm, against 0.000 s for the same query
+                // natively, where the REPL reads the catalog. The
+                // difference is not wasm being slow; it is O(N + E) work
+                // the file had already done.
+                Backend::Bytes(s) => s.active_schema(),
+            };
+            *self.schema.borrow_mut() = Some(sch);
         }
         self.schema.borrow().clone().expect("schema just inferred")
     }
@@ -172,6 +275,17 @@ impl Connection {
     /// objects. Split out from `exec_query` so it is testable on the host
     /// target (the `JsValue` marshaling needs a JS runtime; this does not).
     fn query_json(&self, query: &str, limit: usize) -> Result<Json, String> {
+        with_store!(self, s => self.query_json_on(s, query, limit))
+    }
+
+    /// The same body against whichever backend is live. Generic rather
+    /// than duplicated, so the two arms cannot drift.
+    fn query_json_on<G: GraphAccess>(
+        &self,
+        store: &G,
+        query: &str,
+        limit: usize,
+    ) -> Result<Json, String> {
         let schema = self.active_schema();
         let compiled = frogql_core::compile_query_with_diagnostics_with(&schema, query)
             .map_err(|e| e.message())?;
@@ -181,7 +295,7 @@ impl Connection {
             return Ok(Json::Array(vec![]));
         }
 
-        let rt = self.runtime();
+        let rt = Runtime::with_triple_index(store, self.triple_index_arc());
         let rows = match rt.run_query(&q, limit) {
             QueryResult::Projected(rows) => {
                 let headers = projection_headers(&q);
@@ -190,13 +304,13 @@ impl Connection {
                     let mut obj = Map::new();
                     for (i, v) in row.into_iter().enumerate() {
                         let key = headers.get(i).cloned().unwrap_or_else(|| format!("col{i}"));
-                        obj.insert(key, value_to_json(&self.store, &v));
+                        obj.insert(key, value_to_json(store, &v));
                     }
                     out.push(Json::Object(obj));
                 }
                 Json::Array(out)
             }
-            QueryResult::Raw(ir) => raw_to_json(&self.store, &ir),
+            QueryResult::Raw(ir) => raw_to_json(store, &ir),
         };
         Ok(rows)
     }
@@ -206,7 +320,7 @@ impl Connection {
     fn dm_json(&self, dm: frogql_core::syntax::dm::DmStatement) -> Result<Json, String> {
         // No catalog in the in-memory backend, so DEFAULT semantics: no
         // G2000 validation schema.
-        let exec = frogql_core::runtime::dm::run_dm(&self.store, &dm, None)?;
+        let exec = with_store!(self, s => frogql_core::runtime::dm::run_dm(s, &dm, None))?;
         self.invalidate_caches();
         Ok(json!({
             "nodes_inserted": exec.nodes_inserted,
@@ -260,7 +374,7 @@ fn to_js(v: &Json) -> Result<JsValue, JsError> {
         .map_err(|e| JsError::new(&e.to_string()))
 }
 
-fn value_to_json(store: &MemoryGraphStore, v: &Value) -> Json {
+fn value_to_json<G: GraphAccess>(store: &G, v: &Value) -> Json {
     match v {
         Value::Null => Json::Null,
         Value::Int(n) => json!(n),
@@ -290,7 +404,7 @@ fn value_to_json(store: &MemoryGraphStore, v: &Value) -> Json {
     }
 }
 
-fn node_ref_json(store: &MemoryGraphStore, id: Id) -> Json {
+fn node_ref_json<G: GraphAccess>(store: &G, id: Id) -> Json {
     let labels: Vec<String> = store
         .node_labels(id)
         .required_labels()
@@ -304,7 +418,7 @@ fn node_ref_json(store: &MemoryGraphStore, id: Id) -> Json {
     json!({ "kind": "node", "id": id, "labels": labels, "props": Json::Object(props) })
 }
 
-fn edge_ref_json(store: &MemoryGraphStore, id: Id) -> Json {
+fn edge_ref_json<G: GraphAccess>(store: &G, id: Id) -> Json {
     let labels: Vec<String> = store
         .edge_labels(id)
         .required_labels()
@@ -318,7 +432,7 @@ fn edge_ref_json(store: &MemoryGraphStore, id: Id) -> Json {
     json!({ "kind": "edge", "id": id, "labels": labels, "props": Json::Object(props) })
 }
 
-fn pathvalue_to_json(store: &MemoryGraphStore, pv: &PathValue) -> Json {
+fn pathvalue_to_json<G: GraphAccess>(store: &G, pv: &PathValue) -> Json {
     match pv {
         PathValue::Node(id) => node_ref_json(store, *id),
         PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => {
@@ -334,7 +448,7 @@ fn pathvalue_to_json(store: &MemoryGraphStore, pv: &PathValue) -> Json {
     }
 }
 
-fn raw_to_json(store: &MemoryGraphStore, ir: &IntermediateResult) -> Json {
+fn raw_to_json<G: GraphAccess>(store: &G, ir: &IntermediateResult) -> Json {
     let mut out: Vec<Json> = Vec::with_capacity(ir.rows.len());
     for row in &ir.rows {
         let mut obj = Map::new();

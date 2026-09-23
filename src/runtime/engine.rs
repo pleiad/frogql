@@ -689,6 +689,22 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         let key = self.graph.index_sidecar_key();
         let want_compact = TripleIndex::compact_selected();
         if !forced_build {
+            // Bytes first: a store that was handed a sidecar has no path
+            // to look beside, and `read_for` on its empty path would only
+            // report `Missing`.
+            if let (Some(key), Some(bytes)) = (&key, self.graph.index_sidecar_bytes()) {
+                match persist::decode(bytes, key, want_compact) {
+                    Ok(mut idx) => {
+                        idx.stamp_overlay(self.graph);
+                        return idx;
+                    }
+                    Err(why) => {
+                        if std::env::var("FROGQL_TRACE_OPEN").is_ok() {
+                            eprintln!("  LTJ sidecar bytes not used: {why}");
+                        }
+                    }
+                }
+            }
             if let Some(key) = &key {
                 match persist::read_for(key, want_compact) {
                     Ok(mut idx) => {

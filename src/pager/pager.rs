@@ -15,8 +15,73 @@ const DEFAULT_CACHE_SIZE: usize = 2000;
 /// pages in memory. On a miss, the least recently used page is evicted.
 ///
 /// Page 0 is always the file header. Pages 1+ are data/index pages.
+/// Where a pager's pages live.
+///
+/// The browser has no filesystem, so the whole `.gdb` arrives as one
+/// `Vec<u8>` a fetch produced and is paged out of RAM. That is the only
+/// reason this is an enum: every other target opens a file, and the
+/// `File` arm is unchanged.
+///
+/// `Memory` is **read-only**. A page write needs somewhere durable to
+/// land, and a browser has nowhere — the mutation overlay already holds
+/// DML in RAM without touching the pager, so nothing on the read path
+/// wants this, and failing loudly beats silently dropping a write into a
+/// buffer nobody will persist.
+enum Backing {
+    File(File),
+    Memory(Vec<u8>),
+}
+
+impl Backing {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        match self {
+            Backing::File(f) => {
+                f.seek(SeekFrom::Start(offset))?;
+                f.read_exact(buf)
+            }
+            Backing::Memory(bytes) => {
+                let start = offset as usize;
+                let end = start.checked_add(buf.len()).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "page offset overflow")
+                })?;
+                let src = bytes.get(start..end).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "page at byte {start} is past the end of the {} byte image",
+                            bytes.len()
+                        ),
+                    )
+                })?;
+                buf.copy_from_slice(src);
+                Ok(())
+            }
+        }
+    }
+
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
+        match self {
+            Backing::File(f) => {
+                f.seek(SeekFrom::Start(offset))?;
+                f.write_all(buf)
+            }
+            Backing::Memory(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this database was opened from bytes and has no file to write to",
+            )),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Backing::File(f) => f.flush(),
+            Backing::Memory(_) => Ok(()),
+        }
+    }
+}
+
 pub struct Pager {
-    file: File,
+    file: Backing,
     path: PathBuf,
     pub header: FileHeader,
     // LRU page cache: page_num → (page_data, last_access_tick)
@@ -54,7 +119,7 @@ impl Pager {
 
         let header = FileHeader::new();
         let mut pager = Pager {
-            file,
+            file: Backing::File(file),
             path: path.to_path_buf(),
             header,
             cache: HashMap::new(),
@@ -114,8 +179,87 @@ impl Pager {
         }
 
         Ok(Pager {
-            file,
+            file: Backing::File(file),
             path: path.to_path_buf(),
+            header,
+            cache: HashMap::new(),
+            cache_size,
+            tick: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+        })
+    }
+
+    /// Open a database that arrived as bytes rather than as a file.
+    ///
+    /// For the browser: there is no filesystem there, so a `.gdb` is
+    /// fetched whole and paged out of the resulting buffer. The header is
+    /// validated exactly as `open_with_cache` validates it, because a
+    /// truncated download and a corrupt file are the same class of
+    /// problem and both should be refused here rather than deep inside
+    /// name resolution.
+    ///
+    /// The LRU cache stays, and is now the only thing it can be: a cache
+    /// over a buffer that is already resident. That is deliberate — it
+    /// keeps one code path for both backings, and `Page::from_bytes`
+    /// copies 4 KiB either way, so the cache still earns its place.
+    ///
+    /// Read-only. See `Backing::Memory`.
+    pub fn from_bytes(bytes: Vec<u8>, cache_size: usize) -> io::Result<Self> {
+        if bytes.len() < PAGE_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "a database image is at least one {PAGE_SIZE} byte page; got {}",
+                    bytes.len()
+                ),
+            ));
+        }
+        let mut buf = [0u8; PAGE_SIZE];
+        buf.copy_from_slice(&bytes[..PAGE_SIZE]);
+        let page0 = Page::from_bytes(buf);
+        let header = FileHeader::from_page(&page0)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        if header.format_version > FORMAT_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "database format version {} is newer than this build supports (max {})",
+                    header.format_version, FORMAT_VERSION
+                ),
+            ));
+        }
+        if header.format_version < MIN_READABLE_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "database format version {} is older than this build supports (min {})",
+                    header.format_version, MIN_READABLE_VERSION
+                ),
+            ));
+        }
+
+        // A short buffer is a truncated download, and every page read past
+        // the end would otherwise fail one at a time, far from the cause.
+        let want = header.page_count as u64 * PAGE_SIZE as u64;
+        if (bytes.len() as u64) < want {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "the image is {} bytes but its header declares {} pages ({want} bytes);                      it is truncated",
+                    bytes.len(),
+                    header.page_count
+                ),
+            ));
+        }
+
+        Ok(Pager {
+            file: Backing::Memory(bytes),
+            // No file, so no path. Nothing on the read path consults it;
+            // the sidecar lookup that would is bypassed by handing the
+            // `.ltj` bytes in directly.
+            path: PathBuf::new(),
             header,
             cache: HashMap::new(),
             cache_size,
@@ -254,16 +398,14 @@ impl Pager {
 
     fn read_page_from_disk(&mut self, page_num: u32) -> io::Result<Page> {
         let offset = page_num as u64 * PAGE_SIZE as u64;
-        self.file.seek(SeekFrom::Start(offset))?;
         let mut buf = [0u8; PAGE_SIZE];
-        self.file.read_exact(&mut buf)?;
+        self.file.read_at(offset, &mut buf)?;
         Ok(Page::from_bytes(buf))
     }
 
     fn write_page_to_disk(&mut self, page_num: u32, page: &Page) -> io::Result<()> {
         let offset = page_num as u64 * PAGE_SIZE as u64;
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(&page.data)?;
+        self.file.write_at(offset, &page.data)?;
         Ok(())
     }
 

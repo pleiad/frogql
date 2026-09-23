@@ -138,6 +138,22 @@ pub trait GraphAccess {
         None
     }
 
+    /// A persisted LTJ index the store was handed as *bytes* rather than
+    /// left to find beside its `.gdb`.
+    ///
+    /// Only a byte-opened database has one: there is no filesystem in a
+    /// browser, so the caller fetches `<db>.gdb.ltj` itself and passes it
+    /// in. Every other backend returns `None` and the sidecar is read
+    /// from disk as before.
+    ///
+    /// The bytes are still checked against `index_sidecar_key`, so a
+    /// mismatched pair is rejected exactly as a stale file on disk would
+    /// be — a `.ltj` fetched from a path that has moved on is the same
+    /// hazard as one that was never deleted.
+    fn index_sidecar_bytes(&self) -> Option<&[u8]> {
+        None
+    }
+
     /// What this store's mutation overlay currently holds, in the form
     /// the LTJ delta needs: the live edges the overlay allocated, the
     /// tombstoned ids, and the watermark that separates the two from the
