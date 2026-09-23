@@ -848,7 +848,10 @@ fn fold_range_filters<G: GraphAccess>(graph: &G, decomp: &mut Decomposition) {
 /// Estimate a per-variable weight for VEO ordering. Smaller weight binds
 /// earlier. The estimate uses the filters extracted from descriptors:
 ///
-/// - `NodeAttrCmp` with `Eq` on a constant → point-lookup, weight 1.
+/// - `NodeAttrCmp` with `Eq` on a constant → point-lookup, `POINT_WEIGHT`.
+/// - `NodeInSet` (a btree-resolved range) → just above it: still the
+///   second-most selective class, but not a single value, so it does not
+///   collect the ordering promotion `POINT_WEIGHT` carries.
 /// - `NodeAttrCmp` with a range op → ~10% of the index size.
 /// - `NodeLabel` → ~25% of the index size (label sets are typically a
 ///   fraction of the total node space; without a real cardinality estimator
@@ -861,6 +864,7 @@ fn fold_range_filters<G: GraphAccess>(graph: &G, decomp: &mut Decomposition) {
 /// per-attribute histograms.
 fn estimate_var_weights(num_vars: usize, filters: &[ExtractedFilter], total: usize) -> Vec<usize> {
     let mut has_eq = vec![false; num_vars];
+    let mut has_set = vec![false; num_vars];
     let mut has_cmp = vec![false; num_vars];
     let mut has_label = vec![false; num_vars];
 
@@ -878,10 +882,15 @@ fn estimate_var_weights(num_vars: usize, filters: &[ExtractedFilter], total: usi
             }
             FilterKind::NodeLabel { var_id, .. } => has_label[*var_id as usize] = true,
             FilterKind::NodeProperty { .. } => {}
-            // A precomputed set is the most selective predicate available —
-            // treat it as the strongest equality (weight 1) so the variable
-            // binds early and rejects non-members before recursion.
-            FilterKind::NodeInSet { var_id, .. } => has_eq[*var_id as usize] = true,
+            // A precomputed set is the most selective predicate available,
+            // so it binds early — but it is *not* a point: a btree-resolved
+            // range can hold thousands of ids, and only a single value
+            // earns the promotion out of the held-back group that
+            // `POINT_WEIGHT` confers (see `veo::held_to_the_end`). Giving
+            // it that promotion cost every LDBC IC between 3% and 67%,
+            // IC1 291 ms against 174, by letting a lonely date-range
+            // variable drive the join.
+            FilterKind::NodeInSet { var_id, .. } => has_set[*var_id as usize] = true,
         }
     }
 
@@ -889,7 +898,9 @@ fn estimate_var_weights(num_vars: usize, filters: &[ExtractedFilter], total: usi
     (0..num_vars)
         .map(|v| {
             if has_eq[v] {
-                1
+                veo::POINT_WEIGHT
+            } else if has_set[v] {
+                veo::POINT_WEIGHT + 1
             } else if has_cmp[v] {
                 (total / 10).max(2)
             } else if has_label[v] {

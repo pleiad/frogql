@@ -109,16 +109,57 @@ pub trait Veo {
 /// position before the filter can reject — the eq does not become a true
 /// point lookup. Letting it elevate above a non-lonely connector trades a
 /// cheap structural intersection for a per-row scan.
+/// The weight `estimate_var_weights` gives a variable it can resolve by
+/// point lookup — an `Eq` against a constant, or a precomputed `NodeInSet`.
+/// Every other class is ≥ 2, so the value doubles as the marker for "this
+/// variable is pinned in all but name".
+pub const POINT_WEIGHT: usize = 1;
+
+/// Should this variable be held back to the end of the order?
+///
+/// The lonely-last rule exists because a variable in a single triple adds
+/// no join constraint: binding it early multiplies the search without
+/// narrowing anything, since nothing downstream is waiting on its value.
+///
+/// A point predicate inverts that. The variable collapses to at most one
+/// value, and through its own triple that value constrains every variable
+/// sharing it — which is the whole reason the predicate was written. So
+/// loneliness alone must not demote it, and until it did not, the
+/// selectivity was ranked *within* the lonely group where it could not
+/// help.
+///
+/// Measured on a 459 127-node / 2 244 154-edge OpenStreetMap graph, with
+/// the secondary-index fold switched off so the order is what decides:
+///
+/// ```text
+/// MATCH (m:Lugar)-[:EN_CALLE]->(:Calle)<-[:EN_CALLE]-(i:Interseccion)
+///       -[:CONECTA_BICI]->(j:Interseccion)-[:EN_CALLE]->(c:Calle)
+/// WHERE m.nombre = 'Colegio Quitalmahue'
+/// ```
+///
+/// `m` is in one triple, so it sorted last and the join bound the three
+/// unfiltered variables first: **1 045 117 candidate visits, 27.8 s**, for
+/// 255 rows. Binding it first: **458 visits, 0.004 s** — 2 280× fewer
+/// visits, same rows. The index fold hid this whenever an index happened
+/// to exist (450 visits, 0.002 s), which is why it surfaced as "the
+/// missing index costs 30 seconds" rather than as an ordering bug.
+fn held_to_the_end(weight: usize, is_lonely: bool) -> bool {
+    is_lonely && weight != POINT_WEIGHT
+}
+
 pub struct VeoSimple {
     order: Vec<u8>,
 }
 
 impl VeoSimple {
     /// Build a VEO. `var_info[i]` is `(var_id, weight, is_lonely)`. Sort:
-    /// non-lonely first, then ascending weight as a tiebreaker.
+    /// everything that constrains the search first, then ascending weight
+    /// as a tiebreaker. A lonely variable is held to the end *unless* it
+    /// carries a point predicate — see `held_to_the_end`.
     pub fn new(mut var_info: Vec<(u8, usize, bool)>) -> Self {
         var_info.sort_by(|a, b| {
-            a.2.cmp(&b.2) // lonely last
+            held_to_the_end(a.1, a.2)
+                .cmp(&held_to_the_end(b.1, b.2))
                 .then(a.1.cmp(&b.1)) // ascending weight within each group
         });
         VeoSimple {
@@ -240,8 +281,31 @@ impl Veo for VeoOverride {
 /// adaptive VEO's construction was 20% of the query for an order it could
 /// not change.
 pub fn order_is_forced(var_info: &[(u8, usize, bool)]) -> bool {
-    let lonely = var_info.iter().filter(|&&(_, _, l)| l).count();
-    (var_info.len() - lonely) <= 1 && lonely <= 1
+    // Three groups, not two, and a point-predicate variable is its own.
+    // It sorts ahead of everything either way — `POINT_WEIGHT` is the
+    // floor of the weight scale and the syntactic tiebreak keeps it there
+    // under `down`'s re-weighing — so like a held-back variable its
+    // position is decided before the search starts, and only the
+    // *remainder* is what an adaptive order can still permute.
+    //
+    // Counting it as free instead costs the adaptive build on patterns
+    // whose order cannot move: LDBC IC8 runs its LTJ once per outer row,
+    // 148 323 times, and paying `AdaptiveVeo::new` there rather than
+    // short-circuiting to `VeoSimple` measured 194 ms -> 220 ms (13%) on
+    // SF0.1 for an identical order.
+    let mut held = 0usize;
+    let mut point = 0usize;
+    let mut free = 0usize;
+    for &(_, w, l) in var_info {
+        if held_to_the_end(w, l) {
+            held += 1;
+        } else if w == POINT_WEIGHT {
+            point += 1;
+        } else {
+            free += 1;
+        }
+    }
+    free <= 1 && held <= 1 && point <= 1
 }
 
 /// One non-lonely variable's live state in the adaptive order.
@@ -345,7 +409,7 @@ impl AdaptiveVeo {
 
         for &(name, syntactic, is_lonely) in &var_info {
             let weight = syntactic.min(sizes.min_size(name));
-            if is_lonely {
+            if held_to_the_end(syntactic, is_lonely) {
                 lonely.push((name, weight, syntactic));
             } else {
                 pos_of[name as usize] = Some(info.len());
