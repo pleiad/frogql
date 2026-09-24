@@ -1,0 +1,388 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>froGQL explorer</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --panel: #fff; --ink: #1c1a17; --muted: #6b655c;
+    --line: #e3ded6; --accent: #2f6f4f; --accent-soft: #e8f1eb;
+    --warn: #8a4b2a; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17161a; --panel: #1f1e23; --ink: #eceaf0; --muted: #9a94a1;
+      --line: #32303a; --accent: #6bbd90; --accent-soft: #23342b; --warn: #d69b72;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--ink);
+         display: grid; grid-template-columns: 290px 1fr; height: 100vh; }
+  aside { border-right: 1px solid var(--line); padding: 16px; overflow-y: auto; background: var(--panel); }
+  main  { display: grid; grid-template-rows: auto auto 1fr; min-width: 0; min-height: 0; }
+  h1 { font-size: 15px; margin: 0 0 14px; letter-spacing: .01em; }
+  h1 span { color: var(--accent); }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .09em; color: var(--muted);
+       margin: 18px 0 8px; font-weight: 600; }
+  label.file { display: block; border: 1px dashed var(--line); border-radius: 7px; padding: 10px;
+               cursor: pointer; margin-bottom: 8px; font-size: 13px; }
+  label.file:hover { border-color: var(--accent); }
+  label.file input { display: none; }
+  label.file b { display: block; font-weight: 600; }
+  label.file em { color: var(--muted); font-style: normal; font-size: 12px; }
+  button { font: inherit; padding: 7px 13px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--ink); cursor: pointer; }
+  button.go { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  #stats { font: 12px/1.7 var(--mono); color: var(--muted); }
+  #stats b { color: var(--ink); font-weight: 600; }
+  .lbl { display: inline-block; font: 11px var(--mono); background: var(--accent-soft);
+         color: var(--accent); border-radius: 4px; padding: 1px 6px; margin: 0 4px 4px 0; }
+  .bar { display: flex; gap: 8px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .bar .grow { flex: 1; }
+  textarea { width: 100%; font: 13px/1.5 var(--mono); padding: 12px 16px; border: 0;
+             border-bottom: 1px solid var(--line); background: var(--panel); color: var(--ink);
+             resize: vertical; min-height: 78px; }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .tabs { display: flex; gap: 4px; }
+  .tabs button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  #out { overflow: auto; min-height: 0; position: relative; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid var(--line);
+           white-space: nowrap; max-width: 380px; overflow: hidden; text-overflow: ellipsis; }
+  th { position: sticky; top: 0; background: var(--panel); font-size: 11px; text-transform: uppercase;
+       letter-spacing: .07em; color: var(--muted); }
+  td { font-family: var(--mono); font-size: 12px; }
+  canvas { display: block; touch-action: none; }
+  .msg { padding: 28px 16px; color: var(--muted); max-width: 560px; }
+  .msg.err { color: var(--warn); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+  .hint { color: var(--muted); font-size: 12px; }
+  code { font: 12px var(--mono); background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; }
+</style>
+
+<aside>
+  <h1>fro<span>GQL</span> explorer</h1>
+
+  <label class="file"><input type="file" id="gdb" accept=".gdb">
+    <b id="gdbName">Elegir .gdb</b><em>la base de datos</em></label>
+  <label class="file"><input type="file" id="ltj" accept=".ltj">
+    <b id="ltjName">Elegir .ltj (opcional)</b><em>índice; si no, se reconstruye</em></label>
+
+  <h2>Base</h2>
+  <div id="stats">sin cargar</div>
+
+  <h2>Etiquetas de nodo</h2>
+  <div id="nodeLabels" class="hint">—</div>
+  <h2>Etiquetas de arista</h2>
+  <div id="edgeLabels" class="hint">—</div>
+</aside>
+
+<main>
+  <textarea id="q" spellcheck="false" placeholder="(n)-[e]->(m)"></textarea>
+  <div class="bar">
+    <button class="go" id="run" disabled>Ejecutar &nbsp;⌘↵</button>
+    <span class="tabs">
+      <button id="tabTable" class="on">Tabla</button>
+      <button id="tabGraph">Grafo</button>
+    </span>
+    <span class="grow"></span>
+    <span id="status" class="hint"></span>
+    <span class="hint" style="margin-left:12px">rueda: zoom · arrastrar: mover</span>
+  </div>
+  <div id="out"><div class="msg">Carga un <code>.gdb</code> para empezar.</div></div>
+</main>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+let rows = null, view = "table", scene = null;
+
+// Past this the drawing stops being readable — it becomes a texture, and
+// the point of the view is to see the shape of one answer. The cap is
+// low on purpose, and the notice says how to get under it.
+const MAX_DRAW = 120;
+
+// ---- the engine lives in a worker ------------------------------------------
+// See worker.js: `open_bytes` and `execute` are synchronous and can run
+// for seconds, which on the UI thread is a frozen tab.
+const w = new Worker("./worker.js", { type: "module" });
+
+w.onmessage = ({ data: m }) => {
+  if (m.ev === "status") return say(m.text);
+  if (m.ev === "error")  return fail(m.msg);
+  if (m.ev === "opened") return opened(m);
+  if (m.ev === "rows") {
+    rows = m.rows;
+    say(`${Array.isArray(rows) ? rows.length : 1} filas · ${m.ms} ms`);
+    render();
+  }
+};
+w.onerror = (e) => fail(e.message || e);
+
+async function pick(input, nameEl, which) {
+  const f = input.files[0]; if (!f) return;
+  $(nameEl).textContent = f.name;
+  say("leyendo…");
+  const buf = await f.arrayBuffer();
+  // Transferred, not copied: a 309 MB image would otherwise be duplicated
+  // on the way across.
+  w.postMessage({ op: "file", which, bytes: buf }, [buf]);
+}
+$("gdb").onchange = () => pick($("gdb"), "gdbName", "gdb");
+$("ltj").onchange = () => pick($("ltj"), "ltjName", "ltj");
+
+function opened(m) {
+  $("stats").innerHTML =
+    `<b>${m.node_count.toLocaleString()}</b> nodos<br>` +
+    `<b>${m.edge_count.toLocaleString()}</b> aristas<br>` +
+    `abierta en <b>${m.ms} ms</b>`;
+  $("nodeLabels").innerHTML = chips(m.node_labels);
+  $("edgeLabels").innerHTML = chips(m.edge_labels);
+  $("run").disabled = false;
+  if (!$("q").value) {
+    $("q").value = m.node_labels.length
+      ? `(n:${m.node_labels[0]})-[e]->(m) LIMIT 30`
+      : `(n)-[e]->(m) LIMIT 30`;
+  }
+  say(`lista (${m.ms} ms)`);
+  msg(`Escribe un patrón y ejecuta.<br><br>Sin <code>RETURN</code> la respuesta trae
+       los elementos y se puede dibujar; con <code>RETURN</code> obtienes columnas.`);
+}
+
+const chips = (xs) => xs.length
+  ? xs.map((l) => `<span class="lbl">${esc(l)}</span>`).join("") : "—";
+
+// ---- running ---------------------------------------------------------------
+$("run").onclick = run;
+$("q").onkeydown = (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); }
+};
+function run() {
+  const q = $("q").value.trim(); if (!q) return;
+  w.postMessage({ op: "query", q, limit: 500 });
+}
+
+$("tabTable").onclick = () => setView("table");
+$("tabGraph").onclick = () => setView("graph");
+function setView(v) {
+  view = v;
+  $("tabTable").classList.toggle("on", v === "table");
+  $("tabGraph").classList.toggle("on", v === "graph");
+  render();
+}
+
+function render() {
+  if (rows == null) return;
+  if (!Array.isArray(rows)) return table([rows]);   // a DML counters object
+  if (rows.length === 0) return msg("0 filas.");
+  view === "graph" ? drawGraph(rows) : table(rows);
+}
+
+// ---- table -----------------------------------------------------------------
+function table(rs) {
+  scene = null;
+  const cols = [...new Set(rs.flatMap((r) => Object.keys(r)))].filter((c) => c !== "_paths");
+  const head = cols.map((c) => `<th>${esc(c)}</th>`).join("");
+  const body = rs.map((r) =>
+    "<tr>" + cols.map((c) => `<td>${esc(cell(r[c]))}</td>`).join("") + "</tr>").join("");
+  $("out").innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+// An element renders as its labels plus the first couple of properties;
+// its internal id is deliberately not shown — it is not stable across a
+// save, so it is never the thing a reader wants.
+function cell(v) {
+  if (v == null) return "null";
+  if (typeof v !== "object") return String(v);
+  if (v.kind === "node" || v.kind === "edge") return elemLabel(v);
+  return JSON.stringify(v);
+}
+function elemLabel(e) {
+  const l = (e.labels || []).join("&") || e.kind;
+  const p = e.props || {};
+  const k = Object.keys(p).slice(0, 2).map((k) => `${k}: ${p[k]}`).join(", ");
+  return k ? `${l} {${k}}` : l;
+}
+
+// ---- graph -----------------------------------------------------------------
+// Built from `_paths`: each path is the matched elements in order, so a
+// node followed by an edge followed by a node is one hop. A query with
+// RETURN projects columns and has no `_paths`, which is what the empty
+// case below says rather than drawing nothing.
+function drawGraph(rs) {
+  const N = new Map(), E = [];
+  let clipped = false;
+  for (const r of rs) {
+    if (!r._paths) continue;
+    for (const path of r._paths) {
+      let prev = null, pendingEdge = null;
+      for (const el of path) {
+        if (el == null) continue;
+        if (el.kind === "node") {
+          if (!N.has(el.id)) {
+            if (N.size >= MAX_DRAW) { clipped = true; prev = null; continue; }
+            N.set(el.id, { id: el.id, t: elemLabel(el), x: 0, y: 0, vx: 0, vy: 0 });
+          }
+          if (prev != null && pendingEdge != null && N.has(prev))
+            E.push({ a: prev, b: el.id });
+          prev = el.id; pendingEdge = null;
+        } else if (el.kind === "edge") {
+          pendingEdge = el;
+        }
+      }
+    }
+  }
+  if (N.size === 0) {
+    return msg(`Nada que dibujar.<br><br>El grafo se arma con los elementos que el patrón
+      recorre. Una consulta con <code>RETURN</code> devuelve columnas, no elementos —
+      quita el <code>RETURN</code> para verla dibujada.`);
+  }
+
+  const out = $("out");
+  out.innerHTML = clipped
+    ? `<div class="msg" id="clip" style="padding:8px 16px">Dibujando ${MAX_DRAW} de los nodos
+       que el patrón tocó. Más que eso deja de leerse: acota con
+       <code>LIMIT</code> o con una etiqueta más específica.</div>` : "";
+  const taken = clipped ? $("clip").offsetHeight : 0;
+  const cv = document.createElement("canvas");
+  out.appendChild(cv);
+  layout([...N.values()], E, cv, taken);
+}
+
+// A small force layout: repulsion between every pair, springs along the
+// edges, gravity to the middle. Written here rather than pulled from a
+// library so the page stays one file and works offline.
+function layout(nodes, edges, cv, taken) {
+  const W = cv.parentElement.clientWidth;
+  const H = cv.parentElement.clientHeight - taken - 4;
+  const dpr = devicePixelRatio || 1;
+  cv.width = W * dpr; cv.height = H * dpr;
+  cv.style.width = W + "px"; cv.style.height = H + "px";
+  const g = cv.getContext("2d");
+
+  const idx = new Map(nodes.map((n, i) => [n.id, i]));
+  nodes.forEach((n) => { n.x = W / 2 + (Math.random() - .5) * W * .7;
+                         n.y = H / 2 + (Math.random() - .5) * H * .7; });
+
+  scene = { g, cv, nodes, edges, idx, W, H, dpr, k: 1, ox: 0, oy: 0, held: null };
+  bindPointer(scene);
+
+  let step = 0;
+  const tick = () => {
+    if (scene !== window.__s) return;             // a newer render took over
+    for (let i = 0; i < nodes.length; i++) {
+      const a = nodes[i];
+      if (a === scene.held) continue;
+      for (let j = i + 1; j < nodes.length; j++) {
+        const b = nodes[j];
+        const dx = a.x - b.x, dy = a.y - b.y;
+        const d2 = dx * dx + dy * dy || 0.01, d = Math.sqrt(d2), f = 900 / d2;
+        a.vx += (dx / d) * f; a.vy += (dy / d) * f;
+        b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
+      }
+      a.vx += (W / 2 - a.x) * 0.0015;
+      a.vy += (H / 2 - a.y) * 0.0015;
+    }
+    for (const e of edges) {
+      const a = nodes[idx.get(e.a)], b = nodes[idx.get(e.b)];
+      if (!a || !b) continue;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.hypot(dx, dy) || 0.01, f = (d - 90) * 0.01;
+      a.vx += (dx / d) * f; a.vy += (dy / d) * f;
+      b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
+    }
+    for (const n of nodes) {
+      if (n === scene.held) { n.vx = n.vy = 0; continue; }
+      n.vx *= 0.82; n.vy *= 0.82;
+      n.x += n.vx; n.y += n.vy;
+    }
+    draw(scene);
+    if (++step < 320 || scene.held) requestAnimationFrame(tick);
+  };
+  window.__s = scene;
+  tick();
+}
+
+// Zoom with the wheel, pan by dragging the background, move a node by
+// dragging it. The layout keeps running while a node is held, so the rest
+// of the graph settles around where it was put.
+function bindPointer(s) {
+  const { cv } = s;
+  const at = (ev) => {
+    const r = cv.getBoundingClientRect();
+    return { x: (ev.clientX - r.left - s.ox) / s.k, y: (ev.clientY - r.top - s.oy) / s.k };
+  };
+  const near = (p) => s.nodes.find((n) => Math.hypot(n.x - p.x, n.y - p.y) < 10 / s.k);
+
+  cv.onwheel = (ev) => {
+    ev.preventDefault();
+    const r = cv.getBoundingClientRect();
+    const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+    const f = Math.exp(-ev.deltaY * 0.0015);
+    const k = Math.max(0.15, Math.min(6, s.k * f));
+    // Keep the point under the cursor fixed while the scale changes.
+    s.ox = mx - ((mx - s.ox) / s.k) * k;
+    s.oy = my - ((my - s.oy) / s.k) * k;
+    s.k = k;
+    draw(s);
+  };
+
+  let panning = null;
+  cv.onpointerdown = (ev) => {
+    cv.setPointerCapture(ev.pointerId);
+    const p = at(ev), n = near(p);
+    if (n) { s.held = n; requestAnimationFrame(() => {}); }
+    else panning = { x: ev.clientX - s.ox, y: ev.clientY - s.oy };
+    if (s.held) window.__s = s, requestAnimationFrame(function again() {
+      if (s.held) { draw(s); requestAnimationFrame(again); }
+    });
+  };
+  cv.onpointermove = (ev) => {
+    if (s.held) { const p = at(ev); s.held.x = p.x; s.held.y = p.y; draw(s); }
+    else if (panning) { s.ox = ev.clientX - panning.x; s.oy = ev.clientY - panning.y; draw(s); }
+    else cv.style.cursor = near(at(ev)) ? "grab" : "default";
+  };
+  const release = () => { s.held = null; panning = null; };
+  cv.onpointerup = release;
+  cv.onpointercancel = release;
+}
+
+function draw(s) {
+  const { g, nodes, edges, idx, W, H, dpr, k, ox, oy } = s;
+  const css = getComputedStyle(document.body);
+  const ink = css.color;
+  const line = css.getPropertyValue("--line") || "#ddd";
+  const accent = css.getPropertyValue("--accent") || "#2f6f4f";
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  g.setTransform(dpr * k, 0, 0, dpr * k, dpr * ox, dpr * oy);
+
+  g.strokeStyle = line; g.lineWidth = 1 / k;
+  for (const e of edges) {
+    const a = nodes[idx.get(e.a)], b = nodes[idx.get(e.b)];
+    if (!a || !b) continue;
+    g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke();
+  }
+  g.font = `${11 / k}px ui-monospace, monospace`;
+  g.textAlign = "center";
+  for (const n of nodes) {
+    g.beginPath(); g.arc(n.x, n.y, 5 / k, 0, 7);
+    g.fillStyle = n === s.held ? ink : accent; g.fill();
+    // Labels come back as you zoom in: unreadable at a distance, wanted
+    // once a node is close enough to be the thing you are looking at.
+    if (nodes.length <= 120 || k > 1.6) {
+      g.fillStyle = ink;
+      g.fillText(n.t.slice(0, 26), n.x, n.y - 10 / k);
+    }
+  }
+}
+
+// ---- plumbing --------------------------------------------------------------
+const say = (t) => { $("status").textContent = t; };
+const msg = (h) => { $("out").innerHTML = `<div class="msg">${h}</div>`; };
+function fail(e) {
+  say("error");
+  $("out").innerHTML = `<div class="msg err">${esc(e)}</div>`;
+}
+function esc(s) {
+  return String(s).replace(/[&<>"]/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+</script>

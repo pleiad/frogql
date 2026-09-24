@@ -54,3 +54,4 @@ latex
 /.playwright-mcp/
 /asd
 pkg-smoke/
+wasm/explorer/pkg/
