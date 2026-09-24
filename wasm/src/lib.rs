@@ -184,6 +184,104 @@ impl Connection {
 
     /// `{ node_labels, edge_labels, node_count, edge_count }`, mirroring
     /// the Python/Node `schema()` summary.
+    /// The active GRAPH TYPE, rendered the way `SHOW GRAPH TYPE DEFAULT`
+    /// renders it in the REPL: one line per node type and one per edge
+    /// type, with the properties each carries.
+    ///
+    /// `schema()` answers "which labels exist", which is what a sidebar
+    /// needs and all it needs. This answers "what is in them" — the
+    /// question anyone writing a query against an unfamiliar database
+    /// actually has, and the one that was unanswerable in the browser
+    /// because the formatter was never exposed.
+    ///
+    /// On a `.gdb` this reads the catalog; on a JSON graph it is inferred
+    /// from the data, which is the same split `active_schema` makes.
+    pub fn graph_type(&self) -> String {
+        frogql_core::typing::format::format_schema(&self.active_schema())
+    }
+
+    /// The active GRAPH TYPE as data, so it can be **drawn**.
+    ///
+    /// `graph_type()` renders the same thing as text, which is what the
+    /// REPL shows and what a reader skims. A schema is a graph, though —
+    /// node types joined by edge types — and the shape of it is the part
+    /// a text listing makes you reconstruct in your head. This returns
+    /// the pieces a diagram needs and lets the page draw them.
+    ///
+    /// ```json
+    /// { "nodes": [{ "name": "fpl", "labels": ["Fpl"],
+    ///               "props": [{ "key": "fplId", "type": "STRING" }] }],
+    ///   "edges": [{ "label": "SALE_DE", "from": "fpl", "to": "aerodromo",
+    ///               "directed": true, "props": [] }] }
+    /// ```
+    ///
+    /// Endpoints are the *names* `typing::format::NodeTypeNames` derives,
+    /// so the diagram and the text call a type the same thing. An edge
+    /// whose endpoint matches no declared node type gets `null` there
+    /// rather than a name that would misdescribe it — the same care
+    /// `format_schema` takes when it declines to borrow a name.
+    pub fn graph_type_json(&self) -> Result<JsValue, JsError> {
+        use frogql_core::typing::descriptor_type::DescriptorType;
+        use frogql_core::typing::format::NodeTypeNames;
+        use frogql_core::typing::property_type::PropertyType;
+        use frogql_core::typing::variable_type::VariableType;
+
+        let schema = self.active_schema();
+        let names = NodeTypeNames::of(&schema);
+
+        let props_of = |p: &PropertyType| -> Json {
+            let map = match p {
+                PropertyType::Open(m) | PropertyType::Closed(m) => m,
+                PropertyType::Zero => return Json::Array(vec![]),
+            };
+            Json::Array(
+                map.iter()
+                    .map(|(k, t)| json!({ "key": k, "type": format!("{t}") }))
+                    .collect(),
+            )
+        };
+        let name_of = |d: &DescriptorType| -> Json {
+            match names.get(d) {
+                Some(n) => Json::String(n.to_string()),
+                None => Json::Null,
+            }
+        };
+
+        let mut nodes: Vec<Json> = Vec::new();
+        for vt in schema.nodes.iter() {
+            let VariableType::Node(d) = vt else { continue };
+            nodes.push(json!({
+                "name": name_of(d),
+                "labels": d.label.required_labels().iter().map(|l| l.to_string())
+                           .collect::<Vec<_>>(),
+                "props": props_of(&d.props),
+            }));
+        }
+
+        let mut edges: Vec<Json> = Vec::new();
+        for vt in schema.edges.iter() {
+            let (desc, left, right, directed) = match vt {
+                VariableType::EdgeDirectional { desc, left, right } => (desc, left, right, true),
+                VariableType::EdgeNonDirectional { desc, left, right } => {
+                    (desc, left, right, false)
+                }
+                _ => continue,
+            };
+            let endpoint = |v: &VariableType| match v {
+                VariableType::Node(d) => name_of(d),
+                _ => Json::Null,
+            };
+            edges.push(json!({
+                "label": desc.label.required_labels().first().map(|l| l.to_string()),
+                "from": endpoint(left),
+                "to": endpoint(right),
+                "directed": directed,
+                "props": props_of(&desc.props),
+            }));
+        }
+        to_js(&json!({ "nodes": nodes, "edges": edges }))
+    }
+
     // `node_count` returns `usize` on one backend and `u32` on the other,
     // and `with_store!` expands both arms, so whichever cast is needed for
     // one is redundant for the other. Narrowing before the match would

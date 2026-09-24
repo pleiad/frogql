@@ -45,6 +45,12 @@ function open() {
     edge_count: conn.edge_count,
     node_labels: s.node_labels,
     edge_labels: s.edge_labels,
+    // Both renderings of the active GRAPH TYPE, sent once at open: the
+    // text the REPL's `.schema` prints, and the same thing as data so
+    // the page can draw it. Neither is large and both are wanted the
+    // moment a database is open.
+    graph_type: conn.graph_type(),
+    graph_json: conn.graph_type_json(),
   });
 }
 
