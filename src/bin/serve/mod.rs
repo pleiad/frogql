@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 /// The page and its worker are compiled in: they are plain files in the
 /// repository, so embedding them costs no build step and guarantees the
 /// page matches the binary serving it.
-const INDEX_HTML: &str = include_str!("../../../wasm/explorer/index.html");
-const WORKER_JS: &str = include_str!("../../../wasm/explorer/worker.js");
+const INDEX_HTML: &str = include_str!("../../../explorer/index.html");
+const WORKER_JS: &str = include_str!("../../../explorer/worker.js");
 
 /// Where the generated wasm package might be. It is *not* embedded: it is
 /// produced by `wasm-pack`, and making a `cargo build` of the CLI depend
@@ -40,7 +40,7 @@ fn find_pkg(explicit: Option<&Path>) -> Option<PathBuf> {
     if let Ok(p) = std::env::var("FROGQL_EXPLORER_PKG") {
         tries.push(PathBuf::from(p));
     }
-    tries.push(PathBuf::from("wasm/explorer/pkg"));
+    tries.push(PathBuf::from("explorer/pkg"));
     tries.push(PathBuf::from("pkg"));
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -60,7 +60,7 @@ pub fn serve(db: &Path, port: u16, pkg_hint: Option<&Path>) -> std::io::Result<(
              It is built separately, because a `cargo build` of this CLI cannot\n\
              depend on a wasm toolchain. From the repository root:\n\
              \n    cargo install wasm-pack        # once\n\
-             \n    wasm-pack build wasm --target web --out-dir explorer/pkg\n\
+             \n    wasm-pack build wasm --target web --out-dir ../explorer/pkg\n\
              \n\
              Then re-run, or point at it with --explorer-pkg <dir> or\n\
              FROGQL_EXPLORER_PKG."

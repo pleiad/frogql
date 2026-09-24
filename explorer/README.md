@@ -5,7 +5,7 @@ as a drawing. No server, no build step, no bundler — two files and the
 wasm package.
 
 ```bash
-wasm-pack build wasm --target web --out-dir explorer/pkg   # once
+wasm-pack build wasm --target web --out-dir ../explorer/pkg   # once
 frogql --serve santiago.gdb                                # then this
 ```
 
@@ -18,7 +18,7 @@ Any static host works too — the page falls back to the picker when there
 is no `manifest.json` to answer it:
 
 ```bash
-cd wasm/explorer && python3 -m http.server 8777
+cd explorer && python3 -m http.server 8777
 ```
 
 The `.ltj` sidecar is optional; see `wasm/README.md` for when it is worth

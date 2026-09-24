@@ -1,6 +1,6 @@
 [package]
 name = "frogql"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 # MSRV of the engine library (default-features = false). Verified by
 # building `--lib --no-default-features` on 1.71.0. Clippy reads this and
@@ -22,6 +22,24 @@ include = [
     "/Cargo.toml",
     "/README.md",
     "/LICENSE",
+    # `--serve` compiles the explorer's page and worker into the binary
+    # with `include_str!`, so they have to travel with the crate. Left out,
+    # the packaged crate does not build at all — `cargo publish` failed on
+    # 0.5.6 with "couldn't read .../wasm/explorer/index.html", and nothing
+    # before `cargo publish` looks: a normal `cargo build` reads them from
+    # the working tree, where they are always present.
+    #
+    # `cargo package --list` is the check that would have caught it, and it
+    # is cheap. Run it when adding an `include_str!` / `include_bytes!` of
+    # anything outside `/src`.
+    #
+    # The page lives at `/explorer`, not under `/wasm`, for a reason no
+    # `include` line can work around: `wasm/` is a workspace member, and
+    # cargo excludes a nested package's directory from its parent's
+    # archive whatever the whitelist says. It only ever *used* the wasm
+    # crate's output; it was never part of it.
+    "/explorer/index.html",
+    "/explorer/worker.js",
 ]
 
 # What `dist` ships in the CLI release archives. Only the REPL binary is
