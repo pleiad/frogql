@@ -14,9 +14,10 @@
     }
   }
   * { box-sizing: border-box; }
+  :root { --side: 290px; --toph: 44%; --qw: 1fr; }
   body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--ink);
-         display: grid; grid-template-columns: 290px 1fr; height: 100vh; }
-  aside { border-right: 1px solid var(--line); padding: 16px; overflow-y: auto; background: var(--panel); }
+         display: grid; grid-template-columns: var(--side) 6px 1fr; height: 100vh; }
+  aside { padding: 16px; overflow-y: auto; background: var(--panel); }
   main  { display: grid; grid-template-rows: auto auto 1fr; min-width: 0; min-height: 0; }
   h1 { font-size: 15px; margin: 0 0 14px; letter-spacing: .01em; }
   h1 span { color: var(--accent); }
@@ -105,10 +106,9 @@
     .sm { color: #d6a0e8; } .sy  { color: #e0bb63; }
   }
 
-  main { grid-template-rows: minmax(200px, 44%) auto 1fr !important; }
-  .top { display: grid; grid-template-columns: 1fr 1fr; min-height: 0;
-         border-bottom: 1px solid var(--line); }
-  .top .pane + .pane { border-left: 1px solid var(--line); }
+  main { grid-template-rows: var(--toph) 6px auto 1fr !important; }
+  .top { display: grid; grid-template-columns: var(--qw) 6px 1fr; min-height: 0; }
+
   .pane { display: grid; grid-template-rows: auto 1fr; min-height: 0; min-width: 0;
           background: var(--panel); }
   .pane > header { display: flex; align-items: center; gap: 8px; padding: 7px 12px;
@@ -121,6 +121,17 @@
   .pane .ed textarea { height: 100%; resize: none; }
   #schemaBody { position: relative; overflow: auto; min-height: 0; }
   #schemaPane header .hint { text-transform: none; letter-spacing: 0; font-weight: 400; }
+
+  /* Splitters. A pane that cannot be resized decides for the reader how
+     much of a schema, a query and an answer they want on screen at once,
+     and that balance is different per database and per question. */
+  .split { background: var(--line); position: relative; }
+  .split::after { content: ""; position: absolute; inset: -3px; }   /* a grabbable margin */
+  .split:hover, .split.drag { background: var(--accent); }
+  .split.v { cursor: col-resize; }
+  .split.h { cursor: row-resize; }
+  body.resizing { user-select: none; }
+  body.resizing * { cursor: inherit !important; }
 </style>
 
 <aside>
@@ -139,6 +150,7 @@
   <h2>Etiquetas de arista</h2>
   <div id="edgeLabels" class="hint">—</div>
 </aside>
+<div class="split v" id="splitSide"></div>
 
 <main>
   <div class="top">
@@ -150,6 +162,7 @@
       <div class="ed"><pre id="hl" aria-hidden="true"></pre><textarea id="q"
         spellcheck="false" placeholder="(n)-[e]->(m)"></textarea></div>
     </section>
+    <div class="split v" id="splitQ"></div>
     <section class="pane" id="schemaPane">
       <header>Esquema
         <span class="tabs sm">
@@ -162,6 +175,7 @@
       <div id="schemaBody"><div class="msg">Carga un <code>.gdb</code>.</div></div>
     </section>
   </div>
+  <div class="split h" id="splitTop"></div>
   <div class="bar">
     <span class="tabs">
       <button id="tabTable" class="on">Tabla</button>
@@ -934,6 +948,57 @@ function closeInspector() {
   if (scene) scene.sel = null;
   if (sscene) sscene.sel = null;
 }
+
+
+// ---- splitters -------------------------------------------------------------
+// Both drawings size their canvas when they are built, so a resize is not
+// a CSS-only affair: the panes have to be re-rendered once the drag ends.
+// During the drag only the grid track moves, which is cheap and keeps the
+// pointer responsive.
+function splitter(el, axis, apply) {
+  el.addEventListener("pointerdown", (ev) => {
+    el.setPointerCapture(ev.pointerId);
+    el.classList.add("drag");
+    document.body.classList.add("resizing");
+    const move = (e) => apply(axis === "x" ? e.clientX : e.clientY);
+    const up = () => {
+      el.classList.remove("drag");
+      document.body.classList.remove("resizing");
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      relayout();
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  });
+}
+const root = document.documentElement.style;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+splitter($("splitSide"), "x", (x) =>
+  root.setProperty("--side", clamp(x, 170, innerWidth - 420) + "px"));
+
+splitter($("splitQ"), "x", (x) => {
+  const left = $("splitSide").getBoundingClientRect().right;
+  root.setProperty("--qw", clamp(x - left, 220, innerWidth - left - 240) + "px");
+});
+
+splitter($("splitTop"), "y", (y) => {
+  const top = document.querySelector("main").getBoundingClientRect().top;
+  root.setProperty("--toph", clamp(y - top, 120, innerHeight - 200) + "px");
+});
+
+// A canvas is sized at build time, so both panes are rebuilt rather than
+// stretched. Cheap: the schema is tens of boxes and the result drawing is
+// capped at MAX_DRAW.
+function relayout() {
+  if (schema) drawSchema();
+  render();
+}
+addEventListener("resize", () => {
+  clearTimeout(relayout._t);
+  relayout._t = setTimeout(relayout, 150);   // one rebuild per gesture, not per pixel
+});
 
 // ---- plumbing --------------------------------------------------------------
 const say = (t) => { $("status").textContent = t; };

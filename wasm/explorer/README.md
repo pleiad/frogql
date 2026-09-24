@@ -31,6 +31,13 @@ reading an answer mutually exclusive — and reading a schema is what you
 do *while* writing a query, so that was asking the reader to remember one
 while looking at the other.
 
+Three splitters resize it: sidebar / top row, query / schema, top row /
+results. How much schema, query and answer you want on screen at once is
+different per database and per question, so the page does not decide it.
+Both drawings size their canvas when they are built, so a drag rebuilds
+the panes on release rather than stretching a bitmap — cheap, since the
+schema is tens of boxes and the result drawing is capped.
+
 ## The schema, two ways
 
 **Diagram** — one box per node type, header with the label and a section
