@@ -94,6 +94,33 @@
   .subtabs button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   pre.schematext { margin: 0; padding: 16px; font: 12px/1.7 var(--mono);
                    white-space: pre-wrap; color: var(--ink); }
+
+  .sb  { font-weight: 700; }
+  .sl  { color: #0d7a86; font-weight: 600; }   /* :Label — the REPL's cyan */
+  .st2 { color: #2f6f4f; }                     /* value type — green */
+  .sm  { color: #8a4a9c; }                     /* NULL / ANY / * — magenta */
+  .sy  { color: #9a6b12; }                     /* edge brackets — yellow */
+  @media (prefers-color-scheme: dark) {
+    .sl { color: #5fd3e0; } .st2 { color: #7fd6a4; }
+    .sm { color: #d6a0e8; } .sy  { color: #e0bb63; }
+  }
+
+  main { grid-template-rows: minmax(200px, 44%) auto 1fr !important; }
+  .top { display: grid; grid-template-columns: 1fr 1fr; min-height: 0;
+         border-bottom: 1px solid var(--line); }
+  .top .pane + .pane { border-left: 1px solid var(--line); }
+  .pane { display: grid; grid-template-rows: auto 1fr; min-height: 0; min-width: 0;
+          background: var(--panel); }
+  .pane > header { display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+                   border-bottom: 1px solid var(--line); font-size: 11px;
+                   text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+                   font-weight: 600; }
+  .pane > header button { text-transform: none; letter-spacing: 0; }
+  .tabs.sm button { padding: 3px 9px; font-size: 11px; }
+  .pane .ed { border: 0; min-height: 0; overflow: auto; }
+  .pane .ed textarea { height: 100%; resize: none; }
+  #schemaBody { position: relative; overflow: auto; min-height: 0; }
+  #schemaPane header .hint { text-transform: none; letter-spacing: 0; font-weight: 400; }
 </style>
 
 <aside>
@@ -114,13 +141,31 @@
 </aside>
 
 <main>
-  <div class="ed"><pre id="hl" aria-hidden="true"></pre><textarea id="q" spellcheck="false" placeholder="(n)-[e]->(m)"></textarea></div>
+  <div class="top">
+    <section class="pane">
+      <header>Consulta
+        <span class="grow"></span>
+        <button class="go" id="run" disabled>Ejecutar ⌘↵</button>
+      </header>
+      <div class="ed"><pre id="hl" aria-hidden="true"></pre><textarea id="q"
+        spellcheck="false" placeholder="(n)-[e]->(m)"></textarea></div>
+    </section>
+    <section class="pane" id="schemaPane">
+      <header>Esquema
+        <span class="tabs sm">
+          <button id="smDia" class="on">Diagrama</button>
+          <button id="smTxt">Texto</button>
+        </span>
+        <span class="grow"></span>
+        <span id="schemaInfo" class="hint"></span>
+      </header>
+      <div id="schemaBody"><div class="msg">Carga un <code>.gdb</code>.</div></div>
+    </section>
+  </div>
   <div class="bar">
-    <button class="go" id="run" disabled>Ejecutar &nbsp;⌘↵</button>
     <span class="tabs">
       <button id="tabTable" class="on">Tabla</button>
       <button id="tabGraph">Grafo</button>
-      <button id="tabSchema">Esquema</button>
     </span>
     <span class="grow"></span>
     <span id="status" class="hint"></span>
@@ -131,7 +176,9 @@
 
 <script type="module">
 const $ = (id) => document.getElementById(id);
-let rows = null, view = "table", scene = null, schema = null, schemaText = "";
+let rows = null, view = "table", schema = null, schemaText = "";
+let scene = null;    // the results pane
+let sscene = null;   // the schema pane; the two coexist now
 let schemaMode = "diagram";   // or "text" — the REPL's `.schema` output
 
 // Past this the drawing stops being readable — it becomes a texture, and
@@ -147,7 +194,7 @@ w.onmessage = ({ data: m }) => {
   if (m.ev === "rows") {
     rows = m.rows;
     say(`${Array.isArray(rows) ? rows.length : 1} filas · ${m.ms} ms`);
-    if (view === "schema") setView("table"); else render();
+    render();
   }
 };
 w.onerror = (e) => fail(e.message || e);
@@ -177,7 +224,8 @@ function opened(m) {
     paint();
   }
   say(`lista (${m.ms} ms)`);
-  setView("schema");   // the first thing anyone needs is what is in here
+  drawSchema();
+  setView("table");
 }
 const chips = (xs) => xs.length
   ? xs.map((l) => `<span class="lbl">${esc(l)}</span>`).join("") : "—";
@@ -225,18 +273,18 @@ function run() {
   w.postMessage({ op: "query", q, limit: 500 });
 }
 
-for (const [id, v] of [["tabTable","table"],["tabGraph","graph"],["tabSchema","schema"]])
+for (const [id, v] of [["tabTable","table"],["tabGraph","graph"]])
   $(id).onclick = () => setView(v);
 function setView(v) {
   view = v;
   $("tabTable").classList.toggle("on", v === "table");
   $("tabGraph").classList.toggle("on", v === "graph");
-  $("tabSchema").classList.toggle("on", v === "schema");
   render();
 }
+$("smDia").onclick = () => { schemaMode = "diagram"; drawSchema(); };
+$("smTxt").onclick = () => { schemaMode = "text"; drawSchema(); };
 
 function render() {
-  if (view === "schema") return drawSchema();
   if (rows == null) return msg("Escribe un patrón y ejecuta.");
   if (!Array.isArray(rows)) return table([rows]);      // a DML counters object
   if (rows.length === 0) return msg("0 filas.");
@@ -268,35 +316,60 @@ function elemLabel(e) {
   return k ? `${l} {${k}}` : l;
 }
 
+
+// The same palette `print_schema_colored` uses in the REPL, so the two
+// readings of one schema look like the same thing: labels cyan, value
+// types green, NULL and the open-record `*` magenta, edge brackets
+// yellow, type names bold.
+function colorSchema(src) {
+  const rules = [
+    [/^(Node types:|Edge types:)$/gmy, "sb"],
+    [/\b[a-z_][a-z0-9_]*(?= = \()/gy, "sb"],            // the declared name
+    [/:[A-Za-z_][A-Za-z0-9_&]*/gy, "sl"],                // :LABEL
+    [/\b(STRING|INT|INTEGER|FLOAT|BOOL|BOOLEAN|LIST|RECORD|PATH|DATE|DATETIME)\b/gy, "st2"],
+    [/\b(NULL|ANY)\b|\*/gy, "sm"],
+    [/-\[|\]->|~\[|\]~|<-\[|\]-/gy, "sy"],
+  ];
+  let out = "", i = 0;
+  while (i < src.length) {
+    let hit = null;
+    for (const [re, cls] of rules) {
+      re.lastIndex = i;
+      const m = re.exec(src);
+      if (m && m.index === i) { hit = [m[0], cls]; break; }
+    }
+    if (hit) { out += `<span class="${hit[1]}">${esc(hit[0])}</span>`; i += hit[0].length; }
+    else { out += esc(src[i]); i++; }
+  }
+  return out;
+}
+
 // ---- schema diagram --------------------------------------------------------
 // A schema is a graph, and a text listing makes you rebuild its shape in
 // your head. Boxes with a header and a property section, joined by
 // labelled arrows — the shape the LDBC schema figure uses, because it is
 // the one that reads.
 const HUES = [205, 145, 35, 275, 0, 95, 320, 250, 60, 175];
+// The schema has its own pane beside the editor rather than a tab that
+// competes with the results. Reading a schema is what you do *while*
+// writing a query, so making the two exclusive was asking the user to
+// remember one while looking at the other.
 function drawSchema() {
-  if (!schema) return msg("Carga un <code>.gdb</code> para ver su esquema.");
-  const out = $("out");
-  // The two readings of the same thing. The drawing shows the shape; the
-  // text is what `.schema` prints in the REPL, and is the one to copy
-  // into a CREATE GRAPH TYPE or paste into a report.
-  out.innerHTML = `<div class="subtabs">
-      <button id="smDia" class="${schemaMode === "diagram" ? "on" : ""}">Diagrama</button>
-      <button id="smTxt" class="${schemaMode === "text" ? "on" : ""}">Texto</button>
-    </div>`;
-  const bar = out.firstElementChild;
-  $("smDia").onclick = () => { schemaMode = "diagram"; drawSchema(); };
-  $("smTxt").onclick = () => { schemaMode = "text"; drawSchema(); };
+  const out = $("schemaBody");
+  $("smDia").classList.toggle("on", schemaMode === "diagram");
+  $("smTxt").classList.toggle("on", schemaMode === "text");
+  if (!schema) { out.innerHTML = `<div class="msg">Carga un <code>.gdb</code>.</div>`; return; }
 
   if (schemaMode === "text") {
-    scene = null;
+    sscene = null;
     const pre = document.createElement("pre");
     pre.className = "schematext";
-    pre.textContent = schemaText || "(sin esquema)";
+    pre.innerHTML = colorSchema(schemaText || "(sin esquema)");
     out.appendChild(pre);
     return;
   }
 
+  out.innerHTML = "";
   const types = (schema.nodes || []).filter((n) => n.name);
   if (!types.length) {
     const d = document.createElement("div");
@@ -308,7 +381,7 @@ function drawSchema() {
   const cv = document.createElement("canvas");
   out.appendChild(cv);
 
-  const W = out.clientWidth, H = out.clientHeight - bar.offsetHeight;
+  const W = out.clientWidth, H = out.clientHeight;
   const dpr = devicePixelRatio || 1;
   cv.width = W * dpr; cv.height = H * dpr;
   cv.style.width = W + "px"; cv.style.height = H + "px";
@@ -332,30 +405,44 @@ function drawSchema() {
     .filter((e) => e.label && byName.has(e.from) && byName.has(e.to))
     .map((e) => ({ ...e, a: byName.get(e.from), b: byName.get(e.to) }));
 
-  const cols = Math.ceil(Math.sqrt(boxes.length));
-  boxes.forEach((b, i) => {
-    b.x = 60 + (i % cols) * (W - 140) / Math.max(1, cols - 1 || 1);
-    b.y = 60 + Math.floor(i / cols) * 150;
+  // Seed on a circle, most-connected first. Where a force layout lands is
+  // decided mostly by where it started — it walks to the nearest local
+  // minimum and stops — so the seed is worth choosing rather than taking
+  // whatever order the types arrived in. A ring also starts with far
+  // fewer crossings than a grid, which leaves the pass below less to undo.
+  const deg = new Map(boxes.map((b) => [b, 0]));
+  for (const l of links) {
+    if (l.a === l.b) continue;
+    deg.set(l.a, deg.get(l.a) + 1);
+    deg.set(l.b, deg.get(l.b) + 1);
+  }
+  const ring = [...boxes].sort((p, q) => deg.get(q) - deg.get(p));
+  const R = Math.max(150, Math.min(W, H) * 0.36);
+  ring.forEach((b, i) => {
+    const th = (i / ring.length) * Math.PI * 2;
+    b.x = W / 2 + Math.cos(th) * R;
+    b.y = H / 2 + Math.sin(th) * R;
   });
 
-  scene = { kind: "schema", g, cv, boxes, links, W, H, dpr, k: 1, ox: 0, oy: 0, held: null };
-  window.__s = scene;
-  bindPointer(scene, () => boxes);
+  sscene = { kind: "schema", g, cv, boxes, links, W, H, dpr, k: 1, ox: 0, oy: 0, held: null };
+  const me = sscene;
+  window.__s = me;
+  bindPointer(me, () => boxes);
 
   let step = 0;
   const tick = () => {
-    if (scene !== window.__s) return;
+    if (sscene !== me) return;   // a newer schema render took over
     // Repel by bounding box, not by centre: these are rectangles, and
     // treating them as points overlaps the wide ones.
     for (let i = 0; i < boxes.length; i++) {
-      const a = boxes[i]; if (a === scene.held) continue;
+      const a = boxes[i]; if (a === me.held) continue;
       for (let j = i + 1; j < boxes.length; j++) {
         const b = boxes[j];
         const dx = a.x - b.x, dy = a.y - b.y;
-        const ox = (a.w + b.w) / 2 + 40 - Math.abs(dx);
-        const oy = (a.h + b.h) / 2 + 34 - Math.abs(dy);
+        const ox = (a.w + b.w) / 2 + 46 - Math.abs(dx);
+        const oy = (a.h + b.h) / 2 + 40 - Math.abs(dy);
         if (ox > 0 && oy > 0) {
-          const push = Math.min(ox, oy) * 0.06;
+          const push = Math.min(ox, oy) * 0.12;
           const sx = Math.sign(dx) || 1, sy = Math.sign(dy) || 1;
           if (ox < oy) { a.vx += sx * push; b.vx -= sx * push; }
           else         { a.vy += sy * push; b.vy -= sy * push; }
@@ -368,17 +455,164 @@ function drawSchema() {
       if (l.a === l.b) continue;
       const dx = l.b.x - l.a.x, dy = l.b.y - l.a.y;
       const d = Math.hypot(dx, dy) || 1, f = (d - 240) * 0.006;
-      if (l.a !== scene.held) { l.a.vx += (dx / d) * f; l.a.vy += (dy / d) * f; }
-      if (l.b !== scene.held) { l.b.vx -= (dx / d) * f; l.b.vy -= (dy / d) * f; }
+      if (l.a !== me.held) { l.a.vx += (dx / d) * f; l.a.vy += (dy / d) * f; }
+      if (l.b !== me.held) { l.b.vx -= (dx / d) * f; l.b.vy -= (dy / d) * f; }
     }
     for (const b of boxes) {
-      if (b === scene.held) { b.vx = b.vy = 0; continue; }
+      if (b === me.held) { b.vx = b.vy = 0; continue; }
       b.vx *= 0.8; b.vy *= 0.8; b.x += b.vx; b.y += b.vy;
     }
-    paintSchema(scene);
-    if (++step < 300 || scene.held) requestAnimationFrame(tick);
+    paintSchema(me);
+    step++;
+    // Once the spacing has settled, attack the crossings, then let the
+    // forces relax again around the new arrangement — a swap moves a box
+    // to a slot sized for a different one, and only the springs know how
+    // to tidy that up.
+    if (step === 150) {
+      const b0 = countCrossings(links), h0 = countBoxHits(links, boxes);
+      reduceCrossings(boxes, links);
+      const b1 = countCrossings(links), h1 = countBoxHits(links, boxes);
+      me.crossings = b1; me.boxHits = h1;
+      me.overlaps = () => countOverlaps(boxes);
+      $("schemaInfo").textContent =
+        `${boxes.length} tipos · ${b1} cruces` + (h1 ? ` · ${h1} sobre cajas` : "");
+    }
+    if (step === 500) fitToPane(me);
+    if (step < 520 || me.held) requestAnimationFrame(tick);
   };
   tick();
+}
+
+function fitToPane(s) {
+  const { boxes, links, W, H } = s;
+  if (!boxes.length) return;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const b of boxes) {
+    x0 = Math.min(x0, b.x - b.w / 2); x1 = Math.max(x1, b.x + b.w / 2);
+    y0 = Math.min(y0, b.y - b.h / 2); y1 = Math.max(y1, b.y + b.h / 2);
+  }
+  // Self-loops hang off the right edge of their box and carry a label
+  // past that. Fitting to the boxes alone cut them off — the diagram
+  // looked complete and was not, which is the worst kind of clipping.
+  const loops = new Map();
+  for (const l of links) {
+    if (l.a !== l.b) continue;
+    const i = loops.get(l.a) || 0;
+    loops.set(l.a, i + 1);
+    const n = [...links].filter((q) => q.a === q.b && q.a === l.a).length;
+    const rMax = 18 + (n - 1) * 13;
+    x1 = Math.max(x1, l.a.x + l.a.w / 2 + 2 * rMax + 16 + l.label.length * 6.5);
+    const spread = ((n - 1) / 2) * 16 + rMax;
+    y0 = Math.min(y0, l.a.y - spread);
+    y1 = Math.max(y1, l.a.y + spread);
+  }
+  const pad = 16;
+  // Never magnify: a four-type schema blown up to fill the pane looks
+  // broken, and the text is sized for 1:1.
+  const k = Math.min(1, (W - pad * 2) / (x1 - x0), (H - pad * 2) / (y1 - y0));
+  s.k = k;
+  s.ox = (W - (x1 - x0) * k) / 2 - x0 * k;
+  s.oy = (H - (y1 - y0) * k) / 2 - y0 * k;
+}
+
+
+// ---- crossing reduction ----------------------------------------------------
+// A force layout optimises *distance*, never crossings — they are
+// different objectives, and no amount of spring tuning turns one into the
+// other. So the forces settle the spacing and this pass attacks the
+// crossings directly: swap two boxes, recount, keep the swap if it helped.
+//
+// Affordable because a schema is small. Node types are counted in tens,
+// so every pair is a few hundred trials and each trial is one recount.
+// The same idea on a result graph with 120 nodes would not be.
+function segmentsCross(a, b, c, d) {
+  const o = (p, q, r) => Math.sign((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x));
+  const o1 = o(a, b, c), o2 = o(a, b, d), o3 = o(c, d, a), o4 = o(c, d, b);
+  return o1 !== o2 && o3 !== o4 && o1 !== 0 && o2 !== 0 && o3 !== 0 && o4 !== 0;
+}
+
+function countOverlaps(boxes) {
+  let n = 0;
+  for (let i = 0; i < boxes.length; i++)
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i], b = boxes[j];
+      if (Math.abs(a.x - b.x) < (a.w + b.w) / 2 && Math.abs(a.y - b.y) < (a.h + b.h) / 2) n++;
+    }
+  return n;
+}
+
+// Does the segment a-b pass through box `r`? Slab clipping (Liang-Barsky),
+// which is exact and needs no cases.
+function segHitsBox(p, q, r) {
+  const hw = r.w / 2 + 3, hh = r.h / 2 + 3;
+  let t0 = 0, t1 = 1;
+  const dx = q.x - p.x, dy = q.y - p.y;
+  for (const [d, lo, hi] of [[dx, r.x - hw - p.x, r.x + hw - p.x],
+                             [dy, r.y - hh - p.y, r.y + hh - p.y]]) {
+    if (Math.abs(d) < 1e-9) { if (lo > 0 || hi < 0) return false; continue; }
+    let a = lo / d, b = hi / d;
+    if (a > b) [a, b] = [b, a];
+    t0 = Math.max(t0, a); t1 = Math.min(t1, b);
+    if (t0 > t1) return false;
+  }
+  return true;
+}
+
+// A line drawn straight through an unrelated box is worse than two lines
+// crossing: a crossing is a visual knot the eye untangles, a line over a
+// box hides text. It is weighted accordingly in the objective below.
+function countBoxHits(links, boxes) {
+  let n = 0;
+  for (const l of links) {
+    if (l.a === l.b) continue;
+    for (const b of boxes) {
+      if (b === l.a || b === l.b) continue;
+      if (segHitsBox(l.a, l.b, b)) n++;
+    }
+  }
+  return n;
+}
+
+function countCrossings(links) {
+  let n = 0;
+  for (let i = 0; i < links.length; i++) {
+    const p = links[i];
+    if (p.a === p.b) continue;                     // a self-loop crosses nothing
+    for (let j = i + 1; j < links.length; j++) {
+      const q = links[j];
+      if (q.a === q.b) continue;
+      // Edges meeting at a shared box touch there by construction; that
+      // is not a crossing and counting it would reward pulling related
+      // types apart.
+      if (p.a === q.a || p.a === q.b || p.b === q.a || p.b === q.b) continue;
+      if (segmentsCross(p.a, p.b, q.a, q.b)) n++;
+    }
+  }
+  return n;
+}
+
+// Hill-climb by swapping positions. Stops when a full pass finds no
+// improvement, so it always terminates and never leaves the diagram worse
+// than it found it.
+const cost = (boxes, links) => countCrossings(links) + 3 * countBoxHits(links, boxes);
+
+function reduceCrossings(boxes, links, passes = 8) {
+  let best = cost(boxes, links);
+  for (let pass = 0; pass < passes && best > 0; pass++) {
+    let improved = false;
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        const a = boxes[i], b = boxes[j];
+        const ax = a.x, ay = a.y;
+        a.x = b.x; a.y = b.y; b.x = ax; b.y = ay;
+        const now = cost(boxes, links);
+        if (now < best) { best = now; improved = true; }
+        else { b.x = a.x; b.y = a.y; a.x = ax; a.y = ay; }   // put them back
+      }
+    }
+    if (!improved) break;
+  }
+  return best;
 }
 
 function paintSchema(s) {
@@ -400,13 +634,39 @@ function paintSchema(s) {
   // overlap, because a clipped name is unreadable while an overlapping
   // one is merely crowded.
   const captions = [];
+  g.font = `${10 / k}px ui-monospace, monospace`;   // captions are measured below
+  // A type with several relationships to itself drew every loop in the
+  // same place, so the labels overprinted into a smear. Each gets its own
+  // ring, and its caption joins the others so it lands on a background
+  // chip and is painted after the boxes.
+  // How many loops each box carries, counted up front so the labels can
+  // be spread around the box's own centre instead of all landing on it.
+  const loopN = new Map();
+  for (const l of links) if (l.a === l.b) loopN.set(l.a, (loopN.get(l.a) || 0) + 1);
+  const loopIdx = new Map();
   for (const l of links) {
-    if (l.a === l.b) { selfLoop(g, l, ink, muted, k); continue; }
+    if (l.a === l.b) {
+      const i = loopIdx.get(l.a) || 0;
+      loopIdx.set(l.a, i + 1);
+      captions.push(selfLoop(g, l, muted, k, i, loopN.get(l.a)));
+      continue;
+    }
     const [x1, y1] = edgePoint(l.a, l.b), [x2, y2] = edgePoint(l.b, l.a);
     g.strokeStyle = muted;
     g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
     if (l.directed) arrow(g, x1, y1, x2, y2, muted, k);
-    captions.push([l.label, (x1 + x2) / 2, (y1 + y2) / 2]);
+    // The midpoint is the natural place for a caption and the wrong one
+    // when a box is sitting there. Walk out along the line until the spot
+    // is clear; if nothing is, keep the midpoint rather than hiding the
+    // label somewhere unrelated to its edge.
+    let mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+    for (const t of [0.5, 0.38, 0.62, 0.28, 0.72, 0.2, 0.8]) {
+      const cx = x1 + (x2 - x1) * t, cy = y1 + (y2 - y1) * t;
+      const clear = boxes.every((b) =>
+        Math.abs(b.x - cx) > b.w / 2 + 6 || Math.abs(b.y - cy) > b.h / 2 + 6);
+      if (clear) { mx = cx; my = cy; break; }
+    }
+    captions.push([l.label, mx, my]);
   }
 
   for (const b of boxes) {
@@ -460,14 +720,23 @@ function arrow(g, x1, y1, x2, y2, col, k) {
 }
 // A relationship from a type to itself — `knows` on Person in the LDBC
 // figure — is a loop off the right edge rather than a zero-length line.
-function selfLoop(g, l, ink, muted, k) {
-  const b = l.a, x = b.x + b.w / 2, y = b.y;
-  g.strokeStyle = muted; g.beginPath();
-  g.arc(x + 22, y, 22, Math.PI * 0.75, Math.PI * 1.25, true); g.stroke();
-  if (l.directed) arrow(g, x + 30, y - 14, x + 2, y - 6, muted, k);
-  g.fillStyle = ink; g.textAlign = "left"; g.textBaseline = "middle";
-  g.font = `${10 / k}px ui-monospace, monospace`;
-  g.fillText(l.label, x + 48, y);
+// A relationship from a type to itself — `knows` on Person in the LDBC
+// figure — is a loop off the right edge rather than a zero-length line.
+// `i` stacks the loops when a type has more than one, and the caption is
+// returned rather than drawn so it goes through the same chip-on-top pass
+// as every other edge label.
+function selfLoop(g, l, muted, k, i, n) {
+  const b = l.a, x = b.x + b.w / 2;
+  const r = 18 + i * 13;                  // one ring per relationship
+  const y = b.y;
+  g.strokeStyle = muted;
+  g.beginPath(); g.arc(x + r, y, r, Math.PI * 0.72, Math.PI * 1.28, true); g.stroke();
+  if (l.directed) arrow(g, x + r * 1.3, y - r * 0.7, x + 3, y - r * 0.35, muted, k);
+  // Labels stack around the box's centre line rather than sitting on it,
+  // which is what turned three relationships on one type into a smear.
+  const ly = y + (i - (n - 1) / 2) * 16;
+  const rMax = 18 + (n - 1) * 13;
+  return [l.label, x + 2 * rMax + 8 + g.measureText(l.label).width / 2, ly];
 }
 function round(g, x, y, w, h, r) {
   g.beginPath();
@@ -663,6 +932,7 @@ const fmt = (v) => (v === null ? "null" : typeof v === "object" ? JSON.stringify
 function closeInspector() {
   const c = $("insp"); if (c) c.remove();
   if (scene) scene.sel = null;
+  if (sscene) sscene.sel = null;
 }
 
 // ---- plumbing --------------------------------------------------------------

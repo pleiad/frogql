@@ -23,7 +23,73 @@ is optional; see `wasm/README.md` for when it is worth fetching.
   library: the force layout is ~40 lines, and keeping it here is what
   makes the page work offline and survive being copied somewhere else.
 
-## The drawing is a view of an answer, not of the graph
+## The layout
+
+Query on the left, schema on the right, results underneath. The schema
+started as a third tab beside Tabla and Grafo, which made reading it and
+reading an answer mutually exclusive — and reading a schema is what you
+do *while* writing a query, so that was asking the reader to remember one
+while looking at the other.
+
+## The schema, two ways
+
+**Diagram** — one box per node type, header with the label and a section
+listing `prop: TYPE` under it, joined by labelled arrows. Modelled on the
+LDBC SNB schema figure, because a schema *is* a graph and a text listing
+makes you rebuild its shape in your head. Boxes are sized from their own
+contents, so a type with two properties does not get the footprint of one
+with ten, and the finished drawing is zoomed to fit its pane (never
+magnified past 1:1 — the text is sized for that).
+
+**Text** — byte for byte what `.schema` prints in the REPL
+(`SHOW GRAPH TYPE DEFAULT`), coloured with the same palette
+`print_schema_colored` uses: labels cyan, value types green, `NULL` and
+the open-record `*` magenta, edge brackets yellow. This is the one to
+copy into a `CREATE GRAPH TYPE`.
+
+Both come from the active GRAPH TYPE: read from the catalog on a `.gdb`,
+inferred from the data on a JSON graph.
+
+### Keeping the lines out of the way
+
+A force layout optimises *distance*. Crossings are a different objective
+and no amount of spring tuning turns one into the other, so the forces
+settle the spacing and a second pass attacks the drawing directly: swap
+two boxes, recount, keep the swap if it helped. Affordable because a
+schema is small — node types come in tens, so every pair is a few hundred
+trials.
+
+The objective counts two things and weights the second at 3x: **lines
+crossing each other**, and **a line drawn straight through an unrelated
+box**. A crossing is a knot the eye untangles; a line over a box hides
+text. Measured on the LDBC schema (11 types, 25 relationships): **34
+crossings down to 3**. On a 5-type OpenStreetMap schema: 0 crossings, 0
+lines over boxes, 0 overlapping boxes.
+
+Edge captions then take the first point along their line that is clear of
+every box rather than the midpoint come what may, and a type with several
+relationships to itself gets one ring per relationship with the labels
+stacked around its centre.
+
+## Clicking a node shows everything in it
+
+The caption on a drawn node is its labels plus two properties — enough to
+tell nodes apart, not enough to inspect one. A click opens a card with
+every label and every property, sorted. The whole element is kept when
+the drawing is built, so the click costs no round trip.
+
+A click and a drag are the same gesture until something moves, which is
+what lets one pointer do both.
+
+## The editor is highlighted
+
+Keywords, `:Labels`, strings, numbers and `--` comments, painted by a
+`<pre>` under a transparent `<textarea>` that shares its metrics. No
+editor library: the grammar worth colouring is six token classes, and a
+dependency would cost more than it saves in a page meant to be copied
+around.
+
+## The result drawing is a view of an answer, not of the graph
 
 Nodes and edges come from `_paths`, which a query returns when it has no
 `RETURN` clause — the elements the pattern walked, in match order. A
