@@ -826,7 +826,7 @@ function edgePoint(a, b) {
   return [a.x + dx * t, a.y + dy * t];
 }
 function arrow(g, x1, y1, x2, y2, col, k) {
-  const an = Math.atan2(y2 - y1, x2 - x1), s = 7 / k;
+  const an = Math.atan2(y2 - y1, x2 - x1), s = 9 / k;
   g.fillStyle = col; g.beginPath();
   g.moveTo(x2, y2);
   g.lineTo(x2 - s * Math.cos(an - .4), y2 - s * Math.sin(an - .4));
@@ -879,7 +879,13 @@ function drawGraph(rs) {
             // round trip for nothing.
             N.set(el.id, { id: el.id, el, t: elemLabel(el), x: 0, y: 0, vx: 0, vy: 0 });
           }
-          if (prev != null && pending != null && N.has(prev)) E.push({ a: prev, b: el.id });
+          if (prev != null && pending != null && N.has(prev)) {
+            // Direction comes from the edge, not from the order the path
+            // walked it: `(a)<-[e]-(b)` traverses b→a and the arrow still
+            // belongs on a→b. An undirected edge gets none.
+            E.push({ a: pending.src, b: pending.tgt, dir: pending.directed,
+                     label: (pending.labels || []).join("&") });
+          }
           prev = el.id; pending = null;
         } else if (el.kind === "edge") pending = el;
       }
@@ -967,20 +973,40 @@ function replayRows(cv, taken, lay) {
   paintRows(scene);
 }
 
+
+// A self-edge has nowhere to point, so it becomes a small loop above the
+// node — the same idea the schema diagram uses for a type related to
+// itself.
+function selfArc(g, n, R, directed, col, head, k) {
+  const r = 11 / k;
+  g.strokeStyle = col;
+  g.beginPath(); g.arc(n.x, n.y - r, r, Math.PI * 0.62, Math.PI * 0.38, true); g.stroke();
+  if (directed) arrow(g, n.x + r * 0.7, n.y - r * 1.4, n.x + R * 0.9, n.y - R, head, k);
+}
+
 function paintRows(s) {
   const { g, nodes, edges, idx, W, H, dpr, k, ox, oy } = s;
   const css = getComputedStyle(document.body);
   const ink = css.color;
   const line = css.getPropertyValue("--line") || "#ddd";
+  const muted = css.getPropertyValue("--muted") || "#888";
   const accent = css.getPropertyValue("--accent") || "#2f6f4f";
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
   g.setTransform(dpr * k, 0, 0, dpr * k, dpr * ox, dpr * oy);
   g.strokeStyle = line; g.lineWidth = 1 / k;
+  const R = 5 / k;                       // the dot's radius, so the head clears it
   for (const e of edges) {
     const a = nodes[idx.get(e.a)], b = nodes[idx.get(e.b)];
     if (!a || !b) continue;
-    g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke();
+    if (a === b) { selfArc(g, a, R, e.dir, line, muted, k); continue; }
+    const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
+    // Stop the line at the node's edge rather than its centre: an
+    // arrowhead buried under the dot it points at is not a direction.
+    const x2 = b.x - (dx / d) * (R + 1 / k), y2 = b.y - (dy / d) * (R + 1 / k);
+    g.strokeStyle = line;
+    g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(x2, y2); g.stroke();
+    if (e.dir) arrow(g, a.x, a.y, x2, y2, muted, k);
   }
   g.font = `${11 / k}px ui-monospace, monospace`;
   g.textAlign = "center"; g.textBaseline = "alphabetic";

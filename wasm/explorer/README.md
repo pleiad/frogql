@@ -161,6 +161,15 @@ Nodes and edges come from `_paths`, which a query returns when it has no
 query that projects columns has no `_paths`, and the graph tab says so
 rather than drawing nothing.
 
+Edges carry arrowheads, and the direction comes from the edge rather than
+from the order the path walked it — `(a)<-[e]-(b)` traverses b→a while
+the arrow still belongs on a→b, so following the traversal would point
+half of them backwards. An undirected edge gets no head, and a self-edge
+becomes a small loop. This needs `src`, `tgt` and `directed` on the edge
+element, which the binding did not send: a path is a sequence of
+elements, and `EdgeDirectional` / `EdgeUndirectional` both arrive as
+`kind: "edge"`.
+
 At most **120 nodes** are drawn. The first version allowed 300 and the
 result was a texture rather than a picture; the cap is low on purpose and
 the notice says how to get under it. Labels fade in with zoom: unreadable

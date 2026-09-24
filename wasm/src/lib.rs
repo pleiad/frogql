@@ -591,7 +591,19 @@ fn edge_ref_json<G: GraphAccess>(store: &G, id: Id) -> Json {
     for (k, vv) in store.edge_props(id).iter() {
         props.insert(k.clone(), value_to_json(store, vv));
     }
-    json!({ "kind": "edge", "id": id, "labels": labels, "props": Json::Object(props) })
+    // Endpoints and directedness travel with the edge because the caller
+    // cannot recover them. A path lists elements in *traversal* order, so
+    // a reverse pattern (`(a)<-[e]-(b)`) yields the same sequence as the
+    // forward one and the arrow would point the wrong way half the time;
+    // and `PathValue::EdgeDirectional` / `EdgeUndirectional` collapse
+    // into one `kind` here, so an undirected edge would be drawn with an
+    // arrowhead it does not have.
+    json!({
+        "kind": "edge", "id": id, "labels": labels,
+        "src": store.src(id), "tgt": store.tgt(id),
+        "directed": store.is_directed(id),
+        "props": Json::Object(props),
+    })
 }
 
 fn pathvalue_to_json<G: GraphAccess>(store: &G, pv: &PathValue) -> Json {
