@@ -85,8 +85,25 @@ tell nodes apart, not enough to inspect one. A click opens a card with
 every label and every property, sorted. The whole element is kept when
 the drawing is built, so the click costs no round trip.
 
-A click and a drag are the same gesture until something moves, which is
-what lets one pointer do both.
+A click and a drag are the same gesture until the pointer travels more
+than a few pixels — **not** until it moves at all. Pressing a mouse
+button nudges the pointer, so "any movement is a drag" meant no real
+click ever opened the card. Synthetic events do not jitter, which is
+exactly why that survived being tested.
+
+The card is sized by the window rather than by the pane it floats over:
+once the splitters are dragged the results pane can be a couple of
+hundred pixels tall, and a card capped at that showed three properties of
+eighteen.
+
+## Resizing does not rearrange anything
+
+A force layout is seeded randomly, so re-running it gives a different —
+equally valid, entirely unfamiliar — arrangement. Re-running it on every
+splitter drag scrambled a diagram the reader had just finished reading.
+Positions are kept; a resize only re-sizes the canvas and re-fits the
+zoom. The `↻` button asks for a fresh arrangement deliberately, and a new
+database or a new answer gets one on its own.
 
 ## The editor is highlighted
 

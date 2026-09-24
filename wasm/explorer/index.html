@@ -80,9 +80,14 @@
   }
 
   /* Node inspector */
-  #insp { position: absolute; right: 12px; top: 12px; width: 300px; max-height: calc(100% - 24px);
-          overflow: auto; background: var(--panel); border: 1px solid var(--line);
-          border-radius: 9px; padding: 12px 14px; box-shadow: 0 6px 24px rgba(0,0,0,.10); }
+  /* Fixed, not absolute: the results pane can be a couple of hundred
+     pixels tall once the splitters are dragged, and a card capped at that
+     showed three properties of eighteen. A node's properties are the
+     thing the click was for, so the card is bounded by the window. */
+  #insp { position: fixed; right: 18px; bottom: 18px; width: 340px;
+          max-height: min(70vh, 560px); overflow: auto; z-index: 5;
+          background: var(--panel); border: 1px solid var(--line);
+          border-radius: 9px; padding: 12px 14px; box-shadow: 0 8px 30px rgba(0,0,0,.18); }
   #insp h3 { margin: 0 0 8px; font-size: 13px; }
   #insp .x { float: right; cursor: pointer; color: var(--muted); }
   #insp dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 10px;
@@ -171,6 +176,7 @@
         </span>
         <span class="grow"></span>
         <span id="schemaInfo" class="hint"></span>
+        <button id="reflow" title="Reordenar el diagrama">↻</button>
       </header>
       <div id="schemaBody"><div class="msg">Carga un <code>.gdb</code>.</div></div>
     </section>
@@ -193,6 +199,13 @@ const $ = (id) => document.getElementById(id);
 let rows = null, view = "table", schema = null, schemaText = "";
 let scene = null;    // the results pane
 let sscene = null;   // the schema pane; the two coexist now
+// The arrangement, kept apart from the canvas that draws it. A resize
+// changes how much room the drawing has, not what the drawing *is*, and
+// re-running the layout on every drag scrambled a diagram the reader had
+// just finished reading. Cleared when the schema itself changes, or when
+// the reader asks for a new arrangement.
+let schemaLayout = null;
+let rowsLayout = null;
 let schemaMode = "diagram";   // or "text" — the REPL's `.schema` output
 
 // Past this the drawing stops being readable — it becomes a texture, and
@@ -207,6 +220,7 @@ w.onmessage = ({ data: m }) => {
   if (m.ev === "opened") return opened(m);
   if (m.ev === "rows") {
     rows = m.rows;
+    rowsLayout = null;   // a new answer is a new drawing
     say(`${Array.isArray(rows) ? rows.length : 1} filas · ${m.ms} ms`);
     render();
   }
@@ -225,6 +239,7 @@ $("ltj").onchange = () => pick($("ltj"), "ltjName", "ltj");
 
 function opened(m) {
   schema = m.graph_json; schemaText = m.graph_type;
+  schemaLayout = null;   // a different database, a different diagram
   $("stats").innerHTML =
     `<b>${m.node_count.toLocaleString()}</b> nodos<br>` +
     `<b>${m.edge_count.toLocaleString()}</b> aristas<br>` +
@@ -297,6 +312,9 @@ function setView(v) {
 }
 $("smDia").onclick = () => { schemaMode = "diagram"; drawSchema(); };
 $("smTxt").onclick = () => { schemaMode = "text"; drawSchema(); };
+// A force layout is seeded randomly, so a second run is a second opinion.
+// Worth offering, and worth *not* doing behind the reader's back.
+$("reflow").onclick = () => { schemaLayout = null; schemaMode = "diagram"; drawSchema(); };
 
 function render() {
   if (rows == null) return msg("Escribe un patrón y ejecuta.");
@@ -396,6 +414,7 @@ function drawSchema() {
   out.appendChild(cv);
 
   const W = out.clientWidth, H = out.clientHeight;
+  if (schemaLayout) return replaySchema(cv, W, H, schemaLayout);
   const dpr = devicePixelRatio || 1;
   cv.width = W * dpr; cv.height = H * dpr;
   cv.style.width = W + "px"; cv.style.height = H + "px";
@@ -488,6 +507,7 @@ function drawSchema() {
       const b1 = countCrossings(links), h1 = countBoxHits(links, boxes);
       me.crossings = b1; me.boxHits = h1;
       me.overlaps = () => countOverlaps(boxes);
+      schemaLayout = { boxes, links, crossings: b1, boxHits: h1 };
       $("schemaInfo").textContent =
         `${boxes.length} tipos · ${b1} cruces` + (h1 ? ` · ${h1} sobre cajas` : "");
     }
@@ -495,6 +515,22 @@ function drawSchema() {
     if (step < 520 || me.held) requestAnimationFrame(tick);
   };
   tick();
+}
+
+// Draw an arrangement that is already decided. Only the canvas and the
+// zoom-to-fit depend on the pane's size; the positions do not.
+function replaySchema(cv, W, H, lay) {
+  const dpr = devicePixelRatio || 1;
+  cv.width = W * dpr; cv.height = H * dpr;
+  cv.style.width = W + "px"; cv.style.height = H + "px";
+  sscene = { kind: "schema", g: cv.getContext("2d"), cv,
+             boxes: lay.boxes, links: lay.links, W, H, dpr,
+             k: 1, ox: 0, oy: 0, held: null,
+             crossings: lay.crossings, boxHits: lay.boxHits };
+  window.__s = sscene;
+  bindPointer(sscene, () => lay.boxes);
+  fitToPane(sscene);
+  paintSchema(sscene);
 }
 
 function fitToPane(s) {
@@ -797,10 +833,15 @@ function drawGraph(rs) {
   const taken = clipped ? $("clip").offsetHeight : 0;
   const cv = document.createElement("canvas");
   out.appendChild(cv);
-  layout([...N.values()], E, cv, taken);
+  // Same reasoning as the schema: a resize must not scramble a drawing
+  // the reader is in the middle of. Keyed on the row set, so a new
+  // answer does get a new arrangement.
+  const key = rs.length + ":" + N.size + ":" + E.length;
+  if (rowsLayout && rowsLayout.key === key) return replayRows(cv, taken, rowsLayout);
+  layout([...N.values()], E, cv, taken, key);
 }
 
-function layout(nodes, edges, cv, taken) {
+function layout(nodes, edges, cv, taken, key) {
   const W = cv.parentElement.clientWidth;
   const H = cv.parentElement.clientHeight - taken - 4;
   const dpr = devicePixelRatio || 1;
@@ -842,9 +883,23 @@ function layout(nodes, edges, cv, taken) {
       n.vx *= 0.82; n.vy *= 0.82; n.x += n.vx; n.y += n.vy;
     }
     paintRows(scene);
+    if (step === 300) rowsLayout = { key, nodes, edges, idx, taken };
     if (++step < 320 || scene.held) requestAnimationFrame(tick);
   };
   tick();
+}
+
+function replayRows(cv, taken, lay) {
+  const W = cv.parentElement.clientWidth;
+  const H = cv.parentElement.clientHeight - taken - 4;
+  const dpr = devicePixelRatio || 1;
+  cv.width = W * dpr; cv.height = H * dpr;
+  cv.style.width = W + "px"; cv.style.height = H + "px";
+  scene = { kind: "rows", g: cv.getContext("2d"), cv, nodes: lay.nodes, edges: lay.edges,
+            idx: lay.idx, W, H, dpr, k: 1, ox: 0, oy: 0, held: null };
+  window.__s = scene;
+  bindPointer(scene, () => lay.nodes);
+  paintRows(scene);
 }
 
 function paintRows(s) {
@@ -894,30 +949,41 @@ function bindPointer(s, items) {
     s.k = k; repaint(s);
   };
 
-  let pan = null, moved = false;
+  // A mouse click is never perfectly still: pressing a button nudges the
+  // pointer a pixel or two, and treating *any* movement as a drag meant
+  // every real click was read as a one-pixel drag and never opened the
+  // inspector. Synthetic events, which do not jitter, worked — which is
+  // exactly why this survived being tested.
+  const SLOP = 4;
+  let pan = null, moved = false, down = null, target = null;
   cv.onpointerdown = (ev) => {
     cv.setPointerCapture(ev.pointerId);
     moved = false;
-    const n = hit(at(ev));
-    if (n) { s.held = n; keepPainting(s); }
-    else pan = { x: ev.clientX - s.ox, y: ev.clientY - s.oy };
+    down = { x: ev.clientX, y: ev.clientY };
+    target = hit(at(ev));
+    if (!target) pan = { x: ev.clientX - s.ox, y: ev.clientY - s.oy };
   };
   cv.onpointermove = (ev) => {
-    if (s.held) { const p = at(ev); s.held.x = p.x; s.held.y = p.y; moved = true; repaint(s); }
-    else if (pan) { s.ox = ev.clientX - pan.x; s.oy = ev.clientY - pan.y; moved = true; repaint(s); }
-    else cv.style.cursor = hit(at(ev)) ? "grab" : "default";
+    if (down && !moved) {
+      if (Math.hypot(ev.clientX - down.x, ev.clientY - down.y) < SLOP) return;
+      moved = true;
+      if (target) { s.held = target; keepPainting(s); }   // the drag starts here
+    }
+    if (s.held) { const p = at(ev); s.held.x = p.x; s.held.y = p.y; repaint(s); }
+    else if (pan && moved) { s.ox = ev.clientX - pan.x; s.oy = ev.clientY - pan.y; repaint(s); }
+    else if (!down) cv.style.cursor = hit(at(ev)) ? "grab" : "default";
   };
   const up = (ev) => {
-    // A click, not a drag, opens the inspector. Distinguishing them by
-    // "did anything move" is what lets one gesture do both.
+    // A click, not a drag, opens the inspector — "drag" meaning the
+    // pointer travelled past SLOP, not merely that it moved.
     if (!moved) {
       const n = hit(at(ev));
       n && n.el ? inspect(n, s) : closeInspector();
     }
-    s.held = null; pan = null;
+    s.held = null; pan = null; down = null; target = null;
   };
   cv.onpointerup = up;
-  cv.onpointercancel = () => { s.held = null; pan = null; };
+  cv.onpointercancel = () => { s.held = null; pan = null; down = null; target = null; };
 }
 const repaint = (s) => (s.kind === "schema" ? paintSchema(s) : paintRows(s));
 function keepPainting(s) {
