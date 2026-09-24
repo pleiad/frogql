@@ -78,6 +78,17 @@ every box rather than the midpoint come what may, and a type with several
 relationships to itself gets one ring per relationship with the labels
 stacked around its centre.
 
+## A colour means one thing everywhere
+
+Each node type gets a hue, assigned once from the schema. The schema
+box's header, the dots in a result graph and the label chips in the
+sidebar all read that one assignment, so a blue dot and the blue box are
+the same type without anything having to say so. Two assignments that
+agree today would not stay agreeing, which is why there is one.
+
+An element whose labels match no declared type keeps the neutral accent
+rather than borrowing a colour that would claim a type it does not have.
+
 ## Clicking a node shows everything in it
 
 The caption on a drawn node is its labels plus two properties — enough to

@@ -137,6 +137,12 @@
   .split.h { cursor: row-resize; }
   body.resizing { user-select: none; }
   body.resizing * { cursor: inherit !important; }
+
+  /* A tinted chip needs its own dark values; the inline style above only
+     carries the light ones. */
+  @media (prefers-color-scheme: dark) {
+    .lbl[style] { filter: invert(1) hue-rotate(180deg) brightness(1.5); }
+  }
 </style>
 
 <aside>
@@ -244,7 +250,8 @@ function opened(m) {
     `<b>${m.node_count.toLocaleString()}</b> nodos<br>` +
     `<b>${m.edge_count.toLocaleString()}</b> aristas<br>` +
     `abierta en <b>${m.ms} ms</b>`;
-  $("nodeLabels").innerHTML = chips(m.node_labels);
+  assignHues();
+  $("nodeLabels").innerHTML = chips(m.node_labels, true);
   $("edgeLabels").innerHTML = chips(m.edge_labels);
   $("run").disabled = false;
   if (!$("q").value) {
@@ -256,8 +263,15 @@ function opened(m) {
   drawSchema();
   setView("table");
 }
-const chips = (xs) => xs.length
-  ? xs.map((l) => `<span class="lbl">${esc(l)}</span>`).join("") : "—";
+// Node chips carry their type's hue; edge chips have no type to carry one.
+const chips = (xs, tinted) => xs.length
+  ? xs.map((l) => {
+      const h = tinted ? hueOf([l]) : null;
+      const st = h === null ? ""
+        : ` style="background:hsl(${h} 60% 92%);color:hsl(${h} 70% 26%)"`;
+      return `<span class="lbl"${st}>${esc(l)}</span>`;
+    }).join("")
+  : "—";
 
 // ---- editor highlighting ---------------------------------------------------
 // A transparent textarea over a painted <pre>. No library: the grammar
@@ -382,6 +396,30 @@ function colorSchema(src) {
 // labelled arrows — the shape the LDBC schema figure uses, because it is
 // the one that reads.
 const HUES = [205, 145, 35, 275, 0, 95, 320, 250, 60, 175];
+
+// Which hue belongs to which node type. Built once from the schema and
+// read by both drawings, so a colour means the same thing in the schema
+// diagram, in a result graph and on the sidebar chips — that is the whole
+// point of colouring them, and it only holds if there is one assignment
+// rather than two that agree today.
+let hueByLabels = new Map();
+function assignHues() {
+  hueByLabels = new Map();
+  const types = (schema?.nodes || []).filter((n) => n.name);
+  types.forEach((t, i) => hueByLabels.set(labelKey(t.labels), HUES[i % HUES.length]));
+  return types;
+}
+const labelKey = (ls) => [...(ls || [])].sort().join("&");
+// `null` for an element whose labels match no declared type: it gets the
+// neutral accent rather than borrowing a colour that would claim a type
+// it does not have.
+const hueOf = (ls) => {
+  const h = hueByLabels.get(labelKey(ls));
+  return h === undefined ? null : h;
+};
+const hueFill = (h, dark, held) =>
+  held ? (dark ? "#fff" : "#111")
+       : dark ? `hsl(${h} 55% 62%)` : `hsl(${h} 55% 42%)`;
 // The schema has its own pane beside the editor rather than a tab that
 // competes with the results. Reading a schema is what you do *while*
 // writing a query, so making the two exclusive was asking the user to
@@ -402,7 +440,7 @@ function drawSchema() {
   }
 
   out.innerHTML = "";
-  const types = (schema.nodes || []).filter((n) => n.name);
+  const types = assignHues();
   if (!types.length) {
     const d = document.createElement("div");
     d.className = "msg";
@@ -429,7 +467,7 @@ function drawSchema() {
     g.font = "11px ui-monospace, monospace";
     const lines = t.props.map((p) => `${p.key}: ${p.type}`);
     for (const l of lines) wd = Math.max(wd, g.measureText(l).width);
-    return { ...t, lines, hue: HUES[i % HUES.length],
+    return { ...t, lines, hue: hueOf(t.labels) ?? HUES[i % HUES.length],
              w: Math.ceil(wd) + 22, h: 26 + lines.length * 15 + (lines.length ? 8 : 4),
              x: 0, y: 0, vx: 0, vy: 0 };
   });
@@ -919,9 +957,13 @@ function paintRows(s) {
   }
   g.font = `${11 / k}px ui-monospace, monospace`;
   g.textAlign = "center"; g.textBaseline = "alphabetic";
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
   for (const n of nodes) {
+    const h = n.el ? hueOf(n.el.labels) : null;
     g.beginPath(); g.arc(n.x, n.y, 5 / k, 0, 7);
-    g.fillStyle = n === s.held || n === s.sel ? ink : accent; g.fill();
+    g.fillStyle = n === s.held || n === s.sel ? ink
+                : h === null ? accent : hueFill(h, dark, false);
+    g.fill();
     if (nodes.length <= 120 || k > 1.6) {
       g.fillStyle = ink; g.fillText(n.t.slice(0, 26), n.x, n.y - 10 / k);
     }
