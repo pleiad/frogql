@@ -81,3 +81,10 @@ test:
 # Open the frogql REPL on a database.
 repl database *args:
     cargo run --release --bin frogql -- {{database}} {{args}}
+
+# Refresh the wasm that `frogql --serve` embeds. Run on every version
+# bump, for the same reason `node/index.js` is regenerated then: the
+# committed copy is what ships, and nothing rebuilds it.
+embed-wasm:
+    wasm-pack build wasm --target web --out-dir ../explorer/pkg
+    cp explorer/pkg/frogql_wasm.js explorer/pkg/frogql_wasm_bg.wasm explorer/embed/

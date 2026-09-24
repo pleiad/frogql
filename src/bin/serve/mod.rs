@@ -28,10 +28,23 @@ use std::path::{Path, PathBuf};
 const INDEX_HTML: &str = include_str!("../../../explorer/index.html");
 const WORKER_JS: &str = include_str!("../../../explorer/worker.js");
 
-/// Where the generated wasm package might be. It is *not* embedded: it is
-/// produced by `wasm-pack`, and making a `cargo build` of the CLI depend
-/// on that would break `cargo install` and the release build, neither of
-/// which has a wasm toolchain.
+/// The wasm the explorer runs, compiled in.
+///
+/// It is committed rather than built, for the same reason `node/index.js`
+/// is: `cargo build` cannot depend on `wasm-pack`, and a `--serve` that
+/// prints build instructions instead of serving is not a feature. 0.5.6
+/// and 0.5.7 shipped exactly that — `cargo install frogql && frogql
+/// --serve db.gdb` told the user to go install a wasm toolchain.
+///
+/// The cost is a generated file that is stale unless regenerated on every
+/// version bump (`just embed-wasm`), which is a discipline this repo
+/// already keeps for the napi loader.
+const WASM_JS: &str = include_str!("../../../explorer/embed/frogql_wasm.js");
+const WASM_BIN: &[u8] = include_bytes!("../../../explorer/embed/frogql_wasm_bg.wasm");
+
+/// A live `wasm-pack` build, when there is one. Preferred over the
+/// embedded copy so local iteration does not need a refresh — edit the
+/// crate, rebuild the package, reload the page.
 fn find_pkg(explicit: Option<&Path>) -> Option<PathBuf> {
     let mut tries: Vec<PathBuf> = Vec::new();
     if let Some(p) = explicit {
@@ -53,20 +66,7 @@ fn find_pkg(explicit: Option<&Path>) -> Option<PathBuf> {
 }
 
 pub fn serve(db: &Path, port: u16, pkg_hint: Option<&Path>) -> std::io::Result<()> {
-    let Some(pkg) = find_pkg(pkg_hint) else {
-        eprintln!(
-            "error: the explorer's wasm package was not found.\n\
-             \n\
-             It is built separately, because a `cargo build` of this CLI cannot\n\
-             depend on a wasm toolchain. From the repository root:\n\
-             \n    cargo install wasm-pack        # once\n\
-             \n    wasm-pack build wasm --target web --out-dir ../explorer/pkg\n\
-             \n\
-             Then re-run, or point at it with --explorer-pkg <dir> or\n\
-             FROGQL_EXPLORER_PKG."
-        );
-        std::process::exit(2);
-    };
+    let pkg = find_pkg(pkg_hint);
 
     let ltj = db.with_extension(
         db.extension()
@@ -90,7 +90,10 @@ pub fn serve(db: &Path, port: u16, pkg_hint: Option<&Path>) -> std::io::Result<(
         size as f64 / 1e6,
         if has_ltj { " + .ltj" } else { "" }
     );
-    println!("  page from this binary, wasm from {}", pkg.display());
+    match &pkg {
+        Some(p) => println!("  page from this binary, wasm from {}", p.display()),
+        None => println!("  page and wasm from this binary"),
+    }
     println!("  Ctrl-C to stop");
 
     for stream in listener.incoming() {
@@ -98,7 +101,7 @@ pub fn serve(db: &Path, port: u16, pkg_hint: Option<&Path>) -> std::io::Result<(
         // One at a time. A browser opens a handful of connections for one
         // page and nobody else is on this port; a thread pool here would
         // be machinery in search of a problem.
-        if let Err(e) = handle(stream, db, &ltj, has_ltj, &pkg, &name) {
+        if let Err(e) = handle(stream, db, &ltj, has_ltj, pkg.as_deref(), &name) {
             eprintln!("  request failed: {e}");
         }
     }
@@ -110,7 +113,7 @@ fn handle(
     db: &Path,
     ltj: &Path,
     has_ltj: bool,
-    pkg: &Path,
+    pkg: Option<&Path>,
     name: &str,
 ) -> std::io::Result<()> {
     let mut line = String::new();
@@ -153,7 +156,19 @@ fn handle(
             } else {
                 "application/octet-stream"
             };
-            file(&mut s, &pkg.join(leaf), ct)
+            // A live build wins, so editing the crate and rebuilding the
+            // package is enough to see the change.
+            if let Some(dir) = pkg {
+                let p = dir.join(leaf);
+                if p.is_file() {
+                    return file(&mut s, &p, ct);
+                }
+            }
+            match leaf {
+                "frogql_wasm.js" => text(&mut s, ct, WASM_JS.as_bytes()),
+                "frogql_wasm_bg.wasm" => text(&mut s, ct, WASM_BIN),
+                _ => not_found(&mut s),
+            }
         }
         _ => not_found(&mut s),
     }

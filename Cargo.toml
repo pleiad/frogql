@@ -1,6 +1,6 @@
 [package]
 name = "frogql"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2021"
 # MSRV of the engine library (default-features = false). Verified by
 # building `--lib --no-default-features` on 1.71.0. Clippy reads this and
@@ -40,6 +40,11 @@ include = [
     # crate's output; it was never part of it.
     "/explorer/index.html",
     "/explorer/worker.js",
+    # And the wasm itself, so `cargo install frogql && frogql --serve`
+    # works on a machine with no wasm toolchain. 1.7 MB, which compresses
+    # to a fraction of the 10 MiB crates.io allows.
+    "/explorer/embed/frogql_wasm.js",
+    "/explorer/embed/frogql_wasm_bg.wasm",
 ]
 
 # What `dist` ships in the CLI release archives. Only the REPL binary is

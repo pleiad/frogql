@@ -207,6 +207,16 @@ Cut a release by bumping **six files** in lock-step plus regenerating `Cargo.loc
 - `node/package.json` (host version + the 5 `optionalDependencies` versions)
 - `wasm/Cargo.toml` (semver; the published `frogql-wasm` version is derived from it by wasm-pack)
 
+Also run **`just embed-wasm`** and commit the result. `frogql --serve`
+compiles `explorer/embed/` into the binary so it works from a bare
+`cargo install`, which means that copy is what ships and nothing
+rebuilds it — the same trap `node/index.js` has, and 0.5.6/0.5.7 are
+what it looks like unhandled: both shipped a `--serve` that printed
+build instructions instead of serving. CI diffs the generated JS shim
+against the committed one, which catches a changed *surface*; a change
+confined to the engine's internals it cannot see, so the bump is where
+the refresh has to happen.
+
 Then `git tag vX.Y.Z && git push origin vX.Y.Z`. All four registries reject re-publishing, so always bump. The npm release also requires `node/index.js` + `node/index.d.ts` to be committed at the tagged SHA; **regenerate them with `npm run build` inside `node/` on every version bump**, not only when the API surface changes, and commit the diff.
 
 The "every bump" part is easy to miss and was: `napi build` bakes the version into the loader's `NAPI_RS_ENFORCE_VERSION_CHECK` guard, one copy per platform, so a committed `index.js` generated at `0.4.2` still said `0.4.2` at `0.5.1` — fourteen stale literals in a file nobody re-reads. It is dormant because the check is opt-in (`NAPI_RS_ENFORCE_VERSION_CHECK` unset means skip), which is exactly why it survived two releases: a consumer who *does* set it gets "Native binding package version mismatch, expected 0.4.2" on a correctly-installed 0.5.1.

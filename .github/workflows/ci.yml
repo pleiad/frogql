@@ -94,3 +94,17 @@ jobs:
         run: wasm-pack build wasm --target nodejs --out-dir ../pkg-smoke
       - name: Smoke test
         run: node wasm/smoke/smoke.cjs
+      # `frogql --serve` compiles `explorer/embed/` into the binary, so a
+      # stale copy ships an explorer that does not match the engine beside
+      # it. The generated JS shim is derived from the binding's surface, so
+      # a method added to `wasm/src/lib.rs` without a refresh shows up here
+      # as a diff. It does not catch a pure-internals change — for that the
+      # discipline is the release ritual, the same one `node/index.js` has.
+      - name: The embedded wasm is current
+        run: |
+          wasm-pack build wasm --target web --out-dir ../explorer/pkg
+          if ! diff -q explorer/pkg/frogql_wasm.js explorer/embed/frogql_wasm.js; then
+            echo "::error::explorer/embed/ is stale. Run: just embed-wasm"
+            diff explorer/pkg/frogql_wasm.js explorer/embed/frogql_wasm.js | head -40
+            exit 1
+          fi
