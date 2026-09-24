@@ -5,6 +5,7 @@
 //!   frogql <database.gdb> --import-csv <dir> [--no-typecheck]       # create from CSV (spanner_import_config.json)
 //!   frogql <database.gdb> --import-ldbc-csv <dir> [--no-typecheck]  # create from LDBC SNB CsvBasic dataset
 //!   frogql <database.gdb> --import-json <file> [--no-typecheck]     # create from JSON
+//!   frogql --serve <database.gdb> [--port N]                    # open it in a browser
 //!   frogql --help | --version
 //!
 //! `--no-auto-indexes` is CLI sugar for `FROGQL_DISABLE_AUTO_INDEXES=1`
@@ -52,10 +53,16 @@ fn usage(prog: &str) -> String {
   {prog} <database.gdb> --import-csv <dir> [--no-typecheck]       # create from CSV (spanner_import_config.json)
   {prog} <database.gdb> --import-ldbc-csv <dir> [--no-typecheck]  # create from LDBC SNB CsvBasic dataset
   {prog} <database.gdb> --import-json <file> [--no-typecheck]     # create from JSON
+  {prog} --serve <database.gdb> [--port N]                        # open it in a browser
 
 A database that does not exist yet is created empty, sqlite3-style.
 
 Options:
+  --serve             serve the browser explorer with this database loaded,
+                      on 127.0.0.1 (default port 8777). Needs the wasm
+                      package; the error says how to build it
+  --port <n>          port for --serve (default 8777)
+  --explorer-pkg <d>  where the explorer's wasm package lives
   --no-typecheck      skip the typechecker for this session (default: on)
   --no-auto-indexes   skip the secondary-index auto-build at open (default: on)
   --auto-indexes <k>  which kinds to auto-build: both (default), hash, btree, none
@@ -64,6 +71,13 @@ Options:
   -V, --version       print the version and exit"
     )
 }
+
+// In a subdirectory, not `src/bin/serve.rs`: cargo auto-discovers every
+// `src/bin/*.rs` as its own binary, and this one has no `main`. A
+// directory without `main.rs` is not a target, so it stays what it is —
+// a module of the REPL binary.
+#[path = "serve/mod.rs"]
+mod serve;
 
 fn main() {
     let mut args: Vec<String> = env::args().collect();
@@ -100,6 +114,49 @@ fn main() {
     // env var stays the single source of truth: every kill switch in the
     // engine is env-driven so a differential test can A/B one flag without
     // a rebuild.
+    // `--serve` takes over entirely: it never opens the database in this
+    // process, it hands the bytes to a browser that opens its own copy.
+    if let Some(i) = args.iter().position(|a| a == "--serve") {
+        let take_after = |flag: &str| -> Option<String> {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|j| args.get(j + 1).cloned())
+        };
+        let port: u16 = take_after("--port")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(8777);
+        let pkg = take_after("--explorer-pkg");
+        // The database is the positional argument, wherever it sits
+        // relative to the flags.
+        let flags: std::collections::HashSet<String> = [
+            "--serve".into(),
+            "--port".into(),
+            "--explorer-pkg".into(),
+            port.to_string(),
+            pkg.clone().unwrap_or_default(),
+        ]
+        .into_iter()
+        .collect();
+        let db = args[1..]
+            .iter()
+            .find(|a| !a.starts_with("--") && !flags.contains(*a));
+        let Some(db) = db else {
+            eprintln!("usage: {prog} --serve <database.gdb> [--port N] [--explorer-pkg <dir>]");
+            std::process::exit(2);
+        };
+        let db = Path::new(db);
+        if !db.is_file() {
+            eprintln!("error: {} does not exist", db.display());
+            std::process::exit(2);
+        }
+        let _ = i;
+        if let Err(e) = serve::serve(db, port, pkg.as_deref().map(Path::new)) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let auto_indexes = !args.iter().any(|a| a == "--no-auto-indexes");
     args.retain(|a| a != "--no-auto-indexes");
     if !auto_indexes {

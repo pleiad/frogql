@@ -1176,6 +1176,38 @@ function showCheck(m) {
   $("tc").innerHTML = out.join("");
 }
 
+
+// ---- served by `frogql --serve` --------------------------------------------
+// The page works from a file picker on any static host. When it is served
+// by the CLI there is already a database on the other end, and asking the
+// reader to go find it on their own disk would be absurd — so it asks,
+// and loads it if the answer is yes. A plain static host answers 404 and
+// nothing happens.
+(async () => {
+  let man;
+  try {
+    const res = await fetch("./manifest.json", { cache: "no-store" });
+    if (!res.ok) return;
+    man = await res.json();
+  } catch { return; }
+
+  $("gdbName").textContent = man.name;
+  $("ltjName").textContent = man.ltj ? man.name + ".ltj" : "sin índice servido";
+  // The picker stays, but a served page has no use for it.
+  document.querySelectorAll("label.file input").forEach((i) => (i.disabled = true));
+  say("descargando…");
+
+  const grab = async (u) => new Uint8Array(await (await fetch(u)).arrayBuffer());
+  try {
+    if (man.ltj) {
+      const l = await grab("./db.ltj");
+      w.postMessage({ op: "file", which: "ltj", bytes: l.buffer }, [l.buffer]);
+    }
+    const g = await grab("./db");
+    w.postMessage({ op: "file", which: "gdb", bytes: g.buffer }, [g.buffer]);
+  } catch (e) { fail(e); }
+})();
+
 // ---- splitters -------------------------------------------------------------
 // Both drawings size their canvas when they are built, so a resize is not
 // a CSS-only affair: the panes have to be re-rendered once the drag ends.

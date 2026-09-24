@@ -5,12 +5,44 @@ as a drawing. No server, no build step, no bundler — two files and the
 wasm package.
 
 ```bash
-wasm-pack build wasm --target web --out-dir explorer/pkg
+wasm-pack build wasm --target web --out-dir explorer/pkg   # once
+frogql --serve santiago.gdb                                # then this
+```
+
+`--serve` binds `127.0.0.1:8777` and hands the browser the page, the
+database and its `.ltj` if one is beside it; the page notices and loads
+them without a file picker. `--port` moves it, `--explorer-pkg` says
+where the wasm package is when it is not in the usual places.
+
+Any static host works too — the page falls back to the picker when there
+is no `manifest.json` to answer it:
+
+```bash
 cd wasm/explorer && python3 -m http.server 8777
 ```
 
-Then open <http://localhost:8777> and pick a `.gdb`. The `.ltj` sidecar
-is optional; see `wasm/README.md` for when it is worth fetching.
+The `.ltj` sidecar is optional; see `wasm/README.md` for when it is worth
+fetching.
+
+## How `--serve` is put together
+
+No dependency: HTTP/1.1 over `std::net::TcpListener`, about a hundred
+lines in `src/bin/serve.rs`. The alternative is a web server in the
+dependency tree of a database CLI, which the Python wheel and the WASM
+build would then have to be kept clear of the way they are kept clear of
+`rustyline` and `ureq`. A static file server for localhost is small
+enough that writing it costs less than gating it.
+
+`index.html` and `worker.js` are compiled into the binary — they are
+plain files in the repo, so embedding costs no build step and the page
+always matches the binary serving it. The **wasm package is not**: it
+comes from `wasm-pack`, and making `cargo build` depend on a wasm
+toolchain would break `cargo install` and the release build. When it is
+missing the error prints the command.
+
+It binds `127.0.0.1`, serves a fixed set of paths, and never joins the
+request path onto the filesystem. It is for looking at your own database,
+not a deployment target.
 
 ## How it is put together
 
