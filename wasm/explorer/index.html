@@ -116,6 +116,7 @@
 
   .pane { display: grid; grid-template-rows: auto 1fr; min-height: 0; min-width: 0;
           background: var(--panel); }
+  #queryPane { grid-template-rows: auto 1fr auto; }
   .pane > header { display: flex; align-items: center; gap: 8px; padding: 7px 12px;
                    border-bottom: 1px solid var(--line); font-size: 11px;
                    text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
@@ -143,6 +144,29 @@
   @media (prefers-color-scheme: dark) {
     .lbl[style] { filter: invert(1) hue-rotate(180deg) brightness(1.5); }
   }
+
+  /* The typechecker's verdict, under the editor rather than in place of
+     the results: it is about the query you are writing, not the answer
+     you got. */
+  #tc { border-top: 1px solid var(--line); padding: 8px 12px; font-size: 12px;
+        max-height: 190px; overflow: auto; }
+  #tc:empty { display: none; }
+  #tc .row { display: flex; gap: 7px; align-items: baseline; margin: 2px 0; }
+  #tc .tag { font: 10px var(--mono); text-transform: uppercase; letter-spacing: .06em;
+             border-radius: 3px; padding: 1px 5px; flex: none; }
+  #tc .ok    { background: var(--accent-soft); color: var(--accent); }
+  #tc .empty { background: #fdf0d8; color: #8a5a12; }
+  #tc .err   { background: #fbe3dc; color: #8a3520; }
+  #tc .warn  { background: #fdf0d8; color: #8a5a12; }
+  #tc .vars { display: grid; grid-template-columns: auto 1fr; gap: 1px 10px;
+              font: 11px var(--mono); margin-top: 6px;
+              border-top: 1px dashed var(--line); padding-top: 6px; }
+  #tc .vars b { font-weight: 600; }
+  #tc .vars span { color: var(--muted); word-break: break-word; cursor: help; }
+  @media (prefers-color-scheme: dark) {
+    #tc .empty, #tc .warn { background: #3a2f16; color: #e0bb63; }
+    #tc .err { background: #3d211a; color: #e8917a; }
+  }
 </style>
 
 <aside>
@@ -165,13 +189,14 @@
 
 <main>
   <div class="top">
-    <section class="pane">
+    <section class="pane" id="queryPane">
       <header>Consulta
         <span class="grow"></span>
         <button class="go" id="run" disabled>Ejecutar ⌘↵</button>
       </header>
       <div class="ed"><pre id="hl" aria-hidden="true"></pre><textarea id="q"
         spellcheck="false" placeholder="(n)-[e]->(m)"></textarea></div>
+      <div id="tc"></div>
     </section>
     <div class="split v" id="splitQ"></div>
     <section class="pane" id="schemaPane">
@@ -224,6 +249,7 @@ w.onmessage = ({ data: m }) => {
   if (m.ev === "status") return say(m.text);
   if (m.ev === "error")  return fail(m.msg);
   if (m.ev === "opened") return opened(m);
+  if (m.ev === "check")  return showCheck(m);
   if (m.ev === "rows") {
     rows = m.rows;
     rowsLayout = null;   // a new answer is a new drawing
@@ -260,6 +286,7 @@ function opened(m) {
     paint();
   }
   say(`lista (${m.ms} ms)`);
+  requestCheck();
   drawSchema();
   setView("table");
 }
@@ -1057,6 +1084,71 @@ function closeInspector() {
   if (sscene) sscene.sel = null;
 }
 
+
+
+// ---- what the typechecker knows --------------------------------------------
+// froGQL's point is that a pattern is checked against the graph's type
+// before it runs. A bare "0 filas" throws that away: it reads as "no such
+// data" when the truth may be "this pattern cannot match, and here is
+// why". Shown while typing, because that is when it can still change what
+// you write.
+let checkSeq = 0;
+function requestCheck() {
+  const q = $("q").value.trim();
+  if (!q) { $("tc").innerHTML = ""; return; }
+  w.postMessage({ op: "check", q, seq: ++checkSeq });
+}
+$("q").addEventListener("input", () => {
+  clearTimeout(requestCheck._t);
+  requestCheck._t = setTimeout(requestCheck, 250);
+});
+
+
+// An unconstrained edge variable types as the union of every edge type in
+// the schema, properties and all — thousands of characters that bury the
+// one thing a reader wants, which is *which* types it could be. The full
+// text stays on the title attribute; this is what is shown.
+function shortType(t) {
+  if (t === "⊥" || t === "") return t || "—";
+  // Drop property blocks: the labels carry the answer, and the property
+  // lists are already in the schema pane.
+  let x = t.replace(/\s*\{[^{}]*\}/g, "");
+  // Collapse the lattice's brackets and the `& *` every inferred label
+  // carries; neither says anything here.
+  x = x.replace(/[⸨⸩]/g, "").replace(/\s*&\s*\*/g, "");
+  const parts = x.split(" + ").map((p) => p.trim()).filter(Boolean);
+  const uniq = [...new Set(parts)];
+  if (uniq.length <= 2) return uniq.join("  |  ");
+  return `${uniq.slice(0, 2).join("  |  ")}  +${uniq.length - 2} más`;
+}
+
+function showCheck(m) {
+  if (m.seq !== checkSeq) return;      // an older verdict, newer text
+  const r = m.r, out = [];
+  const row = (cls, tag, text) =>
+    `<div class="row"><span class="tag ${cls}">${tag}</span><span>${esc(text)}</span></div>`;
+
+  if (!r.ok) {
+    for (const e of r.errors)
+      out.push(row("err", r.kind === "parse" ? "sintaxis" : "tipo", e));
+  } else if (r.empty) {
+    // The headline case, and the one that sent a reader hunting for
+    // missing data: the schema proves the pattern matches nothing.
+    out.push(row("empty", "vacía",
+      "el esquema demuestra que este patrón no puede coincidir — mira el diagrama"));
+  } else {
+    out.push(row("ok", "ok", "el patrón coincide con el esquema"));
+  }
+  for (const wn of r.warnings) out.push(row("warn", "aviso", wn));
+
+  if (r.vars.length) {
+    out.push(`<div class="vars">` +
+      r.vars.map((v) =>
+        `<b>${esc(v.name)}</b><span title="${esc(v.type)}">${esc(shortType(v.type))}</span>`)
+        .join("") + `</div>`);
+  }
+  $("tc").innerHTML = out.join("");
+}
 
 // ---- splitters -------------------------------------------------------------
 // Both drawings size their canvas when they are built, so a resize is not

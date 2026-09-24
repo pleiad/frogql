@@ -27,6 +27,12 @@ onmessage = async (ev) => {
       if (gdb) open();
     } else if (m.op === "query") {
       query(m.q, m.limit);
+    } else if (m.op === "check") {
+      // Typechecking is parse + elaborate + check with no graph access,
+      // so it is cheap enough to answer while the reader is still typing.
+      // `seq` is echoed back because answers can outrun each other and a
+      // stale verdict shown against newer text is worse than none.
+      if (conn) send({ ev: "check", seq: m.seq, r: conn.check(m.q) });
     }
   } catch (e) { fail(e); }
 };

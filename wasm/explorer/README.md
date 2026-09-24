@@ -78,6 +78,36 @@ every box rather than the midpoint come what may, and a type with several
 relationships to itself gets one ring per relationship with the labels
 stacked around its centre.
 
+## The typechecker answers before the runtime does
+
+froGQL's point is that a pattern is checked against the graph's type
+before it runs, and a bare "0 filas" throws that away: it reads as *no
+such data* when the truth may be *this pattern cannot match*. A strip
+under the editor says which, updated while you type.
+
+`Connection::check(query)` runs parse → elaborate → typecheck with no
+optimizer pass and no graph access, so it is cheap on every keystroke,
+and returns what the pipeline otherwise drops:
+
+- **`empty`** — the schema proves the pattern matches nothing. This is
+  the case that sends a reader hunting for missing data: on a schema
+  where every `EN_CALLE` points *into* `Calle`, `(n:Calle)-[e]->(m)` is
+  provably empty, and the diagram beside it shows why.
+- **errors**, separated into syntax and type.
+- **warnings**, such as a label that is not in the schema.
+- **`vars`** — what the checker *inferred* for each variable, which is
+  the part no amount of re-reading the query tells you. An impossible
+  variable shows `⊥`.
+
+Inferred types are shown short: an unconstrained edge variable types as
+the union of every edge type in the schema, properties included, which
+buries the one thing worth reading. Labels are kept, property blocks
+dropped, unions past two summarised — the full text is on the tooltip.
+
+The pipeline is run directly rather than through
+`compile_query_with_diagnostics_with`, which returns the compiled query
+and discards the `TypeEnvironment`.
+
 ## A colour means one thing everywhere
 
 Each node type gets a hue, assigned once from the schema. The schema

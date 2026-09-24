@@ -184,6 +184,70 @@ impl Connection {
 
     /// `{ node_labels, edge_labels, node_count, edge_count }`, mirroring
     /// the Python/Node `schema()` summary.
+    /// What the typechecker knows about a query, without running it.
+    ///
+    /// This is the half of froGQL a REPL shows and a bare "0 rows" hides.
+    /// `(n:Calle)-[e]->(m)` against a schema where every `EN_CALLE` points
+    /// *into* `Calle` is not an empty answer, it is a **provably** empty
+    /// one — the checker settles it before the runtime is asked, and
+    /// saying "0 filas" instead sends the reader looking for missing data
+    /// that was never missing.
+    ///
+    /// ```json
+    /// { "ok": true, "empty": true, "errors": [], "warnings": [...],
+    ///   "vars": [{ "name": "n", "type": "(:Calle {...})" }] }
+    /// ```
+    ///
+    /// The pipeline is run here rather than through
+    /// `compile_query_with_diagnostics_with` because that returns the
+    /// compiled query and drops the `TypeEnvironment` — and the
+    /// environment is the interesting part: it is what the checker
+    /// *inferred*, per variable, which no amount of reading the query
+    /// back tells you.
+    ///
+    /// Cheap enough to run on every keystroke: parse, elaborate and check,
+    /// with no optimizer pass and no graph access at all.
+    pub fn check(&self, query: &str) -> Result<JsValue, JsError> {
+        use frogql_core::typing::checker::Typechecker;
+
+        let ast = match frogql_core::parser::parse_query(query) {
+            Ok(a) => a,
+            Err(e) => {
+                return to_js(&json!({
+                    "ok": false, "empty": false, "kind": "parse",
+                    "errors": [e], "warnings": [], "vars": [],
+                }))
+            }
+        };
+        let q = frogql_core::elaborate::elaborate_query(ast);
+        let mut tc = Typechecker::new(self.active_schema());
+        let r = tc.check_query(&q);
+
+        let mut vars: Vec<Json> = r
+            .env
+            .keys()
+            .into_iter()
+            .map(|k| {
+                json!({
+                    "name": k,
+                    "type": r.env.get(k).map(|t| format!("{t}")).unwrap_or_default(),
+                })
+            })
+            .collect();
+        // Stable order: a panel that reshuffles on every keystroke is
+        // harder to read than one that grows.
+        vars.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+
+        to_js(&json!({
+            "ok": r.ok,
+            "empty": r.empty,
+            "kind": if r.ok { "ok" } else { "type" },
+            "errors": tc.errors,
+            "warnings": tc.warnings,
+            "vars": vars,
+        }))
+    }
+
     /// The active GRAPH TYPE, rendered the way `SHOW GRAPH TYPE DEFAULT`
     /// renders it in the REPL: one line per node type and one per edge
     /// type, with the properties each carries.
