@@ -147,6 +147,10 @@ fn rewrite(p: PathPattern) -> PathPattern {
             prefix,
             pattern: Box::new(rewrite(*pattern)),
         },
+        PathPattern::Named { var, pattern } => PathPattern::Named {
+            var,
+            pattern: Box::new(rewrite(*pattern)),
+        },
         // Leaf patterns — no rewriting needed
         other => other,
     }
@@ -287,7 +291,11 @@ fn walk_kinds(p: &PathPattern, acc: &mut HashMap<String, VarKind>) {
             walk_kinds(a, acc);
             walk_kinds(b, acc);
         }
-        PathPattern::Filter(inner, _) | PathPattern::Questioned(inner) => walk_kinds(inner, acc),
+        // `p = ...` is transparent: without this arm a named path hid every
+        // variable in it, so no WHERE conjunct was ever pushed into one.
+        PathPattern::Filter(inner, _)
+        | PathPattern::Questioned(inner)
+        | PathPattern::Named { pattern: inner, .. } => walk_kinds(inner, acc),
         PathPattern::Repeat { pattern, .. } => walk_kinds(pattern, acc),
         PathPattern::Selected { prefix, pattern } => {
             if prefix.search == PathSearch::All {
