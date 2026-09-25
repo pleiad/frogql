@@ -227,3 +227,62 @@ fn pinned_zero_hop_binds_empty_group() {
     assert_eq!(rows[0][0], Value::List(vec![]));
     assert_eq!(rows[0][1], Value::Int(5));
 }
+
+// --- Unbounded repetition under a §16.6 prefix -------------------------
+//
+// `Concat(left, (inner){lb,})` starts the finite search (SHORTEST or a
+// restrictive mode) only from the nodes the left rows end on
+// (`try_seeded_unbounded_repetition`). Unseeded, the search ran from every
+// node and the join discarded the rest: all-pairs shortest walks, which
+// took a 2 610-node street graph past 2.9 GB for a query pinning one
+// corner. The answer must not change.
+
+#[test]
+fn differential_unbounded_shortest_named() {
+    assert_differential(
+        "MATCH ANY SHORTEST (a:N WHERE a.id = 0)-[e:R]->+(b) RETURN b.id AS b, e AS e",
+    );
+}
+
+#[test]
+fn differential_unbounded_shortest_star() {
+    assert_differential(
+        "MATCH ANY SHORTEST (a:N WHERE a.id = 1)-[e:R]->*(b) RETURN b.id AS b, e AS e",
+    );
+}
+
+#[test]
+fn differential_unbounded_shortest_groups() {
+    assert_differential(
+        "MATCH ALL SHORTEST (a:N WHERE a.id = 2)-[e:R]-+(b) RETURN b.id AS b, e AS e",
+    );
+}
+
+#[test]
+fn differential_unbounded_shortest_k() {
+    assert_differential(
+        "MATCH SHORTEST 3 (a:N WHERE a.id = 0)-[e:R]-+(b) RETURN b.id AS b, e AS e",
+    );
+}
+
+#[test]
+fn differential_unbounded_shortest_undirected_tail() {
+    assert_differential(
+        "MATCH ANY SHORTEST (a:N WHERE a.id = 2)-[e:R]->+(d)~[:R]~(u) RETURN u.id AS u, e AS e",
+    );
+}
+
+#[test]
+fn differential_unbounded_trail() {
+    assert_differential("MATCH TRAIL (a:N WHERE a.id = 0)-[e:R]-+(b) RETURN b.id AS b, e AS e");
+}
+
+#[test]
+fn differential_unbounded_acyclic_star() {
+    assert_differential("MATCH ACYCLIC (a:N WHERE a.id = 1)-[e:R]->*(b) RETURN b.id AS b, e AS e");
+}
+
+#[test]
+fn differential_unbounded_no_seed_filter() {
+    assert_differential("MATCH ANY SHORTEST (a:N)-[e:R]->+(b) RETURN a.id AS a, b.id AS b");
+}

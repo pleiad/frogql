@@ -1994,11 +1994,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 None => match self.unbounded_policy.get() {
                     // Length-ordered k-shortest search.
                     UnboundedPolicy::Shortest { count, groups } => {
-                        self.run_repetition_shortest(pattern, *lb, count, groups, limit)
+                        self.run_repetition_shortest(pattern, *lb, count, groups, limit, None)
                     }
                     // Finite enumeration of paths the mode admits.
                     UnboundedPolicy::Mode(mode) => {
-                        self.run_repetition_unbounded_mode(pattern, *lb, mode, limit)
+                        self.run_repetition_unbounded_mode(pattern, *lb, mode, limit, None)
                     }
                     // Infinite under WALK/ALL; the typechecker
                     // (`check_unbounded_repetition`) rejects this, so
@@ -2422,6 +2422,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 {
                     return seeded;
                 }
+                if let Some(ir2) = self.try_seeded_unbounded_repetition(&ir1, pattern, *lb, *ub) {
+                    return Self::hash_join(&ir1, &ir2, limit);
+                }
             }
             _ => {}
         }
@@ -2429,6 +2432,52 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // Fallback: cross-product for complex right-side patterns
         let ir2 = self.run_path_pattern(p2, 0);
         Self::hash_join(&ir1, &ir2, limit)
+    }
+
+    /// Seeded unbounded repetition: evaluate the right operand of
+    /// `Concat(left, (inner){lb,})` with its finite search (§16.6
+    /// `SHORTEST` or a restrictive mode) started only from the nodes the
+    /// left rows end on, instead of from every node in the graph.
+    ///
+    /// The unseeded search computes one budget per `(first, last)` pair of
+    /// the repetition over the whole graph, and the join that follows
+    /// throws away every pair whose `first` the left side never reaches.
+    /// On a 2 610-node street graph that is 6.8 M shortest walks, each a
+    /// materialised row, held at once: several GB of RAM for a query whose
+    /// left side pins a single corner. Seeding changes nothing but the
+    /// start set. Walks rooted at different nodes never meet in either
+    /// search (a walk extends only walks with its own `first`, and every
+    /// budget is keyed by `first`), and restricting the seeds keeps their
+    /// relative order, so each kept root sees exactly the pops, admissions
+    /// and ties it saw before. The result is the old one minus rows the
+    /// join would have dropped.
+    ///
+    /// `None` (→ the global search + join) for a bounded repetition, a
+    /// `WALK ALL` context, or `FROGQL_DISABLE_SEEDED_REPEAT=1`.
+    fn try_seeded_unbounded_repetition(
+        &self,
+        ir1: &IntermediateResult,
+        pattern: &PathPattern,
+        lb: usize,
+        ub: Option<usize>,
+    ) -> Option<IntermediateResult> {
+        if ub.is_some() || std::env::var("FROGQL_DISABLE_SEEDED_REPEAT").is_ok() {
+            return None;
+        }
+        let seeds: HashSet<Id> = ir1
+            .rows
+            .iter()
+            .filter_map(|r| r.path().last_node_id())
+            .collect();
+        match self.unbounded_policy.get() {
+            UnboundedPolicy::Shortest { count, groups } => {
+                Some(self.run_repetition_shortest(pattern, lb, count, groups, 0, Some(&seeds)))
+            }
+            UnboundedPolicy::Mode(mode) => {
+                Some(self.run_repetition_unbounded_mode(pattern, lb, mode, 0, Some(&seeds)))
+            }
+            UnboundedPolicy::Forbidden => None,
+        }
     }
 
     /// Seeded repetition traversal: evaluate `Concat(left, (edge){lb,ub})`
@@ -3024,6 +3073,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         count: usize,
         groups: bool,
         limit: usize,
+        seeds: Option<&HashSet<Id>>,
     ) -> IntermediateResult {
         // Admit `pair` at `len` against the per-pair budget, recording it.
         // Returns whether the path is wanted (and so worth expanding).
@@ -3058,7 +3108,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // `*` admits the length-0 match: one row per node (a == b), the
         // shortest possible path for every self pair.
         let mut result: Vec<ResultRow> = if lb == 0 {
-            self.run_repetition_pattern(p, 0).rows
+            let mut rows = self.run_repetition_pattern(p, 0).rows;
+            if let Some(seeds) = seeds {
+                rows.retain(|r| starts_in(r, seeds));
+            }
+            rows
         } else {
             Vec::new()
         };
@@ -3096,6 +3150,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         let mut heap: BinaryHeap<ShortestEntry> = BinaryHeap::new();
         let mut seq = 0usize;
         for r in &grouped.rows {
+            if seeds.is_some_and(|s| !starts_in(r, s)) {
+                continue;
+            }
             heap.push(ShortestEntry {
                 len: path_edge_len(r.path()),
                 seq,
@@ -3575,11 +3632,16 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         lb: usize,
         mode: PathMode,
         limit: usize,
+        seeds: Option<&HashSet<Id>>,
     ) -> IntermediateResult {
         // `*` admits the length-0 match (a lone node), which trivially
         // satisfies every mode.
         let mut result: Vec<ResultRow> = if lb == 0 {
-            self.run_repetition_pattern(p, 0).rows
+            let mut rows = self.run_repetition_pattern(p, 0).rows;
+            if let Some(seeds) = seeds {
+                rows.retain(|r| starts_in(r, seeds));
+            }
+            rows
         } else {
             Vec::new()
         };
@@ -3611,6 +3673,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         for r in &grouped.rows {
             if self.budget.expired() {
                 break;
+            }
+            if seeds.is_some_and(|s| !starts_in(r, s)) {
+                continue;
             }
             if path_satisfies_mode(r.path(), mode) {
                 if lb <= 1 {
@@ -6159,6 +6224,14 @@ fn numeric_arg(v: &Value) -> Option<f64> {
         Value::Float(x) => Some(*x),
         _ => None,
     }
+}
+
+/// Whether `row`'s path starts at one of `seeds` (the seeded repetition
+/// searches keep only the walks the left operand can reach).
+fn starts_in(row: &ResultRow, seeds: &HashSet<Id>) -> bool {
+    row.path()
+        .first_node_id()
+        .is_some_and(|f| seeds.contains(&f))
 }
 
 #[cfg(test)]
