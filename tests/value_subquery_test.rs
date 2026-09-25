@@ -97,3 +97,65 @@ fn test_value_subquery_distinct_per_outer_row() {
         ]
     );
 }
+
+// --- Aggregate bodies --------------------------------------------------
+//
+// The materialised regime (uncorrelated bodies, and correlated ones the
+// pinned probe declines — every aggregate body) projected row by row, so
+// an aggregate saw one row and no group and came back Null, silently.
+// `project_value_body` now groups the way the parameter-correlated regime
+// always did.
+
+#[test]
+fn uncorrelated_aggregate_body_is_reduced() {
+    let g = graph();
+    let rows = run(
+        &g,
+        "MATCH (p:Person) WHERE p.name = 'Alice' \
+         RETURN VALUE { MATCH (m:Post) RETURN COUNT(m) } AS n",
+    );
+    assert_eq!(rows, vec![vec![Value::Int(2)]]);
+}
+
+#[test]
+fn uncorrelated_collect_list_body_feeds_in() {
+    let g = graph();
+    let rows = run(
+        &g,
+        "MATCH (m:Post) WHERE m.t IN VALUE { \
+             MATCH (x:Post) WHERE x.t = 'late' RETURN COLLECT_LIST(x.t) \
+         } RETURN m.t AS t",
+    );
+    assert_eq!(rows, vec![vec![Value::Str("late".into())]]);
+}
+
+#[test]
+fn correlated_aggregate_body_is_reduced_per_outer_row() {
+    let g = graph();
+    let mut rows = run(
+        &g,
+        "MATCH (p:Person) \
+         RETURN p.name AS name, VALUE { MATCH (p)-[:likes]->(m:Post) RETURN COUNT(m) } AS n",
+    );
+    rows.sort_by_key(|r| format!("{r:?}"));
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Str("Alice".into()), Value::Int(2)],
+            vec![Value::Str("Bob".into()), Value::Int(1)],
+        ]
+    );
+}
+
+/// A correlation tuple with no body rows is the aggregate over the empty
+/// set — `COUNT` is 0 — not the Null a plain projection gives.
+#[test]
+fn aggregate_over_an_empty_bucket_is_the_empty_aggregate() {
+    let g = graph();
+    let rows = run(
+        &g,
+        "MATCH (m:Post) WHERE m.t = 'late' \
+         RETURN VALUE { MATCH (m)-[:likes]->(x) RETURN COUNT(x) } AS n",
+    );
+    assert_eq!(rows, vec![vec![Value::Int(0)]]);
+}

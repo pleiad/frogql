@@ -432,6 +432,11 @@ struct ValueSubqueryCache {
     /// avoids materialising the body across the entire graph when the
     /// outer side binds few distinct tuples (LDBC IC7's arg-max-per-liker).
     pinned: bool,
+    /// What a tuple with no body rows projects to, for a materialised
+    /// `map` (`pinned == false`). `Null` for a plain projection; for an
+    /// aggregate without GROUP BY it is the aggregate over the empty set,
+    /// so `VALUE { ... RETURN COUNT(x) }` over nothing is `0`, not `Null`.
+    empty: Value,
 }
 
 // `G: 'g` is implied by the `&'g G` field; stated explicitly so the
@@ -4520,7 +4525,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 }
                 if !entry.pinned {
                     // Fully materialised: a miss is a genuinely empty bucket.
-                    return ExprResult::Success(Value::Null);
+                    return ExprResult::Success(entry.empty.clone());
                 }
                 // Pinned mode, key not computed yet → compute below.
             }
@@ -4548,7 +4553,14 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     _ => {
                         let mut map = HashMap::new();
                         map.insert(probe.clone(), value.clone());
-                        cache.insert(body_ptr, ValueSubqueryCache { map, pinned: true });
+                        cache.insert(
+                            body_ptr,
+                            ValueSubqueryCache {
+                                map,
+                                pinned: true,
+                                empty: Value::Null,
+                            },
+                        );
                     }
                 }
                 return ExprResult::Success(value);
@@ -4577,26 +4589,50 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             }
         }
 
-        let items = body.returns.as_deref().unwrap_or(&[]);
         let mut map: HashMap<Vec<PathValue>, Value> = HashMap::with_capacity(groups.len());
         for (key, rows) in groups {
-            let mut projected = self.run_row_by_row(items, &rows, /*distinct=*/ false);
-            if let Some(specs) = &body.order_by {
-                sort_projected_rows(&mut projected, specs, /*limit=*/ 1);
-            }
-            let value = projected
-                .first()
-                .and_then(|cols| cols.first())
-                .cloned()
-                .unwrap_or(Value::Null);
-            map.insert(key, value);
+            map.insert(key, self.project_value_body(body, &rows));
         }
+        let empty = self.project_value_body(body, &[]);
 
-        let result = map.get(&probe).cloned().unwrap_or(Value::Null);
-        self.value_subquery_cache
-            .borrow_mut()
-            .insert(body_ptr, ValueSubqueryCache { map, pinned: false });
+        let result = map.get(&probe).cloned().unwrap_or_else(|| empty.clone());
+        self.value_subquery_cache.borrow_mut().insert(
+            body_ptr,
+            ValueSubqueryCache {
+                map,
+                pinned: false,
+                empty,
+            },
+        );
         ExprResult::Success(result)
+    }
+
+    /// The single value a `VALUE { ... }` body yields over `rows`: its one
+    /// RETURN item, grouped and aggregated when the body aggregates or has
+    /// a GROUP BY, then ORDER BY + LIMIT 1.
+    ///
+    /// Every regime goes through here. The materialised one used to
+    /// project row by row whatever the body said, so an aggregate was
+    /// evaluated against a single row with no group to reduce over and
+    /// came back `Null`: `VALUE { MATCH (x) RETURN COLLECT_LIST(x.k) }`
+    /// was silently null, while the parameter-correlated regime answered
+    /// the same body correctly.
+    fn project_value_body(&self, body: &Query, rows: &[ResultRow]) -> Value {
+        let items = body.returns.as_deref().unwrap_or(&[]);
+        let needs_grouping = body.group_by.is_some() || items.iter().any(|it| it.is_aggregate());
+        let mut projected = if needs_grouping {
+            self.run_aggregated(items, body.group_by.as_deref(), rows)
+        } else {
+            self.run_row_by_row(items, rows, /*distinct=*/ false)
+        };
+        if let Some(specs) = &body.order_by {
+            sort_projected_rows(&mut projected, specs, /*limit=*/ 1);
+        }
+        projected
+            .first()
+            .and_then(|cols| cols.first())
+            .cloned()
+            .unwrap_or(Value::Null)
     }
 
     /// Probe a correlated `VALUE { ... }` subquery for one outer row by
@@ -4682,22 +4718,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         let ir = self.run_match_chain(body, /*limit=*/ 0);
         self.correlation_scope.borrow_mut().pop();
 
-        let items = body.returns.as_deref().unwrap_or(&[]);
-        let needs_grouping = body.group_by.is_some() || items.iter().any(|it| it.is_aggregate());
-        let mut projected = if needs_grouping {
-            self.run_aggregated(items, body.group_by.as_deref(), &ir.rows)
-        } else {
-            self.run_row_by_row(items, &ir.rows, /*distinct=*/ false)
-        };
-        if let Some(specs) = &body.order_by {
-            sort_projected_rows(&mut projected, specs, /*limit=*/ 1);
-        }
-        let value = projected
-            .first()
-            .and_then(|cols| cols.first())
-            .cloned()
-            .unwrap_or(Value::Null);
-        ExprResult::Success(value)
+        ExprResult::Success(self.project_value_body(body, &ir.rows))
     }
 
     /// Runtime evaluation of `EXISTS L` and `NOT EXISTS L`. Uncorrelated
