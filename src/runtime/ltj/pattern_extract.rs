@@ -332,7 +332,11 @@ fn try_ltj_inner<G: GraphAccess>(
                     // binding before it descends further.
                     FilterKind::NodeLabel { var_id, .. }
                     | FilterKind::NodeProperty { var_id, .. } => *var_id != pin_var_id,
-                    FilterKind::NodeAttrCmp { .. } | FilterKind::NodeInSet { .. } => true,
+                    // The pin guarantees one required label, not the whole
+                    // expression: a negation or alternative still applies.
+                    FilterKind::NodeLabelExpr { .. }
+                    | FilterKind::NodeAttrCmp { .. }
+                    | FilterKind::NodeInSet { .. } => true,
                 });
             }
         }
@@ -880,7 +884,9 @@ fn estimate_var_weights(num_vars: usize, filters: &[ExtractedFilter], total: usi
                     _ => {}
                 }
             }
-            FilterKind::NodeLabel { var_id, .. } => has_label[*var_id as usize] = true,
+            FilterKind::NodeLabel { var_id, .. } | FilterKind::NodeLabelExpr { var_id, .. } => {
+                has_label[*var_id as usize] = true
+            }
             FilterKind::NodeProperty { .. } => {}
             // A precomputed set is the most selective predicate available,
             // so it binds early — but it is *not* a point: a btree-resolved
@@ -1249,6 +1255,20 @@ fn node_var(
                 kind: FilterKind::NodeLabel {
                     var_id,
                     label: label.to_string(),
+                },
+            });
+        }
+        // `required_labels` keeps only what every match must carry, which
+        // drops negations and alternatives. Anything beyond a plain
+        // conjunction is checked whole, so `(x:!A)` and `(x:A|B)` filter
+        // under LTJ the way they do under the scan.
+        let label = &d.dtype.label;
+        if !label.is_concrete_conjunction() && *label != LabelType::Star {
+            filters.push(ExtractedFilter {
+                depends_on: vec![var_id],
+                kind: FilterKind::NodeLabelExpr {
+                    var_id,
+                    label: label.clone(),
                 },
             });
         }
