@@ -330,6 +330,11 @@ Prefixes scope to one comma operand.
 | `SHORTEST n GROUPS` | every path at the n shortest lengths |
 | `ANY SHORTEST` / `ALL SHORTEST` | the common spellings of `SHORTEST 1 PATHS` / `GROUPS` |
 
+A prefix applies to one comma operand. To apply it to all of them, end the
+pattern list with `KEEP <prefix>` (ISO §16.4): `MATCH (a)-[]->+(b), (b)-[]->(c)
+KEEP ANY SHORTEST` is rewritten to `ANY SHORTEST` on each operand. An operand
+under `KEEP` may carry a path mode but not its own search prefix.
+
 ### 5.6 Named paths
 
 ```gql
