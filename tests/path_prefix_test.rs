@@ -609,3 +609,77 @@ fn any_is_a_label_wildcard() {
     // And `ANY` as a search prefix still works in the same query family.
     assert!(compile_query("MATCH ANY SHORTEST (s)-[]->(t) RETURN s.name").is_ok());
 }
+
+// =====================================================================
+// ISO §16.4 SR 6: `KEEP <prefix>` rewrites to a prefix on every comma
+// operand, so it must behave exactly like writing the prefix per operand.
+// =====================================================================
+
+#[test]
+fn keep_matches_per_operand_prefixes() {
+    let g = graph_diamond();
+    let keep = run_projected(
+        &g,
+        "MATCH (s)-[]->+(t), (t)-[]->(u) KEEP ANY SHORTEST \
+         WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
+    );
+    let explicit = run_projected(
+        &g,
+        "MATCH ANY SHORTEST (s)-[]->+(t), ANY SHORTEST (t)-[]->(u) \
+         WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
+    );
+    assert_eq!(keep, explicit);
+}
+
+#[test]
+fn keep_reaches_every_operand() {
+    let q =
+        compile_query("MATCH (a)-[]->+(b), (b)-[]->+(c) KEEP SHORTEST 2 RETURN a.name").unwrap();
+    let PathPattern::Join(left, right) = q.matches[0].pattern() else {
+        panic!("expected a comma join");
+    };
+    for operand in [left, right] {
+        assert!(
+            matches!(
+                operand.as_ref(),
+                PathPattern::Selected {
+                    prefix: PathPrefix {
+                        search: PathSearch::ShortestPaths { count: 2 },
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "operand not wrapped: {operand:?}"
+        );
+    }
+}
+
+#[test]
+fn keep_moves_an_operand_mode_inside() {
+    // `TRAIL p KEEP SHORTEST 5` ≡ `SHORTEST 5 (TRAIL p)` ≡ `SHORTEST 5 TRAIL p`.
+    let q = compile_query("MATCH TRAIL (s)-[]->+(t) KEEP SHORTEST 5 RETURN s.name").unwrap();
+    assert_eq!(
+        first_prefix(&q),
+        Some(PathPrefix {
+            mode: PathMode::Trail,
+            search: PathSearch::ShortestPaths { count: 5 },
+        })
+    );
+}
+
+#[test]
+fn keep_mode_licenses_unbounded_repetition() {
+    let g = graph_two_routes();
+    let rows = run_projected(
+        &g,
+        "MATCH (s)-[]->+(t) KEEP ACYCLIC WHERE s.name = 'A' AND t.name = 'D' RETURN s.name",
+    );
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn keep_rejects_operand_search_prefix_and_empty_keep() {
+    assert!(compile_query("MATCH ANY SHORTEST (a)-[]->+(b) KEEP SHORTEST 1 RETURN a").is_err());
+    assert!(compile_query("MATCH (a)-[]->+(b) KEEP RETURN a").is_err());
+}

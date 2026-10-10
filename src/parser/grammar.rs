@@ -518,11 +518,32 @@ impl Parser {
     /// AND-ed predicate.
     fn match_clause_body(&mut self) -> Result<PathPattern, String> {
         let mut pattern = self.query()?;
+        if self.eat_keyword("KEEP") {
+            pattern = self.keep_clause(pattern)?;
+        }
         if self.eat(&Token::Where) {
             let expr = self.expr()?;
             pattern = PathPattern::Filter(Box::new(pattern), expr);
         }
         Ok(pattern)
+    }
+
+    /// ISO §16.4 SR 6 `<keep clause>`. `KEEP <prefix>` is purely syntactic:
+    /// every comma operand `PVDECL [PMP] PPE` is rewritten to
+    /// `PVDECL PSP ( PMP PPE )` and the clause disappears, so the typechecker
+    /// and runtime only ever see per-operand prefixes.
+    fn keep_clause(&mut self, pattern: PathPattern) -> Result<PathPattern, String> {
+        let start = self.pos;
+        let keep = self.parse_path_prefix()?;
+        if self.pos == start {
+            return Err("KEEP requires a path pattern prefix (e.g. `KEEP SHORTEST 1`)".to_string());
+        }
+        // `KEEP WALK` (or `KEEP ALL`) parses as a trivial prefix: a no-op.
+        let keep = keep.unwrap_or(PathPrefix {
+            mode: PathMode::Walk,
+            search: PathSearch::All,
+        });
+        apply_keep(pattern, keep)
     }
 
     /// MATCH / OPTIONAL MATCH wrapper; prefixes are parsed by `query()`.
@@ -2965,4 +2986,64 @@ enum EdgeKind {
     Right,
     Left,
     Undirected,
+}
+
+/// Push a KEEP prefix into each comma operand (ISO §16.4 SR 6).
+fn apply_keep(pattern: PathPattern, keep: PathPrefix) -> Result<PathPattern, String> {
+    match pattern {
+        PathPattern::Join(a, b) => Ok(PathPattern::Join(
+            Box::new(apply_keep(*a, keep)?),
+            Box::new(apply_keep(*b, keep)?),
+        )),
+        PathPattern::Named { var, pattern } => Ok(PathPattern::Named {
+            var,
+            pattern: Box::new(apply_keep(*pattern, keep)?),
+        }),
+        PathPattern::Selected { prefix, pattern } => {
+            // SR 6 b) i): an operand under KEEP carries at most a path mode.
+            // `ALL <mode>` is indistinguishable from `<mode>` once parsed,
+            // so it is accepted as a mode prefix.
+            if prefix.search != PathSearch::All {
+                return Err("a path pattern under KEEP shall not contain its own \
+                     path search prefix (ISO §16.4 SR 6)"
+                    .to_string());
+            }
+            let mode = keep_mode(keep.mode, prefix.mode)?;
+            Ok(keep_wrap(
+                PathPrefix {
+                    mode,
+                    search: keep.search,
+                },
+                *pattern,
+            ))
+        }
+        other => Ok(keep_wrap(keep, other)),
+    }
+}
+
+/// `PSP ( PMP PPE )` restricts paths by both modes. froGQL carries one mode
+/// per prefix, so the pair must collapse to a single mode with the same
+/// meaning: equal modes, WALK (no restriction) or ACYCLIC (which implies
+/// both TRAIL and SIMPLE). SIMPLE together with TRAIL has no single-mode
+/// equivalent and is rejected.
+fn keep_mode(outer: PathMode, inner: PathMode) -> Result<PathMode, String> {
+    match (outer, inner) {
+        (a, b) if a == b => Ok(a),
+        (PathMode::Walk, m) | (m, PathMode::Walk) => Ok(m),
+        (PathMode::Acyclic, _) | (_, PathMode::Acyclic) => Ok(PathMode::Acyclic),
+        _ => Err(format!(
+            "KEEP {outer:?} over a {inner:?} path pattern is not supported"
+        )),
+    }
+}
+
+fn keep_wrap(prefix: PathPrefix, pattern: PathPattern) -> PathPattern {
+    if prefix.is_trivial() {
+        pattern
+    } else {
+        PathPattern::Selected {
+            prefix,
+            pattern: Box::new(pattern),
+        }
+    }
 }
