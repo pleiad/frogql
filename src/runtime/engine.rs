@@ -1427,6 +1427,16 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             0
         };
         let mut acc = self.run_path_pattern(first.pattern(), first_limit);
+        // A leading OPTIONAL is an OPTIONAL CALL over the unit working table
+        // (ISO §14.4 SR 4f, §15.1 GR 3c): when it matches nothing it still
+        // yields one row, with every variable it introduces null.
+        if first.is_optional() && acc.rows.is_empty() {
+            let mut padded = Assignment::new();
+            for v in first.pattern().freevars() {
+                padded.extend(v, PathValue::Nothing);
+            }
+            acc = IntermediateResult::new(vec![ResultRow::new(Path(Vec::new()), padded)]);
+        }
         let mut bound_vars: HashSet<String> = first.pattern().freevars();
 
         for m in iter {

@@ -440,7 +440,15 @@ impl Typechecker {
         let (mut env, path) = if first.is_optional() {
             let acc =
                 TypeEnvironment::outer_join(&self.schema, &TypeEnvironment::new(), &first_r.env);
-            (acc, first_r.path)
+            // A leading OPTIONAL that cannot match still yields a null row
+            // (ISO §15.1 GR 3c), so its unsatisfiable path must not mark the
+            // query empty.
+            let path = if first_r.path.is_unsatisfiable() {
+                PathType::default()
+            } else {
+                first_r.path
+            };
+            (acc, path)
         } else {
             (first_r.env, first_r.path)
         };
