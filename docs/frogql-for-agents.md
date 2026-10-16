@@ -106,6 +106,20 @@ Same surface, camelCased: `open`, `importJson`, `importCsv`, and
 `execute(query, limit?)`, `save()`, `schema()`, `graphTypes()`,
 `nodeCount`, `edgeCount`.
 
+### Rust
+
+```rust
+let conn = frogql::Connection::open("movies.gdb")?;   // creates it if absent
+conn.execute("INSERT (:Movie {title: 'Arrival', released: 2016})")?;
+conn.save()?;
+let rows = conn.query("MATCH (m:Movie) RETURN m.title AS title")?;
+for row in rows.iter() { println!("{:?}", row.get("title")); }
+```
+
+Depend on `frogql` with `default-features = false`. Nodes and edges come
+back as `Value::Node(id)` / `Value::Edge(id)`; `conn.node(id)` resolves
+labels and properties. Full guide: [`rust-embedding.md`](rust-embedding.md).
+
 ### Browser (WASM)
 
 `frogql-wasm` wraps the in-memory store only: `open_json(json)` →

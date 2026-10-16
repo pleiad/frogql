@@ -88,7 +88,18 @@ pip install frogql
 ```
 Wheels ship for CPython 3.8+ on Linux (x86_64, aarch64), macOS (x86_64, arm64), and Windows (x86_64).
 
-**Library / from source**:
+**Rust library (embedded, like SQLite)**:
+```toml
+[dependencies]
+frogql = { version = "0.5.11", default-features = false }
+```
+```rust
+let conn = frogql::Connection::open("movies.gdb")?;
+let rows = conn.query("MATCH (m:Movie) RETURN m.title AS title")?;
+```
+Full guide: [`docs/rust-embedding.md`](docs/rust-embedding.md).
+
+**From source**:
 ```bash
 cargo build --release
 ```
@@ -305,6 +316,7 @@ Other binaries in `src/bin/`:
 
 User-facing:
 - [`docs/frogql-for-agents.md`](docs/frogql-for-agents.md) — **the whole surface in one file, written for an AI coding agent**: the Cypher-isms that do not parse, the functions that do exist, and what froGQL deliberately lacks
+- [`docs/rust-embedding.md`](docs/rust-embedding.md) — use froGQL as an embedded database from Rust (`frogql::Connection`)
 - [`docs/data-import.md`](docs/data-import.md) — CSV / LDBC / JSON loaders
 - [`docs/query-language.md`](docs/query-language.md) — `MATCH`, `OPTIONAL MATCH`, `EXISTS`, repetition, label algebra
 - [`docs/data-modification.md`](docs/data-modification.md) — ISO §13 surface (`INSERT`, `SET`, `REMOVE`, `DELETE`), persistence, dumps

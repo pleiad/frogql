@@ -5467,7 +5467,7 @@ fn sum_values(values: &[Value]) -> Value {
 /// row value). Repetition `Group(...)` becomes `Value::List(...)` so a
 /// `RETURN y` after `MATCH (x)-[y]->{1,n}()` lands as a list of edge
 /// references instead of collapsing to NULL.
-fn path_value_to_value(pv: &PathValue) -> Value {
+pub(crate) fn path_value_to_value(pv: &PathValue) -> Value {
     match pv {
         PathValue::Node(id) => Value::Node(*id),
         PathValue::EdgeDirectional(id) | PathValue::EdgeUndirectional(id) => Value::Edge(*id),

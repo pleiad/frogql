@@ -287,6 +287,7 @@ The optimizer is reserved for performance-preserving transforms (predicate pushd
 
 ### Entry points
 
+- `Connection::open(path)` (`src/connection.rs`) — **the embedded Rust API**, the counterpart of the Python/Node `Connection`: `execute` / `query` / `save`, routes queries, DML and DDL, keeps the TripleIndex warm and delta-refreshed across DML. User guide `docs/rust-embedding.md`, tests `tests/connection_test.rs`. The bindings still carry their own copy of this dispatch; a change to it belongs in all three
 - `compile(query) → PathPattern` — parse + elaborate + typecheck + optimize a path pattern string
 - `compile_query(input) → Query` — parse a full `MATCH ... WHERE ... RETURN` query
 - `compile_query_with(&Schema, input) → Query` — same, but typechecks against a custom schema (used by REPL/Python bindings to honor the active GRAPH TYPE)

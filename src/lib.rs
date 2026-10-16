@@ -1,3 +1,4 @@
+pub mod connection;
 pub mod elaborate;
 pub mod model;
 pub mod optimizer;
@@ -8,6 +9,9 @@ pub mod store;
 pub mod syntax;
 pub mod typing;
 pub mod vector;
+
+pub use connection::{Connection, Element, Error, Modified, Outcome, Row, Rows};
+pub use model::value::Value;
 
 use syntax::path_pattern::PathPattern;
 use syntax::query::{MatchStatement, Query};
