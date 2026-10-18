@@ -1119,7 +1119,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     or_labels, attr
                 );
             }
-            let mut cs = Vec::with_capacity(or_labels.len());
+            let mut cs = Vec::with_capacity(or_labels.len() + 1);
+            // Nodes a label's btree skips (null `attr`), walked last.
+            let mut unindexed: Vec<Id> = Vec::new();
             for l in or_labels {
                 let ids = match self.graph.lookup_node_ordered(&l, attr, asc) {
                     Some(v) => v,
@@ -1133,7 +1135,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                         return None;
                     }
                 };
-                let label_total = self.graph.nodes_with_label(&l)?.len();
+                let labelled = self.graph.nodes_with_label(&l)?;
+                let label_total = labelled.len();
                 if std::env::var("FROGQL_DEBUG_INDEXES").is_ok() {
                     eprintln!(
                         "btree-ltj-real:   {} ids={} label_total={}",
@@ -1142,22 +1145,36 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                         label_total
                     );
                 }
-                // Allow `ids.len() < label_total`: the auto-built btree
+                // Allow `ids.len() < label_total`: a declared btree
                 // omits nodes whose `attr` is null (the index can't key
-                // on `Null`). Walking only the indexed ids is correct
-                // for `NULLS LAST` (the precondition we already
-                // enforce up-front for the primary spec) — null-valued
-                // nodes sort to the end and so can't enter the top-k
-                // unless the requested limit exceeds the non-null
-                // count, in which case the merge produces all the
-                // indexed rows anyway and the caller's downstream sort
-                // / truncation handles the remainder. The common case
-                // (LDBC IC2 with `creationDate < ...`) excludes nulls
-                // up front via 3VL.
+                // on `Null`). Under `NULLS LAST` (the precondition we
+                // already enforce up-front for the primary spec) those
+                // nodes sort after every indexed one, so they can only
+                // matter once the indexed ids are exhausted below the
+                // limit — and then their rows are still owed. They go
+                // on a trailing cursor with no head value, which
+                // `pick_best_cursor` ranks behind every value-bearing
+                // one, so a limit the index satisfies never reaches
+                // them. The common case (LDBC IC2 with `creationDate <
+                // ...`) excludes nulls up front via 3VL.
                 if ids.len() > label_total {
                     return None;
                 }
+                if ids.len() < label_total {
+                    let indexed: HashSet<Id> = ids.iter().copied().collect();
+                    unindexed.extend(labelled.into_iter().filter(|id| !indexed.contains(id)));
+                }
                 cs.push(BtreeMergeCursor::new(self.graph, l, ids, attr));
+            }
+            if !unindexed.is_empty() {
+                unindexed.sort_unstable();
+                unindexed.dedup();
+                cs.push(BtreeMergeCursor::new(
+                    self.graph,
+                    "(unindexed)".into(),
+                    unindexed,
+                    attr,
+                ));
             }
             cs
         };
@@ -6015,7 +6032,10 @@ fn or_candidate_labels_for_var(matches: &[MatchStatement], target: &str) -> Opti
 /// Build a btree-ordered output by bucketing rows on `mu[var_name].id()`
 /// and walking `ordered_ids` in sort order. Rows whose binding for
 /// `var_name` is missing or not a Node go to the "nulls" bucket and
-/// are placed before / after the indexed run per `nulls_first`.
+/// are placed before / after the indexed run per `nulls_first`. So do
+/// rows whose node the index does not hold: the index skips a node whose
+/// property is null (or a value it cannot key), and the full sort places
+/// that row with the nulls. Leaving it in its bucket would drop it.
 /// `limit == 0` means no truncation.
 fn btree_bucket_output(
     rows: Vec<ResultRow>,
@@ -6058,25 +6078,40 @@ fn btree_bucket_output(
         }
         false
     };
-    let push_nulls = |out: &mut Vec<ResultRow>, taken: &mut [Option<ResultRow>]| -> bool {
-        for &i in &nulls {
-            if let Some(r) = taken[i].take() {
-                out.push(r);
-                if out.len() >= cap {
-                    return true;
+    let push_nulls =
+        |out: &mut Vec<ResultRow>, taken: &mut [Option<ResultRow>], nulls: &[usize]| -> bool {
+            for &i in nulls {
+                if let Some(r) = taken[i].take() {
+                    out.push(r);
+                    if out.len() >= cap {
+                        return true;
+                    }
                 }
             }
-        }
-        false
-    };
+            false
+        };
 
     if nulls_first {
-        if push_nulls(&mut out, &mut taken) {
+        // The unindexed nodes have to be known before the indexed run.
+        let indexed: HashSet<Id> = ordered_ids.iter().copied().collect();
+        by_id.retain(|id, idxs| {
+            indexed.contains(id) || {
+                nulls.append(idxs);
+                false
+            }
+        });
+        nulls.sort_unstable();
+        if push_nulls(&mut out, &mut taken, &nulls) {
             return out;
         }
         push_indexed(&mut out, &mut taken, &mut by_id);
     } else if !push_indexed(&mut out, &mut taken, &mut by_id) {
-        push_nulls(&mut out, &mut taken);
+        // Whatever the walk left in `by_id` is a node the index lacks.
+        // Only reached when the indexed run did not fill `cap`, so a
+        // LIMIT that the index satisfies pays nothing for it.
+        nulls.extend(by_id.into_values().flatten());
+        nulls.sort_unstable();
+        push_nulls(&mut out, &mut taken, &nulls);
     }
     out
 }
