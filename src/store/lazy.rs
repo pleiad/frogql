@@ -704,7 +704,13 @@ impl LazyGraphStore {
 
     /// Mutable borrow of the secondary indexes — used by `CREATE / DROP
     /// INDEX` handlers in the REPL and Python bindings.
+    ///
+    /// Such a handler can change the `(label, prop)` pairs the base covers,
+    /// and the overlay delta only files the pairs that existed when it
+    /// absorbed each node. So the delta is dropped here and the next read
+    /// re-absorbs the whole touched log under the new pairs.
     pub fn secondary_indexes_mut(&self) -> RefMut<'_, SecondaryIndex> {
+        self.overlay_index.borrow_mut().clear();
         self.secondary.borrow_mut()
     }
 
@@ -1123,8 +1129,16 @@ impl LazyGraphStore {
         idx: &crate::store::overlay_index::OverlayNodeIndex,
     ) -> Vec<Id> {
         let overlay = self.overlay.borrow();
+        // A node this session created belongs to the delta, which files
+        // every overlay node. The base index can still hold one when the
+        // index was declared mid-session (the build reads the merged
+        // view), and keeping it here would answer for it twice.
         base.into_iter()
-            .filter(|id| !overlay.is_node_deleted(*id) && !idx.is_shadowed(*id))
+            .filter(|id| {
+                *id < overlay.base_node_count
+                    && !overlay.is_node_deleted(*id)
+                    && !idx.is_shadowed(*id)
+            })
             .collect()
     }
 

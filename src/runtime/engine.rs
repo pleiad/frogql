@@ -1027,8 +1027,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// - The pattern has at least one edge — otherwise the LTJ doesn't
     ///   fire and the per-iteration cost degrades to O(n) post-scan.
     /// - The store has a btree on `(label, attr)` for some label on `var`.
-    /// - No aggregates, no GROUP BY, no DISTINCT, no NULLS FIRST.
-    /// - The btree covers every node carrying the label (no nulls).
+    /// - No aggregates, no GROUP BY, no DISTINCT.
+    ///
+    /// The btree may miss nodes of the label: it cannot key a null `attr`.
+    /// Those nodes are walked after the indexed ones (before them under
+    /// NULLS FIRST), which is where the full sort places their rows.
     ///
     /// Falls back to `None` on any precondition miss; caller routes
     /// through the standard `run_match_chain → route_pre_sort` flow.
@@ -1066,9 +1069,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         let SortKey::Expr(Expr::AttrLookup { var, attr }) = &primary.key else {
             return None;
         };
-        if matches!(primary.nulls.unwrap_or(NullsOrder::Last), NullsOrder::First) {
-            return None;
-        }
+        let nulls_first = matches!(primary.nulls.unwrap_or(NullsOrder::Last), NullsOrder::First);
 
         // Edge precondition: the LTJ only fires for patterns that
         // decompose into ≥1 triple, and a triple needs an edge.
@@ -1086,6 +1087,17 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
 
         let asc = matches!(primary.dir, SortDir::Asc);
         let labels = labels_for_var(&query.matches, var);
+        // Nodes of a candidate label that its btree does not hold (their
+        // `attr` is null). The full sort places their rows with the
+        // nulls, so they are walked after the indexed ids, or before
+        // them under NULLS FIRST.
+        let mut unindexed: Vec<Id> = Vec::new();
+        let mut collect_unindexed = |labelled: Vec<Id>, ids: &[Id]| {
+            if labelled.len() > ids.len() {
+                let indexed: HashSet<Id> = ids.iter().copied().collect();
+                unindexed.extend(labelled.into_iter().filter(|id| !indexed.contains(id)));
+            }
+        };
         // Build the ordered-id stream: one btree's `Vec<Id>` for the
         // single-label / And case, or a k-way merge of per-label
         // cursors for `Or`-of-leaves descriptors. Both produce ids in
@@ -1100,10 +1112,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     .lookup_node_ordered(l, attr, asc)
                     .map(|ids| (l.clone(), ids))
             })?;
-            let label_total = self.graph.nodes_with_label(&label)?.len();
-            if ordered_ids.len() != label_total {
+            let labelled = self.graph.nodes_with_label(&label)?;
+            if ordered_ids.len() > labelled.len() {
                 return None;
             }
+            collect_unindexed(labelled, &ordered_ids);
             vec![BtreeMergeCursor::new(self.graph, label, ordered_ids, attr)]
         } else {
             // Multi-label `Or`-of-leaves path: every candidate must
@@ -1119,9 +1132,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     or_labels, attr
                 );
             }
-            let mut cs = Vec::with_capacity(or_labels.len() + 1);
-            // Nodes a label's btree skips (null `attr`), walked last.
-            let mut unindexed: Vec<Id> = Vec::new();
+            let mut cs = Vec::with_capacity(or_labels.len());
             for l in or_labels {
                 let ids = match self.graph.lookup_node_ordered(&l, attr, asc) {
                     Some(v) => v,
@@ -1145,39 +1156,19 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                         label_total
                     );
                 }
-                // Allow `ids.len() < label_total`: a declared btree
+                // `ids.len() < label_total` is allowed: a declared btree
                 // omits nodes whose `attr` is null (the index can't key
-                // on `Null`). Under `NULLS LAST` (the precondition we
-                // already enforce up-front for the primary spec) those
-                // nodes sort after every indexed one, so they can only
-                // matter once the indexed ids are exhausted below the
-                // limit — and then their rows are still owed. They go
-                // on a trailing cursor with no head value, which
-                // `pick_best_cursor` ranks behind every value-bearing
-                // one, so a limit the index satisfies never reaches
-                // them. The common case (LDBC IC2 with `creationDate <
-                // ...`) excludes nulls up front via 3VL.
+                // on `Null`), and those go to `unindexed`.
                 if ids.len() > label_total {
                     return None;
                 }
-                if ids.len() < label_total {
-                    let indexed: HashSet<Id> = ids.iter().copied().collect();
-                    unindexed.extend(labelled.into_iter().filter(|id| !indexed.contains(id)));
-                }
+                collect_unindexed(labelled, &ids);
                 cs.push(BtreeMergeCursor::new(self.graph, l, ids, attr));
-            }
-            if !unindexed.is_empty() {
-                unindexed.sort_unstable();
-                unindexed.dedup();
-                cs.push(BtreeMergeCursor::new(
-                    self.graph,
-                    "(unindexed)".into(),
-                    unindexed,
-                    attr,
-                ));
             }
             cs
         };
+        unindexed.sort_unstable();
+        unindexed.dedup();
 
         let pattern = query.collapsed_pattern();
         let index = self.triple_index();
@@ -1207,22 +1198,40 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // sorted order; secondaries resolve in-memory) and truncate
         // to k. The single-spec case gets the original early-exit at
         // `out.len() >= cap` — no secondary tie-break to consider.
-        let mut last_primary_value: Option<Value> = None;
-        while let Some(idx) = pick_best_cursor(&cursors, asc) {
-            let id = cursors[idx]
-                .current_id()
-                .expect("pick_best_cursor returns only live cursors");
-            let cur_primary = cursors[idx].head_value.clone();
+        // `None` until the first id is processed; then the primary value
+        // of the last one, which is itself `None` for an unindexed node.
+        let mut last_primary_value: Option<Option<Value>> = None;
+        // The walk: the unindexed nodes (primary value null) first under
+        // NULLS FIRST, then the btree cursors in key order, then the
+        // unindexed nodes under NULLS LAST.
+        let mut next_unindexed = 0usize;
+        loop {
+            let take_unindexed = next_unindexed < unindexed.len()
+                && (nulls_first || cursors.iter().all(|c| c.is_done()));
+            let (id, cur_primary, cursor) = if take_unindexed {
+                (unindexed[next_unindexed], None, None)
+            } else if let Some(idx) = pick_best_cursor(&cursors, asc) {
+                let id = cursors[idx]
+                    .current_id()
+                    .expect("pick_best_cursor returns only live cursors");
+                (id, cursors[idx].head_value.clone(), Some(idx))
+            } else {
+                break;
+            };
+            match cursor {
+                Some(idx) => cursors[idx].advance(self.graph, attr),
+                None => next_unindexed += 1,
+            }
 
             if multi_label && !visited.insert(id) {
-                cursors[idx].advance(self.graph, attr);
                 continue;
             }
 
             if !single_spec
                 && out.len() >= cap
-                && last_primary_value.is_some()
-                && cur_primary != last_primary_value
+                && last_primary_value
+                    .as_ref()
+                    .is_some_and(|last| *last != cur_primary)
             {
                 break;
             }
@@ -1234,8 +1243,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     return Some(out);
                 }
             }
-            last_primary_value = cur_primary;
-            cursors[idx].advance(self.graph, attr);
+            last_primary_value = Some(cur_primary);
         }
 
         if !single_spec && specs.len() > 1 && !out.is_empty() {
