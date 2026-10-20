@@ -4875,21 +4875,41 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// was silently null, while the parameter-correlated regime answered
     /// the same body correctly.
     fn project_value_body(&self, body: &Query, rows: &[ResultRow]) -> Value {
+        self.project_ordered_value_rows(body, rows)
+            .first()
+            .and_then(|cols| cols.first())
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
+    /// A `VALUE` body's RETURN over `rows`, in its ORDER BY order.
+    ///
+    /// Makes the split `run_query` makes: a key the parser resolved to a
+    /// RETURN column sorts the projected rows, and an expression key
+    /// (`ORDER BY x.k`, the body returning `x.k` unaliased) sorts the
+    /// binding rows before projecting. The body used to sort projected
+    /// rows whatever the key was, so an expression key reached the
+    /// `unreachable!` in `sort_projected_rows` and took the process down.
+    fn project_ordered_value_rows(&self, body: &Query, rows: &[ResultRow]) -> Vec<Vec<Value>> {
         let items = body.returns.as_deref().unwrap_or(&[]);
         let needs_grouping = body.group_by.is_some() || items.iter().any(|it| it.is_aggregate());
+        let specs = body.order_by.as_deref();
+        let expr_keys =
+            specs.is_some_and(|ss| ss.iter().all(|s| matches!(s.key, SortKey::Expr(_))));
+        if let (Some(specs), true, false) = (specs, expr_keys, needs_grouping) {
+            let mut sorted = rows.to_vec();
+            self.sort_rows(&mut sorted, specs, /*limit=*/ 1);
+            return self.run_row_by_row(items, &sorted, /*distinct=*/ false);
+        }
         let mut projected = if needs_grouping {
             self.run_aggregated(items, body.group_by.as_deref(), rows)
         } else {
             self.run_row_by_row(items, rows, /*distinct=*/ false)
         };
-        if let Some(specs) = &body.order_by {
+        if let Some(specs) = specs {
             sort_projected_rows(&mut projected, specs, /*limit=*/ 1);
         }
         projected
-            .first()
-            .and_then(|cols| cols.first())
-            .cloned()
-            .unwrap_or(Value::Null)
     }
 
     /// Probe a correlated `VALUE { ... }` subquery for one outer row by
@@ -4941,12 +4961,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         }
         let index = self.triple_index();
         let ir = self.pinned_run_multi(&pattern, &index, &pins, 0)?;
-        let mut projected = self.run_row_by_row(items, &ir.rows, /*distinct=*/ false);
-        if let Some(specs) = &body.order_by {
-            sort_projected_rows(&mut projected, specs, /*limit=*/ 1);
-        }
         Some(
-            projected
+            self.project_ordered_value_rows(body, &ir.rows)
                 .first()
                 .and_then(|cols| cols.first())
                 .cloned()

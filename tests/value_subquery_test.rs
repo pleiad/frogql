@@ -159,3 +159,56 @@ fn aggregate_over_an_empty_bucket_is_the_empty_aggregate() {
     );
     assert_eq!(rows, vec![vec![Value::Int(0)]]);
 }
+
+/// `ORDER BY` an expression rather than a RETURN alias. The body sorted
+/// its projected rows whatever the key was, so an expression key hit the
+/// `unreachable!` in `sort_projected_rows` and took the process down.
+#[test]
+fn order_by_an_expression_in_both_regimes() {
+    let g = graph();
+    let mut queries = vec![
+        // The per-row pinned regime: a directed body.
+        "MATCH (p:Person) RETURN p.name AS n, \
+         VALUE { MATCH (p)-[l:likes]->(m) RETURN m.t ORDER BY l.ts DESC LIMIT 1 } AS t",
+        // The materialised regime: the OPTIONAL clause keeps the body
+        // from being pinned.
+        "MATCH (p:Person) RETURN p.name AS n, \
+         VALUE { MATCH (p)-[l:likes]->(m) OPTIONAL MATCH (m)<-[:likes]-(q) \
+                 RETURN m.t ORDER BY l.ts DESC LIMIT 1 } AS t",
+    ];
+    // An unaliased RETURN item sorted by the same expression.
+    queries.push(
+        "MATCH (p:Person) RETURN p.name AS n, \
+         VALUE { MATCH (p)-[l:likes]->(m) RETURN l.ts ORDER BY l.ts ASC LIMIT 1 } AS t",
+    );
+    let expected = [
+        (
+            "Alice",
+            Value::Str("late".into()),
+            Value::Str("early".into()),
+        ),
+        (
+            "Bob",
+            Value::Str("early".into()),
+            Value::Str("early".into()),
+        ),
+    ];
+    for q in &queries[..2] {
+        let mut rows = run(&g, q);
+        rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        assert_eq!(rows.len(), 2, "{q}: {rows:?}");
+        for (row, (name, t, _)) in rows.iter().zip(&expected) {
+            assert_eq!(row[0], Value::Str((*name).into()), "{q}");
+            assert_eq!(&row[1], t, "{q}");
+        }
+    }
+    let mut rows = run(&g, queries[2]);
+    rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Str("Alice".into()), Value::Int(100)],
+            vec![Value::Str("Bob".into()), Value::Int(50)],
+        ]
+    );
+}
