@@ -356,8 +356,8 @@ RETURN c, MIN(path_length(p)) AS d GROUP BY c
 
 Reversed, or with the condition on `c` inside an `EXISTS`, the search
 runs from every `Calle` and the extra ones are dropped afterwards. Same
-rows, far slower. A `VALUE { ... SHORTEST ... }` subquery also searches
-from every node.
+rows, far slower. A `VALUE { ... }` subquery in `RETURN` is fine: it
+searches only from the rows being returned.
 
 ### 5.6 Named paths
 

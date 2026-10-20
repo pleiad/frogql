@@ -384,6 +384,11 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// `get_candidate_nodes`, so a scan — and the endpoint set a shortest
     /// search starts from — covers only values the join would keep.
     candidate_pins: RefCell<HashMap<String, Arc<Vec<Id>>>>,
+    /// Node ids each variable holds across the rows a RETURN is being
+    /// projected over, set only while one carries a subquery. A `VALUE`
+    /// body that has to be materialised reads it to run restricted to the
+    /// correlation values that will actually be probed (`value_body_pins`).
+    value_pins_hint: RefCell<HashMap<String, Arc<Vec<Id>>>>,
     /// Variables with *group* degree of reference (ISO §4.11.5) in the query
     /// being executed: those declared inside a quantified path primary. Set
     /// at the top of `run_query` from the MATCH chain and consulted when
@@ -474,6 +479,42 @@ struct ValueSubqueryCache {
     /// aggregate without GROUP BY it is the aggregate over the empty set,
     /// so `VALUE { ... RETURN COUNT(x) }` over nothing is `0`, not `Null`.
     empty: Value,
+    /// For a `map` materialised with its correlation variables restricted
+    /// to the rows being projected (`value_body_pins`): the node ids each
+    /// variable was restricted to. A tuple inside them that is missing from
+    /// `map` is a genuinely empty bucket; one outside was never computed.
+    coverage: Option<HashMap<String, Arc<Vec<Id>>>>,
+}
+
+impl ValueSubqueryCache {
+    /// Whether a missing `probe` means an empty bucket (`true`) or a
+    /// tuple this map never looked at (`false`).
+    fn covers(&self, keys: &[String], probe: &[PathValue]) -> bool {
+        let Some(cov) = &self.coverage else {
+            return !self.pinned;
+        };
+        keys.iter()
+            .zip(probe)
+            .all(|(k, pv)| match (cov.get(k), pv) {
+                (None, _) => true,
+                (Some(ids), PathValue::Node(id)) => ids.binary_search(id).is_ok(),
+                (Some(_), _) => false,
+            })
+    }
+}
+
+/// Restores `Runtime::value_pins_hint` when a projection ends.
+struct ValueHintGuard<'a> {
+    cell: &'a RefCell<HashMap<String, Arc<Vec<Id>>>>,
+    prev: Option<HashMap<String, Arc<Vec<Id>>>>,
+}
+
+impl Drop for ValueHintGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            *self.cell.borrow_mut() = prev;
+        }
+    }
 }
 
 // `G: 'g` is implied by the `&'g G` field; stated explicitly so the
@@ -489,6 +530,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
             candidate_pins: RefCell::new(HashMap::new()),
+            value_pins_hint: RefCell::new(HashMap::new()),
             group_vars: RefCell::new(HashSet::new()),
             comprehension_scope: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
@@ -512,6 +554,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
             candidate_pins: RefCell::new(HashMap::new()),
+            value_pins_hint: RefCell::new(HashMap::new()),
             group_vars: RefCell::new(HashSet::new()),
             comprehension_scope: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
@@ -1576,6 +1619,93 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         IntermediateResult::new(rows)
     }
 
+    /// Record, for the length of one projection, the node ids each
+    /// variable holds across `rows` — only when a RETURN item carries a
+    /// subquery, the one consumer (`value_body_pins`).
+    fn value_hint_scope(&self, items: &[ReturnItem], rows: &[ResultRow]) -> ValueHintGuard<'_> {
+        let mut guard = ValueHintGuard {
+            cell: &self.value_pins_hint,
+            prev: None,
+        };
+        let wants = items.iter().any(|it| match it {
+            ReturnItem::Expr { expr, .. } => expr.contains_subquery(),
+        });
+        if !wants {
+            return guard;
+        }
+        let mut sets: HashMap<String, Option<HashSet<Id>>> = HashMap::new();
+        for row in rows {
+            for (var, pv) in row.assignment.m.iter() {
+                let slot = sets
+                    .entry(var.clone())
+                    .or_insert_with(|| Some(HashSet::new()));
+                match (slot.as_mut(), pv) {
+                    (Some(set), PathValue::Node(id)) => {
+                        set.insert(*id);
+                    }
+                    _ => *slot = None,
+                }
+            }
+        }
+        let hint: HashMap<String, Arc<Vec<Id>>> = sets
+            .into_iter()
+            .filter_map(|(var, set)| {
+                let mut ids: Vec<Id> = set?.into_iter().collect();
+                ids.sort_unstable();
+                Some((var, Arc::new(ids)))
+            })
+            .collect();
+        guard.prev = Some(std::mem::replace(
+            &mut *self.value_pins_hint.borrow_mut(),
+            hint,
+        ));
+        guard
+    }
+
+    /// The correlation variables of a `VALUE` body that can be restricted
+    /// to the values the projection will probe, with those values.
+    ///
+    /// The materialised regime runs the body once over the whole graph and
+    /// buckets it by correlation tuple, so a body holding a shortest search
+    /// searched from every node to answer the few the outer rows ask about.
+    /// Restricting a correlation variable to the probed values drops only
+    /// buckets nobody probes; the rows inside a probed bucket are the same,
+    /// for the reason `match_pushdown_pins` gives. The same variables are
+    /// left alone: interior variables of a selective pattern and group
+    /// variables. A row the hint does not cover (a `VALUE` in a `WHERE`,
+    /// say) finds its tuple uncovered and recomputes.
+    ///
+    /// `FROGQL_DISABLE_VALUE_SUBQUERY_PIN=1` turns it off with the pinned
+    /// regime.
+    fn value_body_pins(
+        &self,
+        body: &Query,
+        keys: &[String],
+    ) -> Option<HashMap<String, Arc<Vec<Id>>>> {
+        if std::env::var("FROGQL_DISABLE_VALUE_SUBQUERY_PIN").is_ok() {
+            return None;
+        }
+        let hint = self.value_pins_hint.borrow();
+        if hint.is_empty() {
+            return None;
+        }
+        let mut excluded: HashSet<String> = HashSet::new();
+        for m in &body.matches {
+            excluded.extend(m.pattern().group_vars());
+            selective_interior_vars(m.pattern(), &mut excluded);
+        }
+        let pins: HashMap<String, Arc<Vec<Id>>> = keys
+            .iter()
+            .filter(|k| !excluded.contains(*k))
+            .filter_map(|k| hint.get(k).map(|ids| (k.clone(), ids.clone())))
+            .collect();
+        if pins.is_empty() {
+            None
+        } else {
+            Some(pins)
+        }
+    }
+
     /// Node ids each shared variable already holds, for a MATCH clause
     /// that follows others in the chain.
     ///
@@ -1746,6 +1876,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         rows: &[ResultRow],
         distinct: bool,
     ) -> Vec<Vec<Value>> {
+        let _hint = self.value_hint_scope(items, rows);
         let mut projected: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
         // DISTINCT path uses a HashSet via the `GroupKey` wrapper for
         // O(N) dedup. Without this, the naive `projected.contains(&vals)`
@@ -1802,6 +1933,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         explicit_group_by: Option<&[Expr]>,
         rows: &[ResultRow],
     ) -> Vec<Vec<Value>> {
+        let _hint = self.value_hint_scope(items, rows);
         let mut group_indices: Vec<Vec<usize>> = Vec::new();
         let mut key_to_index: HashMap<GroupKey, usize> = HashMap::new();
 
@@ -4632,11 +4764,12 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 if let Some(v) = entry.map.get(&probe) {
                     return ExprResult::Success(v.clone());
                 }
-                if !entry.pinned {
-                    // Fully materialised: a miss is a genuinely empty bucket.
+                if entry.covers(&keys, &probe) {
+                    // Materialised over this tuple: a miss is an empty bucket.
                     return ExprResult::Success(entry.empty.clone());
                 }
-                // Pinned mode, key not computed yet → compute below.
+                // Not computed yet (pinned mode, or outside a restricted
+                // materialisation) → compute below.
             }
         }
 
@@ -4668,6 +4801,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                                 map,
                                 pinned: true,
                                 empty: Value::Null,
+                                coverage: None,
                             },
                         );
                     }
@@ -4677,9 +4811,22 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             // Not pinnable for this row — fall through to materialise-once.
         }
 
-        // Fallback: materialise the body once over the whole graph, bucket
-        // rows by correlation tuple, project + ORDER BY + LIMIT 1 per bucket.
-        let ir = self.run_match_chain(body, /*limit=*/ 0);
+        // Fallback: materialise the body once, bucket rows by correlation
+        // tuple, project + ORDER BY + LIMIT 1 per bucket. Restricted to the
+        // correlation values the projection will probe when it can be.
+        let coverage = self.value_body_pins(body, &keys);
+        let ir = match &coverage {
+            Some(pins) => {
+                let prev = self.candidate_pins.borrow().clone();
+                let mut merged = prev.clone();
+                merged.extend(pins.iter().map(|(k, v)| (k.clone(), v.clone())));
+                *self.candidate_pins.borrow_mut() = merged;
+                let ir = self.run_match_chain(body, /*limit=*/ 0);
+                *self.candidate_pins.borrow_mut() = prev;
+                ir
+            }
+            None => self.run_match_chain(body, /*limit=*/ 0),
+        };
         let mut groups: HashMap<Vec<PathValue>, Vec<ResultRow>> = HashMap::new();
         for row in ir.rows {
             let mut key: Vec<PathValue> = Vec::with_capacity(keys.len());
@@ -4709,8 +4856,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             body_ptr,
             ValueSubqueryCache {
                 map,
-                pinned: false,
+                pinned: coverage.is_some(),
                 empty,
+                coverage,
             },
         );
         ExprResult::Success(result)
