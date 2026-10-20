@@ -1754,7 +1754,7 @@ fn is_orderable_per_iso_22_14(t: &SimpleType) -> bool {
 }
 
 /// Boundary variables are the first/last top-level node variables.
-fn boundary_node_vars(p: &PathPattern) -> (Option<String>, Option<String>) {
+pub(crate) fn boundary_node_vars(p: &PathPattern) -> (Option<String>, Option<String>) {
     let mut vars: Vec<String> = Vec::new();
     collect_top_node_vars(p, &mut vars);
     let left = vars.first().cloned();

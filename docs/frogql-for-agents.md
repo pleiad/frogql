@@ -344,6 +344,21 @@ Prefixes scope to one comma operand.
 | `SHORTEST n GROUPS` | every path at the n shortest lengths |
 | `ANY SHORTEST` / `ALL SHORTEST` | the common spellings of `SHORTEST 1 PATHS` / `GROUPS` |
 
+**Bind the start before you search from it.** A shortest search starts
+from the nodes an *earlier* `MATCH` clause already bound, so write the
+clause that picks the start first:
+
+```
+MATCH (r:Reclamo)-[:EN_CALLE]->(c:Calle) WHERE r.categoria = 'Ruido'
+MATCH p = ANY SHORTEST (c)~[:CRUZA_CON]~*(b:Calle)
+RETURN c, MIN(path_length(p)) AS d GROUP BY c
+```
+
+Reversed, or with the condition on `c` inside an `EXISTS`, the search
+runs from every `Calle` and the extra ones are dropped afterwards. Same
+rows, far slower. A `VALUE { ... SHORTEST ... }` subquery also searches
+from every node.
+
 ### 5.6 Named paths
 
 ```gql
@@ -626,7 +641,7 @@ agent has tried.
 | `UNION` between two queries | path union `\|` between two patterns in one query (§5.3) |
 | `-[:R*1..2]->` | `-[:R]->{1,2}` |
 | `STARTS WITH`, `CONTAINS`, `=~` | no string operators at all |
-| `upper()`, `lower()`, `size()`, `length()`, `substring()`, `split()`, `coalesce()` | no string or list functions |
+| `upper()`, `lower()`, `size()`, `length()`, `substring()`, `split()` | no string or list functions (`coalesce()` does exist) |
 | `$param` | inline the literal; there are no query parameters |
 | `CALL`, `YIELD`, procedures | none |
 | `FOREACH`, `UNWIND` | none |

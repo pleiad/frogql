@@ -104,6 +104,38 @@ fn node_endpoint(p: &PathPattern) -> Option<&PathPattern> {
 /// True for a plain `(x)` / `(x:ANY)` endpoint that constrains nothing —
 /// any node qualifies. Such a side need not be materialized: membership is
 /// universal and the per-node row is synthesized on demand.
+/// Variables declared inside a selective (`ANY` / `SHORTEST`) pattern
+/// other than its two endpoints. Restricting one before the search would
+/// change which path is selected, so `match_pushdown_pins` leaves them.
+fn selective_interior_vars(p: &PathPattern, out: &mut HashSet<String>) {
+    match p {
+        PathPattern::Selected { prefix, pattern } => {
+            if prefix.search != PathSearch::All {
+                let (left, right) = crate::typing::checker::boundary_node_vars(pattern);
+                for v in pattern.freevars() {
+                    if Some(&v) != left.as_ref() && Some(&v) != right.as_ref() {
+                        out.insert(v);
+                    }
+                }
+            }
+            selective_interior_vars(pattern, out);
+        }
+        PathPattern::Concat(a, b) | PathPattern::Union(a, b) | PathPattern::Join(a, b) => {
+            selective_interior_vars(a, out);
+            selective_interior_vars(b, out);
+        }
+        PathPattern::Filter(inner, _)
+        | PathPattern::Questioned(inner)
+        | PathPattern::Repeat { pattern: inner, .. }
+        | PathPattern::Named { pattern: inner, .. } => selective_interior_vars(inner, out),
+        PathPattern::Node(_)
+        | PathPattern::EdgeRight(_)
+        | PathPattern::EdgeLeft(_)
+        | PathPattern::EdgeUndirected(_)
+        | PathPattern::EdgeAnyDirection(_) => {}
+    }
+}
+
 fn is_unconstrained_node(p: &PathPattern) -> bool {
     match node_endpoint(p) {
         Some(PathPattern::Node(None)) => true,
@@ -347,6 +379,11 @@ pub struct Runtime<'g, G: GraphAccess> {
     value_subquery_cache: RefCell<HashMap<usize, ValueSubqueryCache>>,
     /// Set only while evaluating `PathPattern::Selected`.
     unbounded_policy: Cell<UnboundedPolicy>,
+    /// Node ids an earlier MATCH clause bound, per variable, while a later
+    /// clause sharing that variable runs (`match_pushdown_pins`). Read by
+    /// `get_candidate_nodes`, so a scan — and the endpoint set a shortest
+    /// search starts from — covers only values the join would keep.
+    candidate_pins: RefCell<HashMap<String, Arc<Vec<Id>>>>,
     /// Variables with *group* degree of reference (ISO §4.11.5) in the query
     /// being executed: those declared inside a quantified path primary. Set
     /// at the top of `run_query` from the MATCH chain and consulted when
@@ -451,6 +488,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             exists_cache: RefCell::new(HashMap::new()),
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
+            candidate_pins: RefCell::new(HashMap::new()),
             group_vars: RefCell::new(HashSet::new()),
             comprehension_scope: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
@@ -473,6 +511,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             exists_cache: RefCell::new(HashMap::new()),
             value_subquery_cache: RefCell::new(HashMap::new()),
             unbounded_policy: Cell::new(UnboundedPolicy::Forbidden),
+            candidate_pins: RefCell::new(HashMap::new()),
             group_vars: RefCell::new(HashSet::new()),
             comprehension_scope: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
@@ -1434,7 +1473,18 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             let new_vars = pattern.freevars();
             acc = match m {
                 MatchStatement::Simple { .. } => {
-                    let ir_new = self.run_path_pattern(pattern, 0);
+                    let ir_new = match self.match_pushdown_pins(&acc, pattern, &bound_vars) {
+                        Some(pins) => {
+                            let prev = self.candidate_pins.borrow().clone();
+                            let mut merged = prev.clone();
+                            merged.extend(pins);
+                            *self.candidate_pins.borrow_mut() = merged;
+                            let ir = self.run_path_pattern(pattern, 0);
+                            *self.candidate_pins.borrow_mut() = prev;
+                            ir
+                        }
+                        None => self.run_path_pattern(pattern, 0),
+                    };
                     natural_join(&acc, &ir_new, 0)
                 }
                 MatchStatement::Optional { .. } => {
@@ -1524,6 +1574,59 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             rows.extend(left_outer_join(&single, &inner, bound_vars, new_vars).rows);
         }
         IntermediateResult::new(rows)
+    }
+
+    /// Node ids each shared variable already holds, for a MATCH clause
+    /// that follows others in the chain.
+    ///
+    /// A later clause used to run as if nothing were bound and be joined
+    /// afterwards, so `MATCH (r:Reclamo)-[:EN_CALLE]->(c) MATCH p = ANY
+    /// SHORTEST (c)~[:CRUZA_CON]~*(b)` searched from *every* street and
+    /// kept the few the join wanted. Restricting `c` to the values the
+    /// join will keep cannot change the answer: each row of the clause is
+    /// produced independently, except under a selective prefix, where
+    /// selection is per `(first, last)` partition — and ISO §16.6 SR 7 (the
+    /// typechecker's `check_selective_isolation`) lets such a pattern
+    /// share only those endpoints. An interior variable of a selective
+    /// pattern is skipped anyway, since pinning it would change which path
+    /// is shortest. So are group variables, whose values are lists, and
+    /// any variable bound to something other than a node in some row.
+    ///
+    /// `FROGQL_DISABLE_MATCH_PUSHDOWN=1` turns it off.
+    fn match_pushdown_pins(
+        &self,
+        acc: &IntermediateResult,
+        pattern: &PathPattern,
+        bound_vars: &HashSet<String>,
+    ) -> Option<HashMap<String, Arc<Vec<Id>>>> {
+        if std::env::var("FROGQL_DISABLE_MATCH_PUSHDOWN").is_ok() {
+            return None;
+        }
+        let mut excluded = pattern.group_vars();
+        selective_interior_vars(pattern, &mut excluded);
+        let mut pins = HashMap::new();
+        'vars: for var in pattern.freevars() {
+            if !bound_vars.contains(&var) || excluded.contains(&var) {
+                continue;
+            }
+            let mut ids: HashSet<Id> = HashSet::new();
+            for row in &acc.rows {
+                match row.assignment.m.get(&var) {
+                    Some(PathValue::Node(id)) => {
+                        ids.insert(*id);
+                    }
+                    _ => continue 'vars,
+                }
+            }
+            let mut ids: Vec<Id> = ids.into_iter().collect();
+            ids.sort_unstable();
+            pins.insert(var, Arc::new(ids));
+        }
+        if pins.is_empty() {
+            None
+        } else {
+            Some(pins)
+        }
     }
 
     /// OPTIONAL MATCH bind-pushdown. The naive path evaluates the inner
@@ -2099,6 +2202,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// sixty million, with a hash index sitting unused throughout.
     fn get_candidate_nodes(&self, desc: Option<&Descriptor>) -> Vec<Id> {
         if let Some(desc) = desc {
+            if let Some(var) = desc.var.as_deref() {
+                if let Some(ids) = self.candidate_pins.borrow().get(var) {
+                    return ids.as_ref().clone();
+                }
+            }
             if let Some(ids) = self.indexed_candidates(desc) {
                 return ids;
             }
@@ -3254,7 +3362,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// Resolve one endpoint pattern to a [`BfsEndpoint`]: the universal set
     /// for an unconstrained `(x)`, or a materialized candidate map.
     fn bfs_endpoint(&self, p: &PathPattern) -> BfsEndpoint {
-        if is_unconstrained_node(p) {
+        let pinned = endpoint_var(p).is_some_and(|v| self.candidate_pins.borrow().contains_key(&v));
+        if is_unconstrained_node(p) && !pinned {
             return BfsEndpoint::All {
                 var: endpoint_var(p),
             };

@@ -135,6 +135,7 @@ sidecar that never appears, or silently never loads, is diagnosable.
 |---|---|
 | `FROGQL_DISABLE_EXISTS_PIN=1` | Materialize correlated `EXISTS` bodies once over the whole graph instead of probing with pinned LTJ. |
 | `FROGQL_DISABLE_VALUE_SUBQUERY_PIN=1` | Same, for `VALUE { … }` subqueries. IC7 goes from ~9 ms to ~1.3 s. |
+| `FROGQL_DISABLE_MATCH_PUSHDOWN=1` | Run a later `MATCH` clause unrestricted and join afterwards, instead of starting it from the nodes the earlier clauses bound. `MATCH (r)-[]->(c) MATCH p = ANY SHORTEST (c)~[]~*(b)` searches from every node instead of from the `c`s. |
 | `FROGQL_DISABLE_OPTIONAL_PUSHDOWN=1` | Evaluate `OPTIONAL MATCH` globally then left-join, instead of per-row bind pushdown. IS5 slows ~93×. |
 | `FROGQL_ORDERBY_FORCE=pdqsort\|topk` | Pin one ORDER BY strategy, bypassing the btree-LTJ-real top-k selection. |
 
