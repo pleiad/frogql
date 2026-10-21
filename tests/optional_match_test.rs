@@ -389,3 +389,78 @@ fn runtime_single_optional_match_caller_limit_also_honored() {
         _ => panic!("expected Raw result"),
     }
 }
+
+// =====================================================================
+// A leading OPTIONAL is an OPTIONAL CALL over the unit working table
+// (ISO §14.4 SR 4f, §15.1 GR 3c): with no match it still yields one row,
+// every variable it introduces null.
+// =====================================================================
+
+#[test]
+fn runtime_leading_optional_without_match_yields_one_null_row() {
+    let g = graph_with_optional_pet();
+    let rows = run_projected(&g, "OPTIONAL MATCH (x:User {name: 'Zed'}) RETURN x");
+    assert_eq!(rows, vec![vec![Value::Null]]);
+}
+
+#[test]
+fn runtime_leading_optional_without_match_counts_one_row() {
+    let g = graph_with_optional_pet();
+    let rows = run_projected(&g, "OPTIONAL MATCH (x:User {name: 'Zed'}) RETURN COUNT(*)");
+    assert_eq!(rows, vec![vec![Value::Int(1)]]);
+}
+
+#[test]
+fn runtime_leading_optional_with_match_is_unchanged() {
+    let g = graph_with_optional_pet();
+    let rows = run_projected(&g, "OPTIONAL MATCH (x:User) RETURN x.name");
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn runtime_leading_optional_null_row_joins_with_later_clauses() {
+    let g = graph_with_optional_pet();
+    let mut rows = run_projected(
+        &g,
+        "OPTIONAL MATCH (x:User {name: 'Zed'}) MATCH (u:User) RETURN x, u.name",
+    );
+    rows.sort_by_key(|r| format!("{:?}", r[1]));
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Null, Value::Str("Alice".into())],
+            vec![Value::Null, Value::Str("Bob".into())],
+        ]
+    );
+}
+
+#[test]
+fn typecheck_leading_optional_on_absent_label_is_not_guaranteed_empty() {
+    use frogql::typing::descriptor_type::DescriptorType;
+    use frogql::typing::label_type::LabelType;
+    use frogql::typing::property_type::PropertyType;
+    use frogql::typing::variable_type::{Schema, VariableType};
+
+    // The schema has no `Ghost` label: the optional cannot match,
+    // but the query still returns its null row, so it must not be pruned.
+    let schema = Schema::from_parts(
+        vec![VariableType::Node(DescriptorType::new(
+            LabelType::Label("User".into()),
+            PropertyType::open_empty(),
+        ))],
+        vec![],
+    );
+    let res =
+        frogql::compile_query_with_diagnostics_with(&schema, "OPTIONAL MATCH (x:Ghost) RETURN x")
+            .expect("compile");
+    assert!(
+        !res.guaranteed_empty,
+        "a leading OPTIONAL never empties the query"
+    );
+    let g = graph_with_optional_pet();
+    let rows = match Runtime::new(&g).run_query(&res.query, 0) {
+        QueryResult::Projected(r) => r,
+        _ => panic!("expected projected result"),
+    };
+    assert_eq!(rows, vec![vec![Value::Null]]);
+}
