@@ -321,19 +321,12 @@ fn try_ltj_inner<G: GraphAccess>(
                         }
                     }
                 }
-                decomp.filters.retain(|f| match &f.kind {
-                    // Pinning a variable to a specific NodeId via a
-                    // (label, attr) btree guarantees the label and the
-                    // existence of the attribute on that node — drop
-                    // those filters. NodeAttrCmp / NodeInSet check the
-                    // VALUE of the attribute against a literal / set,
-                    // which the pin doesn't fix; keep them so the LTJ
-                    // evaluates them at level 0 against the pinned
-                    // binding before it descends further.
-                    FilterKind::NodeLabel { var_id, .. }
-                    | FilterKind::NodeProperty { var_id, .. } => *var_id != pin_var_id,
-                    FilterKind::NodeAttrCmp { .. } | FilterKind::NodeInSet { .. } => true,
-                });
+                // Keep every filter on the pinned variable: the LTJ checks
+                // them once, at level 0, against the pinned binding. A pin
+                // fixes the node id but guarantees nothing about it — the
+                // OPTIONAL bind-pushdown and correlated EXISTS/VALUE pin ids
+                // taken from outer rows, which need not carry the inner
+                // pattern's labels or properties.
             }
         }
     }
