@@ -1109,8 +1109,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// - The pattern has at least one edge — otherwise the LTJ doesn't
     ///   fire and the per-iteration cost degrades to O(n) post-scan.
     /// - The store has a btree on `(label, attr)` for some label on `var`.
-    /// - No aggregates, no GROUP BY, no DISTINCT, no NULLS FIRST.
-    /// - The btree covers every node carrying the label (no nulls).
+    /// - No aggregates, no GROUP BY, no DISTINCT.
+    ///
+    /// The btree may miss nodes of the label: it cannot key a null `attr`.
+    /// Those nodes are walked after the indexed ones (before them under
+    /// NULLS FIRST), which is where the full sort places their rows.
     ///
     /// Falls back to `None` on any precondition miss; caller routes
     /// through the standard `run_match_chain → route_pre_sort` flow.
@@ -1148,9 +1151,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         let SortKey::Expr(Expr::AttrLookup { var, attr }) = &primary.key else {
             return None;
         };
-        if matches!(primary.nulls.unwrap_or(NullsOrder::Last), NullsOrder::First) {
-            return None;
-        }
+        let nulls_first = matches!(primary.nulls.unwrap_or(NullsOrder::Last), NullsOrder::First);
 
         // Edge precondition: the LTJ only fires for patterns that
         // decompose into ≥1 triple, and a triple needs an edge.
@@ -1168,6 +1169,17 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
 
         let asc = matches!(primary.dir, SortDir::Asc);
         let labels = labels_for_var(&query.matches, var);
+        // Nodes of a candidate label that its btree does not hold (their
+        // `attr` is null). The full sort places their rows with the
+        // nulls, so they are walked after the indexed ids, or before
+        // them under NULLS FIRST.
+        let mut unindexed: Vec<Id> = Vec::new();
+        let mut collect_unindexed = |labelled: Vec<Id>, ids: &[Id]| {
+            if labelled.len() > ids.len() {
+                let indexed: HashSet<Id> = ids.iter().copied().collect();
+                unindexed.extend(labelled.into_iter().filter(|id| !indexed.contains(id)));
+            }
+        };
         // Build the ordered-id stream: one btree's `Vec<Id>` for the
         // single-label / And case, or a k-way merge of per-label
         // cursors for `Or`-of-leaves descriptors. Both produce ids in
@@ -1182,10 +1194,11 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     .lookup_node_ordered(l, attr, asc)
                     .map(|ids| (l.clone(), ids))
             })?;
-            let label_total = self.graph.nodes_with_label(&label)?.len();
-            if ordered_ids.len() != label_total {
+            let labelled = self.graph.nodes_with_label(&label)?;
+            if ordered_ids.len() > labelled.len() {
                 return None;
             }
+            collect_unindexed(labelled, &ordered_ids);
             vec![BtreeMergeCursor::new(self.graph, label, ordered_ids, attr)]
         } else {
             // Multi-label `Or`-of-leaves path: every candidate must
@@ -1215,7 +1228,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                         return None;
                     }
                 };
-                let label_total = self.graph.nodes_with_label(&l)?.len();
+                let labelled = self.graph.nodes_with_label(&l)?;
+                let label_total = labelled.len();
                 if std::env::var("FROGQL_DEBUG_INDEXES").is_ok() {
                     eprintln!(
                         "btree-ltj-real:   {} ids={} label_total={}",
@@ -1224,25 +1238,19 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                         label_total
                     );
                 }
-                // Allow `ids.len() < label_total`: the auto-built btree
+                // `ids.len() < label_total` is allowed: a declared btree
                 // omits nodes whose `attr` is null (the index can't key
-                // on `Null`). Walking only the indexed ids is correct
-                // for `NULLS LAST` (the precondition we already
-                // enforce up-front for the primary spec) — null-valued
-                // nodes sort to the end and so can't enter the top-k
-                // unless the requested limit exceeds the non-null
-                // count, in which case the merge produces all the
-                // indexed rows anyway and the caller's downstream sort
-                // / truncation handles the remainder. The common case
-                // (LDBC IC2 with `creationDate < ...`) excludes nulls
-                // up front via 3VL.
+                // on `Null`), and those go to `unindexed`.
                 if ids.len() > label_total {
                     return None;
                 }
+                collect_unindexed(labelled, &ids);
                 cs.push(BtreeMergeCursor::new(self.graph, l, ids, attr));
             }
             cs
         };
+        unindexed.sort_unstable();
+        unindexed.dedup();
 
         let pattern = query.collapsed_pattern();
         let index = self.triple_index();
@@ -1272,22 +1280,40 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // sorted order; secondaries resolve in-memory) and truncate
         // to k. The single-spec case gets the original early-exit at
         // `out.len() >= cap` — no secondary tie-break to consider.
-        let mut last_primary_value: Option<Value> = None;
-        while let Some(idx) = pick_best_cursor(&cursors, asc) {
-            let id = cursors[idx]
-                .current_id()
-                .expect("pick_best_cursor returns only live cursors");
-            let cur_primary = cursors[idx].head_value.clone();
+        // `None` until the first id is processed; then the primary value
+        // of the last one, which is itself `None` for an unindexed node.
+        let mut last_primary_value: Option<Option<Value>> = None;
+        // The walk: the unindexed nodes (primary value null) first under
+        // NULLS FIRST, then the btree cursors in key order, then the
+        // unindexed nodes under NULLS LAST.
+        let mut next_unindexed = 0usize;
+        loop {
+            let take_unindexed = next_unindexed < unindexed.len()
+                && (nulls_first || cursors.iter().all(|c| c.is_done()));
+            let (id, cur_primary, cursor) = if take_unindexed {
+                (unindexed[next_unindexed], None, None)
+            } else if let Some(idx) = pick_best_cursor(&cursors, asc) {
+                let id = cursors[idx]
+                    .current_id()
+                    .expect("pick_best_cursor returns only live cursors");
+                (id, cursors[idx].head_value.clone(), Some(idx))
+            } else {
+                break;
+            };
+            match cursor {
+                Some(idx) => cursors[idx].advance(self.graph, attr),
+                None => next_unindexed += 1,
+            }
 
             if multi_label && !visited.insert(id) {
-                cursors[idx].advance(self.graph, attr);
                 continue;
             }
 
             if !single_spec
                 && out.len() >= cap
-                && last_primary_value.is_some()
-                && cur_primary != last_primary_value
+                && last_primary_value
+                    .as_ref()
+                    .is_some_and(|last| *last != cur_primary)
             {
                 break;
             }
@@ -1299,8 +1325,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                     return Some(out);
                 }
             }
-            last_primary_value = cur_primary;
-            cursors[idx].advance(self.graph, attr);
+            last_primary_value = Some(cur_primary);
         }
 
         if !single_spec && specs.len() > 1 && !out.is_empty() {
@@ -6288,7 +6313,10 @@ fn or_candidate_labels_for_var(matches: &[MatchStatement], target: &str) -> Opti
 /// Build a btree-ordered output by bucketing rows on `mu[var_name].id()`
 /// and walking `ordered_ids` in sort order. Rows whose binding for
 /// `var_name` is missing or not a Node go to the "nulls" bucket and
-/// are placed before / after the indexed run per `nulls_first`.
+/// are placed before / after the indexed run per `nulls_first`. So do
+/// rows whose node the index does not hold: the index skips a node whose
+/// property is null (or a value it cannot key), and the full sort places
+/// that row with the nulls. Leaving it in its bucket would drop it.
 /// `limit == 0` means no truncation.
 fn btree_bucket_output(
     rows: Vec<ResultRow>,
@@ -6331,25 +6359,40 @@ fn btree_bucket_output(
         }
         false
     };
-    let push_nulls = |out: &mut Vec<ResultRow>, taken: &mut [Option<ResultRow>]| -> bool {
-        for &i in &nulls {
-            if let Some(r) = taken[i].take() {
-                out.push(r);
-                if out.len() >= cap {
-                    return true;
+    let push_nulls =
+        |out: &mut Vec<ResultRow>, taken: &mut [Option<ResultRow>], nulls: &[usize]| -> bool {
+            for &i in nulls {
+                if let Some(r) = taken[i].take() {
+                    out.push(r);
+                    if out.len() >= cap {
+                        return true;
+                    }
                 }
             }
-        }
-        false
-    };
+            false
+        };
 
     if nulls_first {
-        if push_nulls(&mut out, &mut taken) {
+        // The unindexed nodes have to be known before the indexed run.
+        let indexed: HashSet<Id> = ordered_ids.iter().copied().collect();
+        by_id.retain(|id, idxs| {
+            indexed.contains(id) || {
+                nulls.append(idxs);
+                false
+            }
+        });
+        nulls.sort_unstable();
+        if push_nulls(&mut out, &mut taken, &nulls) {
             return out;
         }
         push_indexed(&mut out, &mut taken, &mut by_id);
     } else if !push_indexed(&mut out, &mut taken, &mut by_id) {
-        push_nulls(&mut out, &mut taken);
+        // Whatever the walk left in `by_id` is a node the index lacks.
+        // Only reached when the indexed run did not fill `cap`, so a
+        // LIMIT that the index satisfies pays nothing for it.
+        nulls.extend(by_id.into_values().flatten());
+        nulls.sort_unstable();
+        push_nulls(&mut out, &mut taken, &nulls);
     }
     out
 }
