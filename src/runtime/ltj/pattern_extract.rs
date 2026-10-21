@@ -1398,7 +1398,7 @@ fn convert_results<G: GraphAccess>(
         decomp.join_boundaries.clone()
     };
 
-    for tuple in tuples {
+    'tuples: for tuple in tuples {
         let mut assignment = Assignment::new();
 
         // Build assignment, excluding internal variables
@@ -1464,6 +1464,13 @@ fn convert_results<G: GraphAccess>(
                         let pv = graph.edge_path_value(eid);
                         path_elements.push(pv.clone());
                         if let Some(ref ev) = edge_var {
+                            // An edge variable is not a trie variable, so two
+                            // triples naming it (`(a)-[e]->(b), (x)-[e]->(y)`)
+                            // are enumerated independently; keep the tuple only
+                            // when both bound the same edge.
+                            if assignment.get(ev).is_some_and(|prev| *prev != pv) {
+                                continue 'tuples;
+                            }
                             assignment.extend(ev.clone(), pv);
                         }
                     }
