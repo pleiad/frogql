@@ -291,14 +291,16 @@ cargo test
 # Just the in-crate unit tests (~8 s)
 cargo test --lib
 
-# Single target / single test
-cargo test --test runtime_test
-cargo test --test runtime_test test_join_star_any_label -- --exact
+# One test file / single test. Every integration test is a module of
+# one binary, `tests/it/`, so a file is a module filter.
+cargo test --test it runtime_test::
+cargo test --test it runtime_test::test_join_star_any_label -- --exact
 ```
 
-A full sweep is ~7-8 minutes, and on macOS most of that is the OS
-scanning each of the ~85 freshly linked test binaries on first run
-(~4.3 s each; the same binary re-runs in 0.17 s). Excluding your terminal
+On macOS most of a full sweep's wall clock is the first run of each
+freshly linked test binary (~4.3 s each; the same binary re-runs in
+0.17 s), which is why the integration tests are one binary rather than
+one per file. Excluding your terminal
 under Settings > Privacy & Security > Developer Tools removes it. Of the
 rest, `bench_test` is ~45 s of real work — it generates 10k-50k-node
 graphs and measures RSS — and every other test together is ~14 s.

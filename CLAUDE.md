@@ -22,25 +22,26 @@ just test        # full sweep, warmed in parallel — the pre-commit gate
 just repl movies.gdb [--import-csv dir/ | --no-typecheck]   # rebuild + open REPL
 
 # Underlying commands (what the recipes wrap):
-# Full test sweep — lib unit tests + every integration target. Use the
+# Full test sweep — lib unit tests + every integration test. Use the
 # unqualified form so the set never drifts as tests are added:
-cargo test                       # everything (lib + all tests/*.rs)
+cargo test                       # everything (lib + tests/it + bench_test + bin harnesses)
 cargo test --lib                 # just the in-crate unit tests (fast)
-# The sweep's wall clock is a first-execution cost macOS charges per
-# freshly linked test binary (~5-8 s each, at 0% CPU, once per file), not
-# the tests themselves (~5.5 s total). `cargo test` runs targets one at a
-# time, so 108 of them serialise. `just test` links everything, warms all
-# the binaries 16-wide in parallel, then tests — ~30 s of warming instead
-# of ~30 min of waiting. Do not hand-roll `cargo test` for a full sweep;
-# use the recipe, which is where that warming lives.
+# Every integration test is a module of ONE binary, `tests/it/` (its
+# main.rs says why). A file in `tests/` is a crate of its own, linked
+# separately, and macOS charges a first-execution cost per freshly linked
+# test binary (~5-8 s each, at 0% CPU) — the tests themselves total ~5.5 s.
+# 97 files were 97 links and 97 of those costs, serialised. What remains is
+# five binaries (lib, `it`, `bench_test`, `ldbc_bench`'s harness, the
+# doctests): every other bin says `test = false` (see *Conventions*).
+# `just test` still links everything and warms them in parallel first.
 #
 # Do NOT re-diagnose this as "macOS rescanning" without measuring — an
 # earlier version of this note claimed that and was wrong.
-cargo test --test runtime_test --test typecheck_test --test parser_test
+cargo test --test it -- runtime_test:: typecheck_test:: parser_test::
 
-# Single test / single file
-cargo test --test runtime_test test_join_star_any_label -- --exact
-cargo test --test parallel_edge_test          # one integration file
+# Single test / single file: filters are module paths inside `it`
+cargo test --test it runtime_test::test_join_star_any_label -- --exact
+cargo test --test it parallel_edge_test::     # one integration file
 
 # Strict clippy (run before every commit)
 cargo clippy --workspace --all-targets -- -D clippy::all
@@ -69,7 +70,19 @@ cargo install wasm-pack && wasm-pack build wasm --target web --out-dir pkg
 
 ### Diagnostic env vars
 
-Runtime/store toggles for A/B testing and tracing (all read at query/open time; set to `1` unless noted). Each optimization has a kill switch so a differential test can pin "optimized ≡ baseline". User-facing tutorial with measured costs per mode: `docs/modes-options.md`.
+Runtime/store toggles for A/B testing and tracing (set to `1` unless noted). Each optimization has a kill switch so a differential test can pin "optimized ≡ baseline". User-facing tutorial with measured costs per mode: `docs/modes-options.md`.
+
+**A switch a `Runtime` consults is also a value**: a field of
+`runtime::cfg::RuntimeCfg`, which `Runtime::new` fills from these
+variables (`RuntimeCfg::from_env`) and `Runtime::set_cfg` overrides per
+runtime. `FROGQL_DISABLE_REPEAT_UNROLL` is `optimizer::OptimizerCfg`
+(`compile_query_with_cfg`), the vector knobs are `VecCfg`, and
+`FROGQL_DISABLE_VECTORS` is `VectorStore::disable`. The rest — the store's
+open-time choices and the trace/debug prints — stay environment-only.
+**Tests set the field, never the variable**: an environment variable is
+process-global, and every integration test shares one process
+(`tests/it/`). A test that needs the variable itself runs as a child
+process, as `overlay_index_test` does.
 
 | Var | Effect |
 |---|---|
@@ -77,7 +90,7 @@ Runtime/store toggles for A/B testing and tracing (all read at query/open time; 
 | `FROGQL_DISABLE_LTJ_DELTA` | drop the cached LTJ index after every DML instead of maintaining a delta beside it — the kill switch `tests/ltj_delta_test.rs` A/Bs against |
 | `FROGQL_LTJ_PERSIST=0` | build the LTJ index but do not write `<db>.ltj`. The index is written automatically the first time a database is opened without a usable sidecar; this declines the file, not the index |
 | `FROGQL_LTJ_REPR=compact\|array` | which physical representation the LTJ `TripleIndex` is built in (**default `compact`**): six LOUDS succinct tries (issue #66) or six sorted arrays — compact is ~2.9× smaller and, since the succ-0 tables landed, within noise of array on most LDBC IC (IC5 1.5×, IC8 3.4×, the rest 0.5–1.0×); differential suite `tests/compact_ltj_test.rs`, size/build stats via the `ltj_index_stats` bin. `FROGQL_LTJ_COMPACT` is honoured as a legacy alias (`0` means arrays) |
-| `FROGQL_DISABLE_ANYDIR_LTJ` | force the hash-join fallback for any-direction (`-[e]-`) patterns instead of the mirrored-index LTJ (`try_ltj_mixed`); checked at the *call site* (`pattern_extract::anydir_ltj_disabled`) so the mirror is never built when disabled |
+| `FROGQL_DISABLE_ANYDIR_LTJ` | force the hash-join fallback for any-direction (`-[e]-`) patterns instead of the mirrored-index LTJ (`try_ltj_mixed`); checked at the *call site* (`RuntimeCfg::anydir_ltj`) so the mirror is never built when disabled |
 | `FROGQL_DISABLE_SEEDED_REPEAT` | force the legacy global repetition path instead of the seeded adjacency traversal |
 | `FROGQL_DISABLE_REPEAT_UNROLL` | keep bounded `{n,m}` repetitions as `Repeat` instead of unrolling to a Union |
 | `FROGQL_DISABLE_SHORTEST_BFS` | force the generic k-shortest-walk enumerator instead of the BFS fast-path |
@@ -110,7 +123,8 @@ targets you touched. **~5 seconds.** This is what runs between edits.
 The full sweep is a **pre-commit** gate and not a per-edit one. Running it
 after every change costs minutes for no information: its wall clock is not
 the tests (they total ~5 s), it is a first-execution cost macOS charges per
-freshly linked binary, and a one-line edit under `store/` relinks all 108.
+freshly linked binary, and a one-line edit under `store/` relinks every
+test binary.
 
 ### Pre-commit checklist for Rust changes (non-negotiable)
 
@@ -1103,7 +1117,9 @@ Run + chart: `bench_setup` (downloads LDBC SF0.1) → `install_python_deps.sh` �
 ## Conventions
 
 - Labels in patterns require the `:` prefix: `-[:Transfer]->`, not `-[Transfer]->`.
-- The `bench_test` integration target is slow (~1 min — it opens the committed example `.gdb` files and measures RSS). It currently passes; skip it during tight iteration, but `cargo test` (the full sweep) does include it.
+- **Bins without tests say `test = false`** in their `[[bin]]` entry in `Cargo.toml` — all but `ldbc_bench`. Otherwise `cargo test` links and runs an empty test harness per bin, and each costs the macOS first-run charge (~72 s measured in an agent session) to report "0 tests". **If you add a `#[test]` to one of those bins, remove its `test = false` in the same change**, or the test never runs in the sweep. A new bin without tests gets a `[[bin]]` entry with `test = false`.
+- **A new integration test goes in `tests/it/`, plus a `mod` line in `tests/it/main.rs`.** A file left directly in `tests/` compiles as a binary of its own again, which is the cost the merge removed. The one deliberate exception is `bench_test`.
+- The `bench_test` integration target is slow (~1 min — it opens the committed example `.gdb` files and measures RSS). It stays a separate binary because it installs a `#[global_allocator]`, and a binary has only one. It currently passes; skip it during tight iteration, but `cargo test` (the full sweep) does include it.
 - `bench/data/` is gitignored (large datasets, downloaded via `cargo run --bin bench_setup`).
 - Example databases in `examples/*.gdb` ARE committed (small, useful for testing).
 - Property values are tagged with `VALUE_TYPE_*` constants in `store/record.rs` (Int=0, Str=1, Bool=2, Float=3, List=4, Record=5, Null=6); changing the order is a breaking on-disk format change.
@@ -1118,6 +1134,8 @@ Run + chart: `bench_setup` (downloads LDBC SF0.1) → `install_python_deps.sh` �
 - **Persisting something new in `.gdb`**: `pager/header.rs` (root `u32`), `store/io.rs::save_graph_*` (write side), `store/lazy.rs::open` (load side), `docs/internals/storage-architecture.md` (spec), and `fig:layout` in `latex/main.tex` if it ships in the paper.
 
 ## Anti-patterns
+
+- Do **not** call `std::env::set_var` / `remove_var` in a test. Every integration test shares one process, so the variable changes the code path of whatever runs beside it — silently, and only sometimes. Set the field on `RuntimeCfg` / `OptimizerCfg` instead; a new kill switch gets a field there, not only a variable.
 
 - Do **not** add an always-on dep for a bench- or REPL-only crate. Gate it behind the `bench` / `repl` feature and add `required-features = [...]` to the bin entry. The Python wheel (`frogql` on PyPI) MUST stay independent of `repl` / `bench` — never reference `rustyline`, `ureq`, `zstd`, `tar`, `sysinfo`, or `toml` from library code.
 - Do **not** put semantic lowering in `src/optimizer/`. The optimizer is performance-preserving; anything that changes which rows the query produces belongs in `src/elaborate/`.

@@ -6,11 +6,12 @@
 //! EXISTS {...} RETURN VALUE { MATCH p = ANY SHORTEST (c)~*... }` searched
 //! from every node to answer the few the filter kept. These tests pin that
 //! the rows are identical with and without the restriction
-//! (`FROGQL_DISABLE_VALUE_SUBQUERY_PIN`).
+//! (`RuntimeCfg::value_subquery_pin`).
 
 use frogql::compile_query;
 use frogql::model::graph::MemoryGraphStore;
 use frogql::model::value::Value;
+use frogql::runtime::cfg::RuntimeCfg;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
 
@@ -65,22 +66,17 @@ fn graph() -> MemoryGraphStore {
     MemoryGraphStore::from_json_str(&json).unwrap()
 }
 
-/// The toggle is process-global, so the tests serialise on it.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn run(g: &MemoryGraphStore, q: &str, restricted: bool) -> Vec<String> {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if restricted {
-        std::env::remove_var("FROGQL_DISABLE_VALUE_SUBQUERY_PIN");
-    } else {
-        std::env::set_var("FROGQL_DISABLE_VALUE_SUBQUERY_PIN", "1");
-    }
     let query = compile_query(q).unwrap_or_else(|e| panic!("{q}: {e}"));
-    let rows: Vec<Vec<Value>> = match Runtime::new(g).run_query(&query, 0) {
+    let rt = Runtime::new(g);
+    rt.set_cfg(RuntimeCfg {
+        value_subquery_pin: restricted,
+        ..RuntimeCfg::default()
+    });
+    let rows: Vec<Vec<Value>> = match rt.run_query(&query, 0) {
         QueryResult::Projected(rs) => rs,
         _ => panic!("expected projected rows for {q}"),
     };
-    std::env::remove_var("FROGQL_DISABLE_VALUE_SUBQUERY_PIN");
     let mut out: Vec<String> = rows.iter().map(|r| format!("{r:?}")).collect();
     out.sort();
     out

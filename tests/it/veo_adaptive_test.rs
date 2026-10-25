@@ -1,7 +1,7 @@
 //! Differential suite: adaptive VEO ≡ simple VEO (issue #101).
 //!
-//! `FROGQL_VEO=adaptive` re-picks the variable order one variable at a
-//! time, from the subtree sizes the iterators report under the current
+//! The adaptive VEO (`RuntimeCfg::adaptive_veo`) re-picks the variable
+//! order one variable at a time, from the subtree sizes the iterators report under the current
 //! partial binding, instead of fixing the whole order up front from a
 //! syntactic guess. Leapfrog is order-agnostic, so the *bag* of rows must
 //! be identical; the order rows arrive in is not, which is why every
@@ -13,10 +13,9 @@
 
 use frogql::compile_query;
 use frogql::model::graph::MemoryGraphStore;
+use frogql::runtime::cfg::RuntimeCfg;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
-
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Rich multigraph: reciprocal pair, parallel edges, self-loop, undirected
 /// edge, second label, and a third label carrying a distinct property so a
@@ -48,21 +47,17 @@ fn rich() -> MemoryGraphStore {
 }
 
 fn run(g: &MemoryGraphStore, q: &str, adaptive: bool, compact: bool) -> Vec<String> {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // Both sides of both axes are set explicitly. The adaptive order and
-    // the compact representation are the defaults now, so *removing* a
-    // variable would run the same side twice and the comparison would
-    // pass for the wrong reason.
-    std::env::set_var("FROGQL_VEO", if adaptive { "adaptive" } else { "simple" });
-    std::env::set_var("FROGQL_LTJ_REPR", if compact { "compact" } else { "array" });
     let rt = Runtime::new(g);
+    rt.set_cfg(RuntimeCfg {
+        adaptive_veo: adaptive,
+        ltj_compact: compact,
+        ..RuntimeCfg::default()
+    });
     let query = compile_query(q).unwrap();
     let out = match rt.run_query(&query, 0) {
         QueryResult::Projected(r) => r,
         other => panic!("expected projected, got {other:?}"),
     };
-    std::env::remove_var("FROGQL_VEO");
-    std::env::remove_var("FROGQL_LTJ_REPR");
     let mut keys: Vec<String> = out.iter().map(|r| format!("{r:?}")).collect();
     keys.sort();
     keys

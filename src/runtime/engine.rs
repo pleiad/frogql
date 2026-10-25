@@ -415,6 +415,12 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// `unbounded_policy` is a `Cell`. Defaults come from the
     /// environment; the benchmark driver overrides them per run.
     vec_cfg: RefCell<crate::runtime::vsearch::VecCfg>,
+    /// The kill switches this runtime consults (`runtime::cfg`). A `Cell`
+    /// for the reason `vec_cfg` is a `RefCell`: every method stays on
+    /// `&self`. Defaults come from the environment; a test sets them per
+    /// runtime, which is what lets the tests that toggle them share a
+    /// process.
+    cfg: Cell<crate::runtime::cfg::RuntimeCfg>,
     /// Counters from the last `NEAREST` evaluation. The benchmark reads
     /// which arm actually ran, which is not always the one requested.
     last_vec_stats: RefCell<crate::runtime::vsearch::VecStats>,
@@ -535,6 +541,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             comprehension_scope: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
             vec_cfg: RefCell::new(crate::runtime::vsearch::VecCfg::from_env()),
+            cfg: Cell::new(crate::runtime::cfg::RuntimeCfg::from_env()),
             last_vec_stats: RefCell::new(crate::runtime::vsearch::VecStats::default()),
             budget: crate::runtime::budget::Budget::unlimited(),
             budget_limit: Cell::new(None),
@@ -559,10 +566,23 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             comprehension_scope: RefCell::new(Vec::new()),
             correlation_scope: RefCell::new(Vec::new()),
             vec_cfg: RefCell::new(crate::runtime::vsearch::VecCfg::from_env()),
+            cfg: Cell::new(crate::runtime::cfg::RuntimeCfg::from_env()),
             last_vec_stats: RefCell::new(crate::runtime::vsearch::VecStats::default()),
             budget: crate::runtime::budget::Budget::unlimited(),
             budget_limit: Cell::new(None),
         }
+    }
+
+    /// The kill switches in force.
+    pub fn cfg(&self) -> crate::runtime::cfg::RuntimeCfg {
+        self.cfg.get()
+    }
+
+    /// Override the kill switches for this runtime. The LTJ index is built
+    /// once, by the first query that needs it, in the representation in
+    /// force then, so `ltj_compact` has to be set before that.
+    pub fn set_cfg(&self, cfg: crate::runtime::cfg::RuntimeCfg) {
+        self.cfg.set(cfg);
     }
 
     /// Build the LTJ TripleIndex now (if not already cached) and return the
@@ -731,7 +751,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         let current = slot.borrow().clone();
         let next = current
             .as_deref()
-            .and_then(|idx| crate::runtime::ltj::delta::refresh(idx, self.graph))
+            .filter(|_| self.cfg().ltj_delta)
+            .and_then(|idx| crate::runtime::ltj::delta::rebase(idx, self.graph))
             .map(Arc::new);
         *slot.borrow_mut() = next;
     }
@@ -752,8 +773,9 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// staying quiet about it is how a 25 GiB file gets written and never
     /// read.
     ///
-    /// `FROGQL_LTJ_SOURCE=build` forces the rebuild, which is what the
-    /// differential test needs to compare the two against each other.
+    /// `RuntimeCfg::ltj_force_build` (`FROGQL_LTJ_SOURCE=build`) forces the
+    /// rebuild, which is what the differential test needs to compare the
+    /// two against each other.
     ///
     /// The succ-0 acceleration tables are rebuilt here on either path — from
     /// the sidecar as well as from the graph — so their cost gets a trace
@@ -772,9 +794,10 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
 
     fn load_or_build_triple_index_inner(&self) -> TripleIndex {
         use crate::runtime::ltj::persist;
-        let forced_build = std::env::var("FROGQL_LTJ_SOURCE").as_deref() == Ok("build");
+        let cfg = self.cfg();
+        let forced_build = cfg.ltj_force_build;
         let key = self.graph.index_sidecar_key();
-        let want_compact = TripleIndex::compact_selected();
+        let want_compact = cfg.ltj_compact;
         if !forced_build {
             // Bytes first: a store that was handed a sidecar has no path
             // to look beside, and `read_for` on its empty path would only
@@ -814,7 +837,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 }
             }
         }
-        let index = TripleIndex::from_graph(self.graph);
+        let index = TripleIndex::from_graph_repr(self.graph, want_compact);
         if let Some(key) = &key {
             self.persist_index(&index, key);
         }
@@ -836,8 +859,8 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     ///
     /// The recovery story is unchanged: deleting `<db>.ltj` forces a
     /// rebuild, and every rejection is a rebuild rather than an error.
-    /// `FROGQL_LTJ_PERSIST=0` switches the write off for a session that
-    /// wants the index and not the file.
+    /// `RuntimeCfg::ltj_persist` (`FROGQL_LTJ_PERSIST=0`) switches the write
+    /// off for a session that wants the index and not the file.
     ///
     /// Failures are silent by design. The index is in hand and the query
     /// is about to run; a read-only directory is a reason not to have a
@@ -845,7 +868,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// what happened, so a sidecar that never appears is diagnosable.
     fn persist_index(&self, index: &TripleIndex, key: &crate::model::graph_access::SidecarKey<'_>) {
         use crate::runtime::ltj::persist;
-        if std::env::var("FROGQL_LTJ_PERSIST").as_deref() == Ok("0") {
+        if !self.cfg().ltj_persist {
             return;
         }
         let trace = std::env::var("FROGQL_TRACE_OPEN").is_ok();
@@ -886,7 +909,10 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// workload without `-[e]-` never pays the mirror-build cost.
     fn anydir_index(&self) -> Arc<TripleIndex> {
         if self.anydir_index.borrow().is_none() {
-            let idx = Arc::new(TripleIndex::from_graph_anydir(self.graph));
+            let idx = Arc::new(TripleIndex::from_graph_anydir(
+                self.graph,
+                self.cfg().ltj_compact,
+            ));
             *self.anydir_index.borrow_mut() = Some(idx);
         }
         self.anydir_index
@@ -971,11 +997,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // any precondition miss, so adding it to the auto path costs
         // nothing for queries that can't use it. Force off with
         // `FROGQL_ORDERBY_FORCE=pdqsort` or `topk`.
-        let force = std::env::var("FROGQL_ORDERBY_FORCE").ok();
-        let force_off = matches!(
-            force.as_deref(),
-            Some("pdqsort") | Some("topk") | Some("driftsort")
-        );
+        let force_off = !self.cfg().order_by.allows_btree();
         // NEAREST imposes its own row order (nearest first) and must see
         // the whole match, so the btree-driven ORDER BY path — which
         // bypasses the match chain and cuts in key order — cannot run
@@ -1058,7 +1080,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
 
         if has_order && !pre_projection_sort && !used_real {
             if let Some(specs) = &query.order_by {
-                sort_projected_rows(&mut projected, specs, limit);
+                sort_projected_rows(&mut projected, specs, limit, self.cfg().order_by);
             }
         }
 
@@ -1088,11 +1110,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         matches: &[MatchStatement],
         limit: usize,
     ) {
-        let force = std::env::var("FROGQL_ORDERBY_FORCE").ok();
-        let try_btree = !matches!(
-            force.as_deref(),
-            Some("pdqsort") | Some("topk") | Some("driftsort")
-        );
+        let try_btree = self.cfg().order_by.allows_btree();
         if try_btree && self.try_btree_sort(rows, specs, matches, limit) {
             return;
         }
@@ -1352,6 +1370,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 0,
                 var,
                 id,
+                &self.cfg(),
                 &self.budget,
             ),
         }
@@ -1395,6 +1414,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 index,
                 limit,
                 pins,
+                &self.cfg(),
                 &self.budget,
             ),
         }
@@ -1473,7 +1493,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             })
             .collect();
 
-        sort_decorated(&mut decorated, specs, limit);
+        sort_decorated(&mut decorated, specs, limit, self.cfg().order_by);
 
         rows.extend(decorated.into_iter().map(|(_, r)| r));
     }
@@ -1682,7 +1702,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         body: &Query,
         keys: &[String],
     ) -> Option<HashMap<String, Arc<Vec<Id>>>> {
-        if std::env::var("FROGQL_DISABLE_VALUE_SUBQUERY_PIN").is_ok() {
+        if !self.cfg().value_subquery_pin {
             return None;
         }
         let hint = self.value_pins_hint.borrow();
@@ -1729,7 +1749,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         pattern: &PathPattern,
         bound_vars: &HashSet<String>,
     ) -> Option<HashMap<String, Arc<Vec<Id>>>> {
-        if std::env::var("FROGQL_DISABLE_MATCH_PUSHDOWN").is_ok() {
+        if !self.cfg().match_pushdown {
             return None;
         }
         let mut excluded = pattern.group_vars();
@@ -1785,7 +1805,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         bound_vars: &HashSet<String>,
         new_vars: &HashSet<String>,
     ) -> Option<IntermediateResult> {
-        if std::env::var("FROGQL_DISABLE_OPTIONAL_PUSHDOWN").is_ok() {
+        if !self.cfg().optional_pushdown {
             return None;
         }
         let shared: Vec<String> = bound_vars.intersection(new_vars).cloned().collect();
@@ -1834,6 +1854,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
                 &index,
                 0,
                 &pin_pairs,
+                &self.cfg(),
                 &self.budget,
             )?;
             decomposable_checked = true;
@@ -2495,25 +2516,29 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // it at open) and reused across every subsequent query.
         let join_pattern = PathPattern::Join(Box::new(q1.clone()), Box::new(q2.clone()));
         let index = self.triple_index();
-        if let Some(result) =
-            pattern_extract::try_ltj(self.graph, &join_pattern, &index, limit, &self.budget)
-        {
+        if let Some(result) = pattern_extract::try_ltj(
+            self.graph,
+            &join_pattern,
+            &index,
+            limit,
+            &self.cfg(),
+            &self.budget,
+        ) {
             return result;
         }
         // Any-direction join (pure or mixed with directed): route each
         // triple to the plain or mirrored index inside one LTJ. The kill
         // switch is checked here, not just inside `try_ltj_mixed`, so the
         // mirror is never built when it is disabled (see
-        // `anydir_ltj_disabled`).
-        if pattern_extract::has_any_direction(&join_pattern)
-            && !pattern_extract::anydir_ltj_disabled()
-        {
+        // `RuntimeCfg::anydir_ltj`).
+        if pattern_extract::has_any_direction(&join_pattern) && self.cfg().anydir_ltj {
             if let Some(result) = pattern_extract::try_ltj_mixed(
                 self.graph,
                 &join_pattern,
                 &index,
                 &self.anydir_index(),
                 limit,
+                &self.cfg(),
                 &self.budget,
             ) {
                 return result;
@@ -2586,9 +2611,14 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // Try LTJ for chains of directed edges. Cached TripleIndex via Arc.
         let concat_pattern = PathPattern::Concat(Box::new(p1.clone()), Box::new(p2.clone()));
         let index = self.triple_index();
-        if let Some(result) =
-            pattern_extract::try_ltj(self.graph, &concat_pattern, &index, limit, &self.budget)
-        {
+        if let Some(result) = pattern_extract::try_ltj(
+            self.graph,
+            &concat_pattern,
+            &index,
+            limit,
+            &self.cfg(),
+            &self.budget,
+        ) {
             return result;
         }
         // Any-direction chain (pure or mixed with directed): route each
@@ -2596,15 +2626,14 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // repetition is not decomposable, so a chain containing `-[e]-{n,m}`
         // still takes the seeded traversal below; this catches flat chains
         // like `(a)-[]-(b)-[]-(c)` and `(a)-[:X]->(b)-[]-(c)`.
-        if pattern_extract::has_any_direction(&concat_pattern)
-            && !pattern_extract::anydir_ltj_disabled()
-        {
+        if pattern_extract::has_any_direction(&concat_pattern) && self.cfg().anydir_ltj {
             if let Some(result) = pattern_extract::try_ltj_mixed(
                 self.graph,
                 &concat_pattern,
                 &index,
                 &self.anydir_index(),
                 limit,
+                &self.cfg(),
                 &self.budget,
             ) {
                 return result;
@@ -2706,7 +2735,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         lb: usize,
         ub: Option<usize>,
     ) -> Option<IntermediateResult> {
-        if ub.is_some() || std::env::var("FROGQL_DISABLE_SEEDED_REPEAT").is_ok() {
+        if ub.is_some() || !self.cfg().seeded_repeat {
             return None;
         }
         let seeds: HashSet<Id> = ir1
@@ -2759,7 +2788,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         ub: Option<usize>,
         limit: usize,
     ) -> Option<IntermediateResult> {
-        if std::env::var("FROGQL_DISABLE_SEEDED_REPEAT").is_ok() {
+        if !self.cfg().seeded_repeat {
             return None;
         }
         let ub = ub?;
@@ -3530,7 +3559,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         pattern: &PathPattern,
         limit: usize,
     ) -> Option<IntermediateResult> {
-        if std::env::var("FROGQL_DISABLE_SHORTEST_BFS").is_ok() {
+        if !self.cfg().shortest_bfs {
             return None;
         }
         if prefix.mode != PathMode::Walk {
@@ -4907,7 +4936,12 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             self.run_row_by_row(items, rows, /*distinct=*/ false)
         };
         if let Some(specs) = specs {
-            sort_projected_rows(&mut projected, specs, /*limit=*/ 1);
+            sort_projected_rows(
+                &mut projected,
+                specs,
+                /*limit=*/ 1,
+                self.cfg().order_by,
+            );
         }
         projected
     }
@@ -4928,7 +4962,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         keys: &[String],
         params: &[String],
     ) -> Option<Value> {
-        if std::env::var("FROGQL_DISABLE_VALUE_SUBQUERY_PIN").is_ok() {
+        if !self.cfg().value_subquery_pin {
             return None;
         }
         // A parameter correlation (outer var referenced but not bound by the
@@ -5156,7 +5190,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         body: &Query,
         correlation: &[String],
     ) -> Option<bool> {
-        if std::env::var("FROGQL_DISABLE_EXISTS_PIN").is_ok() {
+        if !self.cfg().exists_pin {
             return None;
         }
         // Pinning collapses the body to a single pattern; an OPTIONAL or a
@@ -6032,7 +6066,12 @@ fn cast_value_to_type(v: &Value, target: &SimpleType) -> ExprResult {
 /// Post-projection sort over already-projected rows. Caller
 /// guarantees every spec is a projected-column sort key (typechecker
 /// rejects the mixed case). `limit > 0` enables the top-k heap path.
-fn sort_projected_rows(rows: &mut Vec<Vec<Value>>, specs: &[SortSpec], limit: usize) {
+fn sort_projected_rows(
+    rows: &mut Vec<Vec<Value>>,
+    specs: &[SortSpec],
+    limit: usize,
+    force: crate::runtime::cfg::OrderByForce,
+) {
     let mut decorated: Vec<(Vec<Option<Value>>, Vec<Value>)> = std::mem::take(rows)
         .into_iter()
         .map(|projected| {
@@ -6072,7 +6111,7 @@ fn sort_projected_rows(rows: &mut Vec<Vec<Value>>, specs: &[SortSpec], limit: us
             (keys, projected)
         })
         .collect();
-    sort_decorated(&mut decorated, specs, limit);
+    sort_decorated(&mut decorated, specs, limit, force);
     rows.extend(decorated.into_iter().map(|(_, p)| p));
 }
 
@@ -6372,7 +6411,7 @@ fn btree_bucket_output(
 ///   implementation-dependent (§16.17 GR 1k/US006) so stability buys
 ///   nothing the default path needs.
 ///
-/// Override the heuristic with `FROGQL_ORDERBY_FORCE=pdqsort|topk|driftsort` —
+/// Override the heuristic with `force` (`FROGQL_ORDERBY_FORCE=pdqsort|topk|driftsort`) —
 /// useful for benchmarking the worst case of each algorithm in
 /// isolation. Force=topk silently degrades to pdqsort when `limit == 0`
 /// or `limit >= n` (no top-k to extract).
@@ -6380,19 +6419,20 @@ fn sort_decorated<T>(
     decorated: &mut Vec<(Vec<Option<Value>>, T)>,
     specs: &[SortSpec],
     limit: usize,
+    force: crate::runtime::cfg::OrderByForce,
 ) {
+    use crate::runtime::cfg::OrderByForce;
     let n = decorated.len();
-    let force = std::env::var("FROGQL_ORDERBY_FORCE").ok();
     let topk_applies = limit > 0 && limit < n;
-    let use_topk = match force.as_deref() {
-        Some("topk") => topk_applies,
-        Some("pdqsort") | Some("driftsort") => false,
-        _ => topk_applies && limit * 2 < n,
+    let use_topk = match force {
+        OrderByForce::Topk => topk_applies,
+        OrderByForce::Pdqsort | OrderByForce::Driftsort => false,
+        OrderByForce::Auto => topk_applies && limit * 2 < n,
     };
     if use_topk {
         let owned = std::mem::take(decorated);
         *decorated = select_topk_decorated(owned, specs, limit);
-    } else if matches!(force.as_deref(), Some("driftsort")) {
+    } else if force == OrderByForce::Driftsort {
         decorated.sort_by(|(a, _), (b, _)| compare_sort_keys(a, b, specs));
     } else {
         decorated.sort_unstable_by(|(a, _), (b, _)| compare_sort_keys(a, b, specs));

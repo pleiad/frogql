@@ -1,10 +1,6 @@
-//! `FROGQL_DISABLE_VECTORS`, the kill switch for vector search.
-//!
-//! This is its own integration target on purpose. An environment
-//! variable is process-global while `cargo test` runs a file's tests
-//! concurrently in one process, so setting it inside a file that also
-//! opens databases expecting vectors to work is a race. One test binary,
-//! one test.
+//! The kill switch for vector search: `VectorStore::disable`, which is
+//! what `FROGQL_DISABLE_VECTORS` calls at open. Called on the store rather
+//! than set in the environment, so it touches nothing beyond this test.
 
 use std::path::Path;
 
@@ -47,9 +43,8 @@ fn the_kill_switch_hides_a_valid_sidecar() {
     // Without the switch the sidecar is live.
     assert!(LazyGraphStore::open(&db).unwrap().vectors("emb").is_some());
 
-    std::env::set_var("FROGQL_DISABLE_VECTORS", "1");
     let store = LazyGraphStore::open(&db).unwrap();
-    std::env::remove_var("FROGQL_DISABLE_VECTORS");
+    store.vector_store().disable();
 
     assert!(store.vectors("emb").is_none(), "queries must not see it");
     assert_eq!(

@@ -38,7 +38,7 @@
 //!     traversal for repetitions that bind an edge variable and so cannot
 //!     unroll.
 //!
-//! Disable with `FROGQL_DISABLE_REPEAT_UNROLL=1`.
+//! Disabled by `OptimizerCfg::unroll_repeat` (`FROGQL_DISABLE_REPEAT_UNROLL=1`).
 
 use crate::syntax::path_pattern::PathPattern;
 
@@ -53,9 +53,6 @@ use crate::syntax::path_pattern::PathPattern;
 const MAX_UNROLL: usize = 8;
 
 pub fn optimize(p: PathPattern) -> PathPattern {
-    if std::env::var("FROGQL_DISABLE_REPEAT_UNROLL").is_ok() {
-        return p;
-    }
     let unrolled = rewrite(p);
     // Lift any Union produced by unrolling out of any surrounding Concat
     // so each arm becomes a flat chain. Without this, `Concat(prefix,

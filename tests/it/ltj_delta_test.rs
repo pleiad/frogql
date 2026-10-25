@@ -7,7 +7,7 @@
 //! edges, to account for a change of a handful of edges. The index now
 //! keeps its static payload and carries a small delta beside it.
 //!
-//! One optimisation, one kill switch (`FROGQL_DISABLE_LTJ_DELTA=1`), one
+//! One optimisation, one kill switch (`RuntimeCfg::ltj_delta`), one
 //! test asserting "optimised ≡ baseline" — and the A/B has to be on the
 //! *right* axis. The precedent is the edge-direction bug that survived
 //! 1600 tests because `compact_ltj_test` compared two representations of
@@ -20,17 +20,13 @@
 //! an array-over-tries path, and only the second exercises the compact
 //! iterator's `dead_from`.
 
-use std::sync::Mutex;
-
 use frogql::model::graph::{MemoryGraphStore, Props};
 use frogql::model::graph_access::{GraphAccess, GraphAccessMut};
 use frogql::model::value::{Id, Value};
+use frogql::runtime::cfg::RuntimeCfg;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
 use frogql::typing::label_type::LabelType;
-
-/// The representation and the kill switch are both process-global.
-static ENV: Mutex<()> = Mutex::new(());
 
 /// Reciprocal pair, parallel edges, a self-loop, an undirected edge and a
 /// second label — the shapes whose multiplicity the base case fans out,
@@ -263,15 +259,13 @@ const SCRIPTS: [(&str, Script); 12] = [
 /// is something to refresh, and calling `invalidate_caches` after each
 /// statement exactly as the REPL and the bindings do.
 fn run_script(script: Script, delta: bool, repr: &str) -> Vec<Vec<String>> {
-    std::env::set_var("FROGQL_LTJ_REPR", repr);
-    if delta {
-        std::env::remove_var("FROGQL_DISABLE_LTJ_DELTA");
-    } else {
-        std::env::set_var("FROGQL_DISABLE_LTJ_DELTA", "1");
-    }
-
     let store = fixture();
     let rt = Runtime::new(&store);
+    rt.set_cfg(RuntimeCfg {
+        ltj_compact: repr == "compact",
+        ltj_delta: delta,
+        ..RuntimeCfg::default()
+    });
     // Warm it: without a cached index there is no delta to maintain, and
     // both sides would be the same rebuild.
     rt.warm_triple_index();
@@ -279,11 +273,7 @@ fn run_script(script: Script, delta: bool, repr: &str) -> Vec<Vec<String>> {
 
     script(&store);
     rt.invalidate_caches();
-    let out = rows(&store, &rt);
-
-    std::env::remove_var("FROGQL_DISABLE_LTJ_DELTA");
-    std::env::remove_var("FROGQL_LTJ_REPR");
-    out
+    rows(&store, &rt)
 }
 
 fn assert_agrees(name: &str, script: Script, repr: &str) {
@@ -297,7 +287,6 @@ fn assert_agrees(name: &str, script: Script, repr: &str) {
 
 #[test]
 fn delta_equals_rebuild_on_the_compact_index() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     for (name, script) in SCRIPTS {
         assert_agrees(name, script, "compact");
     }
@@ -305,7 +294,6 @@ fn delta_equals_rebuild_on_the_compact_index() {
 
 #[test]
 fn delta_equals_rebuild_on_the_array_index() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     for (name, script) in SCRIPTS {
         assert_agrees(name, script, "array");
     }
@@ -313,7 +301,6 @@ fn delta_equals_rebuild_on_the_array_index() {
 
 #[test]
 fn delta_equals_rebuild_across_several_statements() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     for repr in ["compact", "array"] {
         assert_agrees("many_small_edits", many_small_edits, repr);
     }
@@ -327,7 +314,6 @@ fn delta_equals_rebuild_across_several_statements() {
 /// other way round.
 #[test]
 fn the_mutations_actually_move_the_answers() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let before = {
         let store = fixture();
         let rt = Runtime::new(&store);
@@ -351,7 +337,6 @@ fn the_mutations_actually_move_the_answers() {
 /// proves nothing.
 #[test]
 fn the_index_survives_a_mutation() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let store = fixture();
     let rt = Runtime::new(&store);
     let before = rt.warm_triple_index();

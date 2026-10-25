@@ -17,6 +17,7 @@ use super::iterator::{LtjIterator, SpoPos, Term, TriplePattern};
 use super::triple_index::TripleIndex;
 use super::veo::{self, AdaptiveVeo, IterSizes, Veo, VeoOverride, VeoSimple};
 use crate::runtime::budget::Budget;
+use crate::runtime::cfg::RuntimeCfg;
 
 // ---- Decomposition result ----
 
@@ -81,12 +82,13 @@ pub fn try_ltj<G: GraphAccess>(
     pattern: &PathPattern,
     index: &TripleIndex,
     limit: usize,
+    cfg: &RuntimeCfg,
     budget: &Budget,
 ) -> Option<IntermediateResult> {
     if has_any_direction(pattern) {
         return None;
     }
-    try_ltj_inner(graph, pattern, index, None, limit, &[], None, budget)
+    try_ltj_inner(graph, pattern, index, None, limit, &[], None, cfg, budget)
 }
 
 /// LTJ for patterns that contain any-direction edges (`-[e]-`), **pure or
@@ -99,17 +101,17 @@ pub fn try_ltj<G: GraphAccess>(
 /// directed triple and an any-direction triple intersects correctly.
 /// Result reconstruction is unchanged: `edge_path_value(eid)` tags each
 /// edge with its physical variant, and the base-case per-eid fan-out gives
-/// ISO bag multiplicity (issue #71). Disabled with
-/// `FROGQL_DISABLE_ANYDIR_LTJ=1`.
+/// ISO bag multiplicity (issue #71). Disabled by `RuntimeCfg::anydir_ltj`.
 pub fn try_ltj_mixed<G: GraphAccess>(
     graph: &G,
     pattern: &PathPattern,
     index: &TripleIndex,
     anydir_index: &TripleIndex,
     limit: usize,
+    cfg: &RuntimeCfg,
     budget: &Budget,
 ) -> Option<IntermediateResult> {
-    if anydir_ltj_disabled() {
+    if !cfg.anydir_ltj {
         return None;
     }
     try_ltj_inner(
@@ -120,35 +122,9 @@ pub fn try_ltj_mixed<G: GraphAccess>(
         limit,
         &[],
         None,
+        cfg,
         budget,
     )
-}
-
-/// True when `FROGQL_DISABLE_ANYDIR_LTJ=1` forces the hash-join fallback
-/// for any-direction patterns.
-///
-/// Callers MUST consult this *before* materializing the mirrored index they
-/// would pass to `try_ltj_mixed`. Rust evaluates arguments eagerly, so a
-/// `try_ltj_mixed(.., &self.anydir_index(), ..)` call guarded only by the
-/// check inside the callee still pays the full mirror build (~232 MiB /
-/// ~1 s at SF0.1) before discarding the path — the kill switch then costs
-/// more memory than the optimization it disables.
-pub fn anydir_ltj_disabled() -> bool {
-    std::env::var("FROGQL_DISABLE_ANYDIR_LTJ").is_ok()
-}
-
-/// Whether to re-pick the variable order per binding (issue #101).
-///
-/// The default. `FROGQL_VEO=simple` opts out, and is what the differential
-/// tests A/B against — the switch stays so "adaptive ≡ simple" remains
-/// checkable, which is the discipline every optimization here follows.
-///
-/// Promoted from opt-in on the LDBC evidence: the full test sweep returns
-/// identical results under either order, IC4 runs 123.6 ms → 0.7 ms and
-/// IC11 1.7 → 1.0, most ICs are flat, and IC9 pays 10–15%. One dataset is
-/// the whole of the evidence; the RDF corpus is not measured.
-fn adaptive_requested() -> bool {
-    !std::env::var("FROGQL_VEO").is_ok_and(|v| v.eq_ignore_ascii_case("simple"))
 }
 
 /// True when the pattern contains at least one any-direction (`-[e]-`)
@@ -177,6 +153,7 @@ pub fn has_any_direction(p: &PathPattern) -> bool {
 /// itself never enumerates that variable's domain. The named variable
 /// must exist in the pattern; if not, the pin is silently ignored
 /// (caller can detect via `var_id_to_name` reflection if needed).
+#[allow(clippy::too_many_arguments)]
 pub fn try_ltj_with_pin<G: GraphAccess>(
     graph: &G,
     pattern: &PathPattern,
@@ -184,6 +161,7 @@ pub fn try_ltj_with_pin<G: GraphAccess>(
     limit: usize,
     pin_var: &str,
     pin_id: u32,
+    cfg: &RuntimeCfg,
     budget: &Budget,
 ) -> Option<IntermediateResult> {
     // The pinned paths (correlated EXISTS / OPTIONAL / value subquery) do
@@ -200,6 +178,7 @@ pub fn try_ltj_with_pin<G: GraphAccess>(
         limit,
         &[(pin_var, pin_id)],
         None,
+        cfg,
         budget,
     )
 }
@@ -217,12 +196,13 @@ pub fn try_ltj_with_pins<G: GraphAccess>(
     index: &TripleIndex,
     limit: usize,
     pins: &[(&str, u32)],
+    cfg: &RuntimeCfg,
     budget: &Budget,
 ) -> Option<IntermediateResult> {
     if has_any_direction(pattern) {
         return None;
     }
-    try_ltj_inner(graph, pattern, index, None, limit, pins, None, budget)
+    try_ltj_inner(graph, pattern, index, None, limit, pins, None, cfg, budget)
 }
 
 /// A vector-search level requested of the LTJ, plus the slot its
@@ -259,10 +239,11 @@ pub fn try_ltj_nearest<G: GraphAccess>(
     pattern: &PathPattern,
     index: &TripleIndex,
     plan: NnPlan<'_, '_>,
+    cfg: &RuntimeCfg,
     budget: &Budget,
 ) -> Option<IntermediateResult> {
     // No limit: an arrival-order cut has nothing to do with distance.
-    try_ltj_inner(graph, pattern, index, None, 0, &[], Some(plan), budget)
+    try_ltj_inner(graph, pattern, index, None, 0, &[], Some(plan), cfg, budget)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -274,6 +255,7 @@ fn try_ltj_inner<G: GraphAccess>(
     limit: usize,
     external_pins: &[(&str, u32)],
     nn: Option<NnPlan<'_, '_>>,
+    cfg: &RuntimeCfg,
     budget: &Budget,
 ) -> Option<IntermediateResult> {
     let mut decomp = decompose(pattern, index)?;
@@ -287,7 +269,7 @@ fn try_ltj_inner<G: GraphAccess>(
     // the triples and pre-bind it in the result tuple. Without this, even with
     // the eq weight=1 in the VEO, the lonely-var binding would still scan the
     // variable's position before rejecting (see `veo.rs` rationale comment).
-    let mut pinned = if std::env::var("FROGQL_DISABLE_INDEX_FOLD").is_ok() {
+    let mut pinned = if !cfg.index_fold {
         Vec::new()
     } else {
         match fold_indexed_constants(graph, &mut decomp) {
@@ -338,7 +320,7 @@ fn try_ltj_inner<G: GraphAccess>(
         }
     }
 
-    if std::env::var("FROGQL_DISABLE_INDEX_FOLD").is_err() {
+    if cfg.index_fold {
         fold_range_filters(graph, &mut decomp);
     }
     if !pinned.is_empty() && std::env::var("FROGQL_DEBUG_INDEXES").is_ok() {
@@ -519,7 +501,7 @@ fn try_ltj_inner<G: GraphAccess>(
             // cardinalities the index reports (issue #101). On by
             // default; `FROGQL_VEO=simple` is the escape hatch the
             // differential test A/Bs against.
-            if adaptive_requested() && !veo::order_is_forced(&var_info) {
+            if cfg.adaptive_veo && !veo::order_is_forced(&var_info) {
                 // Which variables share a triple: the adaptive VEO
                 // re-weighs exactly this neighbourhood after each binding,
                 // since nothing else narrows. Built here rather than

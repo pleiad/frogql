@@ -39,24 +39,27 @@ lint-fix:
 # --- Tests -------------------------------------------------------------------
 
 # What to run while iterating: the in-crate unit tests plus whichever
-# integration targets you touched. Seconds, not minutes.
+# integration test files you touched. Seconds, not minutes. The files are
+# modules of the one `it` binary, so each name becomes a module filter.
 #   just t                          # lib only
-#   just t runtime_test parser_test # lib + those targets
+#   just t runtime_test parser_test # lib + those files
 t *targets:
     cargo test --lib
-    @if [ -n "{{targets}}" ]; then cargo test $(for t in {{targets}}; do printf -- "--test $t "; done); fi
+    @if [ -n "{{targets}}" ]; then cargo test --test it -- $(for t in {{targets}}; do printf -- "$t:: "; done); fi
 
 # Full sweep — the pre-commit gate, not a per-edit one.
 #
 # Its wall clock is not the tests: they total ~5 s. It is a first-execution
-# cost macOS charges per freshly linked binary — ~5-8 s each, at 0% CPU,
-# once per file — and `cargo test` runs targets one at a time, so 108 of
-# them serialise into minutes. Touching store/, pager/ or model/ relinks
-# everything and you pay it in full.
+# cost macOS charges per freshly linked binary — ~5-8 s each, at 0% CPU —
+# and `cargo test` runs targets one at a time. The integration tests are
+# one binary (`tests/it/`) for exactly that reason, and every bin without
+# tests says `test = false`; what is left is five (lib, `it`, `bench_test`,
+# `ldbc_bench`'s harness, the doctests), and touching store/, pager/ or
+# model/ relinks all of them.
 #
 # So: link everything first, then run every *test* binary once in parallel
 # to absorb that cost 16-wide, then let cargo do the actual testing against
-# already-warm files. ~30 s of warming replaces ~30 min of serial waiting.
+# already-warm files.
 #
 # The warm list comes from cargo, not from `find target/debug/deps`. That
 # directory also holds the **benchmark** binaries, and `orderby_bench --list`

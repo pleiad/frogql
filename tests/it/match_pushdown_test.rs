@@ -4,11 +4,12 @@
 //! afterwards, so `MATCH (r)-[:EN]->(c) MATCH p = ANY SHORTEST (c)~*(b)`
 //! searched from every node. With the pushdown the search starts only from
 //! the `c` values the first clause produced. These tests pin that the rows
-//! are identical with and without it (`FROGQL_DISABLE_MATCH_PUSHDOWN`).
+//! are identical with and without it (`RuntimeCfg::match_pushdown`).
 
 use frogql::compile_query;
 use frogql::model::graph::MemoryGraphStore;
 use frogql::model::value::Value;
+use frogql::runtime::cfg::RuntimeCfg;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
 
@@ -61,22 +62,17 @@ fn graph() -> MemoryGraphStore {
     MemoryGraphStore::from_json_str(&json).unwrap()
 }
 
-/// The toggle is process-global, so the tests serialise on it.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn run(g: &MemoryGraphStore, q: &str, pushdown: bool) -> Vec<String> {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if pushdown {
-        std::env::remove_var("FROGQL_DISABLE_MATCH_PUSHDOWN");
-    } else {
-        std::env::set_var("FROGQL_DISABLE_MATCH_PUSHDOWN", "1");
-    }
     let query = compile_query(q).unwrap_or_else(|e| panic!("{q}: {e}"));
-    let rows: Vec<Vec<Value>> = match Runtime::new(g).run_query(&query, 0) {
+    let rt = Runtime::new(g);
+    rt.set_cfg(RuntimeCfg {
+        match_pushdown: pushdown,
+        ..RuntimeCfg::default()
+    });
+    let rows: Vec<Vec<Value>> = match rt.run_query(&query, 0) {
         QueryResult::Projected(rs) => rs,
         _ => panic!("expected projected rows for {q}"),
     };
-    std::env::remove_var("FROGQL_DISABLE_MATCH_PUSHDOWN");
     let mut out: Vec<String> = rows.iter().map(|r| format!("{r:?}")).collect();
     out.sort();
     out

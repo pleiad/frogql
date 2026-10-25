@@ -1,11 +1,14 @@
 //! Tests for the ORDER BY optimization paths: top-k heap and
 //! btree-driven bucket sort. Each path must produce the same output
-//! as the reference pdqsort implementation. The `FROGQL_ORDERBY_FORCE`
-//! env var pins one path so the test exercises it deterministically.
+//! as the reference pdqsort implementation. `RuntimeCfg::order_by`
+//! (`FROGQL_ORDERBY_FORCE`) pins one path so the test exercises it
+//! deterministically.
 
 use frogql::compile_query;
 use frogql::model::graph::MemoryGraphStore;
+use frogql::model::graph_access::GraphAccess;
 use frogql::model::value::Value;
+use frogql::runtime::cfg::{OrderByForce, RuntimeCfg};
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
 use frogql::store::lazy::LazyGraphStore;
@@ -37,20 +40,15 @@ fn build_users(n: usize) -> MemoryGraphStore {
     MemoryGraphStore::from_json_str(&json).expect("graph json")
 }
 
-fn run_with_force(g: &MemoryGraphStore, q: &str, force: Option<&str>) -> Vec<Vec<Value>> {
-    let prev = std::env::var("FROGQL_ORDERBY_FORCE").ok();
-    match force {
-        Some(v) => std::env::set_var("FROGQL_ORDERBY_FORCE", v),
-        None => std::env::remove_var("FROGQL_ORDERBY_FORCE"),
-    }
+/// `force` is spelled as the environment variable is.
+fn run_with_force<G: GraphAccess>(g: &G, q: &str, force: Option<&str>) -> Vec<Vec<Value>> {
     let rt = Runtime::new(g);
+    rt.set_cfg(RuntimeCfg {
+        order_by: force.map_or(OrderByForce::Auto, OrderByForce::parse),
+        ..RuntimeCfg::default()
+    });
     let query = compile_query(q).unwrap();
-    let result = rt.run_query(&query, 0);
-    match prev {
-        Some(v) => std::env::set_var("FROGQL_ORDERBY_FORCE", v),
-        None => std::env::remove_var("FROGQL_ORDERBY_FORCE"),
-    }
-    match result {
+    match rt.run_query(&query, 0) {
         QueryResult::Projected(rs) => rs,
         _ => panic!("expected projected"),
     }
@@ -142,22 +140,8 @@ fn btree_path_emits_same_rows_as_pdqsort_via_lazy_store() {
     let store = LazyGraphStore::open(&tmp).unwrap();
 
     let q_str = "MATCH (x: User) RETURN x.id ORDER BY x.id LIMIT 8";
-    let prev = std::env::var("FROGQL_ORDERBY_FORCE").ok();
-
-    std::env::set_var("FROGQL_ORDERBY_FORCE", "pdqsort");
-    let pdq = match Runtime::new(&store).run_query(&compile_query(q_str).unwrap(), 0) {
-        QueryResult::Projected(rs) => rs,
-        _ => panic!("expected projected"),
-    };
-    std::env::set_var("FROGQL_ORDERBY_FORCE", "btree-ltj");
-    let bt = match Runtime::new(&store).run_query(&compile_query(q_str).unwrap(), 0) {
-        QueryResult::Projected(rs) => rs,
-        _ => panic!("expected projected"),
-    };
-    match prev {
-        Some(v) => std::env::set_var("FROGQL_ORDERBY_FORCE", v),
-        None => std::env::remove_var("FROGQL_ORDERBY_FORCE"),
-    }
+    let pdq = run_with_force(&store, q_str, Some("pdqsort"));
+    let bt = run_with_force(&store, q_str, Some("btree-ltj"));
     let _ = std::fs::remove_file(&tmp);
 
     assert_eq!(pdq, bt);
@@ -213,22 +197,8 @@ fn btree_ltj_real_matches_pdqsort_on_join_query() {
     let store = LazyGraphStore::open(&tmp).unwrap();
 
     let q_str = "MATCH (u: User)-[:Knows]->(f: User) RETURN u.id, f.id ORDER BY u.id LIMIT 10";
-    let prev = std::env::var("FROGQL_ORDERBY_FORCE").ok();
-
-    std::env::set_var("FROGQL_ORDERBY_FORCE", "pdqsort");
-    let pdq = match Runtime::new(&store).run_query(&compile_query(q_str).unwrap(), 0) {
-        QueryResult::Projected(rs) => rs,
-        _ => panic!("expected projected"),
-    };
-    std::env::set_var("FROGQL_ORDERBY_FORCE", "btree-ltj-real");
-    let real = match Runtime::new(&store).run_query(&compile_query(q_str).unwrap(), 0) {
-        QueryResult::Projected(rs) => rs,
-        _ => panic!("expected projected"),
-    };
-    match prev {
-        Some(v) => std::env::set_var("FROGQL_ORDERBY_FORCE", v),
-        None => std::env::remove_var("FROGQL_ORDERBY_FORCE"),
-    }
+    let pdq = run_with_force(&store, q_str, Some("pdqsort"));
+    let real = run_with_force(&store, q_str, Some("btree-ltj-real"));
     let _ = std::fs::remove_file(&tmp);
 
     assert_eq!(pdq.len(), real.len(), "row counts differ");

@@ -107,19 +107,26 @@ sha2 = { version = "0.10", optional = true }
 [dev-dependencies]
 proptest = "1"
 
-# Bins that need optional deps. Auto-discovery still picks up the
-# remaining bins (bench_queries, bench_repeat, convert_edgelist,
-# dml_bench, orderby_bench, ltj_index_stats, pattern_typecheck) which
-# use only the always-on dependencies.
+# Every bin without a `#[test]` of its own — all but `ldbc_bench` — says
+# `test = false`. Without it `cargo test` links a test harness per bin and
+# runs it to report "0 tests", and macOS charges each freshly linked binary
+# a first-run cost: ~72 s measured in an agent session, 16 of them per full
+# sweep. A bin that gains a test must drop its `test = false`, or the test
+# never runs. `cargo test --bin <name>` still runs one explicitly.
+#
+# Bins that need optional deps carry `required-features`; the rest use only
+# the always-on dependencies.
 [[bin]]
 name = "frogql"
 path = "src/bin/frogql.rs"
 required-features = ["repl"]
+test = false
 
 [[bin]]
 name = "bench_setup"
 path = "src/bin/bench_setup.rs"
 required-features = ["bench"]
+test = false
 
 [[bin]]
 name = "ldbc_bench"
@@ -132,6 +139,72 @@ required-features = ["bench"]
 name = "internal_bench"
 path = "src/bin/internal_bench.rs"
 required-features = ["bench"]
+test = false
+
+[[bin]]
+name = "bench_queries"
+path = "src/bin/bench_queries.rs"
+test = false
+
+[[bin]]
+name = "bench_repeat"
+path = "src/bin/bench_repeat.rs"
+test = false
+
+[[bin]]
+name = "convert_edgelist"
+path = "src/bin/convert_edgelist.rs"
+test = false
+
+[[bin]]
+name = "dml_bench"
+path = "src/bin/dml_bench.rs"
+test = false
+
+[[bin]]
+name = "import_ttl"
+path = "src/bin/import_ttl.rs"
+test = false
+
+[[bin]]
+name = "ltj_build"
+path = "src/bin/ltj_build.rs"
+test = false
+
+[[bin]]
+name = "ltj_index_stats"
+path = "src/bin/ltj_index_stats.rs"
+test = false
+
+[[bin]]
+name = "orderby_bench"
+path = "src/bin/orderby_bench.rs"
+test = false
+
+[[bin]]
+name = "pattern_typecheck"
+path = "src/bin/pattern_typecheck.rs"
+test = false
+
+[[bin]]
+name = "typecheck_scaling"
+path = "src/bin/typecheck_scaling.rs"
+test = false
+
+[[bin]]
+name = "vec_bench"
+path = "src/bin/vec_bench.rs"
+test = false
+
+[[bin]]
+name = "vec_build"
+path = "src/bin/vec_build.rs"
+test = false
+
+[[bin]]
+name = "vec_sweep"
+path = "src/bin/vec_sweep.rs"
+test = false
 
 [workspace]
 members = [".", "python", "node", "wasm"]

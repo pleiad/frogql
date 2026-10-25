@@ -213,7 +213,7 @@ pub const MAX_DELTA_TRIPLES: usize = 200_000;
 /// Whether this build maintains deltas at all.
 /// `FROGQL_DISABLE_LTJ_DELTA=1` restores the old behaviour — every DML
 /// drops the index and the next query rebuilds it — which is what the
-/// differential suite A/Bs against.
+/// differential suite A/Bs against, through `RuntimeCfg::ltj_delta`.
 pub fn delta_disabled() -> bool {
     std::env::var("FROGQL_DISABLE_LTJ_DELTA").is_ok_and(|v| v == "1")
 }
@@ -226,6 +226,12 @@ pub fn refresh<G: GraphAccess>(base: &TripleIndex, graph: &G) -> Option<TripleIn
     if delta_disabled() {
         return None;
     }
+    rebase(base, graph)
+}
+
+/// `refresh` without consulting the environment, for a caller that carries
+/// the switch itself (`Runtime`, through `RuntimeCfg::ltj_delta`).
+pub fn rebase<G: GraphAccess>(base: &TripleIndex, graph: &G) -> Option<TripleIndex> {
     let now = graph.edge_mutations()?;
     let mut to_id = base.label_to_id.clone();
     let mut to_label = base.id_to_label.clone();

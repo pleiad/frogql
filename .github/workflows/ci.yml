@@ -50,19 +50,13 @@ jobs:
       # Lib unit tests (inline `#[cfg(test)] mod tests` in src/).
       - name: Lib tests
         run: cargo test --workspace --lib
-      # Auto-discover every integration test under `tests/` and exclude
-      # `bench_test` (pre-existing failures — see CLAUDE.md). New test
-      # files are picked up automatically the moment they land; the
-      # previous manual --test allowlist had drifted out of sync with
-      # the repo (42 of 57 test files were silently skipped at the
-      # time this auto-discovery shim was introduced).
+      # Every integration test is a module of the one `it` binary
+      # (`tests/it/main.rs`), so nothing needs discovering: a new file is
+      # in the run once it has its `mod` line. `bench_test` stays out
+      # (pre-existing failures — see CLAUDE.md); it is the one target
+      # left directly under `tests/`.
       - name: Integration tests
-        run: |
-          TESTS=$(ls tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' \
-                  | grep -v '^bench_test$' \
-                  | awk '{print "--test " $0}' | tr '\n' ' ')
-          echo "Running $(echo "$TESTS" | wc -w | awk '{print $1/2}') integration test binaries"
-          cargo test $TESTS
+        run: cargo test --test it
 
   # Compiling for wasm32 proves nothing about running there: the target
   # has no filesystem and no clock, and `SystemTime::now()` /

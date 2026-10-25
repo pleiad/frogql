@@ -5,7 +5,7 @@
 //! (`try_concat_with_edge_repetition`), and the plain adjacency /
 //! hash-join fallback. All three iterate physical edges and, since the
 //! LTJ base-case per-edge fan-out landed, all three produce the same ISO
-//! bag multiplicity. This suite locks that in: `FROGQL_DISABLE_ANYDIR_LTJ`
+//! bag multiplicity. This suite locks that in: `RuntimeCfg::anydir_ltj`
 //! toggles LTJ vs fallback, and the results must match as multisets across
 //! every shape — so a future change to either path can't silently diverge.
 //! One case is also anchored to a hand-computed ISO count.
@@ -13,6 +13,7 @@
 use frogql::compile_query;
 use frogql::model::graph::MemoryGraphStore;
 use frogql::model::value::Value;
+use frogql::runtime::cfg::RuntimeCfg;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
 
@@ -41,22 +42,17 @@ fn rich() -> MemoryGraphStore {
     MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn run(g: &MemoryGraphStore, q: &str, ltj: bool) -> Vec<String> {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if ltj {
-        std::env::remove_var("FROGQL_DISABLE_ANYDIR_LTJ");
-    } else {
-        std::env::set_var("FROGQL_DISABLE_ANYDIR_LTJ", "1");
-    }
     let rt = Runtime::new(g);
+    rt.set_cfg(RuntimeCfg {
+        anydir_ltj: ltj,
+        ..RuntimeCfg::default()
+    });
     let query = compile_query(q).unwrap();
     let out = match rt.run_query(&query, 0) {
         QueryResult::Projected(r) => r,
         other => panic!("expected projected, got {other:?}"),
     };
-    std::env::remove_var("FROGQL_DISABLE_ANYDIR_LTJ");
     let mut keys: Vec<String> = out.iter().map(|r| format!("{r:?}")).collect();
     keys.sort();
     keys

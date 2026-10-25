@@ -13,16 +13,17 @@ pub mod vector;
 pub use connection::{Connection, Element, Error, Modified, Outcome, Row, Rows};
 pub use model::value::Value;
 
+use optimizer::OptimizerCfg;
 use syntax::path_pattern::PathPattern;
 use syntax::query::{MatchStatement, Query};
 use typing::checker::Typechecker;
 use typing::variable_type::Schema;
 
 /// Optimize the query while preserving OPTIONAL and §16.6 prefix boundaries.
-fn optimize_query(q: Query, schema: &Schema) -> Query {
+fn optimize_query(q: Query, schema: &Schema, cfg: &OptimizerCfg) -> Query {
     // Selected patterns are evaluated in isolation; do not collapse across them.
     let mut q = if !q.has_any_optional() && !q.has_any_selected() {
-        let pattern = optimizer::compile(q.collapsed_pattern());
+        let pattern = optimizer::compile_with(q.collapsed_pattern(), cfg);
         Query {
             matches: vec![MatchStatement::Simple { pattern }],
             ..q
@@ -33,10 +34,10 @@ fn optimize_query(q: Query, schema: &Schema) -> Query {
             .into_iter()
             .map(|m| match m {
                 MatchStatement::Simple { pattern } => MatchStatement::Simple {
-                    pattern: optimizer::compile(pattern),
+                    pattern: optimizer::compile_with(pattern, cfg),
                 },
                 MatchStatement::Optional { pattern } => MatchStatement::Optional {
-                    pattern: optimizer::compile(pattern),
+                    pattern: optimizer::compile_with(pattern, cfg),
                 },
             })
             .collect();
@@ -92,6 +93,17 @@ pub fn compile_query_with_diagnostics_with(
     schema: &Schema,
     input: &str,
 ) -> Result<CompileResult, CompileError> {
+    compile_query_with_cfg(schema, input, &OptimizerCfg::from_env())
+}
+
+/// Same as [`compile_query_with_diagnostics_with`] but with the optimizer's
+/// switches given rather than read from the environment — what a
+/// differential test uses to compile one query both ways.
+pub fn compile_query_with_cfg(
+    schema: &Schema,
+    input: &str,
+    cfg: &OptimizerCfg,
+) -> Result<CompileResult, CompileError> {
     let ast = parser::parse_query(input).map_err(CompileError::Parse)?;
     let q = elaborate::elaborate_query(ast);
     let mut tc = Typechecker::new(schema.clone());
@@ -102,7 +114,7 @@ pub fn compile_query_with_diagnostics_with(
     let warnings = tc.warnings;
     let guaranteed_empty = r.empty;
     Ok(CompileResult {
-        query: optimize_query(q, schema),
+        query: optimize_query(q, schema, cfg),
         warnings,
         guaranteed_empty,
     })
@@ -122,7 +134,7 @@ pub fn compile(query: &str) -> Result<PathPattern, String> {
     if !r.ok {
         return Err(tc.errors.join("; "));
     }
-    Ok(optimize_query(q, &Schema::star()).collapsed_pattern())
+    Ok(optimize_query(q, &Schema::star(), &OptimizerCfg::from_env()).collapsed_pattern())
 }
 
 /// Compile a full GQL query: parse → elaborate → typecheck → optimize.
@@ -150,7 +162,7 @@ pub fn compile_unchecked(query: &str) -> Result<PathPattern, String> {
     let ast = parser::parse(query)?;
     let q = Query::pattern_only(ast);
     let q = elaborate::elaborate_query(q);
-    Ok(optimize_query(q, &Schema::star()).collapsed_pattern())
+    Ok(optimize_query(q, &Schema::star(), &OptimizerCfg::from_env()).collapsed_pattern())
 }
 
 /// Compile a full GQL query without typechecking. Same plan as
@@ -158,5 +170,9 @@ pub fn compile_unchecked(query: &str) -> Result<PathPattern, String> {
 pub fn compile_query_unchecked(input: &str) -> Result<Query, String> {
     let q = parser::parse_query(input)?;
     let q = elaborate::elaborate_query(q);
-    Ok(optimize_query(q, &Schema::star()))
+    Ok(optimize_query(
+        q,
+        &Schema::star(),
+        &OptimizerCfg::from_env(),
+    ))
 }

@@ -23,11 +23,9 @@
 
 use frogql::model::graph::MemoryGraphStore;
 use frogql::model::value::Value;
+use frogql::runtime::cfg::RuntimeCfg;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
-use std::sync::Mutex;
-
-static ENV: Mutex<()> = Mutex::new(());
 
 /// Four parallel edges between the same pair, one of them carrying two
 /// labels. The multi-label edge is the whole point: without it the
@@ -49,8 +47,13 @@ fn graph() -> MemoryGraphStore {
 }
 
 fn count(q: &str) -> i64 {
+    count_with(q, RuntimeCfg::default())
+}
+
+fn count_with(q: &str, cfg: RuntimeCfg) -> i64 {
     let g = graph();
     let rt = Runtime::new(&g);
+    rt.set_cfg(cfg);
     let query = frogql::compile_query(q).unwrap_or_else(|e| panic!("compile `{q}`: {e}"));
     match rt.run_query(&query, 0) {
         QueryResult::Projected(rows) => match rows[0][0] {
@@ -116,12 +119,11 @@ fn any_direction_label_algebra() {
 }
 
 /// The differential half, and the one that matters: the answer must not
-/// depend on the plan. `FROGQL_DISABLE_ANYDIR_LTJ=1` forces the
+/// depend on the plan. Clearing `RuntimeCfg::anydir_ltj` forces the
 /// hash-join fallback for an any-direction pattern, which is the path
 /// that was right all along.
 #[test]
 fn ltj_agrees_with_the_hash_join_fallback() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     for q in [
         "MATCH (x:N)-[r]-(y:N) RETURN COUNT(*)",
         "MATCH (x:N)-[r:A]-(y:N) RETURN COUNT(*)",
@@ -129,11 +131,14 @@ fn ltj_agrees_with_the_hash_join_fallback() {
         "MATCH (x:N)-[r:A&B]-(y:N) RETURN COUNT(*)",
         "MATCH (x:N)-[r:A|C]-(y:N) RETURN COUNT(*)",
     ] {
-        std::env::remove_var("FROGQL_DISABLE_ANYDIR_LTJ");
         let ltj = count(q);
-        std::env::set_var("FROGQL_DISABLE_ANYDIR_LTJ", "1");
-        let fallback = count(q);
-        std::env::remove_var("FROGQL_DISABLE_ANYDIR_LTJ");
+        let fallback = count_with(
+            q,
+            RuntimeCfg {
+                anydir_ltj: false,
+                ..RuntimeCfg::default()
+            },
+        );
         assert_eq!(ltj, fallback, "LTJ ≠ hash-join for {q}");
     }
 }
@@ -142,17 +147,21 @@ fn ltj_agrees_with_the_hash_join_fallback() {
 /// tries through a different iterator.
 #[test]
 fn both_representations_agree() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     for q in [
         "MATCH (x:N)-[r]->(y:N) RETURN COUNT(*)",
         "MATCH (x:N)-[r:A|B]->(y:N) RETURN COUNT(*)",
         "MATCH (x:N)-[r:A&B]->(y:N) RETURN COUNT(*)",
     ] {
-        std::env::set_var("FROGQL_LTJ_REPR", "compact");
-        let compact = count(q);
-        std::env::set_var("FROGQL_LTJ_REPR", "array");
-        let array = count(q);
-        std::env::remove_var("FROGQL_LTJ_REPR");
+        let repr = |compact| {
+            count_with(
+                q,
+                RuntimeCfg {
+                    ltj_compact: compact,
+                    ..RuntimeCfg::default()
+                },
+            )
+        };
+        let (compact, array) = (repr(true), repr(false));
         assert_eq!(compact, array, "compact ≠ array for {q}");
     }
 }

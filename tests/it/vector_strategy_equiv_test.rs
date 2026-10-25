@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use frogql::model::graph::MemoryGraphStore;
 use frogql::model::value::Value;
+use frogql::runtime::cfg::RuntimeCfg;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
 use frogql::runtime::vsearch::{Strategy, VecCfg, VecSource};
@@ -188,27 +189,22 @@ fn build_db(name: &str, seed: u64) -> PathBuf {
     db
 }
 
-/// `FROGQL_VEO` is process-global, so every query in this file passes
-/// through here.
-static VEO_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// Run `q` and return the projected rows, with the variable order
-/// explicitly static. `FROGQL_VEO` is process-global, so a test that sets
-/// it would otherwise leak into every other test running beside it, and a
-/// row here would silently be measuring the order it did not ask for.
+/// explicitly static. Asked for, not left to the default: the adaptive
+/// order is the default, so this would otherwise be the adaptive baseline
+/// and the comparison with `run_adaptive` would hold trivially.
 fn run(db: &Path, q: &str, cfg: VecCfg) -> Vec<Vec<Value>> {
-    let _g = VEO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // Set, not removed: the adaptive order is the default, so removing the
-    // variable would make this the adaptive baseline and the comparison
-    // below would hold trivially.
-    std::env::set_var("FROGQL_VEO", "simple");
-    run_inner(db, q, cfg)
+    run_inner(db, q, cfg, false)
 }
 
-fn run_inner(db: &Path, q: &str, cfg: VecCfg) -> Vec<Vec<Value>> {
+fn run_inner(db: &Path, q: &str, cfg: VecCfg, adaptive: bool) -> Vec<Vec<Value>> {
     let store = LazyGraphStore::open(db).unwrap();
     let rt = Runtime::new(&store);
     rt.set_vec_cfg(cfg);
+    rt.set_cfg(RuntimeCfg {
+        adaptive_veo: adaptive,
+        ..RuntimeCfg::default()
+    });
     let query = frogql::compile_query(q).unwrap_or_else(|e| panic!("compile `{q}`: {e}"));
     match rt.run_query(&query, 0) {
         QueryResult::Projected(rows) => rows,
@@ -661,13 +657,9 @@ fn sorted(mut rows: Vec<Vec<Value>>) -> Vec<String> {
     keys
 }
 
-/// Run with `FROGQL_VEO=adaptive` set for the duration.
+/// Run under the adaptive variable order.
 fn run_adaptive(db: &Path, q: &str, cfg: VecCfg) -> Vec<Vec<Value>> {
-    let _g = VEO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("FROGQL_VEO", "adaptive");
-    let rows = run_inner(db, q, cfg);
-    std::env::remove_var("FROGQL_VEO");
-    rows
+    run_inner(db, q, cfg, true)
 }
 
 /// The uncorrelated queries the pinned suite already uses, run with no

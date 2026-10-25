@@ -16,6 +16,7 @@
 use frogql::compile_query;
 use frogql::model::graph::MemoryGraphStore;
 use frogql::model::value::Value;
+use frogql::runtime::cfg::RuntimeCfg;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
 
@@ -48,25 +49,17 @@ fn graph() -> MemoryGraphStore {
     MemoryGraphStore::from_json_str(json).unwrap()
 }
 
-/// Serializes the `FROGQL_DISABLE_SEEDED_REPEAT` toggle: the var is
-/// process-global, so concurrent tests would otherwise clobber each other.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn run_proj(g: &MemoryGraphStore, q: &str, seeded: bool, limit: usize) -> Vec<Vec<Value>> {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if seeded {
-        std::env::remove_var("FROGQL_DISABLE_SEEDED_REPEAT");
-    } else {
-        std::env::set_var("FROGQL_DISABLE_SEEDED_REPEAT", "1");
-    }
     let rt = Runtime::new(g);
+    rt.set_cfg(RuntimeCfg {
+        seeded_repeat: seeded,
+        ..RuntimeCfg::default()
+    });
     let query = compile_query(q).unwrap();
-    let out = match rt.run_query(&query, limit) {
+    match rt.run_query(&query, limit) {
         QueryResult::Projected(rs) => rs,
         _ => panic!("expected projected for {q:?}"),
-    };
-    std::env::remove_var("FROGQL_DISABLE_SEEDED_REPEAT");
-    out
+    }
 }
 
 /// Multiset comparison: both paths may produce rows in different orders.

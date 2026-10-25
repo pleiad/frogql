@@ -612,8 +612,11 @@ built. The gap is the `std::env::var("FROGQL_VEO")` that
 allocating a `String`. Running the *simple* order with `FROGQL_VEO=simple`
 set reproduces it exactly (38.6 ms against 36.4 ms with the variable
 unset), which is how it was identified. Every other kill switch on this
-path is read the same way; caching it would need a mechanism the
-in-process differential tests can still flip.
+path was read the same way; caching it needed a mechanism the in-process
+differential tests can still flip. `RuntimeCfg` is that mechanism: the
+switches are read once, when the `Runtime` is built, and a test sets a
+field rather than the variable. The 148 323 lookups are gone; the IC8 gap
+has not been re-measured since.
 
 The default path pays nothing for the hooks. `next` / `down` / `up` /
 `done` are trait calls with no-op bodies for a materialised order, and an

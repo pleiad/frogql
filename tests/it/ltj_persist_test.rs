@@ -17,21 +17,17 @@
 //! than in a wrong answer or a crash.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use frogql::model::graph::MemoryGraphStore;
 use frogql::model::graph_access::GraphAccess;
 use frogql::model::graph_access::SidecarKey;
 use frogql::model::value::Value;
+use frogql::runtime::cfg::RuntimeCfg;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::ltj::persist::{self, Reject};
 use frogql::runtime::ltj::triple_index::TripleIndex;
 use frogql::runtime::result::QueryResult;
 use frogql::store::lazy::LazyGraphStore;
-
-/// `FROGQL_LTJ_REPR` is process-global; these cases all read it, so they
-/// must not run concurrently with one that sets it.
-static ENV: Mutex<()> = Mutex::new(());
 
 const NODES: usize = 60;
 
@@ -113,9 +109,17 @@ const QUERIES: [&str; 5] = [
     "MATCH (a:Img)-[:P926]->(b:Img) RETURN a.id, b.id ORDER BY a.id, b.id",
 ];
 
+/// The representation comes from the environment, as it does for
+/// `write_sidecar` and `TripleIndex::compact_selected`, so the sidecars
+/// these cases write and the runtimes that read them agree on it.
 fn run_all(db: &Path) -> Vec<Vec<Vec<Value>>> {
+    run_all_with(db, RuntimeCfg::from_env())
+}
+
+fn run_all_with(db: &Path, cfg: RuntimeCfg) -> Vec<Vec<Vec<Value>>> {
     let store = LazyGraphStore::open(db).unwrap();
     let rt = Runtime::new(&store);
+    rt.set_cfg(cfg);
     QUERIES
         .iter()
         .map(|q| {
@@ -128,16 +132,22 @@ fn run_all(db: &Path) -> Vec<Vec<Vec<Value>>> {
         .collect()
 }
 
+/// Ignore any sidecar and build the index from the graph
+/// (`FROGQL_LTJ_SOURCE=build`).
+fn rebuild() -> RuntimeCfg {
+    RuntimeCfg {
+        ltj_force_build: true,
+        ..RuntimeCfg::from_env()
+    }
+}
+
 /// The headline invariant: what the engine answers must not depend on
 /// whether the index was read or computed.
 #[test]
 fn loaded_index_answers_exactly_as_a_built_one() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("equiv");
 
-    std::env::set_var("FROGQL_LTJ_SOURCE", "build");
-    let built = run_all(&db);
-    std::env::remove_var("FROGQL_LTJ_SOURCE");
+    let built = run_all_with(&db, rebuild());
 
     write_sidecar(&db);
     assert!(persist::path_for(&db).exists());
@@ -156,7 +166,6 @@ fn loaded_index_answers_exactly_as_a_built_one() {
 /// The index itself round-trips: same triple count, same labels.
 #[test]
 fn encode_decode_round_trip() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("roundtrip");
     let store = LazyGraphStore::open(&db).unwrap();
     let key = key_for(&db);
@@ -188,7 +197,6 @@ fn missing_sidecar_is_not_an_error() {
 /// longer exist.
 #[test]
 fn a_changed_graph_is_refused() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("stale");
     write_sidecar(&db);
     let key = key_for(&db);
@@ -222,7 +230,6 @@ fn a_changed_graph_is_refused() {
 /// converted: loading it would silently change which algorithm runs.
 #[test]
 fn the_other_representation_is_refused() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("repr");
     let store = LazyGraphStore::open(&db).unwrap();
     let key = key_for(&db);
@@ -241,7 +248,6 @@ fn the_other_representation_is_refused() {
 /// miss.
 #[test]
 fn damaged_sidecars_are_refused_without_panicking() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("damaged");
     write_sidecar(&db);
     let key = key_for(&db);
@@ -289,12 +295,9 @@ fn damaged_sidecars_are_refused_without_panicking() {
 /// a rebuilt index, with the right answer.
 #[test]
 fn the_engine_recovers_from_a_damaged_sidecar() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("recover");
 
-    std::env::set_var("FROGQL_LTJ_SOURCE", "build");
-    let want = run_all(&db);
-    std::env::remove_var("FROGQL_LTJ_SOURCE");
+    let want = run_all_with(&db, rebuild());
 
     std::fs::write(persist::path_for(&db), b"garbage").unwrap();
     let got = run_all(&db);
@@ -324,7 +327,6 @@ fn sidecar_path_is_the_database_plus_a_suffix() {
 /// queries that exercise this plan all carry one.
 #[test]
 fn order_by_without_limit_does_not_overflow() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("orderby_nolimit");
     let store = LazyGraphStore::open(&db).unwrap();
     let rt = Runtime::new(&store);
@@ -357,7 +359,6 @@ fn order_by_without_limit_does_not_overflow() {
 /// session reads instead of rebuilding.
 #[test]
 fn a_first_query_leaves_a_sidecar() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("autowrite");
     let path = persist::path_for(&db);
     assert!(!path.exists(), "a fresh database starts with no sidecar");
@@ -370,24 +371,26 @@ fn a_first_query_leaves_a_sidecar() {
     assert_eq!(run_all(&db), first);
 }
 
-/// `FROGQL_LTJ_PERSIST=0` keeps the index and declines the file.
+/// `RuntimeCfg::ltj_persist` (`FROGQL_LTJ_PERSIST=0`) keeps the index and
+/// declines the file.
 #[test]
 fn the_write_has_a_kill_switch() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("nowrite");
 
-    std::env::set_var("FROGQL_LTJ_PERSIST", "0");
-    let got = run_all(&db);
-    std::env::remove_var("FROGQL_LTJ_PERSIST");
+    let got = run_all_with(
+        &db,
+        RuntimeCfg {
+            ltj_persist: false,
+            ..RuntimeCfg::from_env()
+        },
+    );
 
     assert!(
         !persist::path_for(&db).exists(),
         "the kill switch must leave no sidecar"
     );
     // The rows are still right — it declines the file, not the index.
-    std::env::set_var("FROGQL_LTJ_SOURCE", "build");
-    let want = run_all(&db);
-    std::env::remove_var("FROGQL_LTJ_SOURCE");
+    let want = run_all_with(&db, rebuild());
     assert_eq!(got, want);
 }
 
@@ -402,7 +405,6 @@ fn the_write_has_a_kill_switch() {
 /// it, a sidecar only existed if someone had run `ltj_build` by hand.
 #[test]
 fn a_delete_plus_an_equal_sized_insert_is_refused() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("identity");
     write_sidecar(&db);
     let before = key_for(&db);
@@ -459,7 +461,6 @@ fn a_delete_plus_an_equal_sized_insert_is_refused() {
 /// the index comes back without the new edge.
 #[test]
 fn a_pending_mutation_does_not_read_the_sidecar() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let db = build_db("pending");
     write_sidecar(&db);
 

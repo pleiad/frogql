@@ -323,14 +323,14 @@ fn delta_agrees_with_the_scan_baseline() {
     }
 
     let run = |disabled: bool| -> String {
+        // The harness names a test by its path inside the crate, which is
+        // `module_path!` without the crate's own name in front.
+        let name = concat!(module_path!(), "::delta_agrees_with_the_scan_baseline");
+        let name = name.split_once("::").map_or(name, |(_, rest)| rest);
         let exe = std::env::current_exe().unwrap();
         let mut cmd = std::process::Command::new(exe);
-        cmd.args([
-            "delta_agrees_with_the_scan_baseline",
-            "--exact",
-            "--nocapture",
-        ])
-        .env("FROGQL_OVERLAY_IDX_CHILD", "1");
+        cmd.args([name, "--exact", "--nocapture"])
+            .env("FROGQL_OVERLAY_IDX_CHILD", "1");
         if disabled {
             cmd.env("FROGQL_DISABLE_OVERLAY_INDEX", "1");
         }

@@ -150,8 +150,18 @@ impl TripleIndex {
     /// Build the standard index from a graph: directed edges in their
     /// physical sense only, undirected edges in both senses. This is the
     /// index for directed / `~`-undirected / leftward pattern edges.
+    ///
+    /// The representation is the one the environment selects
+    /// (`compact_selected`); a caller holding a `RuntimeCfg` uses
+    /// `from_graph_repr` instead.
     pub fn from_graph<G: GraphAccess>(graph: &G) -> Self {
-        Self::from_graph_impl(graph, false)
+        Self::from_graph_impl(graph, false, Self::compact_selected())
+    }
+
+    /// `from_graph` in the representation the caller names: compact tries
+    /// when `compact`, sorted arrays otherwise.
+    pub fn from_graph_repr<G: GraphAccess>(graph: &G, compact: bool) -> Self {
+        Self::from_graph_impl(graph, false, compact)
     }
 
     /// Build the **any-direction** index: *every* physical edge — directed
@@ -166,11 +176,12 @@ impl TripleIndex {
     /// `x=b,y=a`), a reciprocal pair yields two per endpoint binding, etc.
     /// Roughly doubles the directed-triple count vs `from_graph`; built
     /// lazily, only when a query actually contains an any-direction edge.
-    pub fn from_graph_anydir<G: GraphAccess>(graph: &G) -> Self {
-        Self::from_graph_impl(graph, true)
+    /// `compact` picks the representation, as in `from_graph_repr`.
+    pub fn from_graph_anydir<G: GraphAccess>(graph: &G, compact: bool) -> Self {
+        Self::from_graph_impl(graph, true, compact)
     }
 
-    fn from_graph_impl<G: GraphAccess>(graph: &G, mirror_directed: bool) -> Self {
+    fn from_graph_impl<G: GraphAccess>(graph: &G, mirror_directed: bool, compact: bool) -> Self {
         let mut label_to_id: HashMap<String, u32> = HashMap::new();
         let mut id_to_label: Vec<String> = Vec::new();
 
@@ -237,7 +248,7 @@ impl TripleIndex {
             }
         }
 
-        let repr = if Self::compact_selected() {
+        let repr = if compact {
             IndexRepr::Compact(Box::new(CompactTripleIndex::from_raw(raw_triples)))
         } else {
             // Build 6 orderings
@@ -482,10 +493,8 @@ mod tests {
         // This case is about the array representation's own invariants
         // (six equal-length orderings, SPO sorted), so it asks for it by
         // name rather than relying on the default, which is compact.
-        std::env::set_var("FROGQL_LTJ_REPR", "array");
         let graph = MemoryGraphStore::from_file(Path::new("test_data/fraud.json")).unwrap();
-        let idx = TripleIndex::from_graph(&graph);
-        std::env::remove_var("FROGQL_LTJ_REPR");
+        let idx = TripleIndex::from_graph_repr(&graph, false);
         assert!(!idx.is_empty());
 
         // All 6 orderings have the same length

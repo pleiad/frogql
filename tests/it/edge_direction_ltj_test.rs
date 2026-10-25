@@ -19,12 +19,12 @@
 //! The optimizer is documented as performance-preserving, and no test
 //! A/B'd it — `FROGQL_DISABLE_REPEAT_UNROLL` had no coverage at all.
 
-use frogql::compile_query;
+use frogql::compile_query_with_cfg;
 use frogql::model::graph::MemoryGraphStore;
+use frogql::optimizer::OptimizerCfg;
 use frogql::runtime::engine::Runtime;
 use frogql::runtime::result::QueryResult;
-
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+use frogql::typing::variable_type::Schema;
 
 /// Two directed edges and two undirected ones, all labelled `R`, so the
 /// label cannot stand in for the direction: a-D->b, b-D->c (directed),
@@ -50,20 +50,18 @@ fn mixed() -> MemoryGraphStore {
 }
 
 fn run(q: &str, unroll: bool) -> Vec<String> {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if unroll {
-        std::env::remove_var("FROGQL_DISABLE_REPEAT_UNROLL");
-    } else {
-        std::env::set_var("FROGQL_DISABLE_REPEAT_UNROLL", "1");
-    }
     let g = mixed();
     let rt = Runtime::new(&g);
-    let query = compile_query(q).unwrap_or_else(|e| panic!("compile `{q}`: {e}"));
+    let cfg = OptimizerCfg {
+        unroll_repeat: unroll,
+    };
+    let query = compile_query_with_cfg(&Schema::star(), q, &cfg)
+        .unwrap_or_else(|e| panic!("compile `{q}`: {e}"))
+        .query;
     let out = match rt.run_query(&query, 0) {
         QueryResult::Projected(rows) => rows,
         other => panic!("expected a projection, got {other:?}"),
     };
-    std::env::remove_var("FROGQL_DISABLE_REPEAT_UNROLL");
     let mut keys: Vec<String> = out.iter().map(|r| format!("{r:?}")).collect();
     keys.sort();
     keys

@@ -1,6 +1,7 @@
 pub mod assignment;
 pub mod budget;
 pub mod catalog;
+pub mod cfg;
 pub mod dm;
 pub mod engine;
 pub mod ltj;
