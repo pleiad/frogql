@@ -138,7 +138,7 @@ pub struct LazyGraphStore {
     incoming_csr: AdjCsr,
     undirected_csr: AdjCsr,
 
-    // Graph-type catalog (loaded from chain at open, persisted via save_catalog).
+    // Graph-type catalog (loaded from chain at open, persisted by `save`).
     catalog: RefCell<GraphTypeCatalog>,
     /// Last persisted catalog chain root. Tracked so subsequent writes
     /// can free the old chain before allocating new pages.
@@ -165,6 +165,18 @@ pub struct LazyGraphStore {
     /// the first DML statement. Persistence happens via `save()`, which
     /// materializes the merged base+overlay view into a fresh `.gdb`.
     overlay: RefCell<MutationOverlay>,
+    /// The overlay as of the last successful `save`, which is what
+    /// `rollback_session` returns to. `None` until the first save, and
+    /// then rollback returns to the opened image.
+    ///
+    /// `save` writes a new file and leaves the session reading the one it
+    /// opened, so the overlay is never cleared and keeps covering what was
+    /// already saved. Clearing it on a rollback therefore threw away
+    /// *saved* work along with the failed statement: `INSERT`, `save()`,
+    /// a rejected `INSERT`, `save()` again, and the first row was gone from
+    /// the file too. With the snapshot, a rollback undoes exactly what was
+    /// not saved.
+    saved_overlay: RefCell<Option<MutationOverlay>>,
 
     /// Where this database was opened from. Kept because the vector
     /// sidecars are named after it (`<db>.vec.<attr>`) and nothing else
@@ -432,6 +444,7 @@ impl LazyGraphStore {
             overlay_index: RefCell::new(Default::default()),
             secondary_index_root: Cell::new(secondary_index_root),
             overlay: RefCell::new(MutationOverlay::default()),
+            saved_overlay: RefCell::new(None),
             db_path: db_path.map(|p| p.to_path_buf()).unwrap_or_default(),
             ltj_sidecar: None,
             vectors: VectorStore::empty(),
@@ -588,6 +601,12 @@ impl LazyGraphStore {
     /// Nodes in the merged view: base, plus what the overlay staged,
     /// minus what it deleted. See `MemoryGraphStore::live_node_count` for
     /// why this is separate from the base count.
+    ///
+    /// Every user-facing count wants this one. The native bindings' getters
+    /// read `node_count` through 0.5.11, so after an `INSERT` a connection
+    /// answered 1 while `MATCH (n) RETURN COUNT(n)` on it answered 3, and
+    /// kept answering 1 after `save`, since the session goes on reading
+    /// the image it opened.
     pub fn live_node_count(&self) -> usize {
         let overlay = self.overlay.borrow();
         overlay.next_node_id() as usize - overlay.deleted_nodes.len()
@@ -715,15 +734,27 @@ impl LazyGraphStore {
         self.catalog.borrow()
     }
 
-    /// Mutable borrow of the catalog. Callers must invoke
-    /// [`save_catalog`](Self::save_catalog) before dropping the store
-    /// for changes to persist.
+    /// Mutable borrow of the catalog. A change persists with the next
+    /// [`save`](Self::save), which writes the catalog together with the
+    /// data, exactly like a DML change.
     pub fn catalog_mut(&self) -> RefMut<'_, GraphTypeCatalog> {
         self.catalog.borrow_mut()
     }
 
-    /// Persist the in-memory catalog to disk: rewrites the chain and
-    /// updates the file header. Idempotent.
+    /// Persist the in-memory catalog alone, in place in the opened file:
+    /// rewrites the chain and updates the header. Idempotent.
+    ///
+    /// **No statement dispatcher calls this.** `CREATE` / `USE` / `DROP` /
+    /// `VALIDATE GRAPH TYPE` used to, so the catalog was auto-committed
+    /// while the data waited for `save` (issue #103), and the two came
+    /// apart. `USE GRAPH TYPE DEFAULT` after an unsaved `DELETE` wrote a
+    /// DEFAULT for data the file did not hold, and after reopening without
+    /// `save` the typechecker declared a query over that data empty. And
+    /// once `save` had replaced the opened file, the write landed in the
+    /// replaced inode and was lost although it reported success. The
+    /// catalog now persists only with `save`, beside the data it
+    /// describes. What remains is for tools that write a fresh file's
+    /// catalog (the CSV / JSON importers) and for tests.
     pub fn save_catalog(&self) -> io::Result<()> {
         let cat = self.catalog.borrow();
         let mut pager = self.pager.borrow_mut();
@@ -1031,9 +1062,14 @@ impl LazyGraphStore {
         }
     }
 
+    /// Nodes in the **opened image**, not counting the overlay. This bounds
+    /// the base id space (`edge_src`, `node_locs`, the overlay's first id)
+    /// and must stay that way; a count to show a *user* is
+    /// `live_node_count`.
     pub fn node_count(&self) -> u32 {
         self.node_count
     }
+    /// Edges in the opened image. See `node_count`.
     pub fn edge_count(&self) -> u32 {
         self.edge_count
     }
@@ -1144,13 +1180,12 @@ impl LazyGraphStore {
     /// `MutationOverlay::touched_node_log`: a sync costs only the nodes
     /// touched since the last one, so a bulk load stays linear.
     ///
-    /// Returning `false` is always safe — the caller scans. Three things
-    /// produce it:
+    /// When the overlay was replaced under us (`rollback_session`, which
+    /// starts a new `MutationOverlay::epoch`), the delta is dropped and
+    /// rebuilt from the first entry of the current log.
     ///
-    /// - the overlay was reset under us (`save` / `rollback_session` clear
-    ///   the log), which drops the delta and rebuilds it from nothing;
-    /// - a node in the log can no longer be read;
-    /// - **the witness disagrees.** Every node-mutating path is supposed to
+    /// Returning `false` is always safe — the caller scans. It happens
+    /// when **the witness disagrees.** Every node-mutating path is supposed to
     ///   call `MutationOverlay::touch_node`; one that forgets would
     ///   otherwise produce silently wrong answers, which is the exact bug
     ///   class this delta exists to close. So the sizes of the overlay's
@@ -1163,8 +1198,21 @@ impl LazyGraphStore {
         if crate::store::overlay_index::overlay_index_disabled() {
             return self.overlay.borrow().node_state_len() == 0;
         }
-        let (pending, base_node_count, witness, log_len) = {
+        let (pending, base_node_count, witness, log_len, epoch) = {
             let overlay = self.overlay.borrow();
+            if self.overlay_index.borrow().epoch != overlay.epoch {
+                // The overlay was replaced (a rollback), so the absorbed
+                // offset points into a log that is gone, and the ids it
+                // filed may now name other nodes. Start over from the
+                // first entry of the current log. Returning early here,
+                // as this once did, skipped whatever the new log already
+                // held: a node inserted after the rollback and before the
+                // next lookup was never filed, and a lookup of its value
+                // missed it.
+                let mut idx = self.overlay_index.borrow_mut();
+                idx.clear();
+                idx.epoch = overlay.epoch;
+            }
             let idx = self.overlay_index.borrow();
             let log_len = overlay.touched_node_log.len();
             let witness = (
@@ -1173,18 +1221,17 @@ impl LazyGraphStore {
                 overlay.mod_node_props.len(),
                 overlay.mod_node_labels.len(),
             );
-            if log_len < idx.absorbed {
-                // The overlay was cleared (save / rollback). Start over.
-                drop(idx);
-                drop(overlay);
-                self.overlay_index.borrow_mut().clear();
-                return true;
-            }
             if log_len == idx.absorbed && witness != idx.witness && idx.absorbed > 0 {
                 return false;
             }
             let pending: Vec<Id> = overlay.touched_node_log[idx.absorbed..].to_vec();
-            (pending, overlay.base_node_count, witness, log_len)
+            (
+                pending,
+                overlay.base_node_count,
+                witness,
+                log_len,
+                overlay.epoch,
+            )
         };
 
         if !pending.is_empty() {
@@ -1210,6 +1257,7 @@ impl LazyGraphStore {
         let mut idx = self.overlay_index.borrow_mut();
         idx.absorbed = log_len;
         idx.witness = witness;
+        idx.epoch = epoch;
         true
     }
 
@@ -1334,6 +1382,8 @@ impl LazyGraphStore {
         // replays the DDL list on top.
         let specs: Vec<_> = self.secondary.borrow().list().to_vec();
         super::io::save_graph_with_catalog_and_indexes_atomic(&g, &cat, &specs, db_path)?;
+        // What was just written is now what a rollback returns to.
+        *self.saved_overlay.borrow_mut() = Some(self.overlay.borrow().clone());
         // The saved file is a new image: `materialize_to_graph` compacted
         // the ids, so every id in the old `<db>.ltj` may now name a
         // different element. The identity stamp in the new header already
@@ -1822,6 +1872,8 @@ impl GraphAccess for LazyGraphStore {
             live_overlay,
             deleted: overlay.deleted_edges.clone(),
             next_edge_id: overlay.next_edge_id(),
+            base_edge_count: overlay.base_edge_count,
+            epoch: overlay.epoch,
         })
     }
 
@@ -1987,11 +2039,18 @@ impl crate::model::graph_access::GraphAccessMut for LazyGraphStore {
         overlay.get_new_edge(id).is_some()
     }
 
+    /// Undo everything since the last `save` (or since open, before the
+    /// first one). See `saved_overlay` for why not simply "since open".
     fn rollback_session(&self) {
         let mut overlay = self.overlay.borrow_mut();
-        let bn = overlay.base_node_count;
-        let be = overlay.base_edge_count;
-        overlay.clear(bn, be);
+        match self.saved_overlay.borrow().as_ref() {
+            Some(snapshot) => overlay.restore(snapshot),
+            None => {
+                let bn = overlay.base_node_count;
+                let be = overlay.base_edge_count;
+                overlay.clear(bn, be);
+            }
+        }
     }
 
     fn set_node_prop(&self, id: Id, prop: &str, value: crate::model::value::Value) {

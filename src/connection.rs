@@ -256,7 +256,6 @@ impl Connection {
                     .catalog_mut()
                     .drop(&name)
                     .map_err(Error::Execution)?;
-                self.store.save_catalog()?;
                 Ok(Outcome::Message(format!("GRAPH TYPE '{name}' dropped.")))
             }
             Statement::ShowGraphTypes => Ok(Outcome::Rows(self.show_graph_types())),
@@ -309,12 +308,15 @@ impl Connection {
         *self.cancel.borrow_mut() = flag;
     }
 
+    /// Nodes in the merged view, unsaved changes included: what
+    /// `MATCH (n) RETURN COUNT(n)` answers.
     pub fn node_count(&self) -> u32 {
-        self.store.node_count()
+        self.store.live_node_count() as u32
     }
 
+    /// Edges in the merged view. See `node_count`.
     pub fn edge_count(&self) -> u32 {
-        self.store.edge_count()
+        self.store.live_edge_count() as u32
     }
 
     /// Labels and properties of node `id` (from a [`Value::Node`]).
@@ -427,19 +429,25 @@ impl Connection {
     }
 
     fn run_dm(&self, dm: &DmStatement) -> Result<Modified> {
-        let validation = match self.store.catalog().active_name() {
+        // Copy the name out first: `active_schema` may refresh DEFAULT,
+        // which borrows the catalog mutably, and a `catalog()` borrow held
+        // across the match made every DML under a declared type panic
+        // (`already borrowed`) once a previous DML had marked DEFAULT dirty.
+        let active = self.store.catalog().active_name().map(str::to_string);
+        let validation = match active.as_deref() {
             None | Some("DEFAULT") => None,
             _ => Some(self.store.active_schema()),
         };
-        let exec = crate::runtime::dm::run_dm_with_index(
+        let result = crate::runtime::dm::run_dm_with_index(
             &self.store,
             dm,
             validation.as_ref(),
             self.triple_index.borrow().clone(),
-        )
-        .map_err(Error::Execution)?;
+        );
         // Keep the index and add a delta for the change; `None` means no
-        // delta can express it, and the next query rebuilds.
+        // delta can express it, and the next query rebuilds. On failure
+        // too: the rollback a failed statement triggers removes edges the
+        // delta still holds, and the next query walked into one.
         let refreshed = self
             .triple_index
             .borrow()
@@ -448,6 +456,7 @@ impl Connection {
             .map(Arc::new);
         *self.triple_index.borrow_mut() = refreshed;
         self.store.catalog_mut().mark_default_dirty();
+        let exec = result.map_err(Error::Execution)?;
         Ok(Modified {
             nodes_inserted: exec.nodes_inserted,
             edges_inserted: exec.edges_inserted,
@@ -459,13 +468,14 @@ impl Connection {
     }
 
     fn create_graph_type(&self, name: &str, body: &[TypeElement]) -> Result<Outcome> {
+        // Catalog changes persist with `save`, like data (see
+        // `LazyGraphStore::save_catalog` for why not right away).
         let schema = schema_from_body(body);
         let (n, e) = (schema.nodes.len(), schema.edges.len());
         self.store
             .catalog_mut()
             .register(name.to_string(), schema)
             .map_err(Error::Execution)?;
-        self.store.save_catalog()?;
         Ok(Outcome::Message(format!(
             "GRAPH TYPE '{name}' created ({n} node types, {e} edge types)."
         )))
@@ -486,11 +496,14 @@ impl Connection {
                 .map_err(Error::Execution)?;
             format!("Active GRAPH TYPE: {name}.")
         };
-        self.store.save_catalog()?;
         Ok(Outcome::Message(msg))
     }
 
     fn show_graph_types(&self) -> Rows {
+        // A DML statement only marks DEFAULT dirty; bring it up to date before
+        // reading it (a no-op unless dirty). Without this a fresh database
+        // answered `graph type 'DEFAULT' not found` after its first INSERT.
+        self.store.refresh_default_if_dirty();
         let cat = self.store.catalog();
         let rows = cat
             .list()
@@ -518,6 +531,10 @@ impl Connection {
 
     /// `SHOW GRAPH TYPE <name>`, or the active one when `name` is `None`.
     fn show_graph_type(&self, name: Option<&str>) -> Result<Outcome> {
+        // A DML statement only marks DEFAULT dirty; bring it up to date before
+        // reading it (a no-op unless dirty). Without this a fresh database
+        // answered `graph type 'DEFAULT' not found` after its first INSERT.
+        self.store.refresh_default_if_dirty();
         let cat = self.store.catalog();
         let key = match name {
             Some(n) => canonical_type_name(n).to_string(),
@@ -544,6 +561,10 @@ impl Connection {
     }
 
     fn validate_graph_type(&self, name: &str) -> Result<Outcome> {
+        // A DML statement only marks DEFAULT dirty; bring it up to date before
+        // reading it (a no-op unless dirty). Without this a fresh database
+        // answered `graph type 'DEFAULT' not found` after its first INSERT.
+        self.store.refresh_default_if_dirty();
         let key = canonical_type_name(name);
         let schema = self
             .store
@@ -563,7 +584,6 @@ impl Connection {
                 .unwrap_or(0),
         };
         self.store.catalog_mut().record_validation(key, status);
-        self.store.save_catalog()?;
         Ok(Outcome::Rows(Rows {
             columns: cols(&[
                 "name",

@@ -66,11 +66,15 @@ pub struct LabelMods {
     pub removed: HashSet<String>,
 }
 
-/// All mutations applied since the store was opened or last saved.
+/// All mutations applied since the store was opened.
+///
+/// `save` does not clear it: the saved file is a new, id-compacted image
+/// and the session keeps reading the one it opened, so the overlay stays
+/// the difference between that image and the live view.
 ///
 /// IDs handed out for new nodes / edges are dense above the base counts,
 /// so `id - base_node_count` indexes into `new_nodes`.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MutationOverlay {
     pub base_node_count: u32,
     pub base_edge_count: u32,
@@ -115,6 +119,20 @@ pub struct MutationOverlay {
     /// / `mod_node_labels`, which is O(overlay) and turns a bulk load back
     /// into a quadratic one. Not persisted, and cleared with the overlay.
     pub touched_node_log: Vec<Id>,
+
+    /// Bumped every time the overlay is replaced wholesale — `clear`, or
+    /// `restore` to a snapshot — rather than grown.
+    ///
+    /// Everything that keeps a delta over the overlay (the LTJ
+    /// `TripleDelta`, the `OverlayNodeIndex`) reads it by *offset*: edges
+    /// past a recorded id, log entries past a recorded length. That is
+    /// sound only while the overlay grows. A rollback shrinks it, and the
+    /// ids it frees are handed out again to different elements, so an
+    /// offset recorded before the rollback silently describes the wrong
+    /// thing — a phantom edge the LTJ walked into and panicked on, a
+    /// lookup that missed a node standing right there. Comparing epochs
+    /// is how a delta notices.
+    pub epoch: u64,
 }
 
 impl MutationOverlay {
@@ -253,10 +271,10 @@ impl MutationOverlay {
         self.touch_node(id);
     }
 
-    /// Restore the overlay to "no mutations applied". Used by save() after
-    /// the merged view is persisted: the base counts shift to the new file
-    /// and overlay starts empty again.
+    /// Restore the overlay to "no mutations applied" over a base of the
+    /// given size. Starts a new `epoch`.
     pub fn clear(&mut self, new_base_node_count: u32, new_base_edge_count: u32) {
+        self.epoch += 1;
         self.base_node_count = new_base_node_count;
         self.base_edge_count = new_base_edge_count;
         self.new_nodes.clear();
@@ -271,6 +289,16 @@ impl MutationOverlay {
         self.new_incoming.clear();
         self.new_undirected.clear();
         self.touched_node_log.clear();
+    }
+
+    /// Replace the overlay with `snapshot`, an earlier copy of it. Starts
+    /// a new `epoch`, never the snapshot's own: a delta synced *after* the
+    /// snapshot was taken carries the snapshot's epoch and would otherwise
+    /// read the restored overlay by an offset it no longer has.
+    pub fn restore(&mut self, snapshot: &MutationOverlay) {
+        let epoch = self.epoch.max(snapshot.epoch) + 1;
+        *self = snapshot.clone();
+        self.epoch = epoch;
     }
 }
 

@@ -334,9 +334,17 @@ the last page are ignored. Effective payload capacity: 4080 bytes in
 the first page, 4084 bytes per continuation. Catalogs are small in
 practice — single-page is the common case.
 
-**Rewrite-and-free**. Each catalog change (CREATE/USE/DROP) calls
-`save_catalog()`, which frees the entire old chain through the pager's
-free list and allocates a fresh one. The new root replaces
+**Written by `save`, with the data.** A catalog change (CREATE / USE /
+DROP / VALIDATE) only mutates the in-RAM catalog; `save` writes it into
+the new file beside the graph it describes. Through 0.5.11 each change
+called `save_catalog()` at once, which auto-committed the catalog while
+the data waited for `save` (issue #103): a DEFAULT refreshed after an
+unsaved `DELETE` reached the file without the deletion, and a change
+made after a `save` was written into the replaced file and lost.
+
+**Rewrite-and-free**. `save_catalog()`, still used by the importers to
+write a fresh file's catalog, frees the entire old chain through the
+pager's free list and allocates a fresh one. The new root replaces
 `header.catalog_root`. Page numbers are reused; there is no leak when
 the catalog stays roughly the same size.
 
@@ -456,8 +464,8 @@ What's in memory:
 │                                                          │
 │  ── Graph-type catalog ──                                │
 │  Loaded eagerly from the chain at `header.catalog_root`. │
-│  Mutations go through `catalog_mut()` + `save_catalog()` │
-│  (rewrites the chain, updates the header).               │
+│  Mutations go through `catalog_mut()` and persist with   │
+│  `save`, beside the data (not written on their own).     │
 └──────────────────────────────────────────────────────────┘
 
                     ┌─────────────────┐

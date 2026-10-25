@@ -49,6 +49,7 @@ Saved /tmp/fresh.gdb (0.001s).
 ## Persistence and dumps
 
 - Mutations live in an **in-RAM overlay** until `.save` (or `connection.save()` from Python). No auto-commit, mirroring SQLite.
+- The same holds for DDL. `CREATE` / `USE` / `DROP` / `VALIDATE GRAPH TYPE` and `CREATE` / `DROP INDEX` change the session only; `.save` writes them with the data. Through 0.5.11 the graph-type statements wrote the catalog at once, while the data waited, so the file could hold a DEFAULT inferred from rows it did not contain (issue #103).
 - `.save` writes to `<path>.tmp` and atomically renames over the destination, so a crash mid-save cannot corrupt the existing file.
 - `.dump-json <path>` writes a JSON snapshot in the shape `--import-json` consumes.
 - `.dump-gql <path>` writes a GQL script that, when executed against an empty database, reproduces the graph: one `INSERT` per node (with a synthetic `_dump_id` property), one `MATCH ... INSERT (a)-[:E {...}]->(b)` per edge, then a final `MATCH (n) REMOVE n._dump_id` cleanup. If `_dump_id` is already in use the dumper falls back to `__dump_id_v1`, `__dump_id_v2`, ....
@@ -59,8 +60,8 @@ These do **not** ship today:
 
 - Multi-DML chains in a single statement (`MATCH α INSERT β SET γ`); deferred to v2. Tests work around it by splitting into separate `execute` calls.
 - String values containing a literal `'` cannot survive `.dump-gql` (the lexer has no escape syntax); the dumper raises an error rather than emit something unparseable.
-- Statement-level atomicity. The whole DML statement either commits to the overlay or rolls back; on failure the **entire session overlay** is discarded (no transaction boundary smaller than the connection until WAL).
-- Secondary indexes (hash + btree) become read-only while the overlay is non-empty: `lookup_node_eq` / `lookup_node_range` return `None` so the caller scans. Incremental maintenance lands in MVP-2.
+- Statement-level rollback. A failed statement leaves no trace of itself, but the rollback is coarser than the statement: the store returns to the **last `.save`** (or to the opened image before the first one), so earlier successful statements that were not saved are undone too. The error message ends with `(rolled back: every unsaved change was undone, not only this statement)`. `save` is the only transaction boundary until a per-statement undo or a WAL exists; it is not configurable. Through 0.5.11 the rollback went back to the opened image even after a `.save`, so the next `.save` erased rows that were already in the file.
+- Secondary indexes are maintained across the overlay by a delta (`store/overlay_index.rs`), not rebuilt per statement; see `docs/secondary-indexes.md`.
 
 ## Python bindings
 

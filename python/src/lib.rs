@@ -44,14 +44,17 @@ struct Connection {
 
 #[pymethods]
 impl Connection {
+    // The merged view, so these agree with `COUNT(n)` on the same
+    // connection before `save` (and after it: the session keeps reading
+    // the image it opened). See `LazyGraphStore::live_node_count`.
     #[getter]
     fn node_count(&self) -> u32 {
-        self.store.node_count()
+        self.store.live_node_count() as u32
     }
 
     #[getter]
     fn edge_count(&self) -> u32 {
-        self.store.edge_count()
+        self.store.live_edge_count() as u32
     }
 
     // No row cap by default. A cap *is* an execution cap here, not a
@@ -100,6 +103,10 @@ impl Connection {
 
     /// List graph types currently in the catalog with active markers.
     fn graph_types<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        // A DML statement only marks DEFAULT dirty; bring it up to date before
+        // reading it (a no-op unless dirty). Without this a fresh database
+        // answered `graph type 'DEFAULT' not found` after its first INSERT.
+        self.store.refresh_default_if_dirty();
         let cat = self.store.catalog();
         let out = PyList::empty_bound(py);
         for (name, is_active) in cat.list() {
@@ -118,13 +125,17 @@ impl Connection {
     fn schema<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         use std::collections::BTreeSet;
         let mut node_labels: BTreeSet<String> = BTreeSet::new();
-        for nid in 0..self.store.node_count() {
+        // Walk the merged view: `0..node_count()` is the opened image only,
+        // which missed labels the session inserted and kept ones it deleted.
+        for nid in self.store.nodes() {
             for l in self.store.node_labels(nid).required_labels() {
                 node_labels.insert(l.to_string());
             }
         }
         let mut edge_labels: BTreeSet<String> = BTreeSet::new();
-        for eid in 0..self.store.edge_count() {
+        let mut edge_ids = self.store.edges_directed();
+        edge_ids.extend(self.store.edges_undirected());
+        for eid in edge_ids {
             for l in self.store.edge_labels(eid).required_labels() {
                 edge_labels.insert(l.to_string());
             }
@@ -132,16 +143,16 @@ impl Connection {
         let d = PyDict::new_bound(py);
         d.set_item("node_labels", node_labels.into_iter().collect::<Vec<_>>())?;
         d.set_item("edge_labels", edge_labels.into_iter().collect::<Vec<_>>())?;
-        d.set_item("node_count", self.store.node_count())?;
-        d.set_item("edge_count", self.store.edge_count())?;
+        d.set_item("node_count", self.store.live_node_count() as u32)?;
+        d.set_item("edge_count", self.store.live_edge_count() as u32)?;
         Ok(d)
     }
 
     fn __repr__(&self) -> String {
         format!(
             "<frogql.Connection nodes={} edges={}>",
-            self.store.node_count(),
-            self.store.edge_count()
+            self.store.live_node_count() as u32,
+            self.store.live_edge_count() as u32
         )
     }
 }
@@ -246,17 +257,20 @@ impl Connection {
             None | Some("DEFAULT") => None,
             _ => Some(self.store.active_schema()),
         };
-        let exec = frogql_core::runtime::dm::run_dm_with_index(
+        let result = frogql_core::runtime::dm::run_dm_with_index(
             &self.store,
             &dm,
             schema_for_validation.as_ref(),
             self.triple_index.borrow().clone(),
-        )
-        .map_err(PyValueError::new_err)?;
+        );
         // Bring the cached LTJ index up to date with the mutation. The
         // static payload is kept and a small delta recomputed beside it;
         // `refresh` returns `None` only when no delta can express the
         // change, and then the next query rebuilds from scratch.
+        //
+        // On failure too: a failed statement rolls the overlay back to the
+        // last save, which removes edges the index's delta still holds. The
+        // next query walked into one of them and panicked.
         let refreshed = self
             .triple_index
             .borrow()
@@ -265,8 +279,9 @@ impl Connection {
             .map(Arc::new);
         *self.triple_index.borrow_mut() = refreshed;
         // Mark DEFAULT dirty so the next read of DEFAULT re-infers it
-        // from the live store (Fase 7).
+        // from the live store (Fase 7). A rollback changes the data too.
         self.store.catalog_mut().mark_default_dirty();
+        let exec = result.map_err(PyValueError::new_err)?;
         let d = PyDict::new_bound(py);
         d.set_item("nodes_inserted", exec.nodes_inserted)?;
         d.set_item("edges_inserted", exec.edges_inserted)?;
@@ -284,6 +299,8 @@ impl Connection {
         name: &str,
         body: &[TypeElement],
     ) -> PyResult<PyObject> {
+        // Catalog changes persist with `save`, like data (see
+        // `LazyGraphStore::save_catalog` for why not right away).
         let schema = build_schema_from_body(body);
         let n_nodes = schema.nodes.len();
         let n_edges = schema.edges.len();
@@ -292,9 +309,6 @@ impl Connection {
             cat.register(name.to_string(), schema)
                 .map_err(PyValueError::new_err)?;
         }
-        self.store
-            .save_catalog()
-            .map_err(|e| PyRuntimeError::new_err(format!("save catalog: {e}")))?;
         ddl_response(
             py,
             &format!("GRAPH TYPE '{name}' created ({n_nodes} node types, {n_edges} edge types)."),
@@ -312,9 +326,6 @@ impl Connection {
             let n_nodes = schema.nodes.len();
             let n_edges = schema.edges.len();
             self.store.catalog_mut().install_default(schema);
-            self.store
-                .save_catalog()
-                .map_err(|e| PyRuntimeError::new_err(format!("save catalog: {e}")))?;
             ddl_response(
                 py,
                 &format!(
@@ -326,9 +337,6 @@ impl Connection {
                 .catalog_mut()
                 .set_active(name)
                 .map_err(PyValueError::new_err)?;
-            self.store
-                .save_catalog()
-                .map_err(|e| PyRuntimeError::new_err(format!("save catalog: {e}")))?;
             ddl_response(py, &format!("Active GRAPH TYPE: {name}."))
         }
     }
@@ -338,9 +346,6 @@ impl Connection {
             let mut cat = self.store.catalog_mut();
             cat.drop(name).map_err(PyValueError::new_err)?;
         }
-        self.store
-            .save_catalog()
-            .map_err(|e| PyRuntimeError::new_err(format!("save catalog: {e}")))?;
         ddl_response(py, &format!("GRAPH TYPE '{name}' dropped."))
     }
 
@@ -349,6 +354,10 @@ impl Connection {
     }
 
     fn exec_show_graph_type<'py>(&self, py: Python<'py>, name: &str) -> PyResult<PyObject> {
+        // A DML statement only marks DEFAULT dirty; bring it up to date before
+        // reading it (a no-op unless dirty). Without this a fresh database
+        // answered `graph type 'DEFAULT' not found` after its first INSERT.
+        self.store.refresh_default_if_dirty();
         let cat = self.store.catalog();
         let key = if name.eq_ignore_ascii_case("DEFAULT") {
             "DEFAULT"
@@ -372,6 +381,10 @@ impl Connection {
     }
 
     fn exec_show_current<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+        // A DML statement only marks DEFAULT dirty; bring it up to date before
+        // reading it (a no-op unless dirty). Without this a fresh database
+        // answered `graph type 'DEFAULT' not found` after its first INSERT.
+        self.store.refresh_default_if_dirty();
         let cat = self.store.catalog();
         let d = PyDict::new_bound(py);
         match cat.active_name() {
@@ -395,6 +408,10 @@ impl Connection {
     }
 
     fn exec_validate<'py>(&self, py: Python<'py>, name: &str) -> PyResult<PyObject> {
+        // A DML statement only marks DEFAULT dirty; bring it up to date before
+        // reading it (a no-op unless dirty). Without this a fresh database
+        // answered `graph type 'DEFAULT' not found` after its first INSERT.
+        self.store.refresh_default_if_dirty();
         let key = if name.eq_ignore_ascii_case("DEFAULT") {
             "DEFAULT"
         } else {
@@ -416,9 +433,6 @@ impl Connection {
             validated_at_unix: now_unix(),
         };
         self.store.catalog_mut().record_validation(key, status);
-        self.store
-            .save_catalog()
-            .map_err(|e| PyRuntimeError::new_err(format!("save catalog: {e}")))?;
 
         let d = PyDict::new_bound(py);
         d.set_item("ok", report.ok())?;

@@ -121,3 +121,34 @@ fn save_clears_dirty_flag_via_refresh() {
     assert!(!store.catalog().is_default_dirty());
     assert!(schema_has_node_label(&store, "BrandNew"));
 }
+
+/// The contract above, through the embedding API rather than the store.
+/// The REPL refreshed DEFAULT on `SHOW` only; the `Connection`s (Rust,
+/// Python, Node) never did. So `SHOW GRAPH TYPE DEFAULT` on a fresh
+/// database answered `graph type 'DEFAULT' not found` after its first
+/// `INSERT`, and `VALIDATE GRAPH TYPE DEFAULT` judged the data against a
+/// DEFAULT from before the last statement.
+#[test]
+fn connection_reads_default_current() {
+    let path = temp_db("connection_default_current.gdb");
+    let _ = std::fs::remove_file(path.with_extension("gdb.ltj"));
+    let conn = frogql::Connection::open(&path).unwrap();
+    conn.execute("INSERT (:Actor {name: 'a'})").unwrap();
+    let formatted = |conn: &frogql::Connection| {
+        let rows = conn.query("SHOW GRAPH TYPE DEFAULT").unwrap();
+        let cell = rows.iter().next().unwrap().get("formatted").cloned();
+        match cell {
+            Some(frogql::Value::Str(s)) => s,
+            other => panic!("expected the formatted schema, got {other:?}"),
+        }
+    };
+    assert!(formatted(&conn).contains("(:Actor"));
+    conn.execute("INSERT (:Film {title: 'f'})").unwrap();
+    assert!(formatted(&conn).contains("(:Film"));
+    conn.execute("INSERT (:Robot {serial: 'r'})").unwrap();
+    let rows = conn.query("VALIDATE GRAPH TYPE DEFAULT").unwrap();
+    assert_eq!(
+        rows.iter().next().unwrap().get("ok"),
+        Some(&frogql::Value::Bool(true))
+    );
+}

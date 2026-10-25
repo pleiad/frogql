@@ -1009,3 +1009,75 @@ fn format_schema_spells_out_an_undeclared_endpoint() {
         "an undeclared endpoint stays spelled out:\n{out}"
     );
 }
+
+// =========================================================
+// Optional properties in a declared graph type.
+// =========================================================
+
+/// Inference prints a property only some elements carry as `T | NULL`,
+/// and a union nested in a union in parentheses; `SHOW` prints an open
+/// record with a trailing `*`. The DDL parser accepted none of the three,
+/// so the DEFAULT a database showed could not be declared back.
+#[test]
+fn ddl_parses_what_show_graph_type_prints() {
+    let schema = schema_of(
+        "{ (:A {k STRING, opt STRING | NULL, mixed (STRING | INT) | NULL}), (:B {k INT, *}) }",
+    );
+    let a = schema
+        .nodes
+        .iter()
+        .find_map(|n| match n {
+            VariableType::Node(d) if d.label == LabelType::Label("A".into()) => Some(d),
+            _ => None,
+        })
+        .unwrap();
+    let nullable = |t: SimpleType| SimpleType::Union(Box::new(t), Box::new(SimpleType::Null));
+    assert_eq!(a.props.get("opt"), nullable(SimpleType::S));
+    assert_eq!(
+        a.props.get("mixed"),
+        nullable(SimpleType::Union(
+            Box::new(SimpleType::S),
+            Box::new(SimpleType::Z)
+        ))
+    );
+    let b = schema
+        .nodes
+        .iter()
+        .find_map(|n| match n {
+            VariableType::Node(d) if d.label == LabelType::Label("B".into()) => Some(d),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(b.props, PropertyType::Open(_)), "{:?}", b.props);
+}
+
+/// The DEFAULT inferred from a graph, printed, re-declared as a graph
+/// type, validates the graph it came from — and `T | NULL` / `ANY` admit
+/// an element that lacks the property while plain `T` does not.
+#[test]
+fn inferred_default_round_trips_as_a_declared_type() {
+    let g = MemoryGraphStore::from_json_str(
+        r#"{"nodes":[
+            {"id":"a","labels":["A"],"props":{"k":"x","opt":"y","mixed":"s"}},
+            {"id":"b","labels":["A"],"props":{"k":"z","mixed":3}},
+            {"id":"c","labels":["A"],"props":{"k":"w"}}],"edges":[]}"#,
+    )
+    .unwrap();
+    let printed = frogql::typing::format::format_schema(&infer_simple_schema(&g));
+    let body: Vec<&str> = printed
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with('('))
+        .collect();
+    let declared = schema_of(&format!("{{ {} }}", body.join(", ")));
+    let report = frogql::typing::validate::validate_against_data(&g, &declared);
+    assert!(report.ok(), "{printed}\n{report:?}");
+
+    let ok =
+        |body: &str| frogql::typing::validate::validate_against_data(&g, &schema_of(body)).ok();
+    assert!(ok("{ (:A {k STRING, opt ANY, mixed ANY}) }"));
+    assert!(
+        !ok("{ (:A {k STRING, opt STRING, mixed ANY}) }"),
+        "opt is required"
+    );
+}

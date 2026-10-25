@@ -2803,14 +2803,21 @@ impl Parser {
     }
 
     /// Closed record body: `{ name STRING, age INT }`. Empty `{}` produces
-    /// `Closed({})` — no extra properties allowed at all.
+    /// `Closed({})` — no extra properties allowed at all. A trailing `*`
+    /// (`{ name STRING, * }`) leaves the record open, which is how
+    /// `SHOW GRAPH TYPE` prints one, so that output re-parses as a body.
     fn type_record_closed(&mut self) -> Result<PropertyType, String> {
         self.expect(&Token::LBrace)?;
         let mut m = std::collections::BTreeMap::new();
         if self.eat(&Token::RBrace) {
             return Ok(PropertyType::Closed(m));
         }
+        let mut open = false;
         loop {
+            if self.eat(&Token::Star) {
+                open = true;
+                break;
+            }
             let name = match self.advance() {
                 Token::Name(n) => n,
                 t => return Err(format!("expected property name, got {t:?}")),
@@ -2822,7 +2829,11 @@ impl Parser {
             }
         }
         self.expect(&Token::RBrace)?;
-        Ok(PropertyType::Closed(m))
+        Ok(if open {
+            PropertyType::Open(m)
+        } else {
+            PropertyType::Closed(m)
+        })
     }
 
     /// Schema-side simple type. Like `simple_type()` but additionally
@@ -2844,6 +2855,16 @@ impl Parser {
             Token::Bool => Ok(SimpleType::B),
             Token::Str => Ok(SimpleType::S),
             Token::Any | Token::Star => Ok(SimpleType::Star),
+            // `STRING | NULL`: a property some elements lack. Inference
+            // prints exactly this, and a declared type could not say it.
+            Token::Null => Ok(SimpleType::Null),
+            // `(STRING | INT) | NULL`: the renderer parenthesises a union
+            // nested in a union.
+            Token::LParen => {
+                let inner = self.schema_simple_type()?;
+                self.expect(&Token::RParen)?;
+                Ok(inner)
+            }
             Token::LBracket => {
                 let inner = self.schema_simple_type()?;
                 self.expect(&Token::RBracket)?;
@@ -2877,7 +2898,7 @@ impl Parser {
                 Ok(SimpleType::Record(fields))
             }
             t => Err(format!(
-                "expected schema type (INT/FLOAT/BOOL/STRING/ANY/LIST<T>/[T]/{{...}}), got {t:?}"
+                "expected schema type (INT/FLOAT/BOOL/STRING/ANY/NULL/LIST<T>/[T]/{{...}}), got {t:?}"
             )),
         }
     }

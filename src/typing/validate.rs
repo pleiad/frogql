@@ -159,16 +159,113 @@ fn push_sample(samples: &mut Vec<Violation>, v: Violation) {
     }
 }
 
-/// True if some `T` in `schema_types` is *consistent* with `instance`,
-/// i.e. mutually subtypes: `instance <: T` AND `T <: instance`. This is
-/// stricter than plain `is_subtype` — a node with extra labels or props
-/// no longer satisfies a more permissive schema entry. The schema is
-/// expected to enumerate every concrete variant present in the data
-/// (e.g. `City&Place` separately from `Country&Place`).
+/// True if some `T` in `schema_types` admits `instance`.
+///
+/// Labels must match exactly — mutual subtyping, so a node with an extra
+/// label does not satisfy a narrower entry. The schema is expected to
+/// enumerate every concrete variant present in the data (e.g. `City&Place`
+/// separately from `Country&Place`).
+///
+/// Properties are checked **one way, key by key**: the element's value
+/// type must be a subtype of the schema's, and a key the element does not
+/// carry reads as `NULL`, the rule `PropertyType::get` applies to a closed
+/// record. So `opt STRING | NULL` and `opt ANY` admit an element without
+/// `opt`, while `opt STRING` requires it.
+///
+/// This used to be mutual subtyping on the whole type, which demands the
+/// same key set on both sides and a schema type no wider than the value.
+/// Inference prints `opt STRING | NULL` for a property some elements lack,
+/// so the DEFAULT inferred from a graph failed `VALIDATE` against that
+/// same graph — for every element missing an optional property, and for
+/// every edge whose endpoint was one.
 fn instance_admitted(instance: &VariableType, schema_types: &[VariableType]) -> bool {
-    schema_types
-        .iter()
-        .any(|t| VariableType::is_subtype(instance, t) && VariableType::is_subtype(t, instance))
+    schema_types.iter().any(|t| admits(t, instance))
+}
+
+fn admits(schema: &VariableType, instance: &VariableType) -> bool {
+    match (schema, instance) {
+        (VariableType::Node(s), VariableType::Node(i)) => descriptor_admits(s, i),
+        (
+            VariableType::EdgeDirectional {
+                desc: sd,
+                left: sl,
+                right: sr,
+            },
+            VariableType::EdgeDirectional {
+                desc: id,
+                left: il,
+                right: ir,
+            },
+        ) => descriptor_admits(sd, id) && admits(sl, il) && admits(sr, ir),
+        (
+            VariableType::EdgeNonDirectional {
+                desc: sd,
+                left: sl,
+                right: sr,
+            },
+            VariableType::EdgeNonDirectional {
+                desc: id,
+                left: il,
+                right: ir,
+            },
+        ) => {
+            descriptor_admits(sd, id)
+                && ((admits(sl, il) && admits(sr, ir)) || (admits(sl, ir) && admits(sr, il)))
+        }
+        (VariableType::Union(a, b), _) => admits(a, instance) || admits(b, instance),
+        _ => {
+            VariableType::is_subtype(instance, schema) && VariableType::is_subtype(schema, instance)
+        }
+    }
+}
+
+fn descriptor_admits(schema: &DescriptorType, instance: &DescriptorType) -> bool {
+    labels_admit(&schema.label, &instance.label) && props_admit(&schema.props, &instance.props)
+}
+
+/// Whether the schema label admits the element's exact label set.
+///
+/// An element without labels is described by `Star` (see
+/// `element_descriptor`), and `Star` is the gradual *unknown* label: it is
+/// a subtype of every label and every label is a subtype of it. So mutual
+/// subtyping let an unlabelled node pass any node type at all —
+/// `INSERT ({name: 'x'})` under `(:Actor {name STRING})` was accepted and
+/// stored with no label. The empty label set is checked here instead, by
+/// evaluating the schema label on it.
+fn labels_admit(schema: &LabelType, instance: &LabelType) -> bool {
+    if *instance == LabelType::Star {
+        return admits_no_labels(schema);
+    }
+    LabelType::is_subtype(instance, schema) && LabelType::is_subtype(schema, instance)
+}
+
+/// Whether an element with no labels satisfies `l`. A type written with
+/// no label (`({k INT})`, printed for `Star` and `Top` alike) constrains
+/// none, so it admits one; any atomic label it requires does not.
+fn admits_no_labels(l: &LabelType) -> bool {
+    match l {
+        LabelType::Star | LabelType::Top | LabelType::Empty => true,
+        LabelType::Label(_) => false,
+        LabelType::And(a, b) => admits_no_labels(a) && admits_no_labels(b),
+        LabelType::Or(a, b) => admits_no_labels(a) || admits_no_labels(b),
+        LabelType::Neg(a) => !admits_no_labels(a),
+    }
+}
+
+fn props_admit(schema: &PropertyType, instance: &PropertyType) -> bool {
+    let keys_of = |p: &PropertyType| -> Vec<String> {
+        match p {
+            PropertyType::Open(m) | PropertyType::Closed(m) => m.keys().cloned().collect(),
+            PropertyType::Zero => Vec::new(),
+        }
+    };
+    if matches!(schema, PropertyType::Zero) {
+        return false;
+    }
+    keys_of(schema)
+        .into_iter()
+        .chain(keys_of(instance))
+        .all(|k| SimpleType::is_subtype(&instance.get(&k), &schema.get(&k)))
 }
 
 fn node_instance_type<G: GraphAccess>(g: &G, nid: u32) -> VariableType {
@@ -206,6 +303,10 @@ fn edge_instance_type<G: GraphAccess>(g: &G, eid: u32) -> VariableType {
 /// Build a closed descriptor that exactly captures the element's
 /// observed labels and prop types. Closed is correct here: an instance
 /// has exactly these properties, no more.
+///
+/// No labels becomes `Star`, for want of a label type meaning "exactly
+/// none". `labels_admit` reads it that way; nothing else may compare an
+/// instance's labels.
 fn element_descriptor(labels: &LabelType, props: &BTreeMap<String, SimpleType>) -> DescriptorType {
     let label_strs = sorted_label_strings(labels);
     let label_t = if label_strs.is_empty() {
@@ -330,6 +431,90 @@ mod tests {
         let report = validate_against_data(&g, &schema);
         assert_eq!(report.node_violations, 1);
         assert!(!report.ok());
+    }
+
+    /// The DEFAULT inferred from a graph validates that graph. Inference
+    /// prints `opt STRING | NULL` for a property only some elements carry;
+    /// the validator demanded the same key set on both sides, so every
+    /// element missing `opt` failed — and so did every edge touching one.
+    #[test]
+    fn validate_passes_inferred_default_with_optional_property() {
+        let g = build_graph(
+            r#"{
+                "nodes": [
+                    {"id":"a","labels":["A"],"props":{"k":"x","opt":"y"}},
+                    {"id":"b","labels":["A"],"props":{"k":"z"}},
+                    {"id":"c","labels":["B"],"props":{}}
+                ],
+                "edges": [
+                    {"id":"e","labels":["R"],"endpoints":["b","c"],"directionality":"->"}
+                ]
+            }"#,
+        );
+        let schema = infer_simple_schema(&g);
+        let report = validate_against_data(&g, &schema);
+        assert!(report.ok(), "report = {report:?}");
+    }
+
+    /// `T | NULL` and `ANY` admit a missing key; plain `T` does not; a
+    /// key the schema does not list is still rejected by a closed record.
+    #[test]
+    fn validate_reads_a_missing_key_as_null() {
+        let g =
+            build_graph(r#"{"nodes": [{"id":"a","labels":["A"],"props":{"k":"x"}}], "edges": []}"#);
+        let node = |props: &[(&str, SimpleType)]| {
+            Schema::from_parts(
+                vec![VariableType::Node(DescriptorType::new(
+                    LabelType::Label("A".into()),
+                    PropertyType::Closed(
+                        props
+                            .iter()
+                            .map(|(k, t)| (k.to_string(), t.clone()))
+                            .collect(),
+                    ),
+                ))],
+                vec![],
+            )
+        };
+        let nullable_s = SimpleType::Union(Box::new(SimpleType::S), Box::new(SimpleType::Null));
+        let ok = |sch: Schema| validate_against_data(&g, &sch).ok();
+        assert!(ok(node(&[("k", SimpleType::S), ("opt", nullable_s)])));
+        assert!(ok(node(&[("k", SimpleType::S), ("opt", SimpleType::Star)])));
+        assert!(!ok(node(&[("k", SimpleType::S), ("opt", SimpleType::S)])));
+        assert!(!ok(node(&[("opt", SimpleType::Star)])), "k is not declared");
+        assert!(!ok(node(&[("k", SimpleType::Z)])), "k holds a string");
+    }
+
+    /// An element with no labels used to pass every node type, because it
+    /// is described by `Star` and `Star` is compatible with any label.
+    #[test]
+    fn validate_flags_unlabelled_node_under_a_labelled_type() {
+        let g =
+            build_graph(r#"{"nodes": [{"id":"a","labels":[],"props":{"name":"x"}}], "edges": []}"#);
+        let typed = |label: LabelType| {
+            let mut props = BTreeMap::new();
+            props.insert("name".to_string(), SimpleType::S);
+            Schema::from_parts(
+                vec![VariableType::Node(DescriptorType::new(
+                    label,
+                    PropertyType::Closed(props),
+                ))],
+                vec![],
+            )
+        };
+        let ok = |sch: Schema| validate_against_data(&g, &sch).ok();
+        assert!(!ok(typed(LabelType::Label("Actor".into()))));
+        assert!(!ok(typed(LabelType::And(
+            Box::new(LabelType::Label("Actor".into())),
+            Box::new(LabelType::Star),
+        ))));
+        // A type written without a label constrains none.
+        assert!(ok(typed(LabelType::Star)));
+        assert!(ok(typed(LabelType::Neg(Box::new(LabelType::Label(
+            "Actor".into()
+        ))))));
+        // And the inferred DEFAULT still validates the graph it came from.
+        assert!(validate_against_data(&g, &infer_simple_schema(&g)).ok());
     }
 
     #[test]

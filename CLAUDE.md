@@ -323,7 +323,7 @@ The optimizer is reserved for performance-preserving transforms (predicate pushd
 
 ### Graph-type catalog
 
-`LazyGraphStore` owns a `RefCell<GraphTypeCatalog>` (`src/runtime/catalog.rs`) loaded from the page chain at `header.catalog_root` on open. The REPL and Python bindings route input via `parse_statement`, dispatch DDL through `catalog_mut()` + `save_catalog()`, and compile queries with `catalog.active_schema()`. The reserved name `DEFAULT` is auto-populated by `infer_simple_schema(&store)` (`src/typing/inference.rs`) at import time and on `USE GRAPH TYPE DEFAULT`; both `CREATE` and `DROP` of `DEFAULT` are rejected. Persistence detail lives in `docs/internals/storage-architecture.md` §3.5.
+`LazyGraphStore` owns a `RefCell<GraphTypeCatalog>` (`src/runtime/catalog.rs`) loaded from the page chain at `header.catalog_root` on open. The REPL and the bindings route input via `parse_statement`, dispatch DDL through `catalog_mut()`, and compile queries with `catalog.active_schema()`. **A catalog change persists only with `save`**, written beside the data, like DML and `CREATE INDEX`; no dispatcher calls `save_catalog()` (see its doc comment for the two bugs the immediate write caused, issue #103). The reserved name `DEFAULT` is auto-populated by `infer_simple_schema(&store)` (`src/typing/inference.rs`) at import time and on `USE GRAPH TYPE DEFAULT`; both `CREATE` and `DROP` of `DEFAULT` are rejected. Persistence detail lives in `docs/internals/storage-architecture.md` §3.5.
 
 DDL surface today: `CREATE / USE / DROP GRAPH TYPE`, plus inspection / validation:
 
@@ -349,6 +349,27 @@ record means (see the `PropertyType::get` note under *Alignment with the
 Lean mechanisation*). A `.gdb` written earlier keeps its **persisted**
 DEFAULT until something marks it dirty; `USE GRAPH TYPE DEFAULT`
 re-infers on demand.
+
+**What inference prints, the DDL accepts and the validator admits.** The
+schema-type parser takes `NULL` as an atom, a parenthesised union
+(`(STRING | INT) | NULL`, the renderer's form for a nested union) and a
+trailing `*` that leaves a record open. `typing::validate` checks labels
+by mutual subtyping but properties **one way, key by key**, reading a
+missing key as `NULL` — so `T | NULL` and `ANY` admit an element without
+the key and `T` requires it. It used mutual subtyping on the whole type,
+which demands equal key sets: the DEFAULT inferred from a graph failed
+`VALIDATE` against that same graph for every element missing an optional
+property, and for every edge touching one. G2000 shares the check. An
+element with **no labels** is described by `Star` (there is no label type
+for "exactly none"), and `Star` is compatible with every label, so it
+passed any node type; `labels_admit` instead evaluates the schema label
+on the empty set, which only a type written without a label satisfies.
+
+DEFAULT is re-inferred lazily, so every reader of it calls
+`refresh_default_if_dirty` first: `active_schema`, and the `SHOW` /
+`SHOW CURRENT` / `SHOW GRAPH TYPES` / `VALIDATE` handlers in all four
+dispatchers. The bindings' handlers skipped it, so a fresh database
+answered `graph type 'DEFAULT' not found` after its first `INSERT`.
 
 **The schema renderers name node types.** A node type with a dozen
 properties was printed once per edge that touches it, so the part that
@@ -404,16 +425,18 @@ DML is a layered overlay on `LazyGraphStore`: mutations live in `RefCell<Mutatio
 Surface today: `INSERT`, `SET <x.prop = expr | x = {...}>`, `REMOVE x.prop`, `SET / REMOVE <x:Label | x IS Label>`, `[DETACH | NODETACH] DELETE <expr-list>`, optional trailing `RETURN`. At most one DML op per statement; multi-DML chains (`MATCH … INSERT … SET …`) deferred. Full surface and per-feature semantics in `docs/data-modification.md`.
 
 Operational invariants Claude must keep in mind:
-- **Atomicity**: per-statement all-or-nothing. `run_dm` collects bindings first, applies in a closure, on error calls `store.rollback_session()` (clears the entire overlay — coarser than per-statement, no smaller transaction boundary until WAL).
+- **Atomicity**: a failed statement leaves no trace, but the rollback is coarser than the statement. `run_dm` collects bindings first, applies in a closure, on error calls `store.rollback_session()`, which returns the overlay to **the last `save`** (`LazyGraphStore::saved_overlay`, a clone taken by `save`) or empties it before the first one. Every unsaved statement goes with the failed one, and the error string says so (`(rolled back: every unsaved change was undone, not only this statement)`). `save` is the only transaction boundary until a per-statement undo or a WAL. Before the snapshot, the rollback emptied the overlay even after a `save`; since `save` does not clear the overlay (the session keeps reading the image it opened), that discarded *saved* rows, and the next `save` erased them from the file. Pinned by `tests/it/dm_rollback_test.rs`.
+- **A rollback breaks every offset into the overlay**: it shrinks the overlay and hands the same ids out again, to other elements. The LTJ `TripleDelta` (watermark `next_edge_id`) and the `OverlayNodeIndex` (offset into `touched_node_log`) both read by offset, so `MutationOverlay::epoch` is bumped on `clear` / `restore` and both compare it: the delta refuses an older-epoch stamp unless it is pristine (the opened image), the overlay index re-absorbs from the start. A new structure that keeps a delta over the overlay must do the same. Before the epoch, a rollback left a phantom edge the next LTJ walk panicked on (`index out of bounds` in `LazyGraphStore::src`), and an equality lookup missed a node inserted after it.
 - **Match-chain elaboration *and optimization***: `run_dm` runs the MATCH chain through `elaborate::elaborate_query` and then `optimizer::compile`, both inside `prepare_match_pattern`. Each half is load-bearing for a different reason. **Skipping elaboration silently drops `value_filters` on descriptors** (`{name: 'Alice'}` becomes equivalent to `{}`) and matches too many rows — a correctness bug. **Skipping the optimizer costs the index**: elaboration lowers the filter into a `WHERE` conjunct, and it is the optimizer's value-predicate pushdown that puts it back on the descriptor as a `value_pred`, which is the field `Runtime::indexed_candidates` reads. `run_dm` elaborated and stopped until 2026-09, so a DM's MATCH could not use an index at all: it scanned every node carrying the label and decoded its properties, once per pattern variable, per statement. Measured on 1 200 nodes, 2 000 `MATCH (x:ACCOUNT {account_number: 'A…'}), (y:…) INSERT (x)-[:PAYS]->(y)` statements took **5.6 s against 0.04 s** for the same 2 000 `MATCH`es run as plain queries — 130×, and the larger half of why loading a graph by `INSERT` looked quadratic. The optimize half is guarded exactly as `lib::optimize_query` guards it (OPTIONAL and §16.6 prefixes are evaluated in isolation and are not collapsed across). Pinned by `tests/dm_match_optimized_test.rs`.
 - **The DM's own `Runtime` must be handed the session's index**: `run_dm` evaluates the MATCH chain through a `Runtime` it constructs, and the `TripleIndex` is cached **on the `Runtime`** (`RefCell<Option<Arc<TripleIndex>>>`), not on the store — `Runtime::new` starts it empty. A comma-join in a DM's MATCH takes the ordinary LTJ path and asks for that index, so until 2026-09 **every such statement rebuilt all six orderings from the graph**. The `<db>.ltj` sidecar does not rescue it: `index_sidecar_key` returns `None` once the overlay holds a triple-affecting mutation, so from the first insert onwards the file is refused for the rest of the session. That is what made the cost *flat* — proportional to the base graph, not to what had been inserted, which is exactly the shape a user reports as "one mutation makes everything slow forever". Measured on 26 178 nodes / 90 132 edges, one `MATCH (f:Fpl {fplId: …}), (a:Aerodromo {oaci: …}) INSERT (f)-[:R]->(a)` cost **118 ms against 0.0 ms**, while the same comma-join as a plain *query* cost 0.02 ms and a single-pattern MATCH + INSERT cost nothing. The edge is incidental — a comma-join with a *node* insert costs the same, and a standalone `INSERT (:A)-[:R]->(:B)` costs nothing. `run_dm_with_index` takes the caller's `Option<Arc<TripleIndex>>`; the REPL passes `Runtime::triple_index_handle()`, the Python and Node `Connection`s pass their own. Plain `run_dm` still exists and delegates with `None`. Pinned by `tests/dm_shares_triple_index_test.rs`, whose guard is a *ratio* against the same join run as a query (three orders of magnitude when broken, so a 25× bound cannot flake).
 - **G2000 validation**: per-element check via `typing::validate::*`, fires from `apply_insert_pattern` only when the active GRAPH TYPE is non-DEFAULT (DEFAULT is data-derived).
 - **DEFAULT lifecycle**: `GraphTypeCatalog.default_dirty` (in-RAM only, `#[serde(skip)]`) flips after every successful DML; `refresh_default_if_dirty` re-runs `infer_simple_schema` lazily on `handle_show("DEFAULT")` and `LazyGraphStore::save`. Eager refresh would cost O(N+E) per mutation.
-- **Cache invalidation**: every successful DML calls `Runtime::invalidate_caches()` (REPL) or the equivalent `ltj::delta::refresh` on `Connection.triple_index` (Python, Node). The six-ordering index is *kept* and a delta recomputed beside it; a full rebuild happens only when no delta can express the change. See *Join strategy → Maintained incrementally across DML*.
+- **Cache invalidation**: every DML statement, **successful or not**, calls `Runtime::invalidate_caches()` (REPL) or the equivalent `ltj::delta::refresh` on `Connection.triple_index` (Rust `Connection`, Python, Node; WASM drops its index). A failed one rolled the overlay back, which changes the triples as much as a successful one; refreshing only on `Ok` is what left the phantom edge above. The six-ordering index is *kept* and a delta recomputed beside it; a full rebuild happens only when no delta can express the change. See *Join strategy → Maintained incrementally across DML*.
+- **Counts**: `LazyGraphStore::node_count()` / `edge_count()` are the **opened image's** and bound the base id space; a user-facing count is `live_node_count()` / `live_edge_count()`. The native bindings' getters read the base ones through 0.5.11, so after an `INSERT` they disagreed with `COUNT(n)` on the same connection, and kept disagreeing after `save`.
 
 **Persistence (`.save`).** `LazyGraphStore::save(path)` materialises merged base+overlay into a temporary `MemoryGraphStore` and calls `save_graph_with_catalog_and_indexes_atomic` (writes graph + catalog + persisted DDL index list to `<path>.tmp`, atomic `rename`). `LazyGraphStore::open_or_create(path)` mirrors SQLite — non-existent path writes an empty `.gdb` first.
 
-**Auto-commit is OFF by design.** Forgetting `.save` loses the overlay (DML) AND any DDL declared this session (`CREATE INDEX` / `DROP INDEX` only mutate the in-memory `RefCell<SecondaryIndex>` via `build_declared`; the persisted list at `header.secondary_index_root` rewrites only on `.save`). Same trade-off as SQLite's explicit-commit model — lets users experiment without writing.
+**Auto-commit is OFF by design.** Forgetting `.save` loses the overlay (DML) AND any DDL declared this session: `CREATE INDEX` / `DROP INDEX` only mutate the in-memory `RefCell<SecondaryIndex>` via `build_declared` (the persisted list at `header.secondary_index_root` rewrites only on `.save`), and `CREATE` / `USE` / `DROP` / `VALIDATE GRAPH TYPE` only mutate the in-RAM catalog. Same trade-off as SQLite's explicit-commit model — lets users experiment without writing. Through 0.5.11 the graph-type statements were the exception and wrote the catalog at once (issue #103).
 
 **Dump**: `store::dump::dump_to_json_file` (round-trips through `MemoryGraphStore::from_json_value`) and `dump_to_gql_file` (emits an `INSERT`-per-node + `MATCH+INSERT`-per-edge script; uses a synthetic `_dump_id` property). Available via `.dump-json` / `.dump-gql` REPL meta-commands.
 
@@ -667,11 +690,14 @@ query after one DML statement:
 The third row is the cost the design moves onto the query path — every
 `leap` asks two sources — and at this delta size it is under the noise.
 
-Three things fall back to the old full rebuild, because no delta can
+Four things fall back to the old full rebuild, because no delta can
 express them: a backend with no overlay to read (`GraphAccess::
 edge_mutations` returns `None`), an edge whose **labels** moved (the
-delta adds and removes, it does not relabel), and a delta grown past
-`MAX_DELTA_TRIPLES`. A delta is always measured from `OverlayStamp` —
+delta adds and removes, it does not relabel), a delta grown past
+`MAX_DELTA_TRIPLES`, and a rollback under an index built mid-session
+(its stamp names ids the rollback handed out again; see *Data
+Modification*). An index built at open has a pristine stamp and survives
+a rollback with its delta recomputed. A delta is always measured from `OverlayStamp` —
 where the overlay stood when the base was built — not from the previous
 delta, so refreshing twice is the same as refreshing once. Compact tries
 are static structures with no insert, which is why "incremental" here

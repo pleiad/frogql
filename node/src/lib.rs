@@ -167,14 +167,16 @@ unsafe impl Send for Connection {}
 
 #[napi]
 impl Connection {
+    // The merged view, so these agree with `COUNT(n)` on the same
+    // connection. See `LazyGraphStore::live_node_count`.
     #[napi(getter)]
     pub fn node_count(&self) -> u32 {
-        self.store.node_count()
+        self.store.live_node_count() as u32
     }
 
     #[napi(getter)]
     pub fn edge_count(&self) -> u32 {
-        self.store.edge_count()
+        self.store.live_edge_count() as u32
     }
 
     /// Run a GQL statement. The return is polymorphic — depends on
@@ -243,13 +245,16 @@ impl Connection {
     pub fn schema(&self) -> SchemaSummary {
         use std::collections::BTreeSet;
         let mut node_labels: BTreeSet<String> = BTreeSet::new();
-        for nid in 0..self.store.node_count() {
+        // The merged view, as in the Python binding.
+        for nid in self.store.nodes() {
             for l in self.store.node_labels(nid).required_labels() {
                 node_labels.insert(l.to_string());
             }
         }
         let mut edge_labels: BTreeSet<String> = BTreeSet::new();
-        for eid in 0..self.store.edge_count() {
+        let mut edge_ids = self.store.edges_directed();
+        edge_ids.extend(self.store.edges_undirected());
+        for eid in edge_ids {
             for l in self.store.edge_labels(eid).required_labels() {
                 edge_labels.insert(l.to_string());
             }
@@ -257,8 +262,8 @@ impl Connection {
         SchemaSummary {
             node_labels: node_labels.into_iter().collect(),
             edge_labels: edge_labels.into_iter().collect(),
-            node_count: self.store.node_count(),
-            edge_count: self.store.edge_count(),
+            node_count: self.store.live_node_count() as u32,
+            edge_count: self.store.live_edge_count() as u32,
         }
     }
 }
@@ -278,6 +283,10 @@ impl Connection {
     }
 
     fn list_graph_types_typed(&self) -> Vec<GraphTypeSummary> {
+        // A DML statement only marks DEFAULT dirty; bring it up to date before
+        // reading it (a no-op unless dirty). Without this a fresh database
+        // answered `graph type 'DEFAULT' not found` after its first INSERT.
+        self.store.refresh_default_if_dirty();
         let cat = self.store.catalog();
         cat.list()
             .into_iter()
@@ -385,16 +394,16 @@ impl Connection {
             None | Some("DEFAULT") => None,
             _ => Some(self.store.active_schema()),
         };
-        let exec = frogql_core::runtime::dm::run_dm_with_index(
+        let result = frogql_core::runtime::dm::run_dm_with_index(
             &self.store,
             &dm,
             schema_for_validation.as_ref(),
             self.triple_index.borrow().clone(),
-        )
-        .map_err(err)?;
+        );
         // Same as the Python binding: keep the static payload and
         // recompute the delta beside it, falling back to a rebuild only
-        // when no delta can express the change.
+        // when no delta can express the change. On failure too, since the
+        // rollback it triggers removes edges the delta still holds.
         let refreshed = self
             .triple_index
             .borrow()
@@ -403,6 +412,7 @@ impl Connection {
             .map(Arc::new);
         *self.triple_index.borrow_mut() = refreshed;
         self.store.catalog_mut().mark_default_dirty();
+        let exec = result.map_err(err)?;
         Ok(json!({
             "nodesInserted": exec.nodes_inserted,
             "edgesInserted": exec.edges_inserted,
@@ -415,6 +425,8 @@ impl Connection {
     }
 
     fn exec_create(&self, name: &str, body: &[TypeElement]) -> napi::Result<JsonValue> {
+        // Catalog changes persist with `save`, like data (see
+        // `LazyGraphStore::save_catalog` for why not right away).
         let schema = build_schema_from_body(body);
         let n_nodes = schema.nodes.len();
         let n_edges = schema.edges.len();
@@ -422,9 +434,6 @@ impl Connection {
             let mut cat = self.store.catalog_mut();
             cat.register(name.to_string(), schema).map_err(err)?;
         }
-        self.store
-            .save_catalog()
-            .map_err(|e| err(format!("save catalog: {e}")))?;
         Ok(ddl_response(&format!(
             "GRAPH TYPE '{name}' created ({n_nodes} node types, {n_edges} edge types)."
         )))
@@ -436,17 +445,11 @@ impl Connection {
             let n_nodes = schema.nodes.len();
             let n_edges = schema.edges.len();
             self.store.catalog_mut().install_default(schema);
-            self.store
-                .save_catalog()
-                .map_err(|e| err(format!("save catalog: {e}")))?;
             Ok(ddl_response(&format!(
                 "GRAPH TYPE 'DEFAULT' refreshed ({n_nodes} node types, {n_edges} edge types) and activated."
             )))
         } else {
             self.store.catalog_mut().set_active(name).map_err(err)?;
-            self.store
-                .save_catalog()
-                .map_err(|e| err(format!("save catalog: {e}")))?;
             Ok(ddl_response(&format!("Active GRAPH TYPE: {name}.")))
         }
     }
@@ -456,13 +459,14 @@ impl Connection {
             let mut cat = self.store.catalog_mut();
             cat.drop(name).map_err(err)?;
         }
-        self.store
-            .save_catalog()
-            .map_err(|e| err(format!("save catalog: {e}")))?;
         Ok(ddl_response(&format!("GRAPH TYPE '{name}' dropped.")))
     }
 
     fn exec_show_graph_type(&self, name: &str) -> napi::Result<JsonValue> {
+        // A DML statement only marks DEFAULT dirty; bring it up to date before
+        // reading it (a no-op unless dirty). Without this a fresh database
+        // answered `graph type 'DEFAULT' not found` after its first INSERT.
+        self.store.refresh_default_if_dirty();
         let cat = self.store.catalog();
         let key = if name.eq_ignore_ascii_case("DEFAULT") {
             "DEFAULT"
@@ -489,6 +493,10 @@ impl Connection {
     }
 
     fn exec_show_current(&self) -> JsonValue {
+        // A DML statement only marks DEFAULT dirty; bring it up to date before
+        // reading it (a no-op unless dirty). Without this a fresh database
+        // answered `graph type 'DEFAULT' not found` after its first INSERT.
+        self.store.refresh_default_if_dirty();
         let cat = self.store.catalog();
         let mut out = Map::new();
         match cat.active_name() {
@@ -512,6 +520,10 @@ impl Connection {
     }
 
     fn exec_validate(&self, name: &str) -> napi::Result<JsonValue> {
+        // A DML statement only marks DEFAULT dirty; bring it up to date before
+        // reading it (a no-op unless dirty). Without this a fresh database
+        // answered `graph type 'DEFAULT' not found` after its first INSERT.
+        self.store.refresh_default_if_dirty();
         let key = if name.eq_ignore_ascii_case("DEFAULT") {
             "DEFAULT"
         } else {
@@ -533,9 +545,6 @@ impl Connection {
             validated_at_unix: now_unix(),
         };
         self.store.catalog_mut().record_validation(key, status);
-        self.store
-            .save_catalog()
-            .map_err(|e| err(format!("save catalog: {e}")))?;
 
         let mut samples: Vec<JsonValue> = Vec::new();
         for v in &report.samples {

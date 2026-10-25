@@ -553,7 +553,14 @@ fn main() {
                             t.elapsed().as_secs_f64()
                         );
                     }
-                    Err(e) => eprintln!("DML error: {e}"),
+                    Err(e) => {
+                        // The failed statement rolled the overlay back to
+                        // the last `.save`, which can remove edges the
+                        // index's delta still holds.
+                        rt.invalidate_caches();
+                        store.catalog_mut().mark_default_dirty();
+                        eprintln!("DML error: {e}");
+                    }
                 }
                 continue;
             }
@@ -1340,7 +1347,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
     let mut node_groups: HashMap<Vec<String>, (Option<BTreeMap<String, &'static str>>, usize)> =
         HashMap::new();
 
-    for nid in 0..store.node_count() {
+    for nid in store.nodes() {
         let mut labels = MemoryGraphStore::label_strings(&store.node_labels(nid));
         labels.sort();
 
@@ -1386,7 +1393,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
     // Check if there are optional props (i.e., the full schema had more than the intersection)
     // We track this by checking if any node had props beyond the common set
     let mut node_has_optional: HashMap<Vec<String>, bool> = HashMap::new();
-    for nid in 0..store.node_count() {
+    for nid in store.nodes() {
         let mut labels = MemoryGraphStore::label_strings(&store.node_labels(nid));
         labels.sort();
         let raw_props = store.node_props(nid);
@@ -1414,7 +1421,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
     > = HashMap::new();
     let mut edge_has_optional: HashMap<SimpleEdgeKey, bool> = HashMap::new();
 
-    for eid in 0..store.edge_count() {
+    for eid in live_edges(store) {
         let mut edge_labels = MemoryGraphStore::label_strings(&store.edge_labels(eid));
         edge_labels.sort();
         let mut src_labels = MemoryGraphStore::label_strings(&store.node_labels(store.src(eid)));
@@ -1467,7 +1474,7 @@ fn print_schema_simple(store: &LazyGraphStore) {
         }
     }
 
-    for eid in 0..store.edge_count() {
+    for eid in live_edges(store) {
         let mut edge_labels = MemoryGraphStore::label_strings(&store.edge_labels(eid));
         edge_labels.sort();
         let mut src_labels = MemoryGraphStore::label_strings(&store.node_labels(store.src(eid)));
@@ -1571,9 +1578,18 @@ fn print_schema_simple(store: &LazyGraphStore) {
         "{C_DIM}{} node types, {} edge types ({} nodes, {} edges){C_RESET}",
         node_type_count,
         edge_type_count,
-        store.node_count(),
-        store.edge_count()
+        store.live_node_count(),
+        store.live_edge_count()
     );
+}
+
+/// Every live edge in the merged base + overlay view. `0..edge_count()`
+/// walks the opened image only, so it missed inserted edges and listed
+/// deleted ones.
+fn live_edges(store: &LazyGraphStore) -> Vec<frogql::model::value::Id> {
+    let mut ids = store.edges_directed();
+    ids.extend(store.edges_undirected());
+    ids
 }
 
 // ===== Catalog DDL handlers =====
@@ -1591,6 +1607,8 @@ fn build_schema_from_body(body: &[TypeElement]) -> Schema {
 }
 
 fn handle_create(store: &LazyGraphStore, name: &str, body: &[TypeElement]) {
+    // Catalog changes persist with `save`, like data (see
+    // `LazyGraphStore::save_catalog` for why not right away).
     let schema = build_schema_from_body(body);
     let node_count = schema.nodes.len();
     let edge_count = schema.edges.len();
@@ -1601,10 +1619,6 @@ fn handle_create(store: &LazyGraphStore, name: &str, body: &[TypeElement]) {
             return;
         }
     }
-    if let Err(e) = store.save_catalog() {
-        eprintln!("error: failed to persist catalog: {e}");
-        return;
-    }
     println!("GRAPH TYPE '{name}' created ({node_count} node types, {edge_count} edge types).");
 }
 
@@ -1614,20 +1628,12 @@ fn handle_use(store: &LazyGraphStore, name: &str, refresh_default: bool) {
         let node_count = schema.nodes.len();
         let edge_count = schema.edges.len();
         store.catalog_mut().install_default(schema);
-        if let Err(e) = store.save_catalog() {
-            eprintln!("error: failed to persist catalog: {e}");
-            return;
-        }
         println!(
             "GRAPH TYPE 'DEFAULT' refreshed ({node_count} node types, {edge_count} edge types) and activated."
         );
     } else {
         if let Err(e) = store.catalog_mut().set_active(name) {
             eprintln!("error: {e}");
-            return;
-        }
-        if let Err(e) = store.save_catalog() {
-            eprintln!("error: failed to persist catalog: {e}");
             return;
         }
         println!("Active GRAPH TYPE: {name}.");
@@ -1641,10 +1647,6 @@ fn handle_drop(store: &LazyGraphStore, name: &str) {
             eprintln!("error: {e}");
             return;
         }
-    }
-    if let Err(e) = store.save_catalog() {
-        eprintln!("error: failed to persist catalog: {e}");
-        return;
     }
     println!("GRAPH TYPE '{name}' dropped.");
 }
@@ -1688,6 +1690,10 @@ fn print_help() {
 }
 
 fn print_graph_types(store: &LazyGraphStore) {
+    // A DML statement only marks DEFAULT dirty; bring it up to date before
+    // reading it (a no-op unless dirty). Without this a fresh database
+    // answered `graph type 'DEFAULT' not found` after its first INSERT.
+    store.refresh_default_if_dirty();
     let cat = store.catalog();
     let entries = cat.list();
     if entries.is_empty() {
@@ -1733,6 +1739,10 @@ fn handle_show(store: &LazyGraphStore, name: &str) {
 }
 
 fn handle_show_current(store: &LazyGraphStore) {
+    // A DML statement only marks DEFAULT dirty; bring it up to date before
+    // reading it (a no-op unless dirty). Without this a fresh database
+    // answered `graph type 'DEFAULT' not found` after its first INSERT.
+    store.refresh_default_if_dirty();
     let cat = store.catalog();
     match cat.active_name() {
         None => println!("CURRENT GRAPH TYPE: (none)"),
@@ -2028,6 +2038,10 @@ fn print_indexes(store: &LazyGraphStore) {
 }
 
 fn handle_validate(store: &LazyGraphStore, name: &str) {
+    // A DML statement only marks DEFAULT dirty; bring it up to date before
+    // reading it (a no-op unless dirty). Without this a fresh database
+    // answered `graph type 'DEFAULT' not found` after its first INSERT.
+    store.refresh_default_if_dirty();
     let lookup_key = if name.eq_ignore_ascii_case("DEFAULT") {
         "DEFAULT"
     } else {
@@ -2053,9 +2067,6 @@ fn handle_validate(store: &LazyGraphStore, name: &str) {
         validated_at_unix: now_unix(),
     };
     store.catalog_mut().record_validation(lookup_key, status);
-    if let Err(e) = store.save_catalog() {
-        eprintln!("warning: failed to persist validation result: {e}");
-    }
 }
 
 fn print_validation_report(

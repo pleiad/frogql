@@ -78,6 +78,36 @@ fn dump_after_mutation_captures_new_data() {
     );
 }
 
+/// An unlabelled node dumps as `"labels": []`, and the JSON loader handed
+/// that to `LabelType::from_list`, which panics on an empty list. So a
+/// graph holding one (`INSERT ({name: 'x'})`) could be dumped and not
+/// loaded back.
+#[test]
+fn dump_round_trips_an_unlabelled_node() {
+    use frogql::model::graph_access::GraphAccessMut;
+    use frogql::store::lazy::LazyGraphStore;
+    use frogql::typing::label_type::LabelType;
+
+    let db_path = temp_path("unlabelled_dump.gdb");
+    fraud_graph().save(&db_path).unwrap();
+    let store = LazyGraphStore::open(&db_path).unwrap();
+    let pre = store.nodes().len();
+    let mut props = frogql::model::graph::Props::new();
+    props.insert("name".into(), frogql::Value::Str("nobody".into()));
+    store.insert_node(LabelType::Star, props);
+
+    let dump_path = temp_path("unlabelled_dump.json");
+    frogql::store::dump::dump_to_json_file(&store, &dump_path).unwrap();
+    let loaded = MemoryGraphStore::from_file(&dump_path).unwrap();
+    assert_eq!(loaded.node_count(), pre + 1);
+    let unlabelled = loaded
+        .nodes()
+        .into_iter()
+        .filter(|&n| MemoryGraphStore::label_strings(&loaded.node_labels(n)).is_empty())
+        .count();
+    assert_eq!(unlabelled, 1);
+}
+
 // --- MVP-1.F: .dump-gql round-trip --------------------------------------
 
 fn execute_gql_script(store: &frogql::store::lazy::LazyGraphStore, script: &str) {

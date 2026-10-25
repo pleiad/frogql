@@ -354,8 +354,10 @@ impl Connection {
     pub fn schema(&self) -> Result<JsValue, JsError> {
         use std::collections::BTreeSet;
         let mut node_labels: BTreeSet<String> = BTreeSet::new();
+        // The merged view, like the `node_count` getter: the base ids
+        // alone miss what the session inserted.
         with_store!(self, s => {
-            for nid in 0..s.node_count() as u32 {
+            for nid in s.nodes() {
                 for l in s.node_labels(nid).required_labels() {
                     node_labels.insert(l.to_string());
                 }
@@ -363,7 +365,7 @@ impl Connection {
         });
         let mut edge_labels: BTreeSet<String> = BTreeSet::new();
         with_store!(self, s => {
-            for eid in 0..s.edge_count() as u32 {
+            for eid in s.edges_directed().into_iter().chain(s.edges_undirected()) {
                 for l in s.edge_labels(eid).required_labels() {
                     edge_labels.insert(l.to_string());
                 }
@@ -372,8 +374,8 @@ impl Connection {
         let v = json!({
             "node_labels": node_labels.into_iter().collect::<Vec<_>>(),
             "edge_labels": edge_labels.into_iter().collect::<Vec<_>>(),
-            "node_count": with_store!(self, s => s.node_count() as u64),
-            "edge_count": with_store!(self, s => s.edge_count() as u64),
+            "node_count": with_store!(self, s => s.live_node_count() as u64),
+            "edge_count": with_store!(self, s => s.live_edge_count() as u64),
         });
         to_js(&v)
     }
@@ -482,8 +484,11 @@ impl Connection {
     fn dm_json(&self, dm: frogql_core::syntax::dm::DmStatement) -> Result<Json, String> {
         // No catalog in the in-memory backend, so DEFAULT semantics: no
         // G2000 validation schema.
-        let exec = with_store!(self, s => frogql_core::runtime::dm::run_dm(s, &dm, None))?;
+        let result = with_store!(self, s => frogql_core::runtime::dm::run_dm(s, &dm, None));
+        // On failure too: the statement's rollback can remove edges the
+        // cached index holds.
         self.invalidate_caches();
+        let exec = result?;
         Ok(json!({
             "nodes_inserted": exec.nodes_inserted,
             "edges_inserted": exec.edges_inserted,

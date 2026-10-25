@@ -38,14 +38,22 @@ use super::triple_index::{IndexEntry, TripleIndex};
 
 /// Where the overlay stood when an index was built.
 ///
-/// Overlay edge ids are handed out in increasing order and never reused,
-/// so a single watermark identifies every edge added since. Deletions
-/// have no such order, so the set is kept whole — it is session-sized,
-/// and empty in the case that matters (an index built at open).
+/// Within one overlay `epoch`, edge ids are handed out in increasing order
+/// and never reused, so a single watermark identifies every edge added
+/// since. Deletions have no such order, so the set is kept whole — it is
+/// session-sized, and empty in the case that matters (an index built at
+/// open).
+///
+/// Across epochs the watermark means nothing: a rollback empties the
+/// overlay and hands the same ids out again, to other edges. `rebase`
+/// refuses such a stamp unless it is *pristine* — it describes the opened
+/// image with nothing added or removed, which no rollback can change.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OverlayStamp {
     pub next_edge_id: Id,
     pub deleted: HashSet<Id>,
+    /// `MutationOverlay::epoch` when the stamp was taken.
+    pub epoch: u64,
 }
 
 /// What a store's overlay currently holds, as the delta builder needs it.
@@ -65,6 +73,10 @@ pub struct EdgeMutations {
     pub deleted: HashSet<Id>,
     /// The id the next overlay edge would be given.
     pub next_edge_id: Id,
+    /// The first overlay edge id: the opened image's edge count.
+    pub base_edge_count: Id,
+    /// `MutationOverlay::epoch`.
+    pub epoch: u64,
 }
 
 /// Triples added since the base was built, plus the edge ids removed.
@@ -233,11 +245,19 @@ pub fn refresh<G: GraphAccess>(base: &TripleIndex, graph: &G) -> Option<TripleIn
 /// the switch itself (`Runtime`, through `RuntimeCfg::ltj_delta`).
 pub fn rebase<G: GraphAccess>(base: &TripleIndex, graph: &G) -> Option<TripleIndex> {
     let now = graph.edge_mutations()?;
+    let stamp = base.overlay_stamp();
+    let pristine = stamp.next_edge_id == now.base_edge_count && stamp.deleted.is_empty();
+    if stamp.epoch != now.epoch && !pristine {
+        // The overlay was rolled back since this index was built, and the
+        // index holds edges the rollback removed (or lacks ones it
+        // restored). No delta over it can say so; rebuild.
+        return None;
+    }
     let mut to_id = base.label_to_id.clone();
     let mut to_label = base.id_to_label.clone();
     let delta = TripleDelta::build(
         graph,
-        base.overlay_stamp(),
+        stamp,
         &now,
         &mut LabelDict {
             to_id: &mut to_id,

@@ -93,3 +93,56 @@ fn insert_with_no_validation_accepts_anything() {
     let exec = run_dm(&store, &dm, None).unwrap();
     assert_eq!(exec.nodes_inserted, 1);
 }
+
+/// A declared type, from the body of a `CREATE GRAPH TYPE`.
+fn declared(body: &str) -> Schema {
+    let Statement::CreateGraphType { body, .. } =
+        parse_statement(&format!("CREATE GRAPH TYPE g AS {body}")).unwrap()
+    else {
+        panic!("expected CREATE GRAPH TYPE");
+    };
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    for el in body {
+        match el {
+            frogql::syntax::statement::TypeElement::Node(vt) => nodes.push(vt),
+            frogql::syntax::statement::TypeElement::Edge(vt) => edges.push(vt),
+        }
+    }
+    Schema::from_parts(nodes, edges)
+}
+
+/// An element with no labels is described by `Star`, the gradual unknown
+/// label, which mutual subtyping accepts against any label. So
+/// `INSERT ({name: 'x'})` passed `(:Person {name STRING})` and was stored
+/// with no label at all.
+#[test]
+fn insert_under_strict_schema_rejects_unlabelled_node() {
+    let store = fraud_store("schema_reject_unlabelled.gdb");
+    let schema = person_only_schema();
+    let dm = parse_dm_or_panic("INSERT ({name: 'nobody'})");
+    let err = run_dm(&store, &dm, Some(&schema)).unwrap_err();
+    assert!(err.contains("G2000"), "expected G2000, got: {err}");
+}
+
+#[test]
+fn insert_under_strict_schema_rejects_unlabelled_edge() {
+    let store = fraud_store("schema_reject_unlabelled_edge.gdb");
+    let schema = declared("{ (:Person {name STRING}), (:Person)-[:KNOWS]->(:Person) }");
+    let ok = parse_dm_or_panic("INSERT (:Person {name: 'a'})-[:KNOWS]->(:Person {name: 'b'})");
+    run_dm(&store, &ok, Some(&schema)).unwrap();
+    let dm = parse_dm_or_panic("INSERT (:Person {name: 'c'})-[]->(:Person {name: 'd'})");
+    let err = run_dm(&store, &dm, Some(&schema)).unwrap_err();
+    assert!(err.contains("G2000"), "expected G2000, got: {err}");
+}
+
+/// A type written with no label constrains none, so it still admits an
+/// unlabelled node.
+#[test]
+fn insert_under_unlabelled_type_accepts_unlabelled_node() {
+    let store = fraud_store("schema_accept_unlabelled.gdb");
+    let schema = declared("{ (:Person {name STRING}), ({name STRING}) }");
+    let dm = parse_dm_or_panic("INSERT ({name: 'nobody'})");
+    let exec = run_dm(&store, &dm, Some(&schema)).unwrap();
+    assert_eq!(exec.nodes_inserted, 1);
+}

@@ -225,13 +225,21 @@ where
 
     if let Err(e) = result {
         // Atomicity per ISO §13.5 Note 196: any DML that fails must leave
-        // the graph unchanged. For MVP-0 the simplest correct policy is to
-        // discard the whole session overlay; this loses earlier successful
-        // statements in the same REPL session, which we accept because
-        // there is no transaction boundary smaller than the connection
-        // until WAL lands.
+        // the graph unchanged. The policy is coarser than that: the store
+        // returns to the last save (or to the opened image before the
+        // first one), so earlier *successful* statements that were not
+        // saved are undone too. `save` is the only transaction boundary
+        // until there is a smaller one (a per-statement undo, or a WAL).
+        //
+        // The message says so, because nothing else does: the caller sees
+        // one statement fail and would otherwise assume only that one was
+        // lost. Caches that read the overlay by offset (the LTJ delta, the
+        // overlay secondary index) notice through `MutationOverlay::epoch`;
+        // the embedder still has to refresh its index after an `Err`.
         graph.rollback_session();
-        return Err(e);
+        return Err(format!(
+            "{e} (rolled back: every unsaved change was undone, not only this statement)"
+        ));
     }
 
     Ok(exec)

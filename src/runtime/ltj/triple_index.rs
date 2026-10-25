@@ -137,12 +137,14 @@ impl TripleIndex {
         if let Some(EdgeMutations {
             next_edge_id,
             deleted,
+            epoch,
             ..
         }) = graph.edge_mutations()
         {
             self.stamp = OverlayStamp {
                 next_edge_id,
                 deleted,
+                epoch,
             };
         }
     }

@@ -74,7 +74,8 @@ path.
 
 **`.save` is not automatic.** Mutations live in an in-RAM overlay until
 you call it, exactly like SQLite's explicit commit. Forgetting it loses
-the work.
+the work, and that includes `CREATE` / `USE` / `DROP GRAPH TYPE` and
+`CREATE INDEX`.
 
 ### Python
 
@@ -83,13 +84,14 @@ import frogql
 
 conn = frogql.open("movies.gdb")        # creates it if absent
 rows = conn.execute("MATCH (m:Movie) RETURN m.title", limit=0)
-#  -> [{'m.title': 'The Matrix'}, ...]
+#  -> [{'col0': 'The Matrix'}, ...]       (alias it to name the key)
 
 conn.execute("INSERT (:Movie {title: 'Arrival', released: 2016})")
 conn.save()                             # <- required, nothing is written without it
 
-conn.node_count, conn.edge_count
-conn.schema()                           # inferred schema, with a 'formatted' string
+conn.node_count, conn.edge_count        # unsaved changes included, like COUNT(n)
+conn.schema()                           # labels in use + counts; the inferred
+                                        # schema is SHOW GRAPH TYPE DEFAULT
 conn.graph_types()
 ```
 
@@ -194,7 +196,24 @@ MATCH (a:Actor)-[r:ACTED_IN]->(:Film) DELETE r       -- just the edge
 
 `DELETE` without `DETACH` refuses to remove a node that still has edges.
 One DML operation per statement; `MATCH … INSERT … SET …` chains are not
-supported yet. Each statement is all-or-nothing.
+supported yet.
+
+**A statement that fails undoes every unsaved change, not only itself.**
+The store goes back to the last `save()` (or to how it was opened, before
+the first one), and the error says so. `save()` is the only transaction
+boundary, so call it after work you want to keep:
+
+```python
+conn.execute("CREATE GRAPH TYPE cast AS { (:Actor {name STRING, born INT | NULL}) }")
+conn.execute("USE GRAPH TYPE cast")
+conn.execute("INSERT (:Actor {name: 'Ada'})")
+conn.save()
+conn.execute("INSERT (:Actor {name: 'Alan', born: 1912})")
+conn.execute("INSERT (:Actor {name: 42})")
+#  ValueError: G2000 graph type violation: ... (rolled back: every unsaved
+#  change was undone, not only this statement)
+conn.execute("MATCH (a:Actor) RETURN a.name")   # -> [{'col0': 'Ada'}]: Alan is gone too
+```
 
 ### Loading in bulk
 
@@ -516,12 +535,24 @@ names this renderer assigns so the edge lines stay readable; they are not
 part of the query language.
 
 The persisted `DEFAULT` can be older than the data. `USE GRAPH TYPE
-DEFAULT` re-infers it from the graph and saves it.
+DEFAULT` re-infers it from the graph; `save()` writes it.
 
 Declared graph types are also available — `CREATE GRAPH TYPE <name> AS {
 … }`, `USE`, `DROP`, `SHOW GRAPH TYPES`, `VALIDATE GRAPH TYPE <name>` —
 and a declared (non-`DEFAULT`) active type makes `INSERT` validate
-against it.
+against it. Like data, they reach the file only with `save()`. The body
+takes what `.schema` prints:
+
+```gql
+CREATE GRAPH TYPE cast AS { (:Actor {name STRING, born INT | NULL}) }
+CREATE GRAPH TYPE loose AS { (:Actor {name STRING, *}) }
+```
+
+A property typed `T` is required. `T | NULL` and `ANY` also accept an
+element that lacks it. `*` at the end leaves the record open, so other
+properties are allowed. Without it, a property the type does not list
+fails validation. An element with no labels matches only a type written
+without a label, such as `({name STRING})`.
 
 ---
 

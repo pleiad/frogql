@@ -66,6 +66,9 @@ pub struct OverlayNodeIndex {
     /// that changed them *without* logging a touch is detectable. See
     /// `LazyGraphStore::sync_overlay_index`.
     pub witness: (usize, usize, usize, usize),
+    /// `MutationOverlay::epoch` the absorbed prefix belongs to. `absorbed`
+    /// is an offset into one epoch's log and means nothing in another.
+    pub epoch: u64,
 }
 
 impl OverlayNodeIndex {
@@ -75,6 +78,7 @@ impl OverlayNodeIndex {
         self.shadowed.clear();
         self.absorbed = 0;
         self.witness = (0, 0, 0, 0);
+        self.epoch = 0;
     }
 
     pub fn is_shadowed(&self, id: Id) -> bool {

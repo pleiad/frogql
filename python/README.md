@@ -66,13 +66,15 @@ frogql.import_csv("graph.gdb", "path/to/csv_dir/")
 
 ## Graph types and indexes
 
-The catalog persists inside the `.gdb` file. DDL is plain GQL:
+The catalog persists inside the `.gdb` file, written by `save()` together
+with the data. DDL is plain GQL:
 
 ```python
-conn.execute("CREATE GRAPH TYPE movies { (:Movie {title STRING, released INT}) }")
+conn.execute("CREATE GRAPH TYPE movies AS { (:Movie {title STRING, released INT}) }")
 conn.execute("USE GRAPH TYPE movies")
 conn.execute("VALIDATE GRAPH TYPE movies")
 conn.execute("CREATE BTREE INDEX ON :Movie(released)")
+conn.save()  # without it, none of the above survives closing the connection
 ```
 
 A `DEFAULT` graph type is auto-inferred at import time. Auto-built secondary indexes (hash + btree) cover unique `(label, prop)` pairs and are picked up by the optimizer for constant-folding and range filters.

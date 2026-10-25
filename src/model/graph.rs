@@ -16,6 +16,18 @@ use crate::typing::label_type::LabelType;
 /// Property map: attribute name → Value.
 pub type Props = HashMap<String, Value>;
 
+/// The label type of a JSON element's `labels` array. An empty array is
+/// an element with no labels, which the store represents as `Star` (as an
+/// unlabelled `INSERT` does); `LabelType::from_list` refuses an empty list,
+/// so `.dump-json` of a graph holding one, imported back, panicked.
+fn labels_of(labels: &[String]) -> LabelType {
+    if labels.is_empty() {
+        LabelType::Star
+    } else {
+        LabelType::from_list(labels)
+    }
+}
+
 /// A property graph with u32 internal IDs.
 ///
 /// String user-facing IDs (from JSON) are mapped to sequential u32 IDs at load time.
@@ -140,7 +152,7 @@ impl MemoryGraphStore {
                 label_to_nodes.entry(l.clone()).or_default().push(nid);
             }
 
-            node_labels_vec.push(LabelType::from_list(&labs));
+            node_labels_vec.push(labels_of(&labs));
             node_props_vec.push(Self::parse_props(&n["props"])?);
             node_names.push(name);
         }
@@ -210,7 +222,7 @@ impl MemoryGraphStore {
                 }
             };
 
-            edge_labels_vec.push(LabelType::from_list(&labs));
+            edge_labels_vec.push(labels_of(&labs));
             edge_props_vec.push(Self::parse_props(&e["props"])?);
             edge_src.push(ep0);
             edge_tgt.push(ep1);
@@ -433,6 +445,8 @@ impl super::graph_access::GraphAccess for MemoryGraphStore {
             live_overlay,
             deleted: overlay.deleted_edges.clone(),
             next_edge_id: overlay.next_edge_id(),
+            base_edge_count: overlay.base_edge_count,
+            epoch: overlay.epoch,
         })
     }
 
