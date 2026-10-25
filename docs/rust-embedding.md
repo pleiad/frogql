@@ -9,7 +9,7 @@ the Rust API. Python and Node have the same surface (see
 
 ```toml
 [dependencies]
-frogql = { version = "0.5.11", default-features = false }
+frogql = { version = "0.6.0", default-features = false }
 ```
 
 `default-features = false` drops the REPL and benchmark dependencies, so

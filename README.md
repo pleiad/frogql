@@ -91,7 +91,7 @@ Wheels ship for CPython 3.8+ on Linux (x86_64, aarch64), macOS (x86_64, arm64), 
 **Rust library (embedded, like SQLite)**:
 ```toml
 [dependencies]
-frogql = { version = "0.5.11", default-features = false }
+frogql = { version = "0.6.0", default-features = false }
 ```
 ```rust
 let conn = frogql::Connection::open("movies.gdb")?;
