@@ -162,3 +162,34 @@ fn import_json_str_creates_a_database() {
         Some(&Value::Str("Quito".into()))
     );
 }
+
+#[test]
+fn import_overwrites_an_existing_database() {
+    // The importers are documented to overwrite. They went through
+    // `Pager::create`, which refuses an existing file, so a second import
+    // to the same path failed with `File exists`.
+    let path = temp_db("reimport");
+    let first = r#"{"nodes":[{"id":"a","labels":["A"],"props":{"k":1}}],"edges":[]}"#;
+    let second = r#"{"nodes":[
+        {"id":"b","labels":["B"],"props":{"k":2}},
+        {"id":"c","labels":["B"],"props":{"k":3}}],"edges":[]}"#;
+    frogql::connection::import_json_str(&path, first).unwrap();
+    // Opening writes the `.ltj` sidecar, which the next import must drop.
+    drop(Connection::open(&path).unwrap());
+    let mut ltj = path.as_os_str().to_os_string();
+    ltj.push(".ltj");
+    assert!(std::path::Path::new(&ltj).exists());
+    // A `.tmp` left by an import that died mid-write must not block it.
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    std::fs::write(&tmp, b"stale").unwrap();
+
+    frogql::connection::import_json_str(&path, second).unwrap();
+
+    assert!(!std::path::Path::new(&ltj).exists());
+    assert!(!std::path::Path::new(&tmp).exists());
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(conn.node_count(), 2);
+    let schema = conn.schema();
+    assert!(schema.contains('B') && !schema.contains("(:A"), "{schema}");
+}

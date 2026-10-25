@@ -78,6 +78,40 @@ pub fn save_graph_with_catalog_and_indexes_atomic(
     Ok(())
 }
 
+/// Write `graph` to `db_path` as a new database, with DEFAULT inferred
+/// and active, **replacing** whatever is there.
+///
+/// The importers (`import_json`, `import_json_str`, `import_csv` in every
+/// binding) are documented to overwrite their destination, and went
+/// through `save_graph`, whose `Pager::create` refuses an existing file:
+/// importing twice to the same path failed with `File exists`. This goes
+/// through the atomic `.tmp` + rename that `.save` uses, so a failure
+/// part-way leaves the old database untouched, and drops the old
+/// `<db>.ltj`, which describes a graph that is gone — `.save` deletes it
+/// for the same reason.
+///
+/// DEFAULT is inferred here, where the graph is already in RAM; without a
+/// catalog the database would open with a permissive typechecker.
+pub fn import_graph(graph: &MemoryGraphStore, db_path: &Path) -> io::Result<()> {
+    let mut catalog = crate::runtime::catalog::GraphTypeCatalog::new();
+    catalog.install_default(crate::typing::inference::infer_simple_schema(graph));
+    // A `.tmp` left by an earlier run that died mid-write would make
+    // `Pager::create` refuse it.
+    let mut tmp = db_path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    save_graph_with_catalog_and_indexes_atomic(graph, &catalog, &[], db_path)?;
+    match std::fs::remove_file(crate::runtime::ltj::persist::path_for(db_path)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Save a MemoryGraphStore to a .gql database file.
 pub fn save_graph(graph: &MemoryGraphStore, db_path: &Path) -> io::Result<()> {
     let mut pager = Pager::create(db_path)?;

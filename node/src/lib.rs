@@ -820,16 +820,8 @@ pub fn open(path: String) -> napi::Result<Connection> {
 /// and the walk is paid once at import rather than on someone's first
 /// query.
 fn save_with_default(g: &MemoryGraphStore, db_path: &str) -> napi::Result<()> {
-    g.save(Path::new(db_path))
-        .map_err(|e| err(format!("save: {e}")))?;
-    let store = LazyGraphStore::open(Path::new(db_path))
-        .map_err(|e| err(format!("reopen to install DEFAULT: {e}")))?;
-    let schema = frogql_core::typing::inference::infer_simple_schema(&store);
-    store.catalog_mut().install_default(schema);
-    store
-        .save_catalog()
-        .map_err(|e| err(format!("persist catalog: {e}")))?;
-    Ok(())
+    frogql_core::store::io::import_graph(g, Path::new(db_path))
+        .map_err(|e| err(format!("import: {e}")))
 }
 
 /// Import a JSON graph (`{nodes: [...], edges: [...]}`) into a fresh

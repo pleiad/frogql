@@ -602,16 +602,8 @@ fn open(path: &str) -> PyResult<Connection> {
 /// and the walk is paid once at import rather than on someone's first
 /// query.
 fn save_with_default(g: &MemoryGraphStore, db_path: &str) -> PyResult<()> {
-    g.save(Path::new(db_path))
-        .map_err(|e| PyRuntimeError::new_err(format!("save: {e}")))?;
-    let store = LazyGraphStore::open(Path::new(db_path))
-        .map_err(|e| PyRuntimeError::new_err(format!("reopen to install DEFAULT: {e}")))?;
-    let schema = frogql_core::typing::inference::infer_simple_schema(&store);
-    store.catalog_mut().install_default(schema);
-    store
-        .save_catalog()
-        .map_err(|e| PyRuntimeError::new_err(format!("persist catalog: {e}")))?;
-    Ok(())
+    frogql_core::store::io::import_graph(g, Path::new(db_path))
+        .map_err(|e| PyRuntimeError::new_err(format!("import: {e}")))
 }
 
 #[pyfunction]

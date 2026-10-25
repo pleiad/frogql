@@ -657,15 +657,8 @@ pub fn import_csv(db_path: impl AsRef<Path>, csv_dir: impl AsRef<Path>) -> Resul
     save_with_default(&g, db_path.as_ref())
 }
 
-/// Save `g` with DEFAULT inferred and active, as the REPL import does;
-/// without a catalog the database would open with a permissive checker.
 fn save_with_default(g: &MemoryGraphStore, db_path: &Path) -> Result<()> {
-    g.save(db_path)
-        .map_err(|e| Error::Execution(e.to_string()))?;
-    let store = LazyGraphStore::open(db_path)?;
-    let schema = infer_simple_schema(&store);
-    store.catalog_mut().install_default(schema);
-    store.save_catalog()?;
+    crate::store::io::import_graph(g, db_path)?;
     Ok(())
 }
 
