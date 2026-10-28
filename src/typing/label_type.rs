@@ -109,6 +109,19 @@ impl LabelType {
             (_, LabelType::Or(a, b)) => {
                 LabelType::is_subtype(l1, a) || LabelType::is_subtype(l1, b)
             }
+            // A negation is decided on the left-hand side as a whole, not
+            // per conjunct. An element labelled `Person & Student` does not
+            // satisfy `!Student`, although its `Person` conjunct alone would:
+            // the `And`-on-the-left arm below asks "does SOME conjunct
+            // entail l2", and for a negated l2 that question has the wrong
+            // answer. For a conjunction of concrete labels — what a stored
+            // element carries, and what a graph-type node type declares —
+            // entailment is exact, so `l1 <: !x` is exactly `not (l1 <: x)`.
+            // With `*` or `|` on the left the relation stays consistent
+            // (optimistic) subtyping, and the arms below keep it that way.
+            (_, LabelType::Neg(inner)) if l1.is_concrete_conjunction() => {
+                !LabelType::is_subtype(l1, inner)
+            }
             (LabelType::And(a, b), _) => {
                 LabelType::is_subtype(a, l2) || LabelType::is_subtype(b, l2)
             }
@@ -125,6 +138,16 @@ impl LabelType {
     /// Currently unimplemented — always returns false (matches Python).
     pub fn is_empty(&self) -> bool {
         false
+    }
+
+    /// A conjunction of atomic labels (`A`, `A & B`, ...): no `*`, `|`, `!`,
+    /// `⊤` or `ε`. This is the shape of a stored element's label set.
+    pub fn is_concrete_conjunction(&self) -> bool {
+        match self {
+            LabelType::Label(_) => true,
+            LabelType::And(a, b) => a.is_concrete_conjunction() && b.is_concrete_conjunction(),
+            _ => false,
+        }
     }
 
     /// If this is a simple atomic label, return its name.
@@ -294,5 +317,47 @@ mod tests {
             matches!(&m, LabelType::And(_, _)),
             "meet of distinct atoms should be And, got {m:?}"
         );
+    }
+
+    fn lbl(s: &str) -> LabelType {
+        LabelType::Label(s.into())
+    }
+    fn and(a: LabelType, b: LabelType) -> LabelType {
+        LabelType::And(Box::new(a), Box::new(b))
+    }
+    fn neg(a: LabelType) -> LabelType {
+        LabelType::Neg(Box::new(a))
+    }
+
+    #[test]
+    fn test_negation_is_decided_on_the_whole_conjunction() {
+        // An element labelled Person & Student is not !Student, even though
+        // its Person conjunct alone is. Deciding per conjunct said it was.
+        let ps = and(lbl("Person"), lbl("Student"));
+        assert!(!LabelType::is_subtype(&ps, &neg(lbl("Student"))));
+        assert!(!LabelType::is_subtype(&ps, &neg(lbl("Person"))));
+        assert!(LabelType::is_subtype(&ps, &neg(lbl("Post"))));
+        // A single label behaves as before.
+        assert!(LabelType::is_subtype(&lbl("Person"), &neg(lbl("Student"))));
+        assert!(!LabelType::is_subtype(
+            &lbl("Student"),
+            &neg(lbl("Student"))
+        ));
+        // Person & !Student, the conjunction in the pattern.
+        let p_not_s = and(lbl("Person"), neg(lbl("Student")));
+        assert!(!LabelType::is_subtype(&ps, &p_not_s));
+        assert!(LabelType::is_subtype(&lbl("Person"), &p_not_s));
+    }
+
+    #[test]
+    fn test_negation_stays_optimistic_on_imprecise_left() {
+        // With ★ or | on the left the relation is consistent subtyping:
+        // some concretisation must be able to satisfy !Student, so the
+        // answer stays true. Turning these false would let refine report
+        // an emptiness it cannot prove.
+        let p_star = and(lbl("Person"), LabelType::Star);
+        assert!(LabelType::is_subtype(&p_star, &neg(lbl("Student"))));
+        let p_or_s = LabelType::Or(Box::new(lbl("Post")), Box::new(lbl("Student")));
+        assert!(LabelType::is_subtype(&p_or_s, &neg(lbl("Student"))));
     }
 }

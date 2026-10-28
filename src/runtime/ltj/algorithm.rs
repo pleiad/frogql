@@ -51,6 +51,12 @@ pub struct PlacedFilter {
 pub enum FilterKind {
     /// Node label: check that the node has a specific label
     NodeLabel { var_id: u8, label: String },
+    /// A node label expression that is not a plain conjunction of labels
+    /// (`!A`, `A|B`, `A&!B`), checked whole against the node's label set
+    /// with the same `is_subtype` test the scan runs. `NodeLabel` only
+    /// carries the labels every match must have; without this the rest
+    /// of the expression — a negation, an alternative — was dropped.
+    NodeLabelExpr { var_id: u8, label: LabelType },
     /// Node property: check that the node has a property of a given type
     NodeProperty { var_id: u8, prop: String },
     /// Node attribute compared against a literal: `var.attr <op> value`.
@@ -1461,6 +1467,14 @@ impl<'a> LtjAlgorithm<'a> {
                     let actual = graph.node_labels(node_id);
                     let required = crate::typing::label_type::LabelType::Label(label.clone());
                     if !crate::typing::label_type::LabelType::is_subtype(&actual, &required) {
+                        return false;
+                    }
+                }
+            }
+            FilterKind::NodeLabelExpr { var_id, label } => {
+                if let Some(&(_, node_id)) = tuple.iter().find(|(v, _)| *v == *var_id) {
+                    let actual = graph.node_labels(node_id);
+                    if !LabelType::is_subtype(&actual, label) {
                         return false;
                     }
                 }
