@@ -24,8 +24,14 @@ use crate::runtime::ltj::triple_index::TripleIndex;
 pub enum OrderByForce {
     /// The heuristic: the btree-driven paths when they apply, else top-k
     /// selection when `LIMIT` is small against the input, else pdqsort.
+    /// The btree walk (`try_btree_ltj_real`) is declined for a pattern
+    /// anchored by an indexed equality; see `Runtime::pattern_is_anchored`.
     #[default]
     Auto,
+    /// The heuristic, except that the btree walk runs whenever its
+    /// preconditions hold, anchored pattern or not: the behaviour before
+    /// the anchor rule, kept so the two can be compared.
+    Btree,
     /// A full unstable sort.
     Pdqsort,
     /// Top-k selection whenever there is a top-k to take.
@@ -36,19 +42,25 @@ pub enum OrderByForce {
 }
 
 impl OrderByForce {
-    /// Any other spelling (`btree-ltj`, `auto`, …) is the heuristic.
+    /// Any other spelling (`auto`, …) is the heuristic.
     pub fn parse(s: &str) -> OrderByForce {
         match s {
             "pdqsort" => OrderByForce::Pdqsort,
             "topk" => OrderByForce::Topk,
             "driftsort" => OrderByForce::Driftsort,
+            "btree" | "btree-ltj" | "btree-ltj-real" => OrderByForce::Btree,
             _ => OrderByForce::Auto,
         }
     }
 
-    /// Whether the btree-driven ORDER BY paths may run. Forcing any
+    /// Whether the btree-driven ORDER BY paths may run. Forcing a sort
     /// strategy turns them off.
     pub fn allows_btree(self) -> bool {
+        matches!(self, OrderByForce::Auto | OrderByForce::Btree)
+    }
+
+    /// Whether the btree walk declines an anchored pattern.
+    pub fn declines_anchored(self) -> bool {
         self == OrderByForce::Auto
     }
 }

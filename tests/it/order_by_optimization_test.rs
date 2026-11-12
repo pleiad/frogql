@@ -272,6 +272,130 @@ fn btree_ltj_real_bails_on_single_node_query() {
     assert_eq!(pdq, real);
 }
 
+/// Ten `:Person {id}` and 200 `:Comment {date}`, comment `i` created by
+/// person `i % 10`. Both properties are unique within their label, so the
+/// lazy store auto-builds a hash and a btree on each: `(:Person {id: _})`
+/// is an anchor and `c.date` can drive the btree walk.
+fn creators_store(file: &str) -> (LazyGraphStore, std::path::PathBuf) {
+    let mut nodes = Vec::new();
+    for i in 0..10 {
+        nodes.push(format!(
+            "{{\"id\":\"p{i}\",\"labels\":[\"Person\"],\"props\":{{\"id\":{i}}}}}"
+        ));
+    }
+    let mut edges = Vec::new();
+    for i in 0..200 {
+        nodes.push(format!(
+            "{{\"id\":\"c{i}\",\"labels\":[\"Comment\"],\"props\":{{\"date\":{}}}}}",
+            1000 + i
+        ));
+        edges.push(format!(
+            "{{\"id\":\"h{i}\",\"labels\":[\"hasCreator\"],\"props\":{{}},\
+              \"endpoints\":[\"c{i}\",\"p{}\"],\"directionality\":\"->\"}}",
+            i % 10
+        ));
+    }
+    let json = format!(
+        "{{\"nodes\":[{}],\"edges\":[{}]}}",
+        nodes.join(","),
+        edges.join(",")
+    );
+    let g = MemoryGraphStore::from_json_str(&json).unwrap();
+    let tmp = std::env::temp_dir().join(file);
+    let _ = std::fs::remove_file(&tmp);
+    g.save(&tmp).unwrap();
+    (LazyGraphStore::open(&tmp).unwrap(), tmp)
+}
+
+/// The rows, and whether the ORDER BY was answered by the btree walk.
+fn run_and_walk(store: &LazyGraphStore, q: &str, force: OrderByForce) -> (Vec<Vec<Value>>, bool) {
+    let rt = Runtime::new(store);
+    rt.set_cfg(RuntimeCfg {
+        order_by: force,
+        ..RuntimeCfg::default()
+    });
+    let rows = match rt.run_query(&compile_query(q).unwrap(), 0) {
+        QueryResult::Projected(rs) => rs,
+        _ => panic!("expected projected"),
+    };
+    (rows, rt.last_query_walked_btree())
+}
+
+/// An anchored pattern is answered by the join, not the btree walk: the
+/// anchor confines the answer to one person's comments, sparse among all
+/// comments, which is where the walk probes longest (LDBC IC8: 674 ms
+/// walking, 9 ms joining). The answer must not depend on which ran.
+#[test]
+fn btree_walk_declines_anchored_pattern() {
+    let (store, tmp) = creators_store("frogql_orderby_anchored.gdb");
+    let q = "MATCH (p:Person {id: 3})<-[:hasCreator]-(c:Comment) \
+             RETURN c.date ORDER BY c.date DESC LIMIT 5";
+    let (auto, auto_walked) = run_and_walk(&store, q, OrderByForce::Auto);
+    let (btree, btree_walked) = run_and_walk(&store, q, OrderByForce::Btree);
+    let (pdq, _) = run_and_walk(&store, q, OrderByForce::Pdqsort);
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        !auto_walked,
+        "the anchored pattern must not take the btree walk"
+    );
+    assert!(
+        btree_walked,
+        "FROGQL_ORDERBY_FORCE=btree must still take it"
+    );
+    assert_eq!(auto, pdq);
+    assert_eq!(btree, pdq);
+    // Person 3 created comments 3, 13, …, 193: the five latest.
+    let dates: Vec<Value> = [1193, 1183, 1173, 1163, 1153]
+        .into_iter()
+        .map(Value::Int)
+        .collect();
+    assert_eq!(
+        auto.into_iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
+        dates
+    );
+}
+
+/// Without an anchor the answer spreads over every comment, the walk
+/// stops after about `k` probes, and it is the strategy that must run
+/// (LDBC SF0.1: 12 ms walking, 803 ms joining and sorting).
+#[test]
+fn btree_walk_still_runs_without_anchor() {
+    let (store, tmp) = creators_store("frogql_orderby_unanchored.gdb");
+    let q = "MATCH (p:Person)<-[:hasCreator]-(c:Comment) \
+             RETURN c.date, p.id ORDER BY c.date DESC LIMIT 5";
+    let (auto, auto_walked) = run_and_walk(&store, q, OrderByForce::Auto);
+    let (pdq, _) = run_and_walk(&store, q, OrderByForce::Pdqsort);
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        auto_walked,
+        "an unanchored pattern must keep the btree walk"
+    );
+    assert_eq!(auto, pdq);
+    assert_eq!(auto[0], vec![Value::Int(1199), Value::Int(9)]);
+}
+
+/// An equality no index answers is not an anchor: no person carries
+/// `name`, so there is no index on `(Person, name)` to narrow `p`, and
+/// the walk runs as before.
+#[test]
+fn unindexed_equality_is_not_an_anchor() {
+    let (store, tmp) = creators_store("frogql_orderby_unindexed.gdb");
+    let q = "MATCH (p:Person)<-[:hasCreator]-(c:Comment) WHERE p.name = 'x' \
+             RETURN c.date ORDER BY c.date DESC LIMIT 5";
+    let (auto, auto_walked) = run_and_walk(&store, q, OrderByForce::Auto);
+    let (pdq, _) = run_and_walk(&store, q, OrderByForce::Pdqsort);
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        auto_walked,
+        "no index answers p.name, so nothing anchors the pattern"
+    );
+    assert_eq!(auto, pdq);
+    assert!(auto.is_empty());
+}
+
 #[test]
 fn topk_with_distinct_keeps_full_sort() {
     // DISTINCT can shrink the post-projection set; if top-k cut at the

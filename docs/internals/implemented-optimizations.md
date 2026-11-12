@@ -554,3 +554,54 @@ materialise fallback, new `value_subquery_pinned`; `pinned_run_multi`),
 `syntax/path_pattern.rs` (`has_undirected_edge`). Tests:
 `exists_runtime_test`, `value_subquery_test`, `correlated_subquery_test`,
 `ic7_test` (the undirected-EXISTS guard).
+
+
+## 14. The btree-LTJ-real walk declines an anchored pattern
+
+**Before:** §10 made the walk fire on every ORDER BY whose
+preconditions held. Those preconditions say whether the walk *can*
+answer the query, not whether it is the cheaper way to. The walk visits
+the sort label's ids in key order and runs one pinned LTJ probe per id
+until it holds `k` rows: about `k · L / M` probes, `L` being the ids in
+the label and `M` the ones in the answer. Running the join and sorting
+it costs about `M`. When the pattern is anchored — a node fixed on
+every row by an indexed equality, `(start:Person {id: $p})` — the
+answer is that node's neighbourhood: `M` is small and sparse in `L`,
+which is the walk's worst case and the join's best.
+
+It showed up as froGQL's default `lazy` backend losing LDBC IC2 and IC8
+to its own `disk` backend, which has no btree and so never walked, and
+IC8 losing to MillenniumDB by up to two orders of magnitude.
+
+**After:** `try_btree_ltj_real` returns `None` (the join-and-sort path
+runs) when `Runtime::pattern_is_anchored` finds such a node, in a
+position that binds on every row (not under a union arm, a repetition
+or `?`), narrowed by the index to at most `ANCHOR_MAX_NODES` (16) nodes —
+the bound only keeps a non-unique index on a common value from passing
+for an anchor. `FROGQL_ORDERBY_FORCE=btree` restores the old choice.
+
+A cost estimate would also catch an anchor whose neighbourhood is large
+and dense in the label. None of the LDBC shapes is one, and the anchor
+is a fact the planner already has rather than an estimate.
+
+**Impact (LDBC SF0.1, lazy, Apple M3; answers identical on all 15
+parameter rows of every implemented IC under both rules):**
+
+| Query | Walk (old) | Rule (new) |
+|---|---|---|
+| IC8 (anchored) | 674 ms | 8 ms |
+| IC2 (anchored) | 31 ms | 19 ms |
+| latest 20 comments with creators (not anchored) | 12 ms | 12 ms |
+| latest 20 replies to posts (not anchored) | 13 ms | 13 ms |
+
+Best of three in the REPL. The join-and-sort path alone takes 803 ms and
+524 ms on the two unanchored queries, which is why they keep the walk.
+Over `ldbc_bench` (15 rows, median), IC8 on `lazy` is now 7.7 ms against
+12.6 ms on `disk` (it was 279 ms), and IC2 19.6 ms against 23.2 ms.
+
+**Files changed:** `runtime/engine.rs` (`pattern_is_anchored`,
+`ANCHOR_MAX_NODES`, the check in `try_btree_ltj_real`,
+`last_query_walked_btree`), `runtime/cfg.rs` (`OrderByForce::Btree`).
+Tests: `order_by_optimization_test` (`btree_walk_declines_anchored_pattern`,
+`btree_walk_still_runs_without_anchor`,
+`unindexed_equality_is_not_an_anchor`).

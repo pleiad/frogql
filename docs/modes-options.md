@@ -138,6 +138,7 @@ sidecar that never appears, or silently never loads, is diagnosable.
 | `FROGQL_DISABLE_MATCH_PUSHDOWN=1` | Run a later `MATCH` clause unrestricted and join afterwards, instead of starting it from the nodes the earlier clauses bound. `MATCH (r)-[]->(c) MATCH p = ANY SHORTEST (c)~[]~*(b)` searches from every node instead of from the `c`s. |
 | `FROGQL_DISABLE_OPTIONAL_PUSHDOWN=1` | Evaluate `OPTIONAL MATCH` globally then left-join, instead of per-row bind pushdown. IS5 slows ~93×. |
 | `FROGQL_ORDERBY_FORCE=pdqsort\|topk` | Pin one ORDER BY strategy, bypassing the btree-LTJ-real top-k selection. |
+| `FROGQL_ORDERBY_FORCE=btree` | Take the btree-LTJ-real walk whenever it applies, even for a pattern anchored by an indexed equality (`(:Person {id: …})`), which the default declines because the join is faster there. LDBC IC8 goes from ~8 ms to ~280 ms. |
 
 ### 3.4 Diagnostics
 

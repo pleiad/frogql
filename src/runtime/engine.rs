@@ -424,6 +424,10 @@ pub struct Runtime<'g, G: GraphAccess> {
     /// Counters from the last `NEAREST` evaluation. The benchmark reads
     /// which arm actually ran, which is not always the one requested.
     last_vec_stats: RefCell<crate::runtime::vsearch::VecStats>,
+    /// Whether the last top-level ORDER BY was answered by the btree walk
+    /// (`try_btree_ltj_real`). Diagnostic, for the tests that pin which
+    /// queries take it.
+    last_btree_walk: Cell<bool>,
     /// Wall-clock budget the LTJ search and the vector walks consult, so
     /// a query that will not finish stops instead of being waited on.
     /// Unarmed by default and never armed by the REPL: an expired budget
@@ -543,6 +547,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             vec_cfg: RefCell::new(crate::runtime::vsearch::VecCfg::from_env()),
             cfg: Cell::new(crate::runtime::cfg::RuntimeCfg::from_env()),
             last_vec_stats: RefCell::new(crate::runtime::vsearch::VecStats::default()),
+            last_btree_walk: Cell::new(false),
             budget: crate::runtime::budget::Budget::unlimited(),
             budget_limit: Cell::new(None),
         }
@@ -568,6 +573,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             vec_cfg: RefCell::new(crate::runtime::vsearch::VecCfg::from_env()),
             cfg: Cell::new(crate::runtime::cfg::RuntimeCfg::from_env()),
             last_vec_stats: RefCell::new(crate::runtime::vsearch::VecStats::default()),
+            last_btree_walk: Cell::new(false),
             budget: crate::runtime::budget::Budget::unlimited(),
             budget_limit: Cell::new(None),
         }
@@ -602,6 +608,13 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
     /// Counters from the most recent `NEAREST` evaluation.
     pub fn last_vec_stats(&self) -> crate::runtime::vsearch::VecStats {
         self.last_vec_stats.borrow().clone()
+    }
+
+    /// Whether the most recent `run_query` answered its ORDER BY with the
+    /// btree walk (`try_btree_ltj_real`) rather than by running the match
+    /// and sorting it. Diagnostic: the answer is the same either way.
+    pub fn last_query_walked_btree(&self) -> bool {
+        self.last_btree_walk.get()
     }
 
     /// Bound each query to `limit` of wall clock, or remove the bound
@@ -1007,6 +1020,7 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         } else {
             None
         };
+        self.last_btree_walk.set(real_rows.is_some());
 
         let return_items = match &query.returns {
             None => {
@@ -1181,6 +1195,17 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
         // (no OPTIONAL / multi-MATCH); running k small LTJs already
         // assumes a single decomposable pattern.
         if query.has_any_optional() || query.matches.len() > 1 {
+            return None;
+        }
+
+        // Cost, not applicability: an anchored pattern is answered faster
+        // by the join (see `pattern_is_anchored`).
+        if self.cfg().order_by.declines_anchored()
+            && self.pattern_is_anchored(&query.collapsed_pattern())
+        {
+            if std::env::var("FROGQL_DEBUG_INDEXES").is_ok() {
+                eprintln!("btree-ltj-real: declined, pattern anchored by an indexed equality");
+            }
             return None;
         }
 
@@ -2400,6 +2425,44 @@ impl<'g, G: GraphAccess + 'g> Runtime<'g, G> {
             }
         }
         None
+    }
+
+    /// Whether some node of `pattern` is fixed, on every row, to a handful
+    /// of nodes by an indexed equality — `(:Person {id: $p})`.
+    ///
+    /// The btree walk (`try_btree_ltj_real`) runs one pinned LTJ probe per
+    /// id of the sort label it visits, and visits about `k · L / M` of them
+    /// before it holds `k` rows, `L` being the ids in the label and `M` the
+    /// ones in the answer. Running the join and sorting what it returns
+    /// costs about `M`. An anchor confines the answer to the anchor's
+    /// neighbourhood, so `M` is small and the matches are sparse in `L`:
+    /// where the walk is slowest and the join cheapest. Without an anchor
+    /// the answer spreads over the whole label and the walk wins by an
+    /// order of magnitude. Measured on LDBC SF0.1: IC8 (anchored) 674 ms
+    /// walking against 9 ms joining, while "the 20 most recent comments
+    /// with their creators" (not anchored) is 12 ms walking against 803 ms
+    /// joining.
+    ///
+    /// A cost estimate would also catch an anchor whose neighbourhood is
+    /// large and dense in `L`; none of the LDBC shapes is one, and the
+    /// anchor is a fact the planner already has rather than a guess.
+    ///
+    /// Only positions that bind on every row count: a union arm, a
+    /// repetition or a `?` may not run, so an anchor inside one bounds
+    /// nothing.
+    fn pattern_is_anchored(&self, pattern: &PathPattern) -> bool {
+        match pattern {
+            PathPattern::Node(Some(d)) => self
+                .indexed_candidates(d)
+                .is_some_and(|ids| ids.len() <= ANCHOR_MAX_NODES),
+            PathPattern::Concat(a, b) | PathPattern::Join(a, b) => {
+                self.pattern_is_anchored(a) || self.pattern_is_anchored(b)
+            }
+            PathPattern::Filter(p, _)
+            | PathPattern::Selected { pattern: p, .. }
+            | PathPattern::Named { pattern: p, .. } => self.pattern_is_anchored(p),
+            _ => false,
+        }
     }
 
     // --- Optimized edge pattern: uses label index when available ---
@@ -6115,6 +6178,12 @@ fn sort_projected_rows(
     rows.extend(decorated.into_iter().map(|(_, p)| p));
 }
 
+/// The most nodes an indexed equality may name and still anchor a pattern
+/// (`Runtime::pattern_is_anchored`). A unique index names one. The bound
+/// only stops a non-unique index on a common value — `gender`, say — from
+/// passing for an anchor.
+const ANCHOR_MAX_NODES: usize = 16;
+
 /// True when the pattern carries at least one edge of any direction.
 /// LTJ requires triples and a triple requires an edge — without one,
 /// `try_ltj` returns None and the BTree-LTJ-real path can't pin the
@@ -6427,7 +6496,7 @@ fn sort_decorated<T>(
     let use_topk = match force {
         OrderByForce::Topk => topk_applies,
         OrderByForce::Pdqsort | OrderByForce::Driftsort => false,
-        OrderByForce::Auto => topk_applies && limit * 2 < n,
+        OrderByForce::Auto | OrderByForce::Btree => topk_applies && limit * 2 < n,
     };
     if use_topk {
         let owned = std::mem::take(decorated);
