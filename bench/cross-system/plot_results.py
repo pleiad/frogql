@@ -51,6 +51,7 @@ SYSTEM_LABEL = {
     "grafeo-gql": "Grafeo",
     "neo4j-cypher": "Neo4j",
     "duckdb-sql": "DuckDB (in-situ)",
+    "millenniumdb-gql": "MillenniumDB",
 }
 SYSTEM_COLOR = {
     "froGQL": "#2c8a3e",
@@ -65,6 +66,7 @@ SYSTEM_COLOR = {
     "Grafeo": "#9b59b6",
     "Neo4j": "#0a6e8a",
     "DuckDB (in-situ)": "#b5a642",
+    "MillenniumDB": "#b03a48",
 }
 
 

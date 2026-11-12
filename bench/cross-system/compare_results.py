@@ -419,6 +419,8 @@ def main() -> int:
                     return "neo4j"
                 if s == "duckdb-sql":
                     return "duckdb"
+                if s == "millenniumdb-gql":
+                    return "millenniumdb"
                 return s
 
             queries_h = sorted({q for (q, _) in by_cell_h})

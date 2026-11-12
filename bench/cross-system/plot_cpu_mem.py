@@ -43,14 +43,14 @@ HERE = Path(__file__).resolve().parent
 LAT_LABEL = {
     "lazy": "froGQL", "lazy-baseline": "froGQL", "disk": "froGQL (disk)",
     "memory": "froGQL (mem)", "kuzu-cypher": "Kuzu", "grafeo-gql": "Grafeo",
-    "graphqlite-cypher": "GraphQLite",
+    "graphqlite-cypher": "GraphQLite", "millenniumdb-gql": "MillenniumDB",
 }
 MEM_LABEL = {"gqlite": "froGQL", "kuzu": "Kuzu", "grafeo": "Grafeo",
-             "graphqlite": "GraphQLite"}
+             "graphqlite": "GraphQLite", "millenniumdb": "MillenniumDB"}
 COLOR = {"froGQL": "#2c8a3e", "Kuzu": "#c2792e", "Grafeo": "#9b59b6",
          "GraphQLite": "#3b6ea5", "froGQL (disk)": "#1f5e2b",
-         "froGQL (mem)": "#56a86a"}
-SYS_ORDER = ["froGQL", "Kuzu", "Grafeo", "GraphQLite"]
+         "froGQL (mem)": "#56a86a", "MillenniumDB": "#b03a48"}
+SYS_ORDER = ["froGQL", "Kuzu", "Grafeo", "GraphQLite", "MillenniumDB"]
 # Failure markers: a hatched block fills the system's slot so a missing
 # result is unmistakable (vs. a tiny tick at the axis floor). Colour + label
 # per failure kind.

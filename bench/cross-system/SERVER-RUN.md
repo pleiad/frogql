@@ -28,6 +28,18 @@ pip install -r bench/cross-system/kuzu/requirements.txt \
 docker info >/dev/null && echo "docker OK"
 ```
 
+MillenniumDB has no wheel; build its server from source once and export
+the binary (details in `millenniumdb/README.md`):
+
+```bash
+git clone https://github.com/MillenniumDB/MillenniumDB ~/MillenniumDB
+(cd ~/MillenniumDB && ./scripts/setup_millenniumdb.sh)
+export MDB_BIN=~/MillenniumDB/build/Release/bin/mdb
+```
+
+Without `MDB_BIN` (or `mdb` on `PATH`), `run_server.sh` drops
+millenniumdb from the run with a warning.
+
 Notes:
 - graphqlite needs a Python whose `sqlite3` allows extension loading
   (stock Debian/Ubuntu python3 is fine; macOS system python is not).
@@ -53,6 +65,22 @@ Outputs land in `bench/cross-system/results/<ts>/`:
 Expected skips (visible in `skipped.log`, not errors):
 - graphqlite on IC1/3/4/7/12/13 (no translations — documented carve-out)
 - duckdb on everything except IC2/6/11 (in-situ baseline is 3 ICs by design)
+
+## 1b. froGQL vs MillenniumDB only
+
+```bash
+export MDB_BIN=~/MillenniumDB/build/Release/bin/mdb
+nohup bash bench/cross-system/run_server.sh --systems gqlite,millenniumdb \
+    --ics 2,8,11,12,13 > /tmp/frogql-vs-mdb.out 2>&1 &
+tail -f /tmp/frogql-vs-mdb.out
+```
+
+The first run builds MillenniumDB's database (`millenniumdb/setup.py`,
+about 11 CPU-minutes at SF0.1). IC2, IC8, IC11 and IC13 must report
+`2/2 systems agree` on every row; IC12 cannot (list column) and its
+content was checked separately. Leaving `--ics` out runs every IC, and the
+eight MillenniumDB cannot answer show up as `[FAIL] millenniumdb.icN` in
+`skipped.log`. Why each one is out: `millenniumdb/DIVERGENCES.md`.
 
 ## 2. Ablation run (R1.1, R2.1 — "which optimization buys what")
 

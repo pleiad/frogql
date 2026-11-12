@@ -1,0 +1,16 @@
+// IC11 — job referral. Translation of bench/ldbc-queries/ic11.toml.
+// Divergence: CAST(id AS INTEGER) dropped from ORDER BY (ids are integers).
+// :Company / :Country are real labels here, loaded from the `type` column
+// exactly as froGQL loads them.
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)-[workAt:workAt]->(company:Company)-[:isLocatedIn]->(country:Country)
+WHERE person <> otherPerson
+  AND country.name = $countryName
+  AND workAt.workFrom < $workFromYear
+RETURN
+    otherPerson.id AS personId,
+    otherPerson.firstName AS personFirstName,
+    otherPerson.lastName AS personLastName,
+    company.name AS organizationName,
+    workAt.workFrom AS organizationWorkFromYear
+ORDER BY organizationWorkFromYear ASC, personId ASC, organizationName DESC
+LIMIT 10

@@ -1,0 +1,28 @@
+// BLOCKED at MillenniumDB d67f3e7: returns wrong rows. The MATCHes that
+// reach otherPerson through `<-[:hasCreator]-` are not joined on it (cross
+// product), and GROUP BY allows two keys. No single-chain rewrite exists:
+// otherPerson has three branches. Move back up a level once fixed.
+//
+// IC3 — friends and friends of friends that have been to countries X and Y.
+// Divergences: `$startDate + DURATION({days: $durationDays})` is passed as the
+// precomputed literal $endDate (run.py); GROUP BY names the RETURN aliases
+// (MillenniumDB rejects a property expression there); CAST(id AS INTEGER) is
+// dropped from ORDER BY since ids are stored as integers already.
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)-[:isLocatedIn]->(:City)-[:isPartOf]->(country:Country)
+WHERE country.name <> $countryXName AND country.name <> $countryYName
+MATCH (otherPerson)<-[:hasCreator]-(messageX:Comment|Post)-[:isLocatedIn]->(:Country {name: $countryXName})
+WHERE messageX.creationDate >= $startDate AND messageX.creationDate < $endDate
+MATCH (otherPerson)<-[:hasCreator]-(messageY:Comment|Post)-[:isLocatedIn]->(:Country {name: $countryYName})
+WHERE messageY.creationDate >= $startDate AND messageY.creationDate < $endDate
+RETURN
+    otherPerson.id AS otherPersonId,
+    otherPerson.firstName AS otherPersonFirstName,
+    otherPerson.lastName AS otherPersonLastName,
+    COUNT(DISTINCT messageX) AS xCount,
+    COUNT(DISTINCT messageY) AS yCount,
+    COUNT(DISTINCT messageX) + COUNT(DISTINCT messageY) AS totalCount
+GROUP BY otherPersonId, otherPersonFirstName, otherPersonLastName
+ORDER BY totalCount DESC, otherPersonId ASC
+LIMIT 20

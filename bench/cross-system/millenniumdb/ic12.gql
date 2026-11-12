@@ -1,0 +1,16 @@
+// IC12 — expert search. Translation of bench/ldbc-queries/ic12.toml.
+// Divergences: COLLECT_LIST is spelled COLLECT; CAST(id AS INTEGER) dropped;
+// GROUP BY takes the node variable `friend` instead of its three projected
+// properties (MillenniumDB's grammar allows at most two grouping keys, and
+// friend determines all three). The tagNames list column is not row-hash
+// comparable across engines (list rendering and element order differ).
+MATCH ACYCLIC (person:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(comment:Comment)-[:replyOf]->(post:Post)-[:hasTag]->(tag:Tag)-[:hasType]->(tagClass:TagClass)-[:isSubclassOf]->{0,}(:TagClass {name: $tagClassName})
+RETURN
+    friend.id AS friendId,
+    friend.firstName AS friendFirstName,
+    friend.lastName AS friendLastName,
+    COLLECT(DISTINCT tag.name) AS tagNames,
+    COUNT(comment) AS replyCount
+GROUP BY friend
+ORDER BY replyCount DESC, friendId ASC
+LIMIT 20

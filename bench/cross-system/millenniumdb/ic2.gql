@@ -1,0 +1,13 @@
+// IC2 — recent messages by your friends. Translation of bench/ldbc-queries/ic2.toml.
+// Divergences: none beyond $param syntax (see DIVERGENCES.md).
+MATCH (:Person {id: $personId})~[:knows]~(friend:Person)<-[:hasCreator]-(message:Comment|Post)
+WHERE message.creationDate <= $maxDate
+RETURN
+    friend.id AS personId,
+    friend.firstName AS personFirstName,
+    friend.lastName AS personLastName,
+    message.id AS postOrCommentId,
+    COALESCE(message.content, message.imageFile) AS postOrCommentContent,
+    message.creationDate AS postOrCommentCreationDate
+ORDER BY postOrCommentCreationDate DESC, postOrCommentId ASC
+LIMIT 20

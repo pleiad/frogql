@@ -1,0 +1,20 @@
+// BLOCKED at MillenniumDB d67f3e7. In this form the edge after the
+// `{1, 2}` repetition is not joined (it pairs every reached person with
+// every message; the first parameter row had no answer after 4 CPU-minutes,
+// against ~6 s for froGQL on the same machine). Written the other way
+// round, `(message)-[:hasCreator]->(otherPerson)~[:knows]~{1, 2}(person)`,
+// it does not finish in 60 s. Move back up a level once fixed.
+//
+// IC9 — recent messages by friends or friends of friends.
+// Divergence: CAST(id AS INTEGER) dropped from ORDER BY (ids are integers).
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)<-[:hasCreator]-(message:Comment|Post)
+WHERE person <> otherPerson AND message.creationDate < $maxDate
+RETURN
+    otherPerson.id AS personId,
+    otherPerson.firstName AS personFirstName,
+    otherPerson.lastName AS personLastName,
+    message.id AS commentOrPostId,
+    COALESCE(message.content, message.imageFile) AS commentOrPostContent,
+    message.creationDate AS commentOrPostCreationDate
+ORDER BY commentOrPostCreationDate DESC, commentOrPostId ASC
+LIMIT 20

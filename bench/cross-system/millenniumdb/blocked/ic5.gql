@@ -1,0 +1,23 @@
+// BLOCKED at MillenniumDB d67f3e7: returns wrong rows. The join on
+// otherPerson through `<-[hm:hasMember]-` is dropped (cross product), and a
+// path-pattern union returns only its first operand's rows, so the OPTIONAL
+// MATCH emulation below cannot work either. Move back up a level once fixed.
+//
+// IC5 — new groups. Translation of bench/ldbc-queries/ic5.toml.
+// Divergence: MillenniumDB has no OPTIONAL MATCH ("not supported yet"). The
+// optional post is a path-pattern union instead: one branch binds `post`, the
+// other matches the already-bound `forum` alone and leaves `post` null. That
+// yields one extra null row per (otherPerson, forum), which COUNT(post) skips,
+// so every count equals the OPTIONAL MATCH count. GROUP BY names aliases.
+MATCH (person:Person {id: $personId})~[:knows]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)<-[hm:hasMember]-(forum:Forum)
+WHERE hm.joinDate > $minDate
+MATCH ((otherPerson)<-[:hasCreator]-(post:Post)<-[:containerOf]-(forum) | (forum))
+RETURN
+    forum.title AS forumName,
+    forum.id AS forumId,
+    COUNT(post) AS postCount
+GROUP BY forumName, forumId
+ORDER BY postCount DESC, forumId ASC
+LIMIT 20

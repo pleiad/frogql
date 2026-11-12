@@ -169,13 +169,19 @@ fi
     echo "neo4j_driver_ver: $(python -c 'import importlib.metadata as m; print(m.version("neo4j"))' 2>/dev/null || echo missing)"
     echo "neo4j_server_ver: $(docker exec frogql-bench-neo4j neo4j --version 2>/dev/null || echo 'missing (container not running)')"
     echo "duckdb_ver:       $(python -c 'import importlib.metadata as m; print(m.version("duckdb"))' 2>/dev/null || echo missing)"
+    # The MillenniumDB server is a source build, so its version is the commit it was
+    # built from. find_mdb() is the runner's own lookup ($MDB_BIN, PATH,
+    # sibling checkout), so this names the binary that will actually run.
+    _mdb_bin="$(cd "$SCRIPT_DIR/millenniumdb" && python -c 'from mdb_common import find_mdb; print(find_mdb())' 2>/dev/null || true)"
+    echo "mdb_bin:          ${_mdb_bin:-missing}"
+    echo "mdb_commit:       $( [[ -n "$_mdb_bin" ]] && git -C "$(dirname "$_mdb_bin")" rev-parse HEAD 2>/dev/null || echo unknown)"
     echo "psutil_ver:       $(python -c 'import importlib.metadata as m; print(m.version("psutil"))' 2>/dev/null || echo missing)"
     echo "ldbc_dataset:     SF0.1"
 } > "$OUT_DIR/run_info.txt"
 
 # Systems registered here. Order is per-system bench order; doesn't
 # affect comparison since compare_results.py sorts independently.
-ALL_SYSTEMS=(gqlite graphqlite kuzu grafeo neo4j duckdb)
+ALL_SYSTEMS=(gqlite graphqlite kuzu grafeo neo4j duckdb millenniumdb)
 
 if [[ -n "$ONLY" ]]; then
     IFS=',' read -ra SYSTEMS <<<"$ONLY"
@@ -331,6 +337,7 @@ declare -A SETUP_CMD=(
     [kuzu]="python $SCRIPT_DIR/kuzu/setup.py"
     [grafeo]="python $SCRIPT_DIR/grafeo/setup.py"
     [neo4j]="python $SCRIPT_DIR/neo4j/setup.py"
+    [millenniumdb]="python $SCRIPT_DIR/millenniumdb/setup.py"
 )
 
 declare -A REBUILD_FLAG=(
@@ -338,6 +345,7 @@ declare -A REBUILD_FLAG=(
     [kuzu]="--force"
     [grafeo]="--force"
     [neo4j]="--force"
+    [millenniumdb]="--force"
 )
 
 # Per-system DB-existence checks. Setup is skipped if the marker
@@ -351,6 +359,7 @@ declare -A SETUP_MARKER=(
     [grafeo]="$REPO_ROOT/bench/data/cross-system/grafeo/ldbc-sf01.grafeo"
     [neo4j]="$REPO_ROOT/bench/data/cross-system/neo4j/.loaded"
     [duckdb]="$REPO_ROOT/bench/data/ldbc-sf0.1/social_network-sf0.1-CsvBasic-LongDateFormatter"
+    [millenniumdb]="$REPO_ROOT/bench/data/cross-system/millenniumdb/ldbc-sf01.mdb"
 )
 
 # Per-system runner commands (path is per-system; dispatch is per-runner).
@@ -362,6 +371,7 @@ declare -A RUNNER=(
     [grafeo]="python $SCRIPT_DIR/grafeo/run.py"
     [neo4j]="python $SCRIPT_DIR/neo4j/run.py"
     [duckdb]="python $SCRIPT_DIR/duckdb/run.py"
+    [millenniumdb]="python $SCRIPT_DIR/millenniumdb/run.py"
 )
 
 SETUP_TIMES_FILE="$OUT_DIR/setup_times.txt"

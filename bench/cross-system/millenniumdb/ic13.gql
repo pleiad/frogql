@@ -1,0 +1,6 @@
+// IC13 — single shortest path. Translation of bench/ldbc-queries/ic13.toml.
+// Divergence: MillenniumDB parses PATH_LENGTH but the server segfaults on it
+// (no implementation behind the grammar rule). The query returns the path's
+// edge group `e`; run.py takes its length as shortestPathLength.
+MATCH ANY SHORTEST (p1:Person {id: $person1Id})~[e:knows]~*(p2:Person {id: $person2Id})
+RETURN e

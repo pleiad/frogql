@@ -1,0 +1,7 @@
+# MillenniumDB cross-system bench runner: standard library only.
+#
+# The server is a native binary built from source (see README.md) and the
+# runner talks to it over HTTP with http.client. The official Python
+# driver (millenniumdb-driver) is deliberately NOT used: at MillenniumDB
+# commit d67f3e7 the server segfaults on the second query of a driver
+# session. See DIVERGENCES.md.

@@ -28,10 +28,13 @@
 #
 # Flags (server-driver-specific; all others pass through to run_all.sh):
 #   --systems a,b,c     systems to bench
-#                       (default: gqlite,graphqlite,kuzu,grafeo,neo4j,duckdb.
-#                       neo4j needs docker — the driver auto-starts its
-#                       container via neo4j/docker.sh when docker is
-#                       available, else drops neo4j from the run)
+#                       (default: gqlite,graphqlite,kuzu,grafeo,neo4j,duckdb,
+#                       millenniumdb. neo4j needs docker — the driver
+#                       auto-starts its container via neo4j/docker.sh when
+#                       docker is available, else drops neo4j from the run.
+#                       millenniumdb needs an `mdb` binary built from source
+#                       ($MDB_BIN, PATH, or ../MillenniumDB/build/...), else
+#                       it is dropped too; see millenniumdb/README.md)
 #   --ics 1,2,3         IC subset          (default: all implemented)
 #   --iters N           measured iters     (default: 10)
 #   --warmup N          warmup iters       (default: 2)
@@ -56,7 +59,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-SYSTEMS="gqlite,graphqlite,kuzu,grafeo,neo4j,duckdb"
+SYSTEMS="gqlite,graphqlite,kuzu,grafeo,neo4j,duckdb,millenniumdb"
 ICS=""                 # empty => let run_all.sh use its all-implemented default
 ITERS=10
 WARMUP=2
@@ -150,6 +153,21 @@ if [[ ",$SYSTEMS," == *",neo4j,"* ]]; then
         echo "WARNING: neo4j requested but docker is unavailable —" >&2
         echo "  dropping neo4j from this run." >&2
         SYSTEMS=$(echo "$SYSTEMS" | tr ',' '\n' | grep -v '^neo4j$' | paste -sd, -)
+    fi
+fi
+
+# --- MillenniumDB binary (only if millenniumdb is requested) ----------
+# There is no wheel: the server is built from source. Same lookup the
+# runner uses ($MDB_BIN, then PATH, then a sibling checkout).
+if [[ ",$SYSTEMS," == *",millenniumdb,"* ]]; then
+    if mdb_bin=$(cd "$SCRIPT_DIR/millenniumdb" && python -c 'from mdb_common import find_mdb; print(find_mdb())' 2>/dev/null); then
+        log "MillenniumDB binary"
+        echo "  $mdb_bin"
+    else
+        echo "WARNING: millenniumdb requested but no mdb binary found —" >&2
+        echo "  set MDB_BIN (see bench/cross-system/millenniumdb/README.md)." >&2
+        echo "  dropping millenniumdb from this run." >&2
+        SYSTEMS=$(echo "$SYSTEMS" | tr ',' '\n' | grep -v '^millenniumdb$' | paste -sd, -)
     fi
 fi
 
