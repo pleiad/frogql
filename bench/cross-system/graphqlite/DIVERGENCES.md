@@ -249,8 +249,8 @@ an `implemented` toml were run; counts are exact param-row hash matches.
 | IC6 | 0/15 | UNSUPPORTED | same root cause as IC5 (UNION friend set vs WITH-grouping per `otherTag`). |
 | IC7 | 0/15 | UNSUPPORTED | per-liker arg-max: second-stage `WITH`+`head(collect())` doesn't re-group; edge-property `max` → NULL; no VALUE subquery / RECORD. |
 | IC8 | 15/15 ✅ | VERIFIED | non-aggregating reply projection. |
-| IC9 | 15/15 ✅ | VERIFIED | var-length `~{1,2}` → 1-hop+2-hop UNION ALL of bidirectional single hops; `toInteger()` casts. Non-aggregating. |
-| IC11 | 14/15 | VERIFIED (1 engine outlier) | `type`-property sub-label encoding + var-length. Row 1 (`24189255811707`) is a forward-only `*1..2` runtime-bug outlier. |
+| IC9 | 15/15 ✅ | VERIFIED | var-length `~{1,2}` → 1-hop+2-hop UNION of bidirectional single hops (UNION, not UNION ALL, since the toml counts each friend once — its `friends-set` divergence; re-verified 2026-11); `toInteger()` casts. Non-aggregating. |
+| IC11 | 14/15 | VERIFIED (1 engine outlier) | `type`-property sub-label encoding + var-length + `WITH DISTINCT otherPerson` (friends set; re-verified 2026-11). Row 1 (`24189255811707`) is a forward-only `*1..2` runtime-bug outlier. |
 | IC12 | 1/15 | RUNS-WRONG | correct friends/counts/order via `WITH friend, count(comment)`; var-length elided (all 15 targets are isSubclassOf-leaves, 0-hop suffices); but `collect(DISTINCT tag.name)` duplicates AND grouped-collect rows stringify all columns → list+int cells diverge. The 1 match is row 6 (reference empty). |
 | IC13 | VERIFIED | VERIFIED | bounded fixed-length probe (shortestPath hangs). See ic13.cypher. |
 

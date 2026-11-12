@@ -4,12 +4,11 @@
 -- Source-of-truth: bench/ldbc-queries/ic6.toml.
 --
 -- Divergences vs the GQL toml (see DIVERGENCES.md):
---   * ~[:knows]~{1,2}: the `fof` CTE is the WALK multiset — UNION ALL
---     of the 1-hop and 2-hop expansions over the symmetric `knows`
---     view, with NO dedup. The tomls deliberately keep flat-chain
---     (no-WITH-DISTINCT) semantics: a friend reachable via multiple
---     knows paths binds multiple times and inflates COUNT(post) the
---     same way in every engine of this bench.
+--   * ANY SHORTEST ~[:knows]~{1,2}: the `fof` CTE is the SET of friends
+--     and friends of friends — UNION (deduplicating) of the 1-hop and
+--     2-hop expansions over the symmetric `knows` view. Each person
+--     appears once, as in the LDBC reference's `WITH DISTINCT friend`
+--     and the toml's `friends-set` divergence.
 --   * `otherPerson:Person` label check is implied (knows only links
 --     persons); `person <> otherPerson` -> pid <> $personId.
 --   * `otherTag <> tag` (node inequality) -> tag-id inequality.
@@ -18,7 +17,7 @@
 --   * GROUP BY otherTag.name -> GROUP BY t2.name (same key).
 WITH fof AS (
     SELECT dst AS pid FROM knows WHERE src = $personId
-    UNION ALL
+    UNION
     SELECT k2.dst AS pid
     FROM knows k1
     JOIN knows k2 ON k2.src = k1.dst

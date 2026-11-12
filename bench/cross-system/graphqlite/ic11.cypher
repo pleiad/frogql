@@ -4,7 +4,9 @@
 //
 // graphqlite-specific divergences:
 //   - `.ldbcId` instead of `.id`.
-//   - `~[:knows]~{1, 2}` → `-[:knows*1..2]-`.
+//   - `ANY SHORTEST ~[:knows]~{1, 2}` → `-[:knows*1..2]-` followed by
+//     `WITH DISTINCT otherPerson` (the friends-of-friends set, as in the
+//     LDBC reference and the toml's `friends-set` divergence).
 //   - Edge labels lowercase per loader convention.
 //
 // Encoding-of-sub-types divergence (vs spec): the LDBC SNB spec uses
@@ -17,9 +19,11 @@
 // loader achieves the same end-state via a synthesized compound
 // label (`Organisation & Company`); the cross-system row-content
 // hash oracle confirms identical rows across encodings.
-MATCH (person:Person {ldbcId: $personId})-[:knows*1..2]-(otherPerson:Person)-[workAt:workAt]->(company:Organisation)-[:isLocatedIn]->(country:Place)
+MATCH (person:Person {ldbcId: $personId})-[:knows*1..2]-(otherPerson:Person)
 WHERE person <> otherPerson
-  AND company.type = 'company'
+WITH DISTINCT otherPerson
+MATCH (otherPerson)-[workAt:workAt]->(company:Organisation)-[:isLocatedIn]->(country:Place)
+WHERE company.type = 'company'
   AND country.type = 'country'
   AND country.name = $countryName
   AND workAt.workFrom < $workFromYear

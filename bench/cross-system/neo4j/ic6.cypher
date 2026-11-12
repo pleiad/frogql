@@ -2,10 +2,12 @@
 //
 // Source-of-truth: bench/ldbc-queries/ic6.toml. Implicit Cypher
 // grouping by RETURN's non-aggregate column (otherTag.name).
-// Flat-chain (no WITH DISTINCT) per the toml's no-with-distinct
-// divergence — same variant as every other system in the bench.
+// Friends-of-friends set: `WITH DISTINCT otherPerson` right after the
+// knows hop, as in the LDBC reference; the toml gets the same set from
+// `ANY SHORTEST` (its `friends-set` divergence).
 MATCH (person:Person {id: $personId})-[:knows*1..2]-(otherPerson:Person)
 WHERE person <> otherPerson
+WITH DISTINCT otherPerson
 MATCH (otherPerson)<-[:hasCreator]-(post:Post)-[:hasTag]->(tag:Tag {name: $tagName})
 MATCH (post)-[:hasTag]->(otherTag:Tag)
 WHERE otherTag <> tag

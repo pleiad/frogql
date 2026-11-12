@@ -11,12 +11,12 @@ were also reproduced on the `v1.0.0` tag (`aaf65c0`, the Docker Hub image).
 | IC | Status | Checked against froGQL on SF0.1 |
 |---|---|---|
 | IC2 | runs | 15/15 row hashes identical |
+| IC6 | runs | 15/15 row hashes identical (rewritten as one chain, §2) |
 | IC8 | runs | 15/15 row hashes identical |
 | IC11 | runs | 15/15 row hashes identical |
 | IC12 | runs | 15/15 identical content; the hash cannot match (list column, §4) |
 | IC13 | runs | 15/15 row hashes identical (length computed by the runner, §2) |
 | IC3, IC5, IC9 | `blocked/` | wrong rows: joins dropped (§3, items 3–5) |
-| IC6 | `blocked/` | runs, but every count is lower: set semantics on `{1,2}` (§3, item 6) |
 | IC1, IC4, IC7, IC14 | no translation | not expressible (§3, items 1, 2, 10) |
 
 `run.py` only looks for `ic<n>.gql` next to itself, so an IC in `blocked/`
@@ -27,8 +27,8 @@ one up a level once MillenniumDB fixes the bug and the hash oracle will
 say whether it then agrees.
 
 Do not move a blocked IC back to get a number for it. IC3, IC5 and IC9
-return wrong rows or do not finish, and IC6 answers a different question;
-a latency for any of them is not comparable to froGQL's.
+return wrong rows or do not finish; a latency for any of them is not
+comparable to froGQL's.
 
 ## 2. Dialect and rewrites (the ICs that run)
 
@@ -42,6 +42,15 @@ a latency for any of them is not comparable to froGQL's.
   (§3, item 7), and `friend` determines all three.
 - **`CAST(id AS INTEGER)` is dropped from `ORDER BY`.** Both loaders store
   ids as integers, so the sort is identical.
+- **IC6: one chain, no `ANY SHORTEST`.** The toml joins
+  `(otherPerson)<-[:hasCreator]-(post)` onto the knows hop, which hits
+  §3 item 3, so the translation is one chain from the tag to the start
+  person: `(tag)<-[:hasTag]-(post)-[:hasCreator]->(otherPerson)~[:knows]~{1, 2}(person)`.
+  The toml's `ANY SHORTEST` (which counts each friend or friend of friend
+  once) cannot go on that chain, since a prefix covers the whole path and
+  would select per (tag, person). It is not needed: §3 item 6 already
+  returns each endpoint of `{1, 2}` once, which is the friends set.
+  Checked on all 15 parameter rows.
 - **IC13: path length in the runner.** `PATH_LENGTH` crashes the server
   (§3, item 2). The query returns the shortest path's edge group
   (`~[e:knows]~*`, `RETURN e`, printed `[_u1,_u2,...]`) and `run.py`
@@ -102,6 +111,10 @@ others run on this bench's SF0.1 database.
    MATCH ALL WALK (p:Person {id: 32985348834013})~[:knows]~{1, 2}(o:Person) WHERE p <> o RETURN COUNT(*)
      -- 451; froGQL: 658 rows over 451 distinct endpoints
    ```
+   For LDBC this happens to be the intended answer: the ICs ask about the
+   *set* of friends and friends of friends, and the tomls now get that
+   set with `ANY SHORTEST`. It is still a divergence from ISO wherever a
+   query wants the walks.
 7. **`GROUP BY` takes at most two keys.** The grammar rule is
    `groupingElement (COMMA groupingElement)?`, where ISO has `*`.
 8. **The Python driver's second query in a session segfaults the server.**
@@ -131,8 +144,6 @@ What that leaves out:
   side also cannot be emulated with a union (5). IC9 written the other way
   round, `(message)-[:hasCreator]->(otherPerson)~[:knows]~{1, 2}(person)`,
   does not finish in 60 s.
-- **IC6** can be written as one chain that avoids 3 and 4, and runs (1.5 to
-  6 s a row), but 6 makes every post count lower than froGQL's.
 
 ## 4. Row-hash comparability
 

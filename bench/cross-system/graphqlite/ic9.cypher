@@ -8,9 +8,9 @@
 // workaround documented below.
 //
 // Source-of-truth: bench/ldbc-queries/ic9.toml. The toml's
-// `~[:knows]~{1,2}(otherPerson)` is a WALK multiset: each otherPerson is
-// bound once per distinct knows-path of length 1 or 2. A FoF reachable via
-// several paths produces several bindings (and thus several result rows).
+// `ANY SHORTEST ~[:knows]~{1,2}(otherPerson)` binds each friend or friend
+// of friend ONCE (its `friends-set` divergence), so each (otherPerson,
+// message) row appears once.
 //
 // graphqlite-specific divergences from the toml:
 //   - graphqlite reserves `.id` for the loader's prefixed external_id;
@@ -25,14 +25,16 @@
 //   traverses outgoing edges only — wrong on LDBC, where each knows pair is
 //   stored once in one direction, so the bidirectional friend set is lost.
 //   The single-hop undirected `-[:knows]-` IS correct, so we expand the
-//   `{1,2}` into a UNION ALL of:
+//   `{1,2}` into a UNION of:
 //     branch A — 1-hop:  (person)-[:knows]-(other)
 //     branch B — 2-hop:  (person)-[:knows]-(mid)-[:knows]-(other)
-//   each built from correct bidirectional single hops. The combined
-//   multiset reproduces gqlite's `~{1,2}` exactly: verified on row 0,
-//   1-hop=10 + 2-hop(person<>other)=648 = 658 bindings, byte-identical to
-//   gqlite's `COUNT(otherPerson)=658`. UNION ALL (not UNION) preserves the
-//   multiset; the `person <> other` filter on each branch drops the trivial
+//   each built from correct bidirectional single hops. UNION (not UNION
+//   ALL) drops the rows a friend reached through several walks would
+//   repeat: a message has one creator, so a result row is unique per
+//   (otherPerson, message), and deduplicating rows is deduplicating
+//   friends. (Until 2026-11 the toml kept the walk multiset and this used
+//   UNION ALL: 1-hop=10 + 2-hop=648 = 658 bindings for 451 persons on row
+//   0.) The `person <> other` filter on each branch drops the trivial
 //   length-2 return-to-self walks, matching the toml's `person <> otherPerson`.
 //
 //   toInteger() CASTS: graphqlite's UNION coerces INTEGER columns to strings
@@ -48,7 +50,7 @@ RETURN toInteger(other.ldbcId) AS personId,
        toInteger(message.ldbcId) AS commentOrPostId,
        COALESCE(message.content, message.imageFile) AS commentOrPostContent,
        toInteger(message.creationDate) AS commentOrPostCreationDate
-UNION ALL
+UNION
 MATCH (person:Person {ldbcId: $personId})-[:knows]-(mid:Person)-[:knows]-(other:Person)<-[:hasCreator]-(message)
 WHERE person <> other AND (message:Comment OR message:Post) AND message.creationDate < $maxDate
 RETURN toInteger(other.ldbcId) AS personId,

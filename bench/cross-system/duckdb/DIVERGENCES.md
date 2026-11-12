@@ -59,14 +59,15 @@ makes `COALESCE(content, imageFile)` behave identically.
 
 ## IC6
 
-- **`~[:knows]~{1,2}` repetition** → a `fof` CTE that is the WALK
-  *multiset*: `UNION ALL` of the 1-hop expansion and the 2-hop
-  self-join, **no DISTINCT**. This mirrors the tomls' documented
-  `no-with-distinct` divergence from the LDBC spec: a
-  friend-of-friend reachable via multiple knows paths binds multiple
-  times and inflates `COUNT(post)` identically in every engine of this
-  bench. (A 2-hop walk returning to the start is excluded by
-  `pid <> $personId`, same as the toml's `person <> otherPerson`.)
+- **`ANY SHORTEST ~[:knows]~{1,2}`** → a `fof` CTE that is the SET of
+  friends and friends of friends: `UNION` (deduplicating) of the 1-hop
+  expansion and the 2-hop self-join. Each person appears once, as in the
+  LDBC reference's `WITH DISTINCT friend` and the toml's `friends-set`
+  divergence. (The start person, reachable by a 2-hop walk back, is
+  excluded by `pid <> $personId`, same as the toml's
+  `person <> otherPerson`.) Until 2026-11 the tomls kept the walk
+  multiset and this CTE used `UNION ALL`, which counted a friend once
+  per walk.
 - **`COUNT(post)`** → `COUNT(*)`: `post` is never NULL in the inner
   join, so counting rows is identical.
 - **`GROUP BY otherTag.name`** → `GROUP BY t2.name`; `ORDER BY
@@ -77,9 +78,8 @@ makes `COALESCE(content, imageFile)` behave identically.
 
 ## IC11
 
-- **`~[:knows]~{1,2}`** → same walk-multiset `fof` CTE as IC6
-  (no-with-distinct semantics; duplicate `(otherPerson, company,
-  workAt)` rows are intentional and hash-verified against frogQL).
+- **`ANY SHORTEST ~[:knows]~{1,2}`** → the same friends-set `fof` CTE
+  as IC6 (`UNION`, each person once).
 - **`:Company` / `:Country` sub-labels** → `type` column filters on
   the `organisation` / `place` views (`'company'` / `'country'`,
   lowercase as in the static CSVs). Same encoding the Kuzu translation

@@ -1,11 +1,17 @@
 -- GQL translation of bench/ldbc-queries/ic9.toml for Grafeo.
 -- Divergences (see DIVERGENCES.md): $-params; (message:Comment|Post)
 -- -> bound var + WHERE label predicate; knows forward-only.
+-- Friends set: the toml counts each friend or friend of friend once
+-- (`ANY SHORTEST`, its `friends-set` divergence). Grafeo 0.5.34 accepts
+-- `ANY SHORTEST` but does not finish it in 60 s, and has no second MATCH
+-- or WITH to dedup with, so the dedup moves to the rows, RETURN DISTINCT: exact here,
+-- because a message has one creator, so a message repeated by the walks
+-- to its creator is the only kind of repeat there is.
 MATCH (person:Person {id: $personId})~[:knows]~{1,2}(otherPerson:Person)<-[:hasCreator]-(message)
 WHERE person <> otherPerson
   AND (message:Comment OR message:Post)
   AND message.creationDate < $maxDate
-RETURN
+RETURN DISTINCT
     otherPerson.id AS personId,
     otherPerson.firstName AS personFirstName,
     otherPerson.lastName AS personLastName,

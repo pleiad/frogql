@@ -71,15 +71,15 @@ Expected skips (visible in `skipped.log`, not errors):
 ```bash
 export MDB_BIN=~/MillenniumDB/build/Release/bin/mdb
 nohup bash bench/cross-system/run_server.sh --systems gqlite,millenniumdb \
-    --ics 2,8,11,12,13 > /tmp/frogql-vs-mdb.out 2>&1 &
+    --ics 2,6,8,11,12,13 > /tmp/frogql-vs-mdb.out 2>&1 &
 tail -f /tmp/frogql-vs-mdb.out
 ```
 
 The first run builds MillenniumDB's database (`millenniumdb/setup.py`,
-about 11 CPU-minutes at SF0.1). IC2, IC8, IC11 and IC13 must report
-`2/2 systems agree` on every row; IC12 cannot (list column) and its
+~8 s on the benchmark server). IC2, IC6, IC8, IC11 and IC13 must report
+every system agreeing on every row; IC12 cannot (list column) and its
 content was checked separately. Leaving `--ics` out runs every IC, and the
-eight MillenniumDB cannot answer show up as `[FAIL] millenniumdb.icN` in
+seven MillenniumDB cannot answer show up as `[FAIL] millenniumdb.icN` in
 `skipped.log`. Why each one is out: `millenniumdb/DIVERGENCES.md`.
 
 ## 2. Ablation run (R1.1, R2.1 — "which optimization buys what")

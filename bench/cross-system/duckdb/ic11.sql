@@ -4,10 +4,10 @@
 -- Source-of-truth: bench/ldbc-queries/ic11.toml.
 --
 -- Divergences vs the GQL toml (see DIVERGENCES.md):
---   * ~[:knows]~{1,2}: `fof` is the WALK multiset (UNION ALL of 1-hop
---     and 2-hop, no dedup) — same flat-chain (no-WITH-DISTINCT)
---     semantics as the toml; duplicate (otherPerson, company, workAt)
---     rows are intentional and shared by every engine in this bench.
+--   * ANY SHORTEST ~[:knows]~{1,2}: `fof` is the SET of friends and
+--     friends of friends (UNION of 1-hop and 2-hop, deduplicating),
+--     as in the toml's `friends-set` divergence; each person appears
+--     once.
 --   * :Company / :Country sub-labels -> `type` column filters on the
 --     organisation / place views ('company' / 'country'), same
 --     encoding the Kuzu translation uses; gqlite synthesizes compound
@@ -16,7 +16,7 @@
 --     BIGINT here, so the bare column sorts identically.
 WITH fof AS (
     SELECT dst AS pid FROM knows WHERE src = $personId
-    UNION ALL
+    UNION
     SELECT k2.dst AS pid
     FROM knows k1
     JOIN knows k2 ON k2.src = k1.dst

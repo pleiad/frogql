@@ -87,10 +87,12 @@ Per-IC notes beyond the table:
   makes both engines' lists element-for-element equal. This pins an
   order the spec leaves unspecified — a determinism patch, not a
   semantics change.
-- **IC5/6/9/11 — flat chain, no `WITH DISTINCT` dedup**: mirrors the
-  toml's `no-with-distinct` divergence so all systems run the same
-  variant; engine agreement (the hashes) is what's verified, not
-  spec faithfulness.
+- **IC5/6/9/11 — `WITH DISTINCT otherPerson` after the knows hop**:
+  the friends-of-friends SET, as in the LDBC reference; the tomls get
+  the same set from `ANY SHORTEST` (their `friends-set` divergence).
+  Until 2026-11 every system ran a flat chain that counted a friend
+  once per knows walk, which inflated IC5/IC6 counts and duplicated
+  IC9 rows.
 - **IC7 — `minutesLatency`** = `toInteger(floor(Δms / 60000.0))`;
   latency is non-negative so trunc == FLOOR == the toml's
   `CAST(FLOOR(CAST(... AS FLOAT) / 60000.0) AS INTEGER)`.

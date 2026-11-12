@@ -9,11 +9,15 @@
 // there via synthesized compound labels. The row-content hash oracle
 // confirms identical rows across encodings.
 //
-// Flat-chain (no WITH DISTINCT) per the toml's no-with-distinct
-// divergence. Edge labels lowercase per loader convention.
-MATCH (person:Person {id: $personId})-[:knows*1..2]-(otherPerson:Person)-[workAt:workAt]->(company:Organisation)-[:isLocatedIn]->(country:Place)
+// Friends-of-friends set: `WITH DISTINCT otherPerson` right after the
+// knows hop, as in the LDBC reference; the toml gets the same set from
+// `ANY SHORTEST` (its `friends-set` divergence).
+// Edge labels lowercase per loader convention.
+MATCH (person:Person {id: $personId})-[:knows*1..2]-(otherPerson:Person)
 WHERE person <> otherPerson
-  AND company.type = 'company'
+WITH DISTINCT otherPerson
+MATCH (otherPerson)-[workAt:workAt]->(company:Organisation)-[:isLocatedIn]->(country:Place)
+WHERE company.type = 'company'
   AND country.type = 'country'
   AND country.name = $countryName
   AND workAt.workFrom < $workFromYear

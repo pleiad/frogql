@@ -18,9 +18,15 @@
 // `(otherPerson)<-[:hasCreator]-(message)` lookups; combined with
 // Kuzu's optimizer not pushing `label()` through joins, expect
 // per-row latency >> IC2.
-MATCH (person:Person {id: $personId})-[:knows*1..2]-(otherPerson:Person)<-[:hasCreator]-(message)
+//
+// Friends-of-friends set: `WITH DISTINCT otherPerson` right after the
+// knows hop, as in the LDBC reference; the toml gets the same set from
+// `ANY SHORTEST` (its `friends-set` divergence).
+MATCH (person:Person {id: $personId})-[:knows*1..2]-(otherPerson:Person)
+WHERE person <> otherPerson
+WITH DISTINCT otherPerson
+MATCH (otherPerson)<-[:hasCreator]-(message)
 WHERE label(message) IN ["Comment", "Post"]
-  AND person <> otherPerson
   AND message.creationDate < $maxDate
 RETURN otherPerson.id AS personId,
        otherPerson.firstName AS personFirstName,

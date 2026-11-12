@@ -3,13 +3,19 @@
 -- synthesize :Company / :Country sub-labels, so we reach them as
 -- :Organisation / :Place filtered by `type` (every company IS an
 -- Organisation with type='company').
+-- Friends set: the toml counts each friend or friend of friend once
+-- (`ANY SHORTEST`, its `friends-set` divergence). Grafeo 0.5.34 accepts
+-- `ANY SHORTEST` but does not finish it in 60 s, and has no second MATCH
+-- or WITH to dedup with, so the dedup moves to the rows, RETURN DISTINCT: exact here,
+-- because a (person, company, workFrom) row can only repeat through the
+-- walks that reach that person.
 MATCH (person:Person {id: $personId})~[:knows]~{1,2}(otherPerson:Person)-[workAt:workAt]->(company:Organisation)-[:isLocatedIn]->(country:Place)
 WHERE person <> otherPerson
   AND company.type = 'company'
   AND country.type = 'country'
   AND country.name = $countryName
   AND workAt.workFrom < $workFromYear
-RETURN
+RETURN DISTINCT
     otherPerson.id AS personId,
     otherPerson.firstName AS personFirstName,
     otherPerson.lastName AS personLastName,

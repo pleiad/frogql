@@ -10,8 +10,10 @@ param_columns = ["personId", "maxDate"]
 param_types = ["int", "int"]
 
 query = """
-MATCH (person:Person {id: {personId}})~[:knows]~{1, 2}(otherPerson:Person)<-[:hasCreator]-(message:Comment|Post)
-WHERE person <> otherPerson AND message.creationDate < {maxDate}
+MATCH ANY SHORTEST (person:Person {id: {personId}})~[:knows]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)<-[:hasCreator]-(message:Comment|Post)
+WHERE message.creationDate < {maxDate}
 RETURN
     otherPerson.id AS personId,
     otherPerson.firstName AS personFirstName,
@@ -32,4 +34,4 @@ return_columns = [
 message-union = "spec uses (message:Message); our LDBC loader doesn't synthesize a :Message superlabel, so we use the :Comment|Post ISO GQL alternation. Same logical query — same as IC2/IC8."
 edge-casing = "loader produces lowercase :knows, :hasCreator. Loader-level."
 bare-node-compare = "spec uses `WHERE person <> otherPerson` (compares node references). gqlite's `<>` operator on bound nodes is now first-class (PR #42 — `tests/first_class_node_edge_values_test.rs`); we run the spec verbatim."
-no-with-distinct = "spec dedups the friends-of-friends set with `WITH collect(distinct friend) AS friends UNWIND friends AS friend` between the `KNOWS*1..2` MATCH and the message-by-friend MATCH. gqlite's parser has no `WITH` clause, so we use a flat chain — `MATCH (person)~[:knows]~{1,2}(otherPerson)<-[hasCreator]-(message:Comment|Post)` and project at the end. A FoF reachable via multiple `:knows` paths produces multiple `otherPerson` bindings, which can duplicate (otherPerson, message) result rows; the LIMIT 20 + ORDER BY-DESC truncation tends to mask this when the top-20 messages have unique paths, but the row set above the limit may differ from the spec. An `EXISTS`-based semi-join would restore spec semantics but invert the join order (message-first), making the iso gql shape less recognizable as the LDBC reference. The kuzu and graphqlite cross-system Cypher mirror this flat-chain form so all three engines run the same variant; cross-system row-content equivalence verifies engine agreement, not spec faithfulness. Same divergence applies to IC5, IC6, IC11."
+friends-set = "spec dedups the friends-of-friends set with `WITH collect(distinct friend) AS friends UNWIND friends AS friend` between the `KNOWS*1..2` MATCH and the message-by-friend MATCH. gqlite has no `WITH`; the `ANY SHORTEST` prefix on the knows hop does the same job in ISO GQL: one path per (person, otherPerson) pair, so each friend or friend of friend binds once. The prefix is selective, so the knows hop is split into its own MATCH (it may share only its endpoints, ISO §16.6 SR 7) and the message hop follows in a second one. Without it each message appeared once per knows WALK: 14 of the 15 SF0.1 parameter rows had a different top 20, with 92 duplicated rows in total (the same message listed twice). Same change in IC5, IC6, IC11; see IC5 for the details."

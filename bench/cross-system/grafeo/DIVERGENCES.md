@@ -28,6 +28,18 @@ query; the cross-system row-content hash oracle is the proof — IC2's
   pre-aggregation variable: IC6 sorts by `tagName`, not `otherTag.name`
   (`otherTag` is out of scope once the group collapses).
 
+- **Friends set (IC5, IC6, IC9, IC11).** The tomls count each friend
+  or friend of friend once, by putting `ANY SHORTEST` on the knows hop
+  (their `friends-set` divergence; without it `{1,2}` yields one row per
+  walk). Grafeo 0.5.34 parses `ANY SHORTEST` but does not finish it in
+  60 s, and it has no second MATCH or WITH to dedup the friends with.
+  The dedup moves to what is counted or returned instead:
+  `COUNT(DISTINCT post)` in IC5 and IC6, `RETURN DISTINCT` in IC9 and
+  IC11. That is exact for these four: a message has one creator, so the
+  only rows the walks can repeat are copies of the same message (or, in
+  IC11, of the same person's job). Verified 15/15 against froGQL on each,
+  2026-11.
+
 ## Loader-level
 
 - **knows is stored forward-only** (1 row per pair), matching gqlite's

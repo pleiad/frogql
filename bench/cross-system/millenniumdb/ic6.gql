@@ -1,0 +1,23 @@
+// IC6 — tag co-occurrence. Translation of bench/ldbc-queries/ic6.toml.
+// Divergences:
+//  - Written as one chain starting from the tag, ending in the knows
+//    repetition. The toml's form joins `(otherPerson)<-[:hasCreator]-(post)`
+//    onto an otherPerson bound by the knows hop, and MillenniumDB drops a
+//    join whose shared variable is the TARGET of the later edge: it returns
+//    a cross product (see DIVERGENCES.md).
+//  - No `ANY SHORTEST`. The toml puts it on the knows hop alone, to count
+//    each friend or friend of friend once; here the repetition is the tail
+//    of one long chain, so a prefix would select per (tag, person) instead.
+//    It is not needed: MillenniumDB returns each endpoint of `{1, 2}` once
+//    (DIVERGENCES.md §3, item 6), which is exactly the friends set. Checked:
+//    15/15 parameter rows equal to froGQL's.
+//  - GROUP BY / ORDER BY name the alias `tagName`.
+MATCH (tag:Tag {name: $tagName})<-[:hasTag]-(post:Post)-[:hasCreator]->(otherPerson:Person)~[:knows]~{1, 2}(person:Person {id: $personId}),
+      (post)-[:hasTag]->(otherTag:Tag)
+WHERE person <> otherPerson AND otherTag <> tag
+RETURN
+    otherTag.name AS tagName,
+    COUNT(post) AS postCount
+GROUP BY tagName
+ORDER BY postCount DESC, tagName ASC
+LIMIT 10

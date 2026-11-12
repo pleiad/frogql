@@ -3,13 +3,19 @@
 -- clauses are merged into one comma-joined MATCH (Grafeo 0.5.34
 -- rejects a second top-level MATCH). ORDER BY uses the RETURN alias
 -- `tagName` (otherTag is out of scope after aggregation).
+-- Friends set: the toml counts each friend or friend of friend once
+-- (`ANY SHORTEST`, its `friends-set` divergence). Grafeo 0.5.34 accepts
+-- `ANY SHORTEST` but does not finish it in 60 s, and has no second MATCH
+-- or WITH to dedup with, so the dedup moves to the count, COUNT(DISTINCT post): exact here,
+-- because a message has one creator, so a message repeated by the walks
+-- to its creator is the only kind of repeat there is.
 MATCH (person:Person {id: $personId})~[:knows]~{1,2}(otherPerson:Person),
       (otherPerson)<-[:hasCreator]-(post:Post)-[:hasTag]->(tag:Tag {name: $tagName}),
       (post)-[:hasTag]->(otherTag:Tag)
 WHERE person <> otherPerson AND otherTag <> tag
 RETURN
     otherTag.name AS tagName,
-    COUNT(post) AS postCount
+    COUNT(DISTINCT post) AS postCount
 GROUP BY otherTag.name
 ORDER BY postCount DESC, tagName ASC
 LIMIT 10

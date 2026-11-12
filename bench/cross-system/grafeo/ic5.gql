@@ -6,6 +6,12 @@
 -- MATCH) — semantically identical, since it constrains the
 -- mandatory-bound `person`/`hm` and the optional `post` is independent;
 -- knows forward-only.
+-- Friends set: the toml counts each friend or friend of friend once
+-- (`ANY SHORTEST`, its `friends-set` divergence). Grafeo 0.5.34 accepts
+-- `ANY SHORTEST` but does not finish it in 60 s, and has no second MATCH
+-- or WITH to dedup with, so the dedup moves to the count, COUNT(DISTINCT post): exact here,
+-- because a message has one creator, so a message repeated by the walks
+-- to its creator is the only kind of repeat there is.
 MATCH (person:Person {id: $personId})~[:knows]~{1,2}(otherPerson:Person),
       (otherPerson)<-[hm:hasMember]-(forum:Forum)
 OPTIONAL MATCH (otherPerson)<-[:hasCreator]-(post:Post)<-[:containerOf]-(forum)
@@ -13,7 +19,7 @@ WHERE person <> otherPerson AND hm.joinDate > $minDate
 RETURN
     forum.title AS forumName,
     forum.id AS forumId,
-    COUNT(post) AS postCount
+    COUNT(DISTINCT post) AS postCount
 GROUP BY forum.title, forum.id
 ORDER BY postCount DESC, forumId ASC
 LIMIT 20

@@ -5,12 +5,12 @@
 // toml uses explicit GROUP BY instead. Both produce the same 20 rows
 // in the same order.
 //
-// Mirrors the toml's flat-chain shape (no `WITH DISTINCT friend`
-// dedup) — see the toml's `no-with-distinct` divergence; all systems
-// in this bench run the same variant so the row hashes are
-// comparable.
+// Friends-of-friends set: `WITH DISTINCT otherPerson` right after the
+// knows hop, as in the LDBC reference; the toml gets the same set from
+// `ANY SHORTEST` (its `friends-set` divergence).
 MATCH (person:Person {id: $personId})-[:knows*1..2]-(otherPerson:Person)
 WHERE person <> otherPerson
+WITH DISTINCT otherPerson
 MATCH (otherPerson)<-[hm:hasMember]-(forum:Forum)
 WHERE hm.joinDate > $minDate
 OPTIONAL MATCH (otherPerson)<-[:hasCreator]-(post:Post)<-[:containerOf]-(forum)

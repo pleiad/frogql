@@ -12,8 +12,8 @@ it into the cross-system bench next to `kuzu/`, `grafeo/` and the rest.
   `mdb server` the runner starts and stops itself. Not the Python driver:
   it crashes the server on the second query of a session. See
   `DIVERGENCES.md` §3.
-- **ICs:** IC2, IC8, IC11, IC12, IC13. Why the other eight do not run is in
-  `DIVERGENCES.md`, with a query reproducing each engine bug.
+- **ICs:** IC2, IC6, IC8, IC11, IC12, IC13. Why the other seven do not run
+  is in `DIVERGENCES.md`, with a query reproducing each engine bug.
 
 ## Build MillenniumDB (once per machine)
 
