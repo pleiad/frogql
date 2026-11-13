@@ -166,6 +166,10 @@ Cargo workspace with four members and `resolver = "2"`:
     without changing any answer (only `globalsort`/`hnsw` read the corpus;
     `localsort` ranks the pattern's candidates and cannot tell). See
     `wikidata/README.md`
+  - `sparql_query` — run one SPARQL `SELECT` against a `.gdb`
+    (`--import-ttl` for the layout `import_ttl` writes, `--explain` for
+    the GQL it translates to, `--gql` for an A/B). **Requires `sparql`
+    feature.** See *SPARQL frontend* below
   - `vec_build` — offline builder for a vector-attribute sidecar (`<db>.vec.<attr>`) + its HNSW
   - `vec_bench` — post-filter vs pre-filter vs in-LTJ vector-search harness
   - `vec_sweep` — the same comparison over a *real* database and a file of
@@ -202,7 +206,9 @@ Optional, behind features (default on for local `cargo build`):
 - `repl = ["dep:rustyline", "dep:signal-hook"]` — only `src/bin/frogql.rs` uses them. `signal-hook` is there so Ctrl-C stops the running query instead of the process; std has no signal API.
 - `bench = ["dep:sysinfo", "dep:toml", "dep:ureq", "dep:zstd", "dep:tar"]` — `bench_setup` (download/extract) and `ldbc_bench` (RSS reporting + TOML query specs) only.
 
-`default = ["repl", "bench"]` so plain `cargo build`, CI, and local dev see the same dependency surface as before. The `python/Cargo.toml` opts out via `default-features = false`; combined with workspace `resolver = "2"`, the wheel build never touches `ring/ureq/zstd/tar/rustyline/sysinfo/toml`. **Do not** add a new always-on dep for a bench- or REPL-only crate; gate it behind the appropriate feature and add `required-features = [...]` to the bin entry.
+- `sparql = ["dep:spargebra"]` — the SPARQL frontend (`src/sparql/`, `compile_sparql_with`, `Connection::query_sparql`, the `sparql_query` bin). `spargebra` needs Rust 1.87, above the library's 1.71 floor, which is why it is a feature and `rust-version` stayed put: that floor covers the library *without* features.
+
+`default = ["repl", "bench", "sparql"]` so plain `cargo build`, CI, and local dev see the same dependency surface, and `cargo test` covers the SPARQL tests (`tests/it/main.rs` gates `sparql_test` on the feature). The `python/Cargo.toml` opts out via `default-features = false`; combined with workspace `resolver = "2"`, the wheel build never touches `ring/ureq/zstd/tar/rustyline/sysinfo/toml`. **Do not** add a new always-on dep for a bench- or REPL-only crate; gate it behind the appropriate feature and add `required-features = [...]` to the bin entry.
 
 Dev: `proptest` (used by `aggregates_proptest`, `lattice_proptest`, `multi_match_proptest`).
 
@@ -303,6 +309,7 @@ The optimizer is reserved for performance-preserving transforms (predicate pushd
 ### Entry points
 
 - `Connection::open(path)` (`src/connection.rs`) — **the embedded Rust API**, the counterpart of the Python/Node `Connection`: `execute` / `query` / `save`, routes queries, DML and DDL, keeps the TripleIndex warm and delta-refreshed across DML. User guide `docs/rust-embedding.md`, tests `tests/it/connection_test.rs`. The bindings still carry their own copy of this dispatch; a change to it belongs in all three
+- `compile_sparql_with(&Schema, input, &SparqlMapping) → CompileResult` and `Connection::query_sparql` — the SPARQL frontend (feature `sparql`; see *SPARQL frontend*)
 - `compile(query) → PathPattern` — parse + elaborate + typecheck + optimize a path pattern string
 - `compile_query(input) → Query` — parse a full `MATCH ... WHERE ... RETURN` query
 - `compile_query_with(&Schema, input) → Query` — same, but typechecks against a custom schema (used by REPL/Python bindings to honor the active GRAPH TYPE)
@@ -1002,6 +1009,38 @@ insert/delete), and the **VEO override happening before filter placement**
 (reordering afterwards leaves filters reading unbound variables, which is
 silently wrong). `tests/it/vector_strategy_equiv_test.rs` pins all four
 strategies equal under the exact sources, at every VEO level.
+
+### SPARQL frontend (`src/sparql/`, feature `sparql`)
+
+A SPARQL 1.1 `SELECT` becomes the same `Query` AST the GQL parser
+produces and then takes the ordinary pipeline (`lib::compile_parsed`, the
+half of `compile_query_with_cfg` after parsing). Parsing is `spargebra`'s;
+`src/sparql/mod.rs` only translates its algebra. Design, coverage table,
+open phases and measurements: `docs/internals/sparql-frontend.md`.
+
+Load-bearing choices:
+- **`SparqlMapping` says how RDF was laid out**, because the graph does
+  not: predicate → edge label (whole IRI or local name), which node
+  property is the key (`iri` string, or `import_ttl`'s integer `id`), and
+  an optional common node label (without one, a constant IRI cannot use
+  the `(label, key)` index and scans). `SparqlMapping::import_ttl("img",
+  "id")` matches what `import_ttl` writes.
+- **A variable denotes the term, not the node**: in expressions and
+  projections it reads `x.<key>`. The key is unique, so equality on it is
+  node identity.
+- **Every unsupported construct is a named error**, never an
+  approximation. Notably a `FILTER` over a variable only an `OPTIONAL`
+  binds (a clause's WHERE belongs to that clause, so the chain cannot
+  filter the left join's result), and a predicate variable mentioned more
+  than once (it would denote the label; see the doc's phase 2).
+- **`*` `+` `?` become `ANY SHORTEST` over only the closure**: a sequence
+  holding one is split into comma operands at a hidden node, or the
+  prefix would collapse the multiplicity of the plain steps.
+- Hidden variables use a prefix chosen to occur nowhere in the input.
+
+Tests: `tests/it/sparql_test.rs` checks each query against the answer
+SPARQL defines and, where GQL can say the same, against that GQL on the
+same graph.
 
 ### Optimizer
 

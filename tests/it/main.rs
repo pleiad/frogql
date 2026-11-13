@@ -104,6 +104,8 @@ mod return_item_shape_test;
 mod runtime_test;
 mod seeded_repetition_test;
 mod shortest_bfs_test;
+#[cfg(feature = "sparql")]
+mod sparql_test;
 mod store_runtime_test;
 mod temporal_test;
 mod text2gql_test;

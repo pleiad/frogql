@@ -5,6 +5,8 @@ pub mod optimizer;
 pub mod pager;
 pub mod parser;
 pub mod runtime;
+#[cfg(feature = "sparql")]
+pub mod sparql;
 pub mod store;
 pub mod syntax;
 pub mod typing;
@@ -105,6 +107,16 @@ pub fn compile_query_with_cfg(
     cfg: &OptimizerCfg,
 ) -> Result<CompileResult, CompileError> {
     let ast = parser::parse_query(input).map_err(CompileError::Parse)?;
+    compile_parsed(schema, ast, cfg)
+}
+
+/// The pipeline after parsing: elaborate → typecheck → optimize. Shared
+/// by every frontend that produces a `Query` AST of its own (SPARQL).
+fn compile_parsed(
+    schema: &Schema,
+    ast: Query,
+    cfg: &OptimizerCfg,
+) -> Result<CompileResult, CompileError> {
     let q = elaborate::elaborate_query(ast);
     let mut tc = Typechecker::new(schema.clone());
     let r = tc.check_query(&q);
@@ -118,6 +130,20 @@ pub fn compile_query_with_cfg(
         warnings,
         guaranteed_empty,
     })
+}
+
+/// Compile a SPARQL `SELECT` query: translate to the GQL AST, then the same
+/// elaborate → typecheck → optimize pipeline a GQL query takes. A
+/// translation error (syntax, or a construct not supported yet) is a
+/// `CompileError::Parse`. See `docs/internals/sparql-frontend.md`.
+#[cfg(feature = "sparql")]
+pub fn compile_sparql_with(
+    schema: &Schema,
+    input: &str,
+    mapping: &sparql::SparqlMapping,
+) -> Result<CompileResult, CompileError> {
+    let ast = sparql::translate(input, mapping).map_err(CompileError::Parse)?;
+    compile_parsed(schema, ast, &OptimizerCfg::from_env())
 }
 
 /// Compile a GQL path pattern string: parse → elaborate → typecheck → optimize.

@@ -122,6 +122,28 @@ Depend on `frogql` with `default-features = false`. Nodes and edges come
 back as `Value::Node(id)` / `Value::Edge(id)`; `conn.node(id)` resolves
 labels and properties. Full guide: [`rust-embedding.md`](rust-embedding.md).
 
+### SPARQL (Rust and a dev binary only)
+
+A SPARQL 1.1 `SELECT` runs on the same engine. It is not in the REPL, the
+release CLI or the Python / Node / WASM bindings yet. In Rust, enable the
+`sparql` feature and say how the RDF was laid out:
+
+```rust
+use frogql::sparql::SparqlMapping;
+let rows = conn.query_sparql(
+    "PREFIX img: <https://www.imfd.cl/imgpedia/> SELECT ?o WHERE { img:100000001 img:P128 ?o }",
+    &SparqlMapping::import_ttl("img", "id"),   // what import_ttl writes
+    0,                                        // no row cap
+)?;
+```
+
+From a checkout: `cargo run --release --bin sparql_query -- db.gdb query.rq
+--import-ttl`. A variable comes back as the node's key (`iri`, or `id`
+under `import_ttl`), not the node. What is supported and what is a named
+error: [`internals/sparql-frontend.md`](internals/sparql-frontend.md).
+No literals, no `OFFSET`, no SPARQL functions, no predicate variable used
+twice.
+
 ### Browser (WASM)
 
 `frogql-wasm` wraps the in-memory store only: `open_json(json)` →

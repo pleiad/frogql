@@ -380,9 +380,28 @@ impl Connection {
         rt
     }
 
+    /// Run a SPARQL `SELECT` query, producing at most `limit` rows (`0` =
+    /// no cap). `mapping` says how the RDF terms were laid out in this
+    /// graph; see [`crate::sparql::SparqlMapping`]. Columns are the
+    /// projected variables, without the `?`.
+    #[cfg(feature = "sparql")]
+    pub fn query_sparql(
+        &self,
+        text: &str,
+        mapping: &crate::sparql::SparqlMapping,
+        limit: usize,
+    ) -> Result<Rows> {
+        let compiled = crate::compile_sparql_with(&self.store.active_schema(), text, mapping)?;
+        self.run_compiled(compiled, limit)
+    }
+
     fn run_query(&self, text: &str, limit: usize) -> Result<Rows> {
         let compiled =
             crate::compile_query_with_diagnostics_with(&self.store.active_schema(), text)?;
+        self.run_compiled(compiled, limit)
+    }
+
+    fn run_compiled(&self, compiled: crate::CompileResult, limit: usize) -> Result<Rows> {
         let q = compiled.query;
         let mut out = Rows {
             columns: projected_columns(&q),
